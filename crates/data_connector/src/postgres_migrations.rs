@@ -247,10 +247,19 @@ fn pg_v9_up(schema: &SchemaConfig) -> Vec<String> {
     let table = s.qualified_table(schema.owner.as_deref());
     let created_at_col = s.col("created_at");
 
+    // Inline CHECK on `status` — DB-level guard against stringly-typed state
+    // drift. Values mirror the `ResponseStatus` enum. `ADD COLUMN IF NOT EXISTS`
+    // applies the CHECK on first add and is a no-op on re-run; safe.
+    let status_col = s.col("status");
+    let status_ty = format!(
+        "TEXT NOT NULL DEFAULT 'completed' \
+         CHECK ({status_col} IN ('queued', 'in_progress', 'completed', \
+                                  'failed', 'cancelled', 'incomplete'))"
+    );
     // JSONB (not JSON) for request_json / request_context_json — gives us
     // indexing, operator support, and faster reads at a small write cost.
     let bg_columns: &[(&str, &str)] = &[
-        ("status", "TEXT NOT NULL DEFAULT 'completed'"),
+        ("status", status_ty.as_str()),
         ("background", "BOOLEAN NOT NULL DEFAULT false"),
         ("stream_enabled", "BOOLEAN NOT NULL DEFAULT false"),
         ("cancel_requested", "BOOLEAN NOT NULL DEFAULT false"),
@@ -316,8 +325,11 @@ fn pg_v10_up(schema: &SchemaConfig) -> Vec<String> {
                 {next_attempt_at} TIMESTAMPTZ NOT NULL, \
                 {lease_expires_at} TIMESTAMPTZ, \
                 {worker_id} TEXT, \
-                {created_at} TIMESTAMPTZ NOT NULL DEFAULT now()\
-            )"
+                {created_at} TIMESTAMPTZ NOT NULL DEFAULT now(), \
+                CONSTRAINT {table}_lease_pairing_chk \
+                    CHECK (({worker_id} IS NULL) = ({lease_expires_at} IS NULL))\
+            )",
+            table = q.table
         ),
         // Claim index: partial index over unclaimed rows, ordered to match the
         // claim query (priority asc, next_attempt_at asc, created_at asc).
@@ -328,8 +340,10 @@ fn pg_v10_up(schema: &SchemaConfig) -> Vec<String> {
             table = q.table
         ),
         // Lease-sweep index for the janitor that requeues expired leases.
+        // Named `_sweep_idx` rather than `_lease_sweep_idx` so the
+        // corresponding Oracle identifier stays ≤30 chars (pre-12.2 limit).
         format!(
-            "CREATE INDEX IF NOT EXISTS {table}_lease_sweep_idx ON {queue_table} \
+            "CREATE INDEX IF NOT EXISTS {table}_sweep_idx ON {queue_table} \
                 ({lease_expires_at}) \
                 WHERE {lease_expires_at} IS NOT NULL",
             table = q.table
@@ -364,9 +378,12 @@ fn pg_v11_up(schema: &SchemaConfig) -> Vec<String> {
             )"
         ),
         // Cleanup index for the retention-window janitor.
+        // Named `stream_chunks_cleanup_idx` rather than
+        // `response_stream_chunks_cleanup_idx` so the corresponding Oracle
+        // identifier stays ≤30 chars (pre-12.2 limit).
         format!(
-            "CREATE INDEX IF NOT EXISTS {table}_cleanup_idx ON {chunks_table} ({created_at})",
-            table = c.table
+            "CREATE INDEX IF NOT EXISTS stream_chunks_cleanup_idx \
+                ON {chunks_table} ({created_at})"
         ),
     ]
 }
@@ -566,6 +583,33 @@ mod tests {
     // ── v9: extend responses with background-mode columns ─────────────────
 
     #[test]
+    fn pg_v9_up_status_column_has_check_constraint() {
+        let schema = SchemaConfig::default();
+        let stmts = pg_v9_up(&schema);
+        let status_stmt = stmts
+            .iter()
+            .find(|s| s.contains("ADD COLUMN IF NOT EXISTS status"))
+            .expect("status ADD COLUMN missing");
+        assert!(
+            status_stmt.contains("CHECK (status IN"),
+            "status must have a CHECK constraint: {status_stmt}"
+        );
+        for val in [
+            "'queued'",
+            "'in_progress'",
+            "'completed'",
+            "'failed'",
+            "'cancelled'",
+            "'incomplete'",
+        ] {
+            assert!(
+                status_stmt.contains(val),
+                "CHECK must enumerate {val}: {status_stmt}"
+            );
+        }
+    }
+
+    #[test]
     fn pg_v9_up_adds_all_nine_columns_and_backfill() {
         let schema = SchemaConfig::default();
         let stmts = pg_v9_up(&schema);
@@ -644,8 +688,20 @@ mod tests {
             stmts[1].contains("WHERE lease_expires_at IS NULL"),
             "claim index must be partial over unclaimed rows: {stmts:?}"
         );
-        assert!(stmts[2].contains("background_queue_lease_sweep_idx"));
+        assert!(stmts[2].contains("background_queue_sweep_idx"));
         assert!(stmts[2].contains("WHERE lease_expires_at IS NOT NULL"));
+    }
+
+    #[test]
+    fn pg_v10_up_enforces_lease_pairing_invariant() {
+        // worker_id and lease_expires_at must be both NULL or both set.
+        let schema = SchemaConfig::default();
+        let stmts = pg_v10_up(&schema);
+        assert!(
+            stmts[0].contains("CONSTRAINT background_queue_lease_pairing_chk")
+                && stmts[0].contains("CHECK ((worker_id IS NULL) = (lease_expires_at IS NULL))"),
+            "lease pairing CHECK constraint missing: {stmts:?}"
+        );
     }
 
     // ── v11: create response_stream_chunks ─────────────────────────────────
@@ -661,6 +717,6 @@ mod tests {
             "composite PK on (response_id, sequence): {stmts:?}"
         );
         assert!(stmts[0].contains("ON DELETE CASCADE"));
-        assert!(stmts[1].contains("response_stream_chunks_cleanup_idx"));
+        assert!(stmts[1].contains("stream_chunks_cleanup_idx"));
     }
 }

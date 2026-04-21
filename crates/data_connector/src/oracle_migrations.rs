@@ -282,11 +282,20 @@ fn oracle_v9_up(schema: &SchemaConfig) -> Vec<String> {
     let request_json_ty = format!("CLOB CHECK ({request_json_col} IS JSON)");
     let request_context_json_ty = format!("CLOB CHECK ({request_context_json_col} IS JSON)");
 
-    // NOTE: the string default below uses doubled single quotes (`''completed''`)
+    // NOTE: the string defaults below use doubled single quotes (`''completed''`)
     // because the entire DDL is wrapped in EXECUTE IMMEDIATE '…'; a single quote
     // would terminate the outer literal and produce ORA-00922 at run time.
+    //
+    // Inline CHECK on `status` — DB-level guard against stringly-typed state
+    // drift. Values mirror the `ResponseStatus` enum.
+    let status_col = s.col("status").to_uppercase();
+    let status_ty = format!(
+        "VARCHAR2(32) DEFAULT ''completed'' NOT NULL \
+         CHECK ({status_col} IN (''queued'', ''in_progress'', ''completed'', \
+                                  ''failed'', ''cancelled'', ''incomplete''))"
+    );
     let bg_columns: &[(&str, &str)] = &[
-        ("status", "VARCHAR2(32) DEFAULT ''completed'' NOT NULL"),
+        ("status", status_ty.as_str()),
         ("background", "NUMBER(1) DEFAULT 0 NOT NULL"),
         ("stream_enabled", "NUMBER(1) DEFAULT 0 NOT NULL"),
         ("cancel_requested", "NUMBER(1) DEFAULT 0 NOT NULL"),
@@ -354,9 +363,10 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
     // Indexes live in their own namespace and need owner qualification in
     // owner-scoped deployments (constraints are auto-qualified to the table's
     // owner, indexes are not).
+    // Index names kept ≤30 chars for Oracle pre-12.2 compatibility. Dropped
+    // `LEASE_` from the sweep name (redundant — the table is already a queue).
     let claim_idx = oracle_qualified_name(schema, &format!("{queue_table_name}_CLAIM_IDX"));
-    let lease_sweep_idx =
-        oracle_qualified_name(schema, &format!("{queue_table_name}_LEASE_SWEEP_IDX"));
+    let sweep_idx = oracle_qualified_name(schema, &format!("{queue_table_name}_SWEEP_IDX"));
 
     vec![
         // ORA-00955 = "name is already used by an existing object"
@@ -370,7 +380,10 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
                 {worker_id} VARCHAR2(256), \
                 {created_at} TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL, \
                 CONSTRAINT {queue_table_name}_FK FOREIGN KEY ({response_id}) \
-                    REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE\
+                    REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE, \
+                CONSTRAINT {queue_table_name}_LEASE_CHK \
+                    CHECK (({worker_id} IS NULL AND {lease_expires_at} IS NULL) \
+                        OR ({worker_id} IS NOT NULL AND {lease_expires_at} IS NOT NULL))\
             )'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ),
         // Claim index — plain composite (Oracle has no partial indexes).
@@ -382,7 +395,7 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
         // Lease-sweep index — Oracle single-column B-tree indexes exclude
         // NULL rows by default, which matches the design's intent.
         format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {lease_sweep_idx} \
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {sweep_idx} \
                 ON {queue_table} ({lease_expires_at})'; \
              EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ),
@@ -403,7 +416,10 @@ fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
     let data = c.col("data").to_uppercase();
     let created_at = c.col("created_at").to_uppercase();
     let chunks_table_name = c.table.to_uppercase();
-    let cleanup_idx = oracle_qualified_name(schema, &format!("{chunks_table_name}_CLEANUP_IDX"));
+    // Fixed short name (not derived from the 22-char table name) — Oracle
+    // pre-12.2 rejects identifiers >30 chars and `{chunks_table_name}_CLEANUP_IDX`
+    // would be 34 chars. `STREAM_CHUNKS_CLEANUP_IDX` is 25 chars.
+    let cleanup_idx = oracle_qualified_name(schema, "STREAM_CHUNKS_CLEANUP_IDX");
 
     vec![
         format!(
@@ -500,6 +516,33 @@ mod tests {
     }
 
     #[test]
+    fn oracle_v9_up_status_column_has_check_constraint() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v9_up(&schema);
+        let status_stmt = stmts
+            .iter()
+            .find(|s| s.contains("STATUS VARCHAR2"))
+            .expect("STATUS ALTER missing");
+        assert!(
+            status_stmt.contains("CHECK (STATUS IN"),
+            "STATUS must have a CHECK constraint: {status_stmt}"
+        );
+        for val in [
+            "''queued''",
+            "''in_progress''",
+            "''completed''",
+            "''failed''",
+            "''cancelled''",
+            "''incomplete''",
+        ] {
+            assert!(
+                status_stmt.contains(val),
+                "CHECK must enumerate {val} (double-quoted for EXECUTE IMMEDIATE): {status_stmt}"
+            );
+        }
+    }
+
+    #[test]
     fn oracle_v9_up_status_default_has_escaped_quotes() {
         // The DDL lives inside `EXECUTE IMMEDIATE '...'`; a single quote in the
         // default would terminate the outer literal. Must be doubled.
@@ -540,7 +583,7 @@ mod tests {
             !stmts[1].contains("WHERE"),
             "Oracle claim index must be plain composite (no WHERE): {stmts:?}"
         );
-        assert!(stmts[2].contains("BACKGROUND_QUEUE_LEASE_SWEEP_IDX"));
+        assert!(stmts[2].contains("BACKGROUND_QUEUE_SWEEP_IDX"));
     }
 
     #[test]
@@ -555,8 +598,23 @@ mod tests {
             "claim index must be owner-qualified: {stmts:?}"
         );
         assert!(
-            stmts[2].contains("CREATE INDEX OWNER.BACKGROUND_QUEUE_LEASE_SWEEP_IDX"),
-            "lease-sweep index must be owner-qualified: {stmts:?}"
+            stmts[2].contains("CREATE INDEX OWNER.BACKGROUND_QUEUE_SWEEP_IDX"),
+            "sweep index must be owner-qualified: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn oracle_v10_up_enforces_lease_pairing_invariant() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v10_up(&schema);
+        assert!(
+            stmts[0].contains("CONSTRAINT BACKGROUND_QUEUE_LEASE_CHK"),
+            "lease pairing CHECK constraint missing: {stmts:?}"
+        );
+        assert!(
+            stmts[0].contains("WORKER_ID IS NULL AND LEASE_EXPIRES_AT IS NULL")
+                && stmts[0].contains("WORKER_ID IS NOT NULL AND LEASE_EXPIRES_AT IS NOT NULL"),
+            "CHECK body must enforce both-NULL-or-both-set: {stmts:?}"
         );
     }
 
@@ -573,7 +631,7 @@ mod tests {
             "composite PK on (response_id, sequence): {stmts:?}"
         );
         assert!(stmts[0].contains("ON DELETE CASCADE"));
-        assert!(stmts[1].contains("RESPONSE_STREAM_CHUNKS_CLEANUP_IDX"));
+        assert!(stmts[1].contains("STREAM_CHUNKS_CLEANUP_IDX"));
     }
 
     #[test]
@@ -584,7 +642,7 @@ mod tests {
         };
         let stmts = oracle_v11_up(&schema);
         assert!(
-            stmts[1].contains("CREATE INDEX OWNER.RESPONSE_STREAM_CHUNKS_CLEANUP_IDX"),
+            stmts[1].contains("CREATE INDEX OWNER.STREAM_CHUNKS_CLEANUP_IDX"),
             "cleanup index must be owner-qualified: {stmts:?}"
         );
     }
@@ -765,5 +823,77 @@ mod tests {
         assert!(v8[2].contains(
             "CREATE INDEX OWNER.IDX_CONTINUATION_COOKIES_EXP ON OWNER.CONTINUATION_COOKIES"
         ));
+    }
+
+    /// Oracle pre-12.2 rejects unquoted identifiers over 30 chars with
+    /// ORA-00972. This test scans every identifier emitted by every migration
+    /// and fails loudly if anything crosses the limit, so future contributors
+    /// can't accidentally reintroduce the bug.
+    #[test]
+    fn all_oracle_migration_identifiers_are_within_30_chars() {
+        let schema = SchemaConfig::default();
+        let all: Vec<String> = ORACLE_MIGRATIONS
+            .iter()
+            .flat_map(|m| (m.up)(&schema))
+            .collect();
+
+        // Tokenize on any char that cannot appear in an identifier. An
+        // identifier starts with a letter/underscore and contains
+        // alphanumerics/underscores. Skip tokens that look like quoted
+        // literals (bounded by '…').
+        fn is_ident_char(c: char) -> bool {
+            c.is_ascii_alphanumeric() || c == '_'
+        }
+        let mut violations: Vec<String> = Vec::new();
+        for stmt in &all {
+            // Strip literals ('…') so we don't trip on default values like
+            // ''completed''. We're looking for table / column / constraint /
+            // index names, which live outside quote pairs.
+            let stripped: String = {
+                let mut out = String::with_capacity(stmt.len());
+                let mut in_lit = false;
+                let mut chars = stmt.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '\'' {
+                        // Doubled '' inside a literal is an escaped quote; leave
+                        // literal state unchanged.
+                        if in_lit && chars.peek() == Some(&'\'') {
+                            chars.next();
+                            continue;
+                        }
+                        in_lit = !in_lit;
+                        out.push(' ');
+                    } else if in_lit {
+                        out.push(' ');
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            };
+            let mut token = String::new();
+            for c in stripped.chars().chain(std::iter::once(' ')) {
+                if is_ident_char(c) {
+                    token.push(c);
+                } else {
+                    // At boundary; check the token we just finished building.
+                    if token.len() > 30 && token.starts_with(|ch: char| !ch.is_ascii_digit()) {
+                        violations.push(format!(
+                            "identifier `{}` ({} chars) in: {}",
+                            token,
+                            token.len(),
+                            stmt.chars().take(80).collect::<String>()
+                        ));
+                    }
+                    token.clear();
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "Oracle identifiers must be ≤30 chars (pre-12.2 limit, ORA-00972). \
+             Violations:\n  {}",
+            violations.join("\n  ")
+        );
     }
 }
