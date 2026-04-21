@@ -60,7 +60,12 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
 }
 
 /// Built-in tools that are added to the system message
-const BUILTIN_TOOLS: &[&str] = &["web_search_preview", "code_interpreter", "container"];
+const BUILTIN_TOOLS: &[&str] = &[
+    "web_search_preview",
+    "code_interpreter",
+    "container",
+    "file_search",
+];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
 trait ToolLike {
@@ -426,6 +431,7 @@ impl HarmonyBuilder {
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
                             ResponseTool::Mcp(_) => "mcp",
+                            ResponseTool::FileSearch(_) => "file_search",
                         })
                         .collect()
                 })
