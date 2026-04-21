@@ -22,6 +22,7 @@ mod ping_server;
 mod rate_limit_window;
 mod service;
 mod stores;
+mod stream_dispatch;
 mod sync;
 mod topology;
 mod tree_ops;

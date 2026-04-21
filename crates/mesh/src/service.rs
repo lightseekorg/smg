@@ -469,7 +469,7 @@ impl MeshServer {
         // Share the controller's current_batch so server-side sync_stream
         // handlers use the same centrally collected data as client-side.
         service = service.with_current_batch(controller.current_batch());
-        service = service.with_current_stream_batch(controller.current_stream_batch());
+        service = service.with_stream_dispatch(controller.stream_dispatch());
 
         // Add mTLS support if configured
         if let Some(mtls_manager) = self.mtls_manager.clone() {

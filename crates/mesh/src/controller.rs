@@ -31,15 +31,60 @@ use super::{
     sync::MeshSyncManager,
 };
 use crate::{
-    chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
-        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
-    },
+    chunking::dispatch_stream_batch,
     collector::{CentralCollector, PeerWatermark, RoundBatch},
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics,
     service::gossip::IncrementalUpdate,
+    stream_dispatch::{encode_stream_batches, StreamDispatch, TargetedPeerSubscription},
 };
+
+enum StreamRoundSendOutcome {
+    Sent,
+    DroppedOnBackpressure,
+    Closed,
+}
+
+fn try_send_stream_round(
+    tx: &mpsc::Sender<StreamMessage>,
+    self_name: &str,
+    peer_name: &str,
+    sequence: &Arc<AtomicU64>,
+    entries: &[(String, Bytes)],
+    round_kind: &str,
+    round_id: u64,
+) -> StreamRoundSendOutcome {
+    for batch in encode_stream_batches(entries) {
+        let msg = StreamMessage {
+            message_type: StreamMessageType::StreamBatch as i32,
+            payload: Some(StreamPayload::StreamBatch(batch)),
+            sequence: sequence.fetch_add(1, Ordering::Relaxed),
+            peer_id: self_name.to_string(),
+        };
+        match tx.try_send(msg) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                log::debug!(
+                    peer = %peer_name,
+                    round_kind,
+                    round_id,
+                    "stream round dropped on backpressure"
+                );
+                return StreamRoundSendOutcome::DroppedOnBackpressure;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                log::warn!(
+                    peer = %peer_name,
+                    round_kind,
+                    round_id,
+                    "stream sender: channel closed, stopping"
+                );
+                return StreamRoundSendOutcome::Closed;
+            }
+        }
+    }
+    StreamRoundSendOutcome::Sent
+}
 
 pub struct MeshController {
     state: ClusterState,
@@ -56,10 +101,10 @@ pub struct MeshController {
     /// Current round batch, updated once per round by the central collector.
     /// Per-peer senders read and apply their own watermark filtering.
     current_batch: Arc<parking_lot::RwLock<Arc<RoundBatch>>>,
-    /// Current stream round batch, drained once per round from MeshKV.
-    /// Per-peer senders read this and filter targeted entries to their
-    /// own peer; drain_entries are broadcast to every peer.
-    current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
+    /// Shared transport state for drained stream rounds. Broadcast traffic
+    /// is retained in a small ring; targeted traffic is routed into
+    /// per-peer bounded queues.
+    stream_dispatch: Arc<StreamDispatch>,
     /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
     /// registry, and chunk assembler shared with the server-side
     /// SyncStream handlers.
@@ -90,9 +135,7 @@ impl MeshController {
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
             central_collector,
             current_batch: Arc::new(parking_lot::RwLock::new(Arc::new(RoundBatch::default()))),
-            current_stream_batch: Arc::new(parking_lot::RwLock::new(Arc::new(
-                crate::kv::RoundBatch::default(),
-            ))),
+            stream_dispatch: Arc::new(StreamDispatch::default()),
             mesh_kv: None,
         }
     }
@@ -112,11 +155,11 @@ impl MeshController {
         self.current_batch.clone()
     }
 
-    /// Get a handle to the shared stream RoundBatch. Used by GossipService
-    /// so server-side sync_stream handlers see the same drained stream
-    /// entries as client-side handlers.
-    pub fn current_stream_batch(&self) -> Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>> {
-        self.current_stream_batch.clone()
+    /// Get a handle to the shared stream dispatch state. Used by
+    /// GossipService so inbound and outbound SyncStream handlers consume
+    /// the same retained broadcast rounds and per-peer targeted queues.
+    pub fn stream_dispatch(&self) -> Arc<StreamDispatch> {
+        self.stream_dispatch.clone()
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
@@ -268,13 +311,13 @@ impl MeshController {
             }
 
             // Stream round collection: drain stream namespace buffers and
-            // drain callbacks exactly once per round (destructive). Per-peer
-            // senders filter targeted_entries by their own peer_id and
-            // broadcast drain_entries to all peers. Empty batch if no
+            // drain callbacks exactly once per round (destructive). The
+            // shared dispatch state retains a bounded broadcast ring and
+            // pushes targeted traffic into per-peer bounded queues. Empty if no
             // MeshKV is attached (legacy path pre-Step 3).
             if let Some(mesh_kv) = &self.mesh_kv {
                 let stream_batch = mesh_kv.collect_round_batch();
-                *self.current_stream_batch.write() = Arc::new(stream_batch);
+                self.stream_dispatch.publish_round(stream_batch);
             }
 
             tokio::select! {
@@ -495,7 +538,7 @@ impl MeshController {
         let sync_manager = self.sync_manager.clone();
         let sync_connections = self.sync_connections.clone();
         let current_batch = self.current_batch.clone();
-        let current_stream_batch = self.current_stream_batch.clone();
+        let stream_dispatch = self.stream_dispatch.clone();
         let mesh_kv = self.mesh_kv.clone();
 
         // Log connection lifecycle: spawn
@@ -551,14 +594,15 @@ impl MeshController {
                     let shared_sequence = sequence.clone();
                     let size_validator = MessageSizeValidator::default();
                     let batch_handle = current_batch.clone();
-                    let stream_batch_handle = current_stream_batch.clone();
+                    let stream_dispatch_handle = stream_dispatch.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
-                        // Skip re-emission of an unchanged stream batch (main
-                        // loop hasn't collected a new one since last tick).
-                        let mut last_stream_batch: Option<Arc<crate::kv::RoundBatch>> = None;
+                        let mut next_broadcast_round_id =
+                            stream_dispatch_handle.initial_broadcast_round_id();
+                        let mut targeted_subscription: TargetedPeerSubscription =
+                            stream_dispatch_handle.subscribe_targeted(&peer_name_incremental);
 
                         loop {
                             interval.tick().await;
@@ -652,74 +696,55 @@ impl MeshController {
                                 }
                             }
 
-                            // Stream batches: drain-portion (broadcast) +
-                            // targeted entries addressed to this peer. Each
-                            // entry is chunked if oversized. On channel
-                            // full, the round's stream traffic for this
-                            // peer is dropped — no retry (at-most-once).
-                            // Application regenerates on its own retry cycle.
-                            let stream_batch = stream_batch_handle.read().clone();
-                            let fresh_batch = last_stream_batch
-                                .as_ref()
-                                .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
-                            if fresh_batch {
-                                last_stream_batch = Some(stream_batch.clone());
-                                let mut entries = Vec::new();
-                                // Drain entries are broadcast: every peer emits.
-                                // Generation is per-value so concurrent publishes
-                                // to the same key get distinct tags.
-                                for (key, value) in &stream_batch.drain_entries {
-                                    entries.extend(chunk_value(
-                                        key.clone(),
-                                        next_generation(),
-                                        Bytes::from(value.clone()),
-                                        MAX_STREAM_CHUNK_BYTES,
-                                    ));
-                                }
-                                // Targeted entries: only those addressed to this peer.
-                                for (target, key, value) in &stream_batch.targeted_entries {
-                                    if target == &peer_name_incremental {
-                                        entries.extend(chunk_value(
-                                            key.clone(),
-                                            next_generation(),
-                                            value.clone(),
-                                            MAX_STREAM_CHUNK_BYTES,
-                                        ));
+                            let broadcast_poll =
+                                stream_dispatch_handle.poll_broadcast_rounds(next_broadcast_round_id);
+                            if let Some(gap) = broadcast_poll.gap {
+                                log::warn!(
+                                    peer = %peer_name_incremental,
+                                    missing_rounds = gap.missing_rounds,
+                                    resume_from = gap.resume_from_broadcast_round_id,
+                                    "broadcast stream rounds dropped before observation"
+                                );
+                                next_broadcast_round_id = gap.resume_from_broadcast_round_id;
+                            }
+
+                            for round in broadcast_poll.rounds {
+                                match try_send_stream_round(
+                                    &tx_incremental,
+                                    &self_name_incremental,
+                                    &peer_name_incremental,
+                                    &shared_sequence,
+                                    round.entries.as_slice(),
+                                    "broadcast",
+                                    round.broadcast_round_id,
+                                ) {
+                                    StreamRoundSendOutcome::Sent
+                                    | StreamRoundSendOutcome::DroppedOnBackpressure => {
+                                        next_broadcast_round_id = round.broadcast_round_id + 1;
                                     }
+                                    StreamRoundSendOutcome::Closed => return,
                                 }
-                                if !entries.is_empty() {
-                                    for batch in build_stream_batches(
-                                        entries,
-                                        DEFAULT_MAX_CHUNKS_PER_BATCH,
-                                        MAX_STREAM_CHUNK_BYTES,
-                                    ) {
-                                        let msg = StreamMessage {
-                                            message_type: StreamMessageType::StreamBatch as i32,
-                                            payload: Some(StreamPayload::StreamBatch(batch)),
-                                            sequence: shared_sequence
-                                                .fetch_add(1, Ordering::Relaxed),
-                                            peer_id: self_name_incremental.clone(),
-                                        };
-                                        match tx_incremental.try_send(msg) {
-                                            Ok(()) => {}
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                log::debug!(
-                                                    peer = %peer_name_incremental,
-                                                    "stream batch dropped on backpressure"
-                                                );
-                                                // TODO(metrics): bump
-                                                // stream_dropped_on_backpressure
-                                                break;
-                                            }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                log::warn!(
-                                                    peer = %peer_name_incremental,
-                                                    "stream sender: channel closed, stopping"
-                                                );
-                                                return;
-                                            }
+                            }
+
+                            loop {
+                                match targeted_subscription.receiver.try_recv() {
+                                    Ok(round) => {
+                                        match try_send_stream_round(
+                                            &tx_incremental,
+                                            &self_name_incremental,
+                                            &peer_name_incremental,
+                                            &shared_sequence,
+                                            round.entries.as_slice(),
+                                            "targeted",
+                                            round.dispatch_round_id,
+                                        ) {
+                                            StreamRoundSendOutcome::Sent
+                                            | StreamRoundSendOutcome::DroppedOnBackpressure => {}
+                                            StreamRoundSendOutcome::Closed => return,
                                         }
                                     }
+                                    Err(mpsc::error::TryRecvError::Empty) => break,
+                                    Err(mpsc::error::TryRecvError::Disconnected) => break,
                                 }
                             }
 

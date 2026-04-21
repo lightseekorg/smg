@@ -18,10 +18,7 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
-        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
-    },
+    chunking::dispatch_stream_batch,
     flow_control::{MessageSizeValidator, MAX_MESSAGE_SIZE},
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
@@ -44,7 +41,58 @@ use super::{
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
 };
-use crate::collector::{PeerWatermark, RoundBatch};
+use crate::{
+    collector::{PeerWatermark, RoundBatch},
+    stream_dispatch::{encode_stream_batches, StreamDispatch, TargetedPeerSubscription},
+};
+
+enum StreamRoundSendOutcome {
+    Sent,
+    DroppedOnBackpressure,
+    Closed,
+}
+
+fn try_send_stream_round(
+    tx: &mpsc::Sender<Result<StreamMessage, Status>>,
+    self_name: &str,
+    peer_name: &str,
+    sequence_counter: &mut u64,
+    entries: &[(String, Bytes)],
+    round_kind: &str,
+    round_id: u64,
+) -> StreamRoundSendOutcome {
+    for batch in encode_stream_batches(entries) {
+        *sequence_counter += 1;
+        let msg = StreamMessage {
+            message_type: StreamMessageType::StreamBatch as i32,
+            payload: Some(gossip::stream_message::Payload::StreamBatch(batch)),
+            sequence: *sequence_counter,
+            peer_id: self_name.to_string(),
+        };
+        match tx.try_send(Ok(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                log::debug!(
+                    peer = %peer_name,
+                    round_kind,
+                    round_id,
+                    "stream round dropped on backpressure"
+                );
+                return StreamRoundSendOutcome::DroppedOnBackpressure;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                log::warn!(
+                    peer = %peer_name,
+                    round_kind,
+                    round_id,
+                    "stream sender: channel closed, stopping"
+                );
+                return StreamRoundSendOutcome::Closed;
+            }
+        }
+    }
+    StreamRoundSendOutcome::Sent
+}
 
 #[derive(Debug)]
 pub struct GossipService {
@@ -61,11 +109,10 @@ pub struct GossipService {
     /// the MeshController's central collector. Server-side sync_stream handlers
     /// read from this and apply per-peer watermark filtering.
     current_batch: Option<Arc<parking_lot::RwLock<Arc<RoundBatch>>>>,
-    /// Shared reference to the current stream RoundBatch, drained once
-    /// per round by the MeshController. Server-side handlers read
-    /// broadcast entries from this (drain_entries); targeted entries
-    /// are handled client-side where peer_name is known at spawn.
-    current_stream_batch: Option<Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>>,
+    /// Shared stream dispatch state from the MeshController. Server-side
+    /// handlers consume retained broadcast rounds and per-peer targeted
+    /// queues from the same transport state as outbound handlers.
+    stream_dispatch: Option<Arc<StreamDispatch>>,
     /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
     /// registry, and chunk assembler shared with the client-side
     /// SyncStream handlers.
@@ -296,7 +343,7 @@ impl GossipService {
             partition_detector: None,
             mtls_manager: None,
             current_batch: None,
-            current_stream_batch: None,
+            stream_dispatch: None,
             mesh_kv: None,
         }
     }
@@ -312,14 +359,11 @@ impl GossipService {
         self
     }
 
-    /// Attach the shared stream RoundBatch reference. Server-side
-    /// handlers emit broadcast drain_entries to their peer — targeted
-    /// entries stay on the client side where peer_name is known.
-    pub fn with_current_stream_batch(
-        mut self,
-        current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
-    ) -> Self {
-        self.current_stream_batch = Some(current_stream_batch);
+    /// Attach the shared stream dispatch state. Server-side handlers use
+    /// the same retained broadcast rounds and per-peer targeted queues
+    /// as outbound sync_stream handlers.
+    pub fn with_stream_dispatch(mut self, stream_dispatch: Arc<StreamDispatch>) -> Self {
+        self.stream_dispatch = Some(stream_dispatch);
         self
     }
 
@@ -478,171 +522,6 @@ impl Gossip for GossipService {
         let (tx, rx) = mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
         let size_validator = MessageSizeValidator::default();
 
-        // Spawn task to periodically send incremental updates.
-        // Uses PeerWatermark reading from the shared RoundBatch (central collector).
-        // If current_batch is not set (e.g., temporary GossipService for snapshots),
-        // skip the sender task.
-        let incremental_sender_handle = if let Some(batch_handle) = self.current_batch.clone() {
-            let tx_incremental = tx.clone();
-            let self_name_incremental = self_name.clone();
-            let size_validator_clone = size_validator.clone();
-            // The remote peer's name isn't known until the first stream message
-            // arrives. Use a placeholder label for debug output — this doesn't
-            // affect filtering correctness (each task has its own watermark).
-            let peer_name_for_watermark = "server-inbound".to_string();
-            let stream_batch_handle = self.current_stream_batch.clone();
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
-            )]
-            Some(tokio::spawn(async move {
-                let mut watermark = PeerWatermark::new(peer_name_for_watermark);
-                let mut interval = tokio::time::interval(Duration::from_secs(1));
-                let mut sequence_counter: u64 = 0;
-                let mut last_stream_batch: Option<Arc<crate::kv::RoundBatch>> = None;
-
-                loop {
-                    interval.tick().await;
-
-                    // Read the centrally collected batch and filter by this peer's watermark.
-                    let batch = batch_handle.read().clone();
-                    let all_updates = watermark.filter(&batch);
-
-                    if !all_updates.is_empty() {
-                        for (store_type, updates) in all_updates {
-                            let proto_store_type = store_type.to_proto();
-
-                            sequence_counter += 1;
-                            let batch_size: usize = updates.iter().map(|u| u.value.len()).sum();
-
-                            // Validate message size
-                            if let Err(e) = size_validator_clone.validate(batch_size) {
-                                log::warn!(
-                                    "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
-                                    store_type,
-                                    e,
-                                    size_validator_clone.max_size()
-                                );
-                                // Mark as sent to prevent infinite retry loop.
-                                watermark.mark_sent(store_type, &updates);
-                                continue;
-                            }
-
-                            let incremental_update = StreamMessage {
-                                message_type: StreamMessageType::IncrementalUpdate as i32,
-                                payload: Some(gossip::stream_message::Payload::Incremental(
-                                    IncrementalUpdate {
-                                        store: proto_store_type,
-                                        updates: updates.clone(),
-                                        version: 0, // Version is tracked per key in StateUpdate
-                                    },
-                                )),
-                                sequence: sequence_counter,
-                                peer_id: self_name_incremental.clone(),
-                            };
-
-                            // Check backpressure using try_send
-                            match tx_incremental.try_send(Ok(incremental_update)) {
-                                Ok(()) => {
-                                    record_batch_sent(&self_name_incremental, batch_size);
-                                    watermark.mark_sent(store_type, &updates);
-                                }
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    log::debug!(
-                                        "Backpressure: channel full, skipping send (will retry next interval)"
-                                    );
-                                    continue;
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    log::warn!(
-                                        "Channel closed, stopping incremental update sender"
-                                    );
-                                    break;
-                                }
-                            }
-
-                            log::debug!(
-                                "Sent incremental update: store={:?}, {} updates",
-                                store_type,
-                                updates.len()
-                            );
-                        }
-                    }
-
-                    // Server-side stream emission: broadcast drain_entries
-                    // only. Targeted entries stay on the client-side
-                    // (controller.rs) where peer_name is known at task
-                    // spawn. At-most-once: on channel full, drop without
-                    // retry.
-                    if let Some(sbh) = &stream_batch_handle {
-                        let stream_batch = sbh.read().clone();
-                        let fresh_batch = last_stream_batch
-                            .as_ref()
-                            .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
-                        if fresh_batch {
-                            // Advance the tracker for every fresh Arc, not just
-                            // ones that produced work — otherwise a batch with
-                            // empty drain_entries stays "fresh" across ticks and
-                            // we keep re-checking it.
-                            last_stream_batch = Some(stream_batch.clone());
-                        }
-                        if fresh_batch && !stream_batch.drain_entries.is_empty() {
-                            let mut entries = Vec::new();
-                            // Generation is per-value so concurrent publishes
-                            // to the same key get distinct tags.
-                            for (key, value) in &stream_batch.drain_entries {
-                                entries.extend(chunk_value(
-                                    key.clone(),
-                                    next_generation(),
-                                    Bytes::from(value.clone()),
-                                    MAX_STREAM_CHUNK_BYTES,
-                                ));
-                            }
-                            if !entries.is_empty() {
-                                for batch in build_stream_batches(
-                                    entries,
-                                    DEFAULT_MAX_CHUNKS_PER_BATCH,
-                                    MAX_STREAM_CHUNK_BYTES,
-                                ) {
-                                    sequence_counter += 1;
-                                    let msg = StreamMessage {
-                                        message_type: StreamMessageType::StreamBatch as i32,
-                                        payload: Some(
-                                            gossip::stream_message::Payload::StreamBatch(batch),
-                                        ),
-                                        sequence: sequence_counter,
-                                        peer_id: self_name_incremental.clone(),
-                                    };
-                                    match tx_incremental.try_send(Ok(msg)) {
-                                        Ok(()) => {}
-                                        Err(mpsc::error::TrySendError::Full(_)) => {
-                                            log::debug!(
-                                                "server-side stream batch dropped on backpressure"
-                                            );
-                                            // TODO(metrics): bump
-                                            // stream_dropped_on_backpressure
-                                            break;
-                                        }
-                                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                                            log::warn!(
-                                                "server-side stream sender: channel closed, stopping"
-                                            );
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else if last_stream_batch.is_some() {
-                        // If handle became None (shouldn't normally), clear state.
-                        last_stream_batch = None;
-                    }
-                }
-            }))
-        } else {
-            None
-        };
-
         // Spawn task to handle incoming messages
         let mut sequence: u64 = 0;
         let _convergence_tracker = ConvergenceTracker::new();
@@ -652,6 +531,8 @@ impl Gossip for GossipService {
         // replaces any incomplete previous attempt (prevents stale chunk mixing).
         use std::collections::HashMap;
         let mut snapshot_state: HashMap<LocalStoreType, (Vec<SnapshotChunk>, u64)> = HashMap::new();
+        let current_batch = self.current_batch.clone();
+        let stream_dispatch = self.stream_dispatch.clone();
 
         #[expect(
             clippy::disallowed_methods,
@@ -659,6 +540,7 @@ impl Gossip for GossipService {
         )]
         tokio::spawn(async move {
             let mut peer_id = String::new();
+            let mut incremental_sender_handle: Option<tokio::task::JoinHandle<()>> = None;
             update_peer_connections(&peer_id, true);
 
             // Check if we need to request snapshots on connection
@@ -715,6 +597,161 @@ impl Gossip for GossipService {
                     Ok(Some(Ok(msg))) => {
                         sequence += 1;
                         peer_id.clone_from(&msg.peer_id);
+
+                        if incremental_sender_handle.is_none() {
+                            if let (Some(batch_handle), Some(stream_dispatch_handle)) =
+                                (current_batch.clone(), stream_dispatch.clone())
+                            {
+                                let tx_incremental = tx.clone();
+                                let self_name_incremental = self_name.clone();
+                                let peer_name_incremental = peer_id.clone();
+                                let size_validator_clone = size_validator.clone();
+                                #[expect(
+                                    clippy::disallowed_methods,
+                                    reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes or handle is aborted"
+                                )]
+                                let handle = tokio::spawn(async move {
+                                    let mut watermark =
+                                        PeerWatermark::new(peer_name_incremental.clone());
+                                    let mut interval =
+                                        tokio::time::interval(Duration::from_secs(1));
+                                    let mut sequence_counter: u64 = 0;
+                                    let mut next_broadcast_round_id =
+                                        stream_dispatch_handle.initial_broadcast_round_id();
+                                    let mut targeted_subscription: TargetedPeerSubscription =
+                                        stream_dispatch_handle
+                                            .subscribe_targeted(&peer_name_incremental);
+
+                                    loop {
+                                        interval.tick().await;
+
+                                        let batch = batch_handle.read().clone();
+                                        let all_updates = watermark.filter(&batch);
+
+                                        if !all_updates.is_empty() {
+                                            for (store_type, updates) in all_updates {
+                                                let proto_store_type = store_type.to_proto();
+
+                                                sequence_counter += 1;
+                                                let batch_size: usize =
+                                                    updates.iter().map(|u| u.value.len()).sum();
+
+                                                if let Err(e) =
+                                                    size_validator_clone.validate(batch_size)
+                                                {
+                                                    log::warn!(
+                                                        "Incremental update too large, skipping store {:?}: {} (max: {} bytes)",
+                                                        store_type,
+                                                        e,
+                                                        size_validator_clone.max_size()
+                                                    );
+                                                    watermark.mark_sent(store_type, &updates);
+                                                    continue;
+                                                }
+
+                                                let incremental_update = StreamMessage {
+                                                    message_type: StreamMessageType::IncrementalUpdate
+                                                        as i32,
+                                                    payload: Some(
+                                                        gossip::stream_message::Payload::Incremental(
+                                                            IncrementalUpdate {
+                                                                store: proto_store_type,
+                                                                updates: updates.clone(),
+                                                                version: 0,
+                                                            },
+                                                        ),
+                                                    ),
+                                                    sequence: sequence_counter,
+                                                    peer_id: self_name_incremental.clone(),
+                                                };
+
+                                                match tx_incremental
+                                                    .try_send(Ok(incremental_update))
+                                                {
+                                                    Ok(()) => {
+                                                        record_batch_sent(
+                                                            &self_name_incremental,
+                                                            batch_size,
+                                                        );
+                                                        watermark.mark_sent(store_type, &updates);
+                                                    }
+                                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                                        log::debug!(
+                                                            "Backpressure: channel full, skipping send (will retry next interval)"
+                                                        );
+                                                        continue;
+                                                    }
+                                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                        log::warn!(
+                                                            "Channel closed, stopping incremental update sender"
+                                                        );
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        let broadcast_poll = stream_dispatch_handle
+                                            .poll_broadcast_rounds(next_broadcast_round_id);
+                                        if let Some(gap) = broadcast_poll.gap {
+                                            log::warn!(
+                                                peer = %peer_name_incremental,
+                                                missing_rounds = gap.missing_rounds,
+                                                resume_from = gap.resume_from_broadcast_round_id,
+                                                "broadcast stream rounds dropped before observation"
+                                            );
+                                            next_broadcast_round_id =
+                                                gap.resume_from_broadcast_round_id;
+                                        }
+
+                                        for round in broadcast_poll.rounds {
+                                            match try_send_stream_round(
+                                                &tx_incremental,
+                                                &self_name_incremental,
+                                                &peer_name_incremental,
+                                                &mut sequence_counter,
+                                                round.entries.as_slice(),
+                                                "broadcast",
+                                                round.broadcast_round_id,
+                                            ) {
+                                                StreamRoundSendOutcome::Sent
+                                                | StreamRoundSendOutcome::DroppedOnBackpressure => {
+                                                    next_broadcast_round_id =
+                                                        round.broadcast_round_id + 1;
+                                                }
+                                                StreamRoundSendOutcome::Closed => return,
+                                            }
+                                        }
+
+                                        loop {
+                                            match targeted_subscription.receiver.try_recv() {
+                                                Ok(round) => {
+                                                    match try_send_stream_round(
+                                                        &tx_incremental,
+                                                        &self_name_incremental,
+                                                        &peer_name_incremental,
+                                                        &mut sequence_counter,
+                                                        round.entries.as_slice(),
+                                                        "targeted",
+                                                        round.dispatch_round_id,
+                                                    ) {
+                                                        StreamRoundSendOutcome::Sent
+                                                        | StreamRoundSendOutcome::DroppedOnBackpressure => {
+                                                        }
+                                                        StreamRoundSendOutcome::Closed => return,
+                                                    }
+                                                }
+                                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                                Err(mpsc::error::TryRecvError::Disconnected) => {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                incremental_sender_handle = Some(handle);
+                            }
+                        }
 
                         match msg.message_type() {
                             StreamMessageType::IncrementalUpdate => {
@@ -1050,7 +1087,7 @@ impl Gossip for GossipService {
                                         partition_detector: None,
                                         mtls_manager: None,
                                         current_batch: None,
-                                        current_stream_batch: None,
+                                        stream_dispatch: None,
                                         mesh_kv: None,
                                     };
                                     let chunks = service.create_snapshot_chunks(store_type, 100); // chunk_size = 100 entries
