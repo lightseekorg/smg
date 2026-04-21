@@ -382,6 +382,8 @@ pub(crate) async fn process_multimodal_messages(
 }
 
 /// Process multimodal content: fetch images, preprocess pixels, expand tokens, collect hashes.
+///
+/// Single entry point called from preparation.rs. Handles the full pipeline:
 pub(crate) async fn process_multimodal(
     messages: &[ChatMessage],
     model_id: &str,
@@ -843,7 +845,10 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use openai_protocol::common::ImageUrl;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -1020,10 +1025,6 @@ mod tests {
     // ------------------------------------------------------------------
     // MultimodalConfigRegistry tests
     // ------------------------------------------------------------------
-
-    use std::fs;
-
-    use tempfile::TempDir;
 
     fn write_config_fixtures(dir: &std::path::Path) {
         fs::write(
