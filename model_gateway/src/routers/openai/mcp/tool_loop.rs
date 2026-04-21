@@ -17,7 +17,7 @@ use openai_protocol::{
         is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
         OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
+    responses::{generate_id, ResponseInput, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
@@ -31,7 +31,10 @@ use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::{header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+        common::{
+            header_utils::ApiProvider,
+            mcp_utils::{collect_user_function_names, DEFAULT_MAX_ITERATIONS},
+        },
         error,
     },
 };
@@ -46,7 +49,7 @@ pub(crate) struct ToolLoopState {
     pub conversation_history: Vec<Value>,
     /// Original user input (preserved for building resume payloads)
     pub original_input: ResponseInput,
-    /// MCP bindings already represented by historical `mcp_list_tools` items.
+    /// MCP list-tools dedupe keys already represented by historical `mcp_list_tools` items.
     pub existing_mcp_list_tools_labels: HashSet<String>,
     /// Transformed output items (mcp_call, web_search_call, etc.) - stored to avoid reconstruction
     pub mcp_call_items: Vec<Value>,
@@ -153,6 +156,7 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
     session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
@@ -163,6 +167,15 @@ pub(crate) async fn execute_streaming_tool_calls(
             warn!(
                 "Skipping incomplete tool call: name is empty, args_len={}",
                 call.arguments_buffer.len()
+            );
+            continue;
+        }
+
+        if !session.should_intercept_function_call(&call.name, user_function_names) {
+            debug!(
+                tool_name = %call.name,
+                call_id = %call.call_id,
+                "Skipping non-MCP function call in streaming tool execution"
             );
             continue;
         }
@@ -180,6 +193,17 @@ pub(crate) async fn execute_streaming_tool_calls(
 
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
+        let mut visibility_probe_item = json!({
+            "type": streaming_output_item_type(&response_format),
+            "name": &call.name,
+            "status": "in_progress",
+            "arguments": args_str,
+        });
+        if matches!(response_format, ResponseFormat::Passthrough) {
+            visibility_probe_item["server_label"] = json!(&server_label);
+        }
+        let should_emit_live_item =
+            !session.should_hide_output_item_json(&visibility_probe_item, user_function_names);
 
         let arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
@@ -201,13 +225,15 @@ pub(crate) async fn execute_streaming_tool_calls(
                         Value::String(stable_streaming_tool_item_id(&call, &response_format)),
                     );
                 }
-                if !send_tool_call_completion_events(
-                    tx,
-                    &call,
-                    &mcp_call_item,
-                    &response_format,
-                    sequence_number,
-                ) {
+                if should_emit_live_item
+                    && !send_tool_call_completion_events(
+                        tx,
+                        &call,
+                        &mcp_call_item,
+                        &response_format,
+                        sequence_number,
+                    )
+                {
                     return false;
                 }
                 state.record_call(
@@ -222,7 +248,9 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         };
 
-        if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
+        if should_emit_live_item
+            && !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number)
+        {
             return false;
         }
 
@@ -258,13 +286,15 @@ pub(crate) async fn execute_streaming_tool_calls(
             );
         }
 
-        if !send_tool_call_completion_events(
-            tx,
-            &call,
-            &mcp_call_item,
-            &response_format,
-            sequence_number,
-        ) {
+        if should_emit_live_item
+            && !send_tool_call_completion_events(
+                tx,
+                &call,
+                &mcp_call_item,
+                &response_format,
+                sequence_number,
+            )
+        {
             return false;
         }
 
@@ -374,6 +404,12 @@ pub(crate) fn send_mcp_list_tools_events(
     sequence_number: &mut u64,
     server_key: &str,
 ) -> bool {
+    // Defense in depth: callers should pre-filter with
+    // `should_emit_streaming_mcp_list_tools` before allocating output indexes.
+    if !session.should_emit_streaming_mcp_list_tools(server_label) {
+        return true;
+    }
+
     let tools_item_full = session.build_mcp_list_tools_json(server_label, server_key);
     let item_id = tools_item_full
         .get("id")
@@ -587,13 +623,80 @@ fn approval_request_item_id_source(item_id: &str) -> String {
 
 pub(crate) fn mcp_list_tools_bindings_to_emit(
     existing_labels: &HashSet<String>,
-    bindings: &[McpServerBinding],
+    session: &McpToolSession<'_>,
 ) -> Vec<(String, String)> {
-    bindings
+    session
+        .mcp_servers()
         .iter()
-        .filter(|binding| !existing_labels.contains(&binding.label))
+        .filter(|binding| {
+            let dedupe_key = mcp_list_tools_dedupe_key_for_binding(session, binding);
+            !existing_labels.contains(&dedupe_key)
+        })
         .map(|binding| (binding.label.clone(), binding.server_key.clone()))
         .collect()
+}
+
+pub(crate) fn mcp_list_tools_dedupe_key(server_label: &str, tools: &Value) -> String {
+    let serialized_tools = serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string());
+    format!("{server_label}\u{1f}{serialized_tools}")
+}
+
+pub(crate) fn mcp_list_tools_dedupe_key_from_item(item: &Value) -> Option<String> {
+    if item.get("type").and_then(|value| value.as_str()) != Some(ItemType::MCP_LIST_TOOLS) {
+        return None;
+    }
+
+    let server_label = item.get("server_label").and_then(|value| value.as_str())?;
+    let tools = item.get("tools").cloned().unwrap_or_else(|| json!([]));
+    Some(mcp_list_tools_dedupe_key(server_label, &tools))
+}
+
+fn mcp_list_tools_dedupe_key_for_binding(
+    session: &McpToolSession<'_>,
+    binding: &McpServerBinding,
+) -> String {
+    let item = session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
+    mcp_list_tools_dedupe_key_from_item(&item)
+        .unwrap_or_else(|| mcp_list_tools_dedupe_key(&binding.label, &json!([])))
+}
+
+fn visible_mcp_list_tools_items(
+    session: &McpToolSession<'_>,
+    list_tools_bindings: &[(String, String)],
+) -> Vec<Value> {
+    list_tools_bindings
+        .iter()
+        .filter(|(server_label, _)| session.should_emit_streaming_mcp_list_tools(server_label))
+        .map(|(server_label, server_key)| {
+            session.build_mcp_list_tools_json(server_label, server_key)
+        })
+        .collect()
+}
+
+fn remove_intercepted_mcp_function_calls_from_output(
+    response: &mut Value,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) {
+    let Some(output_array) = response
+        .get_mut("output")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+
+    output_array.retain(|item| {
+        let item_type = item.get("type").and_then(|value| value.as_str());
+        if !item_type.is_some_and(is_function_call_type) {
+            return true;
+        }
+
+        let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
+            return true;
+        };
+
+        !session.should_intercept_function_call(name, user_function_names)
+    });
 }
 
 /// Inject MCP metadata into a streaming response
@@ -601,44 +704,33 @@ pub(crate) fn inject_mcp_metadata_streaming(
     response: &mut Value,
     state: &ToolLoopState,
     session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
 ) {
-    let list_tools_bindings = mcp_list_tools_bindings_to_emit(
-        &state.existing_mcp_list_tools_labels,
-        session.mcp_servers(),
-    );
+    let list_tools_bindings =
+        mcp_list_tools_bindings_to_emit(&state.existing_mcp_list_tools_labels, session);
 
     if let Some(output_array) = response.get_mut("output").and_then(|v| v.as_array_mut()) {
         output_array.retain(|item| {
             item.get("type").and_then(|t| t.as_str()) != Some(ItemType::MCP_LIST_TOOLS)
         });
 
-        let mut prefix = Vec::with_capacity(list_tools_bindings.len() + state.mcp_call_items.len());
-        for (server_label, server_key) in &list_tools_bindings {
-            if !session.is_internal_server_label(server_label) {
-                prefix.push(session.build_mcp_list_tools_json(server_label, server_key));
-            }
-        }
+        let mut prefix = visible_mcp_list_tools_items(session, &list_tools_bindings);
         prefix.extend(
             state
                 .mcp_call_items
                 .iter()
-                .filter(|item| !is_internal_mcp_response_item(item, session))
+                .filter(|item| !session.should_hide_output_item_json(item, user_function_names))
                 .cloned(),
         );
         output_array.splice(0..0, prefix);
     } else if let Some(obj) = response.as_object_mut() {
-        let mut output_items = Vec::new();
-        for (server_label, server_key) in &list_tools_bindings {
-            if !session.is_internal_server_label(server_label) {
-                output_items.push(session.build_mcp_list_tools_json(server_label, server_key));
-            }
-        }
+        let mut output_items = visible_mcp_list_tools_items(session, &list_tools_bindings);
         // Use stored transformed items (no reconstruction needed)
         output_items.extend(
             state
                 .mcp_call_items
                 .iter()
-                .filter(|item| !is_internal_mcp_response_item(item, session))
+                .filter(|item| !session.should_hide_output_item_json(item, user_function_names))
                 .cloned(),
         );
         obj.insert("output".to_string(), Value::Array(output_items));
@@ -657,24 +749,33 @@ fn build_approval_response(
         .ok_or_else(|| "response not an object".to_string())?;
     obj.insert("status".to_string(), Value::String("completed".to_string()));
 
-    let list_tools_bindings = mcp_list_tools_bindings_to_emit(
-        &state.existing_mcp_list_tools_labels,
-        session.mcp_servers(),
-    );
+    let list_tools_bindings =
+        mcp_list_tools_bindings_to_emit(&state.existing_mcp_list_tools_labels, session);
+    let user_function_names = collect_user_function_names(original_body);
 
     match obj.get_mut("output").and_then(|v| v.as_array_mut()) {
         Some(output_array) => {
-            let retained_items = retained_output_items(output_array, original_body);
-            let prefix =
-                approval_prefix_items(&state, session, &list_tools_bindings, approval_item);
+            let retained_items = retained_output_items(output_array, session, &user_function_names);
+            let prefix = approval_prefix_items(
+                &state,
+                session,
+                &list_tools_bindings,
+                &user_function_names,
+                approval_item,
+            );
 
             output_array.clear();
             output_array.extend(prefix);
             output_array.extend(retained_items);
         }
         None => {
-            let output_items =
-                approval_prefix_items(&state, session, &list_tools_bindings, approval_item);
+            let output_items = approval_prefix_items(
+                &state,
+                session,
+                &list_tools_bindings,
+                &user_function_names,
+                approval_item,
+            );
             obj.insert("output".to_string(), Value::Array(output_items));
         }
     }
@@ -682,35 +783,14 @@ fn build_approval_response(
     Ok(response)
 }
 
-fn retained_output_items(output_array: &[Value], original_body: &ResponsesRequest) -> Vec<Value> {
-    let user_function_names: HashSet<&str> = original_body
-        .tools
-        .as_deref()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|tool| match tool {
-                    ResponseTool::Function(function_tool) => {
-                        Some(function_tool.function.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
+fn retained_output_items(
+    output_array: &[Value],
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) -> Vec<Value> {
     output_array
         .iter()
-        .filter(|item| {
-            let item_type = item.get("type").and_then(|value| value.as_str());
-            if !item_type.is_some_and(is_function_call_type) {
-                return true;
-            }
-
-            item.get("name")
-                .and_then(|value| value.as_str())
-                .is_some_and(|name| user_function_names.contains(name))
-        })
+        .filter(|item| !session.should_hide_output_item_json(item, user_function_names))
         .cloned()
         .collect()
 }
@@ -719,22 +799,18 @@ fn approval_prefix_items(
     state: &ToolLoopState,
     session: &McpToolSession<'_>,
     list_tools_bindings: &[(String, String)],
+    user_function_names: &HashSet<String>,
     approval_item: Value,
 ) -> Vec<Value> {
-    let mut prefix = Vec::with_capacity(list_tools_bindings.len() + state.mcp_call_items.len() + 1);
-    for (list_server_label, server_key) in list_tools_bindings {
-        if !session.is_internal_server_label(list_server_label) {
-            prefix.push(session.build_mcp_list_tools_json(list_server_label, server_key));
-        }
-    }
+    let mut prefix = visible_mcp_list_tools_items(session, list_tools_bindings);
     prefix.extend(
         state
             .mcp_call_items
             .iter()
-            .filter(|item| !is_internal_mcp_response_item(item, session))
+            .filter(|item| !session.should_hide_output_item_json(item, user_function_names))
             .cloned(),
     );
-    if !is_internal_mcp_response_item(&approval_item, session) {
+    if !session.should_hide_output_item_json(&approval_item, user_function_names) {
         prefix.push(approval_item);
     }
     prefix
@@ -765,6 +841,7 @@ pub(crate) async fn execute_tool_loop(
         original_body.input.clone(),
         existing_mcp_list_tools_labels.to_vec(),
     );
+    let user_function_names = collect_user_function_names(original_body);
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
@@ -805,8 +882,27 @@ pub(crate) async fn execute_tool_loop(
                 state.iteration, state.total_calls
             );
             if state.total_calls > 0 {
-                inject_mcp_metadata_streaming(&mut response_json, &state, session);
+                inject_mcp_metadata_streaming(
+                    &mut response_json,
+                    &state,
+                    session,
+                    &user_function_names,
+                );
             }
+            return Ok(response_json);
+        }
+
+        let (mcp_function_calls, user_function_calls): (Vec<_>, Vec<_>) =
+            function_calls.into_iter().partition(|call| {
+                session.should_intercept_function_call(&call.name, &user_function_names)
+            });
+
+        let has_user_function_calls = !user_function_calls.is_empty();
+        if mcp_function_calls.is_empty() {
+            info!(
+                "Returning response with {} user function call(s) without MCP interception",
+                user_function_calls.len()
+            );
             return Ok(response_json);
         }
 
@@ -814,9 +910,10 @@ pub(crate) async fn execute_tool_loop(
         Metrics::record_mcp_tool_iteration(&original_body.model);
 
         info!(
-            "Tool loop iteration {}: {} function call(s) detected",
+            "Tool loop iteration {}: {} MCP function call(s) detected (user calls in batch: {})",
             state.iteration,
-            function_calls.len()
+            mcp_function_calls.len(),
+            has_user_function_calls
         );
 
         let effective_limit = match max_tool_calls {
@@ -824,7 +921,7 @@ pub(crate) async fn execute_tool_loop(
             None => DEFAULT_MAX_ITERATIONS,
         };
 
-        for call in function_calls {
+        for call in mcp_function_calls {
             state.total_calls += 1;
 
             if state.total_calls > effective_limit {
@@ -948,6 +1045,27 @@ pub(crate) async fn execute_tool_loop(
             );
         }
 
+        if has_user_function_calls {
+            remove_intercepted_mcp_function_calls_from_output(
+                &mut response_json,
+                session,
+                &user_function_names,
+            );
+            if state.total_calls > 0 {
+                inject_mcp_metadata_streaming(
+                    &mut response_json,
+                    &state,
+                    session,
+                    &user_function_names,
+                );
+            }
+            info!(
+                "Returning mixed response after executing {} MCP call(s); user function call(s) remain for client execution",
+                state.total_calls
+            );
+            return Ok(response_json);
+        }
+
         current_payload = build_resume_payload(
             &base_payload,
             &state.conversation_history,
@@ -978,28 +1096,12 @@ fn build_incomplete_response(
         json!({ "reason": reason }),
     );
 
-    let list_tools_bindings = mcp_list_tools_bindings_to_emit(
-        &state.existing_mcp_list_tools_labels,
-        session.mcp_servers(),
-    );
+    let list_tools_bindings =
+        mcp_list_tools_bindings_to_emit(&state.existing_mcp_list_tools_labels, session);
 
-    let user_function_names: HashSet<&str> = original_body
-        .tools
-        .as_deref()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|tool| match tool {
-                    ResponseTool::Function(function_tool) => {
-                        Some(function_tool.function.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let user_function_names = collect_user_function_names(original_body);
 
-    // Convert MCP function_call items in output to mcp_call format.
+    // Convert only MCP-intercepted function_call items in output to mcp_call format.
     if let Some(output_array) = obj.get_mut("output").and_then(|v| v.as_array_mut()) {
         // Find any function_call items and convert them to mcp_call (incomplete)
         let mut incomplete_items = Vec::new();
@@ -1007,8 +1109,9 @@ fn build_incomplete_response(
             let item_type = item.get("type").and_then(|t| t.as_str());
             if item_type.is_some_and(is_function_call_type) {
                 let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                if user_function_names.contains(tool_name) {
-                    // User function calls must remain as function_call output items.
+                if !session.should_intercept_function_call(tool_name, &user_function_names) {
+                    // Non-intercepted calls (user tools, unknown names, collisions) must remain
+                    // function_call output items.
                     continue;
                 }
                 let args = item
@@ -1032,25 +1135,20 @@ fn build_incomplete_response(
 
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
-            let mut prefix = Vec::with_capacity(
-                list_tools_bindings.len() + state.mcp_call_items.len() + incomplete_items.len(),
-            );
-            for (server_label, server_key) in &list_tools_bindings {
-                if !session.is_internal_server_label(server_label) {
-                    prefix.push(session.build_mcp_list_tools_json(server_label, server_key));
-                }
-            }
+            let mut prefix = visible_mcp_list_tools_items(session, &list_tools_bindings);
             prefix.extend(
                 state
                     .mcp_call_items
                     .iter()
-                    .filter(|item| !is_internal_mcp_response_item(item, session))
+                    .filter(|item| {
+                        !session.should_hide_output_item_json(item, &user_function_names)
+                    })
                     .cloned(),
             );
             prefix.extend(
-                incomplete_items
-                    .into_iter()
-                    .filter(|item| !is_internal_mcp_response_item(item, session)),
+                incomplete_items.into_iter().filter(|item| {
+                    !session.should_hide_output_item_json(item, &user_function_names)
+                }),
             );
             output_array.splice(0..0, prefix);
         }
@@ -1075,15 +1173,15 @@ fn build_incomplete_response(
     Ok(response)
 }
 
-fn is_internal_mcp_response_item(item: &Value, session: &McpToolSession<'_>) -> bool {
-    let matches_internal_server = item
-        .get("server_label")
-        .and_then(|value| value.as_str())
-        .is_some_and(|server_label| session.is_internal_non_builtin_server_label(server_label));
-
-    match item.get("name").and_then(|value| value.as_str()) {
-        Some(name) if session.has_exposed_tool(name) => session.is_internal_non_builtin_tool(name),
-        _ => matches_internal_server,
+// Keep this mapping in sync with
+// `ResponseStreamEventEmitter::output_item_type_for_format` in
+// `grpc/common/responses/streaming.rs`.
+fn streaming_output_item_type(response_format: &ResponseFormat) -> &'static str {
+    match response_format {
+        ResponseFormat::Passthrough => ItemType::MCP_CALL,
+        ResponseFormat::WebSearchCall => ItemType::WEB_SEARCH_CALL,
+        ResponseFormat::CodeInterpreterCall => ItemType::CODE_INTERPRETER_CALL,
+        ResponseFormat::FileSearchCall => ItemType::FILE_SEARCH_CALL,
     }
 }
 
@@ -1209,8 +1307,7 @@ mod tests {
 
     use super::{
         build_transformed_mcp_call_item, extract_openai_response_output_items,
-        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
-        ToolLoopState,
+        mcp_list_tools_bindings_to_emit, mcp_list_tools_dedupe_key, ResponseInput, ToolLoopState,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -1297,7 +1394,7 @@ mod tests {
             "server_label": "internal-label"
         });
 
-        assert!(!is_internal_mcp_response_item(&item, &session));
+        assert!(!session.should_hide_output_item_json(&item, &HashSet::new()));
     }
 
     #[tokio::test]
@@ -1356,16 +1453,12 @@ mod tests {
             "server_label": "internal-label"
         });
 
-        assert!(!is_internal_mcp_response_item(&builtin_item, &session));
-        assert!(is_internal_mcp_response_item(
-            &internal_non_builtin_item,
-            &session
-        ));
+        assert!(!session.should_hide_output_item_json(&builtin_item, &HashSet::new()));
+        assert!(session.should_hide_output_item_json(&internal_non_builtin_item, &HashSet::new()));
     }
 
-    #[test]
-    fn emits_only_new_binding_when_resume_adds_second_tool_block() {
-        let existing_labels = HashSet::from(["deepwiki_ask".to_string()]);
+    #[tokio::test]
+    async fn emits_only_new_binding_when_resume_adds_second_tool_block() {
         let bindings = vec![
             McpServerBinding {
                 label: "deepwiki_ask".to_string(),
@@ -1378,8 +1471,46 @@ mod tests {
                 allowed_tools: Some(vec!["read_wiki_structure".to_string()]),
             },
         ];
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "server-ask".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3000/sse".to_string(),
+                        token: None,
+                        headers: Default::default(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                    internal: false,
+                },
+                McpServerConfig {
+                    name: "server-read".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3001/sse".to_string(),
+                        token: None,
+                        headers: Default::default(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                    internal: false,
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        let session = McpToolSession::new(&orchestrator, bindings, "test-request");
+        let existing_labels =
+            HashSet::from([mcp_list_tools_dedupe_key("deepwiki_ask", &json!([]))]);
 
-        let bindings_to_emit = mcp_list_tools_bindings_to_emit(&existing_labels, &bindings);
+        let bindings_to_emit = mcp_list_tools_bindings_to_emit(&existing_labels, &session);
 
         assert_eq!(
             bindings_to_emit,
@@ -1387,16 +1518,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emits_all_bindings_when_no_prior_mcp_list_tools_exist() {
+    #[tokio::test]
+    async fn emits_all_bindings_when_no_prior_mcp_list_tools_exist() {
         let existing_labels = HashSet::new();
-        let bindings = vec![McpServerBinding {
-            label: "deepwiki_ask".to_string(),
-            server_key: "server-ask".to_string(),
-            allowed_tools: Some(vec!["ask_question".to_string()]),
-        }];
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "server-ask".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: false,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "deepwiki_ask".to_string(),
+                server_key: "server-ask".to_string(),
+                allowed_tools: Some(vec!["ask_question".to_string()]),
+            }],
+            "test-request",
+        );
 
-        let bindings_to_emit = mcp_list_tools_bindings_to_emit(&existing_labels, &bindings);
+        let bindings_to_emit = mcp_list_tools_bindings_to_emit(&existing_labels, &session);
 
         assert_eq!(
             bindings_to_emit,

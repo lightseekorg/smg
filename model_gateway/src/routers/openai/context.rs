@@ -1,6 +1,6 @@
 //! Request context types for OpenAI router pipeline.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
@@ -322,6 +322,7 @@ pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
     pub session: Option<&'a McpToolSession<'a>>,
+    pub user_function_names: &'a HashSet<String>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;

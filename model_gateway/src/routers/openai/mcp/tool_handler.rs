@@ -59,6 +59,14 @@ impl OutputIndexMapper {
     }
 }
 
+/// Per-upstream-index visibility and mapping state for client-facing streaming output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputVisibilityState {
+    Unknown,
+    Hidden,
+    Visible,
+}
+
 /// Represents a function call being accumulated across delta events
 #[derive(Debug, Clone)]
 pub(crate) struct FunctionCallInProgress {
@@ -101,6 +109,8 @@ pub(crate) struct StreamingToolHandler {
     pub pending_calls: Vec<FunctionCallInProgress>,
     /// Manage output_index remapping so they increment per item
     output_index_mapper: OutputIndexMapper,
+    /// Visibility/mapping state keyed by upstream output_index.
+    output_visibility: HashMap<usize, OutputVisibilityState>,
     /// Original response id captured from the first response.created event
     pub original_response_id: Option<String>,
 }
@@ -111,16 +121,54 @@ impl StreamingToolHandler {
             accumulator: StreamingResponseAccumulator::new(),
             pending_calls: Vec::new(),
             output_index_mapper: OutputIndexMapper::with_start(start),
+            output_visibility: HashMap::new(),
             original_response_id: None,
         }
     }
 
-    pub fn ensure_output_index(&mut self, upstream_index: usize) -> usize {
-        self.output_index_mapper.ensure_mapping(upstream_index)
+    pub fn mapped_output_index(&self, upstream_index: usize) -> Option<usize> {
+        match self.visibility_state(upstream_index) {
+            OutputVisibilityState::Visible => self.output_index_mapper.lookup(upstream_index),
+            OutputVisibilityState::Unknown | OutputVisibilityState::Hidden => None,
+        }
     }
 
-    pub fn mapped_output_index(&self, upstream_index: usize) -> Option<usize> {
-        self.output_index_mapper.lookup(upstream_index)
+    pub fn visibility_state(&self, upstream_index: usize) -> OutputVisibilityState {
+        self.output_visibility
+            .get(&upstream_index)
+            .copied()
+            .unwrap_or(OutputVisibilityState::Unknown)
+    }
+
+    pub fn mark_output_hidden(&mut self, upstream_index: usize) {
+        if self.visibility_state(upstream_index) == OutputVisibilityState::Unknown {
+            self.output_visibility
+                .insert(upstream_index, OutputVisibilityState::Hidden);
+        }
+    }
+
+    pub fn is_output_hidden(&self, upstream_index: usize) -> bool {
+        self.visibility_state(upstream_index) == OutputVisibilityState::Hidden
+    }
+
+    pub fn resolve_output_index_for_forwarding(&mut self, upstream_index: usize) -> Option<usize> {
+        match self.visibility_state(upstream_index) {
+            OutputVisibilityState::Hidden => None,
+            OutputVisibilityState::Visible => {
+                Some(self.output_index_mapper.ensure_mapping(upstream_index))
+            }
+            OutputVisibilityState::Unknown => {
+                let mapped_index = self.output_index_mapper.ensure_mapping(upstream_index);
+                self.output_visibility
+                    .insert(upstream_index, OutputVisibilityState::Visible);
+                if let Some(call) = self.find_call_mut(upstream_index) {
+                    if call.assigned_output_index.is_none() {
+                        call.assigned_output_index = Some(mapped_index);
+                    }
+                }
+                Some(mapped_index)
+            }
+        }
     }
 
     pub fn allocate_synthetic_output_index(&mut self) -> usize {
@@ -174,9 +222,6 @@ impl StreamingToolHandler {
             FunctionCallEvent::ARGUMENTS_DONE => self.handle_arguments_done(&parsed),
             OutputItemEvent::DELTA => self.process_output_delta(&parsed),
             OutputItemEvent::DONE => {
-                if let Some(output_index) = extract_output_index(&parsed) {
-                    self.ensure_output_index(output_index);
-                }
                 if self.has_complete_calls() {
                     StreamAction::ExecuteTools
                 } else {
@@ -189,9 +234,6 @@ impl StreamingToolHandler {
 
     fn handle_output_item_added(&mut self, parsed: &Value) -> StreamAction {
         let cached_output_index = extract_output_index(parsed);
-        if let Some(output_index) = cached_output_index {
-            self.ensure_output_index(output_index);
-        }
 
         let Some(item) = parsed.get("item") else {
             return StreamAction::Forward;
@@ -212,18 +254,19 @@ impl StreamingToolHandler {
             return StreamAction::Forward;
         };
 
-        let assigned_index = self.ensure_output_index(output_index);
         let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
-        let call = self.get_or_create_call(output_index, item);
-        call.call_id = call_id.to_string();
-        call.name = name.to_string();
-        call.item_id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id.to_string());
-        call.assigned_output_index = Some(assigned_index);
+        {
+            let call = self.get_or_create_call(output_index, item);
+            call.call_id = call_id.to_string();
+            call.name = name.to_string();
+            call.item_id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| id.to_string());
+        }
+        self.maybe_assign_existing_mapping(output_index);
 
         StreamAction::Forward
     }
@@ -233,30 +276,21 @@ impl StreamingToolHandler {
             return StreamAction::Forward;
         };
 
-        let assigned_index = self.ensure_output_index(output_index);
-
         if let Some(delta) = parsed.get("delta").and_then(|v| v.as_str()) {
             if let Some(call) = self.find_call_mut(output_index) {
                 call.arguments_buffer.push_str(delta);
                 if let Some(obfuscation) = parsed.get("obfuscation").and_then(|v| v.as_str()) {
                     call.last_obfuscation = Some(obfuscation.to_string());
                 }
-                if call.assigned_output_index.is_none() {
-                    call.assigned_output_index = Some(assigned_index);
-                }
             }
+            self.maybe_assign_existing_mapping(output_index);
         }
         StreamAction::Forward
     }
 
     fn handle_arguments_done(&mut self, parsed: &Value) -> StreamAction {
         if let Some(output_index) = extract_output_index(parsed) {
-            let assigned_index = self.ensure_output_index(output_index);
-            if let Some(call) = self.find_call_mut(output_index) {
-                if call.assigned_output_index.is_none() {
-                    call.assigned_output_index = Some(assigned_index);
-                }
-            }
+            self.maybe_assign_existing_mapping(output_index);
         }
 
         if self.has_complete_calls() {
@@ -275,7 +309,6 @@ impl StreamingToolHandler {
     /// Process output delta events to detect and accumulate function calls
     fn process_output_delta(&mut self, event: &Value) -> StreamAction {
         let output_index = extract_output_index(event).unwrap_or(0);
-        let assigned_index = self.ensure_output_index(output_index);
 
         let delta = match event.get("delta") {
             Some(d) => d,
@@ -286,25 +319,28 @@ impl StreamingToolHandler {
 
         if item_type.is_some_and(is_function_call_type) {
             // Get or create function call for this output index
-            let call = self.get_or_create_call(output_index, delta);
-            call.assigned_output_index = Some(assigned_index);
+            {
+                let call = self.get_or_create_call(output_index, delta);
+                if let Some(call_id) = delta.get("call_id").and_then(|v| v.as_str()) {
+                    call.call_id = call_id.to_string();
+                }
+                if let Some(item_id) = delta.get("id").and_then(|v| v.as_str()) {
+                    call.item_id = Some(item_id.to_string());
+                }
+                if let Some(name) = delta.get("name").and_then(|v| v.as_str()) {
+                    call.name.push_str(name);
+                }
+                if let Some(args) = delta.get("arguments").and_then(|v| v.as_str()) {
+                    call.arguments_buffer.push_str(args);
+                }
 
-            if let Some(call_id) = delta.get("call_id").and_then(|v| v.as_str()) {
-                call.call_id = call_id.to_string();
+                if let Some(obfuscation) = delta.get("obfuscation").and_then(|v| v.as_str()) {
+                    call.last_obfuscation = Some(obfuscation.to_string());
+                }
             }
-            if let Some(item_id) = delta.get("id").and_then(|v| v.as_str()) {
-                call.item_id = Some(item_id.to_string());
-            }
-            if let Some(name) = delta.get("name").and_then(|v| v.as_str()) {
-                call.name.push_str(name);
-            }
-            if let Some(args) = delta.get("arguments").and_then(|v| v.as_str()) {
-                call.arguments_buffer.push_str(args);
-            }
-
-            if let Some(obfuscation) = delta.get("obfuscation").and_then(|v| v.as_str()) {
-                call.last_obfuscation = Some(obfuscation.to_string());
-            }
+            // Keep deferred allocation behavior: only assign when a mapping already
+            // exists for this upstream index (typically after a visible event).
+            self.maybe_assign_existing_mapping(output_index);
 
             return StreamAction::Buffer;
         }
@@ -344,6 +380,17 @@ impl StreamingToolHandler {
         self.pending_calls
             .last_mut()
             .expect("Just pushed to pending_calls, must have at least one element")
+    }
+
+    fn maybe_assign_existing_mapping(&mut self, output_index: usize) {
+        let Some(mapped_index) = self.mapped_output_index(output_index) else {
+            return;
+        };
+        if let Some(call) = self.find_call_mut(output_index) {
+            if call.assigned_output_index.is_none() {
+                call.assigned_output_index = Some(mapped_index);
+            }
+        }
     }
 
     fn has_complete_calls(&self) -> bool {

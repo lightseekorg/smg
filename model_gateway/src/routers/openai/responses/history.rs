@@ -22,6 +22,7 @@ use crate::{
             header_utils::ConversationMemoryConfig, persistence_utils::split_stored_message_content,
         },
         error,
+        openai::mcp::mcp_list_tools_dedupe_key_from_item,
     },
 };
 
@@ -59,7 +60,7 @@ pub(crate) async fn load_input_history(
         {
             Ok(chain) if !chain.responses.is_empty() => {
                 existing_mcp_list_tools_labels.extend(chain.responses.iter().flat_map(|stored| {
-                    extract_mcp_list_tools_labels(
+                    extract_mcp_list_tools_dedupe_keys(
                         stored.raw_response.get("output").unwrap_or(&Value::Null),
                     )
                 }));
@@ -254,17 +255,12 @@ fn deserialize_items_from_array(array: &Value) -> Vec<ResponseInputOutputItem> {
         .unwrap_or_default()
 }
 
-fn extract_mcp_list_tools_labels(array: &Value) -> Vec<String> {
+fn extract_mcp_list_tools_dedupe_keys(array: &Value) -> Vec<String> {
     array
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|item| {
-                    (item.get("type").and_then(|t| t.as_str()) == Some(ItemType::MCP_LIST_TOOLS))
-                        .then(|| item.get("server_label").and_then(|v| v.as_str()))
-                        .flatten()
-                        .map(ToOwned::to_owned)
-                })
+                .filter_map(mcp_list_tools_dedupe_key_from_item)
                 .collect()
         })
         .unwrap_or_default()

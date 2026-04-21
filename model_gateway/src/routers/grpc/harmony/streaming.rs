@@ -1,7 +1,7 @@
 //! Harmony streaming response processor
 
 use std::{
-    collections::{hash_map::Entry::Vacant, HashMap},
+    collections::{hash_map::Entry::Vacant, HashMap, HashSet},
     io,
     sync::Arc,
     time::Instant,
@@ -35,7 +35,10 @@ use crate::{
             response_formatting::CompletionTokenTracker,
             responses::{
                 build_sse_response,
-                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+                streaming::{
+                    attach_mcp_server_label, is_client_visible_streaming_output_item,
+                    OutputItemType, ResponseStreamEventEmitter,
+                },
             },
         },
         context,
@@ -49,6 +52,14 @@ use crate::{
 /// Returns an SSE stream that parses Harmony tokens incrementally and
 /// emits ChatCompletionChunk events for streaming responses.
 pub(crate) struct HarmonyStreamingProcessor;
+
+#[derive(Debug, Clone)]
+struct ToolCallStreamState {
+    output_index: Option<usize>,
+    item_id: Option<String>,
+    response_format: Option<ResponseFormat>,
+    is_visible: bool,
+}
 
 impl HarmonyStreamingProcessor {
     /// Create a new Harmony streaming processor
@@ -475,15 +486,25 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        user_function_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(stream, emitter, tx, session, 0).await
+                Self::process_decode_stream(stream, emitter, tx, session, user_function_names, 0)
+                    .await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(prefill, *decode, emitter, tx, session).await
+                Self::process_responses_dual_stream(
+                    prefill,
+                    *decode,
+                    emitter,
+                    tx,
+                    session,
+                    user_function_names,
+                )
+                .await
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
@@ -497,6 +518,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        user_function_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
@@ -510,9 +532,15 @@ impl HarmonyStreamingProcessor {
         let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
 
         // Phase 2: Process decode stream
-        let result =
-            Self::process_decode_stream(decode_stream, emitter, tx, session, prefill_cached_tokens)
-                .await;
+        let result = Self::process_decode_stream(
+            decode_stream,
+            emitter,
+            tx,
+            session,
+            user_function_names,
+            prefill_cached_tokens,
+        )
+        .await;
 
         prefill_stream.mark_completed();
         result
@@ -524,6 +552,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        user_function_names: Option<&HashSet<String>>,
         prefill_cached_tokens: u32,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
@@ -539,8 +568,9 @@ impl HarmonyStreamingProcessor {
         let mut has_emitted_content_part_added = false;
 
         // Tool call tracking: call_index -> (output_index, item_id, response_format)
-        let mut tool_call_tracking: HashMap<usize, (usize, String, Option<ResponseFormat>)> =
-            HashMap::new();
+        let empty_user_function_names = HashSet::new();
+        let user_function_names = user_function_names.unwrap_or(&empty_user_function_names);
+        let mut tool_call_tracking: HashMap<usize, ToolCallStreamState> = HashMap::new();
 
         // Metadata from Complete message; seed cached_tokens from prefill phase (dual-stream)
         let mut finish_reason: String;
@@ -655,7 +685,10 @@ impl HarmonyStreamingProcessor {
 
                                 // Determine response_format based on MCP context.
                                 let response_format = session.and_then(|s| {
-                                    if s.has_exposed_tool(tool_name) {
+                                    if s.should_intercept_function_call(
+                                        tool_name,
+                                        user_function_names,
+                                    ) {
                                         Some(s.tool_response_format(tool_name))
                                     } else {
                                         None
@@ -671,17 +704,7 @@ impl HarmonyStreamingProcessor {
                                     response_format.as_ref(),
                                 );
 
-                                let (output_index, item_id) =
-                                    emitter.allocate_output_index(output_item_type);
-
-                                tool_call_tracking.insert(
-                                    call_index,
-                                    (output_index, item_id.clone(), response_format.clone()),
-                                );
-
-                                // Build output_item.added event
-                                let mut item = json!({
-                                    "id": item_id,
+                                let mut visibility_probe_item = json!({
                                     "type": type_str,
                                     "name": tool_name,
                                     "call_id": call_id,
@@ -693,57 +716,87 @@ impl HarmonyStreamingProcessor {
                                     .map(|s| s.resolve_tool_server_label(tool_name))
                                     .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
                                 attach_mcp_server_label(
-                                    &mut item,
+                                    &mut visibility_probe_item,
                                     Some(label.as_str()),
                                     response_format.as_ref(),
                                 );
+                                let is_visible = is_client_visible_streaming_output_item(
+                                    session,
+                                    &visibility_probe_item,
+                                    user_function_names,
+                                );
 
-                                let event = emitter.emit_output_item_added(output_index, &item);
-                                emitter.send_event_best_effort(&event, tx);
+                                let mut stream_state = ToolCallStreamState {
+                                    output_index: None,
+                                    item_id: None,
+                                    response_format: response_format.clone(),
+                                    is_visible,
+                                };
 
-                                // Emit in_progress event for MCP tools
-                                if let Some(ref fmt) = response_format {
-                                    let event = emitter.emit_tool_call_in_progress(
-                                        output_index,
-                                        &item_id,
-                                        fmt,
-                                    );
+                                if is_visible {
+                                    let (output_index, item_id) =
+                                        emitter.allocate_output_index(output_item_type);
+                                    let mut item = visibility_probe_item;
+                                    item["id"] = json!(item_id.clone());
+
+                                    let event = emitter.emit_output_item_added(output_index, &item);
                                     emitter.send_event_best_effort(&event, tx);
 
-                                    // Emit searching/interpreting event for builtin tools
-                                    if let Some(event) = emitter.emit_tool_call_searching(
-                                        output_index,
-                                        &item_id,
-                                        fmt,
+                                    if let Some(ref fmt) = response_format {
+                                        let event = emitter.emit_tool_call_in_progress(
+                                            output_index,
+                                            &item_id,
+                                            fmt,
+                                        );
+                                        emitter.send_event_best_effort(&event, tx);
+
+                                        if let Some(event) = emitter.emit_tool_call_searching(
+                                            output_index,
+                                            &item_id,
+                                            fmt,
+                                        ) {
+                                            emitter.send_event_best_effort(&event, tx);
+                                        }
+                                    }
+
+                                    if matches!(
+                                        response_format,
+                                        Some(ResponseFormat::Passthrough) | None
                                     ) {
+                                        let event = match &response_format {
+                                            Some(_) => emitter.emit_mcp_call_arguments_delta(
+                                                output_index,
+                                                &item_id,
+                                                "",
+                                            ),
+                                            None => emitter.emit_function_call_arguments_delta(
+                                                output_index,
+                                                &item_id,
+                                                "",
+                                            ),
+                                        };
                                         emitter.send_event_best_effort(&event, tx);
                                     }
+
+                                    stream_state.output_index = Some(output_index);
+                                    stream_state.item_id = Some(item_id);
                                 }
 
-                                // Emit initial arguments delta for mcp_call only (skip for builtin tools)
-                                if matches!(
-                                    response_format,
-                                    Some(ResponseFormat::Passthrough) | None
-                                ) {
-                                    let event = match &response_format {
-                                        Some(_) => emitter.emit_mcp_call_arguments_delta(
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        ),
-                                        None => emitter.emit_function_call_arguments_delta(
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        ),
-                                    };
-                                    emitter.send_event_best_effort(&event, tx);
-                                }
+                                tool_call_tracking.insert(call_index, stream_state);
                             } else {
                                 // Continuing tool call: emit arguments delta
-                                if let Some((output_index, item_id, response_format)) =
-                                    tool_call_tracking.get(&call_index)
-                                {
+                                if let Some(stream_state) = tool_call_tracking.get(&call_index) {
+                                    if !stream_state.is_visible {
+                                        continue;
+                                    }
+                                    let (Some(output_index), Some(item_id)) = (
+                                        stream_state.output_index,
+                                        stream_state.item_id.as_deref(),
+                                    ) else {
+                                        continue;
+                                    };
+                                    let response_format = &stream_state.response_format;
+
                                     // Skip arguments streaming for builtin tools (only mcp_call streams arguments)
                                     if !matches!(
                                         response_format,
@@ -760,12 +813,12 @@ impl HarmonyStreamingProcessor {
                                     {
                                         let event = match response_format {
                                             Some(_) => emitter.emit_mcp_call_arguments_delta(
-                                                *output_index,
+                                                output_index,
                                                 item_id,
                                                 args,
                                             ),
                                             None => emitter.emit_function_call_arguments_delta(
-                                                *output_index,
+                                                output_index,
                                                 item_id,
                                                 args,
                                             ),
@@ -801,9 +854,16 @@ impl HarmonyStreamingProcessor {
                     // Complete all tool calls if we have commentary
                     if let Some(ref tool_calls) = accumulated_tool_calls {
                         for (call_idx, tool_call) in tool_calls.iter().enumerate() {
-                            if let Some((output_index, item_id, response_format)) =
-                                tool_call_tracking.get(&call_idx)
-                            {
+                            if let Some(stream_state) = tool_call_tracking.get(&call_idx) {
+                                if !stream_state.is_visible {
+                                    continue;
+                                }
+                                let (Some(output_index), Some(item_id)) =
+                                    (stream_state.output_index, stream_state.item_id.as_deref())
+                                else {
+                                    continue;
+                                };
+                                let response_format = &stream_state.response_format;
                                 let tool_name = &tool_call.function.name;
                                 let args_str =
                                     tool_call.function.arguments.as_deref().unwrap_or("");
@@ -815,12 +875,12 @@ impl HarmonyStreamingProcessor {
                                 ) {
                                     let event = match response_format {
                                         Some(_) => emitter.emit_mcp_call_arguments_done(
-                                            *output_index,
+                                            output_index,
                                             item_id,
                                             args_str,
                                         ),
                                         None => emitter.emit_function_call_arguments_done(
-                                            *output_index,
+                                            output_index,
                                             item_id,
                                             args_str,
                                         ),
@@ -831,7 +891,7 @@ impl HarmonyStreamingProcessor {
                                 // Emit completed event for MCP tools
                                 if let Some(ref fmt) = response_format {
                                     let event = emitter.emit_tool_call_completed(
-                                        *output_index,
+                                        output_index,
                                         item_id,
                                         fmt,
                                     );
@@ -861,8 +921,8 @@ impl HarmonyStreamingProcessor {
                                     response_format.as_ref(),
                                 );
 
-                                let event = emitter.emit_output_item_done(*output_index, &item);
-                                emitter.complete_output_item(*output_index);
+                                let event = emitter.emit_output_item_done(output_index, &item);
+                                emitter.complete_output_item(output_index);
                                 emitter.send_event_best_effort(&event, tx);
                             }
                         }
@@ -938,9 +998,16 @@ impl HarmonyStreamingProcessor {
             // Complete any pending tool calls with data from completed messages
             if let Some(ref tool_calls) = accumulated_tool_calls {
                 for (call_idx, tool_call) in tool_calls.iter().enumerate() {
-                    if let Some((output_index, item_id, response_format)) =
-                        tool_call_tracking.get(&call_idx)
-                    {
+                    if let Some(stream_state) = tool_call_tracking.get(&call_idx) {
+                        if !stream_state.is_visible {
+                            continue;
+                        }
+                        let (Some(output_index), Some(item_id)) =
+                            (stream_state.output_index, stream_state.item_id.as_deref())
+                        else {
+                            continue;
+                        };
+                        let response_format = &stream_state.response_format;
                         let tool_name = &tool_call.function.name;
                         let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
 
@@ -948,12 +1015,12 @@ impl HarmonyStreamingProcessor {
                         if matches!(response_format, Some(ResponseFormat::Passthrough) | None) {
                             let event = match response_format {
                                 Some(_) => emitter.emit_mcp_call_arguments_done(
-                                    *output_index,
+                                    output_index,
                                     item_id,
                                     args_str,
                                 ),
                                 None => emitter.emit_function_call_arguments_done(
-                                    *output_index,
+                                    output_index,
                                     item_id,
                                     args_str,
                                 ),
@@ -964,7 +1031,7 @@ impl HarmonyStreamingProcessor {
                         // Emit completed event for MCP tools
                         if let Some(ref fmt) = response_format {
                             let event =
-                                emitter.emit_tool_call_completed(*output_index, item_id, fmt);
+                                emitter.emit_tool_call_completed(output_index, item_id, fmt);
                             emitter.send_event_best_effort(&event, tx);
                         }
 
@@ -990,8 +1057,8 @@ impl HarmonyStreamingProcessor {
                             response_format.as_ref(),
                         );
 
-                        let event = emitter.emit_output_item_done(*output_index, &item);
-                        emitter.complete_output_item(*output_index);
+                        let event = emitter.emit_output_item_done(output_index, &item);
+                        emitter.complete_output_item(output_index);
                         emitter.send_event_best_effort(&event, tx);
                     }
                 }

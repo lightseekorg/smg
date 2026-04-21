@@ -46,7 +46,7 @@ use crate::{
     routers::{
         common::{
             header_utils::{preserve_response_headers, ApiProvider},
-            mcp_utils::DEFAULT_MAX_ITERATIONS,
+            mcp_utils::{collect_user_function_names, DEFAULT_MAX_ITERATIONS},
             persistence_utils::persist_conversation_items,
         },
         error,
@@ -141,9 +141,9 @@ pub(super) fn apply_event_transformations_inplace(
                             .to_string();
 
                         // Only transform if this is an MCP tool; keep function_call unchanged
-                        if let Some(session) =
-                            ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
-                        {
+                        if let Some(session) = ctx.session.filter(|s| {
+                            s.should_intercept_function_call(&tool_name, ctx.user_function_names)
+                        }) {
                             let response_format = session.tool_response_format(&tool_name);
 
                             // Determine item type and ID prefix based on response_format
@@ -173,16 +173,6 @@ pub(super) fn apply_event_transformations_inplace(
                     }
                 }
             }
-        }
-        FunctionCallEvent::ARGUMENTS_DONE => {
-            parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
-
-            // Transform item_id from fc_* to mcp_*
-            if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
-                parsed_data["item_id"] = json!(mcp_response_item_id(item_id));
-            }
-
-            changed = true;
         }
         _ => {}
     }
@@ -218,21 +208,46 @@ fn send_sse_event(
     tx.send(Ok(Bytes::from(block))).is_ok()
 }
 
-/// Map function_call event names to mcp_call event names
+/// Map function_call event names to mcp_call event names when MCP interception is active.
 #[inline]
-fn map_event_name(event_name: &str) -> &str {
-    match event_name {
-        FunctionCallEvent::ARGUMENTS_DELTA => McpEvent::CALL_ARGUMENTS_DELTA,
-        FunctionCallEvent::ARGUMENTS_DONE => McpEvent::CALL_ARGUMENTS_DONE,
-        other => other,
+fn map_event_name(event_name: &str, map_function_call_args: bool) -> &str {
+    if map_function_call_args {
+        match event_name {
+            FunctionCallEvent::ARGUMENTS_DELTA => McpEvent::CALL_ARGUMENTS_DELTA,
+            FunctionCallEvent::ARGUMENTS_DONE => McpEvent::CALL_ARGUMENTS_DONE,
+            other => other,
+        }
+    } else {
+        event_name
     }
+}
+
+fn is_mcp_arguments_event(
+    parsed_data: &Value,
+    handler: &StreamingToolHandler,
+    ctx: &StreamingEventContext<'_>,
+) -> bool {
+    let Some(session) = ctx.session else {
+        return false;
+    };
+
+    extract_output_index(parsed_data)
+        .and_then(|idx| {
+            handler
+                .pending_calls
+                .iter()
+                .find(|call| call.output_index == idx)
+                .map(|call| call.name.as_str())
+        })
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| session.should_intercept_function_call(name, ctx.user_function_names))
 }
 
 /// Send buffered function call arguments as a synthetic delta event.
 /// Returns false if client disconnected.
 fn send_buffered_arguments(
     parsed_data: &mut Value,
-    handler: &StreamingToolHandler,
+    handler: &mut StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
     mapped_output_index: &mut Option<usize>,
@@ -241,9 +256,9 @@ fn send_buffered_arguments(
         return true;
     };
 
-    let assigned_index = handler
-        .mapped_output_index(output_index)
-        .unwrap_or(output_index);
+    let Some(assigned_index) = handler.resolve_output_index_for_forwarding(output_index) else {
+        return true;
+    };
     *mapped_output_index = Some(assigned_index);
 
     let Some(call) = handler
@@ -300,6 +315,60 @@ fn send_buffered_arguments(
     true
 }
 
+fn should_drop_hidden_internal_tool_event(
+    event_name: Option<&str>,
+    parsed_data: &Value,
+    handler: &mut StreamingToolHandler,
+    visibility_session: Option<&McpToolSession<'_>>,
+    user_function_names: &std::collections::HashSet<String>,
+) -> bool {
+    let Some(session) = visibility_session else {
+        return false;
+    };
+
+    let output_index = extract_output_index(parsed_data);
+    // Fast path: if already marked hidden (from when ADDED was dropped), hide all follow-up events.
+    if output_index.is_some_and(|idx| handler.is_output_hidden(idx)) {
+        return true;
+    }
+
+    let resolved_event_name =
+        event_name.or_else(|| parsed_data.get("type").and_then(Value::as_str));
+
+    let should_hide = match resolved_event_name {
+        Some(OutputItemEvent::ADDED) | Some(OutputItemEvent::DONE) => parsed_data
+            .get("item")
+            .filter(|item| {
+                item.get("type")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(is_function_call_type)
+            })
+            .is_some_and(|item| session.should_hide_output_item_json(item, user_function_names)),
+        // MCP ARGUMENTS_DELTA events are handled before this function is reached
+        // (buffered and re-emitted synthetically), so only ARGUMENTS_DONE needs handling here.
+        Some(FunctionCallEvent::ARGUMENTS_DONE) => output_index
+            .and_then(|idx| {
+                handler
+                    .pending_calls
+                    .iter()
+                    .find(|c| c.output_index == idx)
+                    .filter(|c| !c.name.is_empty())
+            })
+            .is_some_and(|c| {
+                let probe = json!({ "type": ItemType::FUNCTION_CALL, "name": c.name.as_str() });
+                session.should_hide_output_item_json(&probe, user_function_names)
+            }),
+        _ => false,
+    };
+
+    if should_hide {
+        if let Some(idx) = output_index {
+            handler.mark_output_hidden(idx);
+        }
+    }
+    should_hide
+}
+
 /// An SSE event to be forwarded to the client, with optional pre-parsed JSON.
 pub(super) struct SseEventData<'a> {
     pub raw_block: &'a str,
@@ -316,6 +385,7 @@ pub(super) fn forward_streaming_event(
     handler: &mut StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
+    redaction_session: Option<&McpToolSession<'_>>,
     sequence_number: &mut u64,
 ) -> bool {
     let SseEventData {
@@ -324,10 +394,6 @@ pub(super) fn forward_streaming_event(
         data,
         pre_parsed,
     } = event;
-
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) {
-        return true;
-    }
 
     // Use pre-parsed value or parse JSON data
     let mut parsed_data: Value = match pre_parsed {
@@ -341,14 +407,37 @@ pub(super) fn forward_streaming_event(
         },
     };
 
+    let is_mcp_call_arguments_event = matches!(
+        event_name,
+        Some(FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE)
+    ) && is_mcp_arguments_event(&parsed_data, handler, ctx);
+
+    // Only MCP-intercepted argument deltas are dropped. User-function argument
+    // deltas must pass through unchanged.
+    if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) && is_mcp_call_arguments_event {
+        return true;
+    }
+
     let event_type = get_event_type(event_name, &parsed_data);
     if event_type == ResponseEvent::COMPLETED {
+        return true;
+    }
+
+    let visibility_session = ctx.session.or(redaction_session);
+    if should_drop_hidden_internal_tool_event(
+        event_name,
+        &parsed_data,
+        handler,
+        visibility_session,
+        ctx.user_function_names,
+    ) {
         return true;
     }
 
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+        && is_mcp_call_arguments_event
         && !send_buffered_arguments(
             &mut parsed_data,
             handler,
@@ -362,11 +451,21 @@ pub(super) fn forward_streaming_event(
 
     if mapped_output_index.is_none() {
         if let Some(idx) = extract_output_index(&parsed_data) {
-            mapped_output_index = handler.mapped_output_index(idx);
+            let Some(mapped) = handler.resolve_output_index_for_forwarding(idx) else {
+                return true;
+            };
+            mapped_output_index = Some(mapped);
         }
     }
     if let Some(mapped) = mapped_output_index {
         parsed_data["output_index"] = json!(mapped);
+    }
+
+    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE) && is_mcp_call_arguments_event {
+        parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
+        if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
+            parsed_data["item_id"] = json!(mcp_response_item_id(item_id));
+        }
     }
 
     apply_event_transformations_inplace(&mut parsed_data, ctx);
@@ -394,7 +493,11 @@ pub(super) fn forward_streaming_event(
     };
 
     let final_block = match event_name {
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
+        Some(evt) => format!(
+            "event: {}\ndata: {}\n\n",
+            map_event_name(evt, is_mcp_call_arguments_event),
+            final_data
+        ),
         None => format!("data: {final_data}\n\n"),
     };
 
@@ -460,6 +563,7 @@ pub(super) fn send_final_response_event(
     sequence_number: &mut u64,
     state: &ToolLoopState,
     ctx: &StreamingEventContext<'_>,
+    redaction_session: Option<&McpToolSession<'_>>,
 ) -> bool {
     let mut final_response = match handler.snapshot_final_response() {
         Some(resp) => resp,
@@ -476,10 +580,15 @@ pub(super) fn send_final_response_event(
     }
 
     if let Some(session) = ctx.session {
-        inject_mcp_metadata_streaming(&mut final_response, state, session);
+        inject_mcp_metadata_streaming(&mut final_response, state, session, ctx.user_function_names);
     }
 
-    restore_original_tools(&mut final_response, ctx.original_request, None);
+    let session_for_redaction = redaction_session.or(ctx.session);
+    restore_original_tools(
+        &mut final_response,
+        ctx.original_request,
+        session_for_redaction,
+    );
     patch_response_with_request_metadata(
         &mut final_response,
         ctx.original_request,
@@ -711,16 +820,23 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut sequence_number: u64 = 0;
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
-        let list_tools_bindings = mcp_list_tools_bindings_to_emit(
-            &state.existing_mcp_list_tools_labels,
-            session.mcp_servers(),
-        );
+        let list_tools_bindings =
+            mcp_list_tools_bindings_to_emit(&state.existing_mcp_list_tools_labels, &session);
+        let user_function_names = collect_user_function_names(&original_request);
 
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,
             previous_response_id: previous_response_id.as_deref(),
             session: Some(&session),
+            user_function_names: &user_function_names,
         };
+        let passthrough_streaming_ctx = StreamingEventContext {
+            original_request: &original_request,
+            previous_response_id: previous_response_id.as_deref(),
+            session: None,
+            user_function_names: &user_function_names,
+        };
+        let mut disable_mcp_interception = false;
         let provider = ApiProvider::from_url(&url_clone);
         let auth_header =
             provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
@@ -774,14 +890,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                                 continue;
                             }
 
+                            let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+
                             // Process through handler
                             let action = handler.process_event(event_name, data.as_ref());
 
                             match action {
                                 StreamAction::Forward => {
-                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
-                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
-
                                     // Skip response.created and response.in_progress on subsequent iterations
                                     let should_skip = if is_first_iteration {
                                         false
@@ -803,6 +918,11 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         });
 
                                     if !should_skip {
+                                        let active_ctx = if disable_mcp_interception {
+                                            &passthrough_streaming_ctx
+                                        } else {
+                                            &streaming_ctx
+                                        };
                                         // Forward the event with pre-parsed value (moved, not cloned)
                                         if !forward_streaming_event(
                                             SseEventData {
@@ -813,7 +933,8 @@ pub(super) fn handle_streaming_with_tool_interception(
                                             },
                                             &mut handler,
                                             &tx,
-                                            &streaming_ctx,
+                                            active_ctx,
+                                            Some(&session),
                                             &mut sequence_number,
                                         ) {
                                             return;
@@ -822,8 +943,16 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                                     if is_in_progress {
                                         seen_in_progress = true;
-                                        if !mcp_list_tools_sent {
+                                        if !disable_mcp_interception && !mcp_list_tools_sent {
                                             for (server_label, server_key) in &list_tools_bindings {
+                                                // Guard before synthetic index allocation so hidden
+                                                // bindings do not consume client-visible output
+                                                // indexes.
+                                                if !session.should_emit_streaming_mcp_list_tools(
+                                                    server_label,
+                                                ) {
+                                                    continue;
+                                                }
                                                 let list_tools_index =
                                                     handler.allocate_synthetic_output_index();
                                                 if !send_mcp_list_tools_events(
@@ -843,23 +972,120 @@ pub(super) fn handle_streaming_with_tool_interception(
                                     }
                                 }
                                 StreamAction::Buffer => {
-                                    // Don't forward, just buffer
+                                    if disable_mcp_interception
+                                        && !forward_streaming_event(
+                                            SseEventData {
+                                                raw_block: &raw_block,
+                                                event_name,
+                                                data: data.as_ref(),
+                                                pre_parsed: parsed,
+                                            },
+                                            &mut handler,
+                                            &tx,
+                                            &passthrough_streaming_ctx,
+                                            Some(&session),
+                                            &mut sequence_number,
+                                        )
+                                    {
+                                        return;
+                                    }
                                 }
                                 StreamAction::ExecuteTools => {
+                                    let has_non_mcp_calls =
+                                        handler.pending_calls.iter().any(|call| {
+                                            !call.name.is_empty()
+                                                && !session.should_intercept_function_call(
+                                                    &call.name,
+                                                    &user_function_names,
+                                                )
+                                        });
+
+                                    let active_ctx = if disable_mcp_interception {
+                                        &passthrough_streaming_ctx
+                                    } else {
+                                        &streaming_ctx
+                                    };
+
                                     if !forward_streaming_event(
                                         SseEventData {
                                             raw_block: &raw_block,
                                             event_name,
                                             data: data.as_ref(),
-                                            pre_parsed: None,
+                                            pre_parsed: parsed,
                                         },
                                         &mut handler,
                                         &tx,
-                                        &streaming_ctx,
+                                        active_ctx,
+                                        Some(&session),
                                         &mut sequence_number,
                                     ) {
                                         return;
                                     }
+
+                                    if has_non_mcp_calls {
+                                        let pending_calls = handler.take_pending_calls();
+                                        let (mcp_pending_calls, _passthrough_calls): (
+                                            Vec<_>,
+                                            Vec<_>,
+                                        ) = pending_calls.into_iter().partition(|call| {
+                                            !call.name.is_empty()
+                                                && session.should_intercept_function_call(
+                                                    &call.name,
+                                                    &user_function_names,
+                                                )
+                                        });
+
+                                        if !mcp_pending_calls.is_empty() {
+                                            state.iteration += 1;
+                                            state.total_calls += mcp_pending_calls.len();
+                                            Metrics::record_mcp_tool_iteration(
+                                                &original_request.model,
+                                            );
+
+                                            let effective_limit = match max_tool_calls {
+                                                Some(user_max) => {
+                                                    user_max.min(DEFAULT_MAX_ITERATIONS)
+                                                }
+                                                None => DEFAULT_MAX_ITERATIONS,
+                                            };
+
+                                            if state.total_calls > effective_limit {
+                                                warn!(
+                                                    "Reached tool call limit during streaming: {}",
+                                                    effective_limit
+                                                );
+                                                send_sse_event(
+                                                    &tx,
+                                                    "error",
+                                                    &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
+                                                );
+                                                let _ = tx.send(Ok(Bytes::from_static(
+                                                    SSE_DONE.as_bytes(),
+                                                )));
+                                                return;
+                                            }
+
+                                            if !execute_streaming_tool_calls(
+                                                mcp_pending_calls,
+                                                &session,
+                                                &user_function_names,
+                                                &tx,
+                                                &mut state,
+                                                &mut sequence_number,
+                                                &original_request.model,
+                                            )
+                                            .await
+                                            {
+                                                return;
+                                            }
+                                        }
+
+                                        // Any user-function call in the batch means this turn must
+                                        // remain client-driven; continue passthrough streaming.
+                                        disable_mcp_interception = true;
+                                        continue;
+                                    }
+
                                     tool_calls_detected = true;
                                     break; // Exit stream processing to execute tools
                                 }
@@ -888,12 +1114,18 @@ pub(super) fn handle_streaming_with_tool_interception(
 
             // If no tool calls, we're done - stream is complete
             if !tool_calls_detected {
+                let final_streaming_ctx = if disable_mcp_interception {
+                    &passthrough_streaming_ctx
+                } else {
+                    &streaming_ctx
+                };
                 if !send_final_response_event(
                     &handler,
                     &tx,
                     &mut sequence_number,
                     &state,
-                    &streaming_ctx,
+                    final_streaming_ctx,
+                    Some(&session),
                 ) {
                     return;
                 }
@@ -910,7 +1142,14 @@ pub(super) fn handle_streaming_with_tool_interception(
                             obj.insert("id".to_string(), Value::String(id.clone()));
                         }
                     }
-                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
+                    if !disable_mcp_interception {
+                        inject_mcp_metadata_streaming(
+                            &mut response_json,
+                            &state,
+                            &session,
+                            &user_function_names,
+                        );
+                    }
 
                     restore_original_tools(&mut response_json, &original_request, Some(&session));
                     patch_response_with_request_metadata(
@@ -974,6 +1213,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             if !execute_streaming_tool_calls(
                 pending_calls,
                 &session,
+                &user_function_names,
                 &tx,
                 &mut state,
                 &mut sequence_number,

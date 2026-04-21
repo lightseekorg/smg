@@ -78,7 +78,7 @@ pub struct McpToolSession<'a> {
     tenant_ctx: TenantContext,
     /// All MCP servers in this session (including builtin).
     all_mcp_servers: Vec<McpServerBinding>,
-    /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
+    /// Non-builtin MCP servers only — default source for `mcp_list_tools` output.
     mcp_servers: Vec<McpServerBinding>,
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
@@ -211,6 +211,17 @@ impl<'a> McpToolSession<'a> {
     /// Returns true if the name is exposed to the model for this session.
     pub fn has_exposed_tool(&self, tool_name: &str) -> bool {
         self.exposed_name_map.contains_key(tool_name)
+    }
+
+    /// Returns true when a function call should be intercepted and executed as MCP.
+    ///
+    /// User-defined function tools take precedence on name collisions.
+    pub fn should_intercept_function_call(
+        &self,
+        tool_name: &str,
+        user_function_names: &HashSet<String>,
+    ) -> bool {
+        self.has_exposed_tool(tool_name) && !user_function_names.contains(tool_name)
     }
 
     /// Returns the session's qualified-name -> exposed-name mapping.
@@ -460,6 +471,12 @@ impl<'a> McpToolSession<'a> {
     ) -> openai_protocol::responses::ResponseOutputItem {
         let tools = self.list_tools_for_server(server_key);
         build_mcp_list_tools_item(server_label, &tools)
+    }
+
+    /// Returns true when a per-server streaming `mcp_list_tools` item should be emitted.
+    pub fn should_emit_streaming_mcp_list_tools(&self, server_label: &str) -> bool {
+        !self.is_builtin_server_label(server_label)
+            && !self.is_internal_non_builtin_server_label(server_label)
     }
 
     /// Inject MCP metadata into a response output array.

@@ -33,6 +33,7 @@ use crate::{
         grpc::{
             common::responses::{
                 collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
+                retain_client_visible_output_items, retain_client_visible_response_tools,
                 ResponsesContext,
             },
             harmony::processor::ResponsesIterationResult,
@@ -180,12 +181,14 @@ async fn execute_with_mcp_loop(
                     "Tool calls found - separating MCP and function tools"
                 );
 
-                // Separate MCP and function tool calls based on session exposure.
-                // MCP tools are exposed to the model as function tools, so the only reliable
-                // discriminator is whether the name belongs to the MCP session.
-                let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
-                    .into_iter()
-                    .partition(|tc| session.has_exposed_tool(tc.function.name.as_str()));
+                // Separate MCP and function tool calls based on session policy.
+                let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) =
+                    tool_calls.into_iter().partition(|tc| {
+                        session.should_intercept_function_call(
+                            tc.function.name.as_str(),
+                            &user_function_names,
+                        )
+                    });
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),
@@ -245,6 +248,16 @@ async fn execute_with_mcp_loop(
                             &user_function_names,
                         );
                     }
+                    retain_client_visible_output_items(
+                        &mut response.output,
+                        &session,
+                        &user_function_names,
+                    );
+                    retain_client_visible_response_tools(
+                        &mut response,
+                        &session,
+                        &user_function_names,
+                    );
 
                     return Ok(response);
                 }
@@ -295,6 +308,11 @@ async fn execute_with_mcp_loop(
                             &user_function_names,
                         );
                     }
+                    retain_client_visible_response_tools(
+                        &mut response,
+                        &session,
+                        &user_function_names,
+                    );
 
                     return Ok(response);
                 }
@@ -329,6 +347,7 @@ async fn execute_with_mcp_loop(
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.take().unwrap_or_default();
+                retain_client_visible_response_tools(&mut response, &session, &user_function_names);
 
                 debug!(
                     mcp_calls = mcp_tracking.total_calls(),

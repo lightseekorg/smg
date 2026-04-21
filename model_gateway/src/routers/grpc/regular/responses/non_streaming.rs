@@ -28,6 +28,7 @@ use crate::{
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
+            retain_client_visible_output_items, retain_client_visible_response_tools,
             ResponsesContext,
         },
     },
@@ -240,6 +241,11 @@ pub(super) async fn execute_tool_loop(
                     state.total_calls
                 );
             }
+            retain_client_visible_response_tools(
+                &mut responses_response,
+                &session,
+                &user_function_names,
+            );
 
             return Ok(responses_response);
         } else {
@@ -254,11 +260,11 @@ pub(super) async fn execute_tool_loop(
                 tool_calls.len()
             );
 
-            // Separate MCP and function tool calls using session-exposed names.
+            // Separate MCP and function tool calls using session policy.
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
-                tool_calls
-                    .into_iter()
-                    .partition(|tc| session.has_exposed_tool(tc.name.as_str()));
+                tool_calls.into_iter().partition(|tc| {
+                    session.should_intercept_function_call(tc.name.as_str(), &user_function_names)
+                });
 
             trace!(
                 "Separated tool calls: {} MCP, {} function",
@@ -266,10 +272,10 @@ pub(super) async fn execute_tool_loop(
                 function_tool_calls.len()
             );
 
-            // If ANY tool call is a function tool, return to caller immediately
-            if !function_tool_calls.is_empty() {
-                // Convert chat response to responses format (includes all tool calls)
-                let responses_response = conversions::chat_to_responses(
+            let has_user_function_calls = !function_tool_calls.is_empty();
+            if mcp_tool_calls.is_empty() {
+                // Convert chat response to responses format (includes only user function calls)
+                let mut responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
                     params.response_id.clone(),
@@ -287,8 +293,12 @@ pub(super) async fn execute_tool_loop(
                         format!("Failed to convert to responses format: {e}"),
                     )
                 })?;
+                retain_client_visible_response_tools(
+                    &mut responses_response,
+                    &session,
+                    &user_function_names,
+                );
 
-                // Return response with function tool calls to caller
                 return Ok(responses_response);
             }
 
@@ -331,6 +341,16 @@ pub(super) async fn execute_tool_loop(
                 // Mark as completed but with incomplete details
                 responses_response.status = ResponseStatus::Completed;
                 responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+                retain_client_visible_output_items(
+                    &mut responses_response.output,
+                    &session,
+                    &user_function_names,
+                );
+                retain_client_visible_response_tools(
+                    &mut responses_response,
+                    &session,
+                    &user_function_names,
+                );
 
                 return Ok(responses_response);
             }
@@ -388,6 +408,53 @@ pub(super) async fn execute_tool_loop(
 
                 // Increment total calls counter
                 state.total_calls += 1;
+            }
+
+            if has_user_function_calls {
+                // Return mixed response: MCP calls executed by gateway; user function calls
+                // remain for client execution.
+                let mut responses_response = conversions::chat_to_responses(
+                    &chat_response,
+                    original_request,
+                    params.response_id.clone(),
+                )
+                .map_err(|e| {
+                    error!(
+                        function = "tool_loop",
+                        iteration = state.iteration,
+                        error = %e,
+                        context = "mixed_tool_calls",
+                        "Failed to convert ChatCompletionResponse to ResponsesResponse"
+                    );
+                    error::internal_error(
+                        "convert_to_responses_format_failed",
+                        format!("Failed to convert to responses format: {e}"),
+                    )
+                })?;
+
+                // Remove MCP function_call placeholders; executed MCP results are injected
+                // below as MCP/builtin output items.
+                responses_response.output.retain(|item| match item {
+                    openai_protocol::responses::ResponseOutputItem::FunctionToolCall {
+                        name,
+                        ..
+                    } => !session.should_intercept_function_call(name, &user_function_names),
+                    _ => true,
+                });
+
+                let tool_items = std::mem::take(&mut state.mcp_call_items);
+                session.inject_client_visible_mcp_output_items(
+                    &mut responses_response.output,
+                    tool_items,
+                    &user_function_names,
+                );
+                retain_client_visible_response_tools(
+                    &mut responses_response,
+                    &session,
+                    &user_function_names,
+                );
+
+                return Ok(responses_response);
             }
 
             // Build resume request with conversation history

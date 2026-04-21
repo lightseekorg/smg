@@ -1,5 +1,7 @@
 //! Streaming infrastructure for /v1/responses endpoint
 
+use std::collections::HashSet;
+
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
@@ -15,7 +17,7 @@ use openai_protocol::{
     },
 };
 use serde_json::json;
-use smg_mcp::{self as mcp, ResponseFormat};
+use smg_mcp::{self as mcp, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -1009,4 +1011,12 @@ pub(crate) fn attach_mcp_server_label(
     if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
         item["server_label"] = json!(label);
     }
+}
+
+pub(crate) fn is_client_visible_streaming_output_item(
+    session: Option<&McpToolSession<'_>>,
+    item: &serde_json::Value,
+    user_function_names: &HashSet<String>,
+) -> bool {
+    session.is_none_or(|s| !s.should_hide_output_item_json(item, user_function_names))
 }

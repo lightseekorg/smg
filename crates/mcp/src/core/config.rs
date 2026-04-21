@@ -215,9 +215,10 @@ pub struct McpServerConfig {
 
     /// Whether tools from this server should be hidden from standard client-visible output.
     ///
-    /// Limitation: `internal: true` does not currently redact or block live streaming
-    /// Server-Sent Events (SSE) tool events. Internal tool activity may still appear in
-    /// real-time streams until streaming redaction is implemented.
+    /// Behavior:
+    /// - Internal non-builtin server metadata/tool-trace items are redacted from assembled
+    ///   responses and streaming SSE output.
+    /// - Builtin-routed tool result items (for example `web_search_call`) remain visible.
     #[serde(default)]
     pub internal: bool,
 }

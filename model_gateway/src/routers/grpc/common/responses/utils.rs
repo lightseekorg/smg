@@ -1,20 +1,26 @@
 //! Utility functions for /v1/responses endpoint
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::response::Response;
+use bytes::Bytes;
 use openai_protocol::{
     common::Tool,
-    responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
+    responses::{
+        ResponseOutputItem, ResponseTool, ResponsesRequest, ResponsesResponse, ResponsesToolChoice,
+        ToolChoiceOptions,
+    },
 };
 use serde_json::to_value;
 use smg_data_connector::{
     ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
     ResponseStorage,
 };
-use smg_mcp::{McpOrchestrator, McpServerBinding};
+use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession};
+use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
+use super::streaming::ResponseStreamEventEmitter;
 use crate::{
     routers::{
         common::{
@@ -165,4 +171,130 @@ pub(crate) async fn persist_response_if_needed(
             debug!("Persisted response: {}", response.id);
         }
     }
+}
+
+/// Retain only client-visible output items based on session hide policy.
+///
+/// This keeps non-streaming redaction behavior consistent across regular and
+/// harmony response paths.
+pub(crate) fn retain_client_visible_output_items(
+    output: &mut Vec<ResponseOutputItem>,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) {
+    output.retain(|item| {
+        let Ok(json) = to_value(item) else {
+            return true;
+        };
+        !session.should_hide_output_item_json(&json, user_function_names)
+    });
+}
+
+fn retain_client_visible_tools_in_place(
+    tools: &mut Vec<ResponseTool>,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) {
+    tools.retain(|tool| {
+        let Ok(json) = to_value(tool) else {
+            return true;
+        };
+        !session.should_hide_tool_json(&json, user_function_names)
+    });
+}
+
+fn has_function_tool(tools: &[ResponseTool], tool_name: &str) -> bool {
+    tools.iter().any(|tool| {
+        matches!(
+            tool,
+            ResponseTool::Function(function_tool) if function_tool.function.name == tool_name
+        )
+    })
+}
+
+fn normalize_request_tool_choice(
+    tool_choice: &mut Option<ResponsesToolChoice>,
+    tools: &[ResponseTool],
+) {
+    if tools.is_empty() {
+        *tool_choice = None;
+        return;
+    }
+
+    if let Some(selected_name) = tool_choice
+        .as_ref()
+        .and_then(ResponsesToolChoice::function_name)
+    {
+        if !has_function_tool(tools, selected_name) {
+            *tool_choice = Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto));
+        }
+    }
+}
+
+fn normalize_response_tool_choice(tool_choice: &mut String, tools: &[ResponseTool]) {
+    if tools.is_empty() {
+        *tool_choice = "auto".to_string();
+        return;
+    }
+
+    let selected_name = serde_json::from_str::<ResponsesToolChoice>(tool_choice)
+        .ok()
+        .and_then(|choice| choice.function_name().map(str::to_string));
+    if let Some(selected_name) = selected_name {
+        if !has_function_tool(tools, &selected_name) {
+            *tool_choice = "auto".to_string();
+        }
+    }
+}
+
+/// Retain only client-visible tools and normalize request `tool_choice`.
+///
+/// Used on streaming paths before copying original request fields into
+/// `response.completed` payloads.
+pub(crate) fn retain_client_visible_request_tools(
+    request: &mut ResponsesRequest,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) {
+    if let Some(tools) = request.tools.as_mut() {
+        retain_client_visible_tools_in_place(tools, session, user_function_names);
+        normalize_request_tool_choice(&mut request.tool_choice, tools);
+        if tools.is_empty() {
+            request.tools = None;
+        }
+    } else {
+        request.tool_choice = None;
+    }
+}
+
+/// Retain only client-visible tools and normalize response `tool_choice`.
+///
+/// Keeps gRPC non-streaming responses aligned with session hide policy.
+pub(crate) fn retain_client_visible_response_tools(
+    response: &mut ResponsesResponse,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) {
+    retain_client_visible_tools_in_place(&mut response.tools, session, user_function_names);
+    normalize_response_tool_choice(&mut response.tool_choice, &response.tools);
+}
+
+/// Emit the visible `mcp_list_tools` streaming sequence for all server bindings
+/// in the session.
+///
+/// Visibility is gated by `session.should_emit_streaming_mcp_list_tools` so
+/// hidden bindings do not appear in client-facing streams.
+pub(crate) fn emit_visible_mcp_list_tools_sequence(
+    session: &McpToolSession<'_>,
+    emitter: &mut ResponseStreamEventEmitter,
+    tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+) -> Result<(), String> {
+    for binding in session.mcp_servers() {
+        if !session.should_emit_streaming_mcp_list_tools(&binding.label) {
+            continue;
+        }
+        let tools_for_server = session.list_tools_for_server(&binding.server_key);
+        emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, tx)?;
+    }
+    Ok(())
 }

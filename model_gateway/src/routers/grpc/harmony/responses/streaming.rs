@@ -22,7 +22,9 @@ use crate::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
         grpc::{
             common::responses::{
-                build_sse_response, ensure_mcp_connection, persist_response_if_needed,
+                build_sse_response, collect_user_function_names,
+                emit_visible_mcp_list_tools_sequence, ensure_mcp_connection,
+                persist_response_if_needed, retain_client_visible_request_tools,
                 streaming::ResponseStreamEventEmitter, ResponsesContext,
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
@@ -146,6 +148,14 @@ async fn execute_mcp_tool_loop_streaming(
     let session_request_id = format!("resp_{}", Uuid::now_v7());
 
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+    let user_function_names = collect_user_function_names(original_request);
+    let mut client_visible_request = original_request.clone();
+    retain_client_visible_request_tools(
+        &mut client_visible_request,
+        &session,
+        &user_function_names,
+    );
+    emitter.set_original_request(client_visible_request);
 
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = session.mcp_tools();
@@ -165,15 +175,8 @@ async fn execute_mcp_tool_loop_streaming(
     let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    for binding in session.mcp_servers() {
-        let tools_for_server = session.list_tools_for_server(&binding.server_key);
-
-        if emitter
-            .emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, tx)
-            .is_err()
-        {
-            return;
-        }
+    if emit_visible_mcp_list_tools_sequence(&session, emitter, tx).is_err() {
+        return;
     }
 
     debug!(
@@ -231,6 +234,7 @@ async fn execute_mcp_tool_loop_streaming(
             emitter,
             tx,
             Some(&session),
+            Some(&user_function_names),
         )
         .await
         {
@@ -257,10 +261,12 @@ async fn execute_mcp_tool_loop_streaming(
                     "Tool calls found - separating MCP and function tools"
                 );
 
-                // Separate MCP and function tool calls based on session exposure.
-                let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
-                    .into_iter()
-                    .partition(|tc| session.has_exposed_tool(&tc.function.name));
+                // Separate MCP and function tool calls based on session policy.
+                let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) =
+                    tool_calls.into_iter().partition(|tc| {
+                        session
+                            .should_intercept_function_call(&tc.function.name, &user_function_names)
+                    });
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),
@@ -438,6 +444,7 @@ async fn execute_without_mcp_streaming(
         execution_result,
         emitter,
         tx,
+        None,
         None,
     )
     .await
