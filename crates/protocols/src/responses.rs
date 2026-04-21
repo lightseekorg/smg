@@ -1538,23 +1538,6 @@ impl ResponseOutputItem {
         }
     }
 
-    /// Create a new message output item with a phase label.
-    pub fn new_message_with_phase(
-        id: String,
-        role: String,
-        content: Vec<ResponseContentPart>,
-        status: String,
-        phase: Option<MessagePhase>,
-    ) -> Self {
-        Self::Message {
-            id,
-            role,
-            content,
-            status,
-            phase,
-        }
-    }
-
     /// Create a new reasoning output item.
     ///
     /// `encrypted_content` defaults to `None`; use
