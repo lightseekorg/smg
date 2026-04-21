@@ -592,13 +592,27 @@ impl Gossip for GossipService {
             }
 
             const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+            // Once learned, the remote peer_id is fixed for the life of this
+            // stream; subsequent changes are treated as protocol violations.
+            let mut peer_learned = false;
             loop {
                 match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
                     Ok(Some(Ok(msg))) => {
                         sequence += 1;
-                        peer_id.clone_from(&msg.peer_id);
 
-                        if incremental_sender_handle.is_none() {
+                        if !peer_learned && !msg.peer_id.is_empty() {
+                            peer_id.clone_from(&msg.peer_id);
+                            peer_learned = true;
+                        } else if peer_learned && msg.peer_id != peer_id {
+                            log::warn!(
+                                expected_peer_id = %peer_id,
+                                received_peer_id = %msg.peer_id,
+                                "peer_id changed mid-stream; closing sync_stream"
+                            );
+                            break;
+                        }
+
+                        if peer_learned && incremental_sender_handle.is_none() {
                             if let (Some(batch_handle), Some(stream_dispatch_handle)) =
                                 (current_batch.clone(), stream_dispatch.clone())
                             {
