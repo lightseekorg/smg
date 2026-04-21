@@ -103,6 +103,7 @@ pub enum FileSearchFilter {
 
 /// Key/value comparison used by the `eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`in`/`nin` filter variants.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ComparisonFilter {
     pub key: String,
     /// Spec allows `string | number | boolean | array of string | number`.
@@ -111,6 +112,7 @@ pub struct ComparisonFilter {
 
 /// Boolean composition over nested filters (used by `and` / `or` variants).
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompoundFilter {
     pub filters: Vec<FileSearchFilter>,
 }
@@ -129,8 +131,10 @@ pub struct FileSearchRankingOptions {
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HybridSearchOptions {
-    pub embedding_weight: f64,
-    pub text_weight: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_weight: Option<f64>,
 }
 
 /// Ranker selection for file search.
@@ -1923,6 +1927,41 @@ mod tests {
         let tool: ResponseTool =
             serde_json::from_value(payload.clone()).expect("file_search tool should deserialize");
         assert!(matches!(tool, ResponseTool::FileSearch(_)));
+
+        let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
+        assert_eq!(serialized, payload);
+    }
+
+    #[test]
+    fn test_file_search_tool_round_trip_hybrid_weights_omitted() {
+        // Spec (openai-responses-api-spec.md §tools): `embedding_weight` and
+        // `text_weight` are optional. When omitted they must deserialize to
+        // `None` and be absent again on re-serialization (absent→None→absent).
+        let payload = json!({
+            "type": "file_search",
+            "vector_store_ids": ["vs_1234567890"],
+            "ranking_options": {
+                "hybrid_search": {}
+            }
+        });
+
+        let tool: ResponseTool = serde_json::from_value(payload.clone())
+            .expect("file_search tool with empty hybrid_search should deserialize");
+        match &tool {
+            ResponseTool::FileSearch(fs) => {
+                let ranking = fs
+                    .ranking_options
+                    .as_ref()
+                    .expect("ranking_options should be present");
+                let hybrid = ranking
+                    .hybrid_search
+                    .as_ref()
+                    .expect("hybrid_search should be present");
+                assert!(hybrid.embedding_weight.is_none());
+                assert!(hybrid.text_weight.is_none());
+            }
+            other => panic!("expected FileSearch variant, got {other:?}"),
+        }
 
         let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
         assert_eq!(serialized, payload);
