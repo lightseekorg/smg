@@ -790,8 +790,10 @@ impl Gossip for GossipService {
                                     break;
                                 }
                             }
-                        } else if peer_learned && !msg.peer_id.is_empty() && msg.peer_id != peer_id
-                        {
+                        } else if peer_learned && msg.peer_id != peer_id {
+                            // Empty peer_id after learn is also an identity
+                            // change — a stream bound to a learned peer
+                            // shouldn't accept unowned frames.
                             log::warn!(
                                 expected_peer_id = %peer_id,
                                 received_peer_id = %msg.peer_id,
