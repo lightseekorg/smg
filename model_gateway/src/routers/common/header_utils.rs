@@ -440,10 +440,19 @@ mod tests {
 
         assert!(cfg.long_term_memory.enabled);
         assert_eq!(cfg.long_term_memory.subject_id.as_deref(), Some("sub-1"));
-        assert_eq!(cfg.long_term_memory.embedding_model_id.as_deref(), Some("emb-model"));
-        assert_eq!(cfg.long_term_memory.extraction_model_id.as_deref(), Some("ext-model"));
+        assert_eq!(
+            cfg.long_term_memory.embedding_model_id.as_deref(),
+            Some("emb-model")
+        );
+        assert_eq!(
+            cfg.long_term_memory.extraction_model_id.as_deref(),
+            Some("ext-model")
+        );
         assert!(cfg.short_term_memory.enabled);
-        assert_eq!(cfg.short_term_memory.condenser_model_id.as_deref(), Some("cond-model"));
+        assert_eq!(
+            cfg.short_term_memory.condenser_model_id.as_deref(),
+            Some("cond-model")
+        );
     }
 
     #[test]
