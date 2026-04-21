@@ -534,6 +534,10 @@ pub enum IncludeField {
     MessageOutputTextLogprobs,
     #[serde(rename = "reasoning.encrypted_content")]
     ReasoningEncryptedContent,
+    #[serde(rename = "web_search_call.action.sources")]
+    WebSearchCallActionSources,
+    #[serde(rename = "web_search_call.results")]
+    WebSearchCallResults,
 }
 
 // ============================================================================
@@ -1684,6 +1688,29 @@ mod tests {
                     "tool_names": ["ask_question", "read_wiki_structure"]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn test_include_field_web_search_call_variants_round_trip() {
+        let fields: Vec<IncludeField> = serde_json::from_value(json!([
+            "web_search_call.action.sources",
+            "web_search_call.results",
+        ]))
+        .expect("include fields should deserialize");
+
+        assert_eq!(
+            fields,
+            vec![
+                IncludeField::WebSearchCallActionSources,
+                IncludeField::WebSearchCallResults,
+            ]
+        );
+
+        let serialized = serde_json::to_value(&fields).expect("include fields should serialize");
+        assert_eq!(
+            serialized,
+            json!(["web_search_call.action.sources", "web_search_call.results"])
         );
     }
 }
