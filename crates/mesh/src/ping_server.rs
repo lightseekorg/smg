@@ -659,7 +659,11 @@ impl Gossip for GossipService {
                                                         e,
                                                         size_validator_clone.max_size()
                                                     );
-                                                    watermark.mark_sent(store_type, &updates);
+                                                    if !updates.iter().any(|update| {
+                                                        update.key.starts_with("tree:")
+                                                    }) {
+                                                        watermark.mark_sent(store_type, &updates);
+                                                    }
                                                     continue;
                                                 }
 
