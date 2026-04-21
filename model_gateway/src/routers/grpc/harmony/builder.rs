@@ -525,17 +525,19 @@ impl HarmonyBuilder {
                     _ => Role::User, // Default to user for unknown roles
                 };
 
-                // Extract text from content parts. Non-text parts (images,
-                // files, refusals) are dropped here because the harmony
-                // builder currently only emits text content.
+                // Extract text from content parts. `Refusal` is losslessly
+                // representable as text and is preserved verbatim. Image /
+                // file parts are currently dropped (R1/R2/R3 will implement
+                // full media handling).
                 let text_parts: Vec<String> = content
                     .iter()
                     .filter_map(|part| match part {
                         ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                         ResponseContentPart::InputText { text } => Some(text.clone()),
+                        ResponseContentPart::Refusal { refusal } => Some(refusal.clone()),
+                        // R1/R2/R3 will implement full media handling
                         ResponseContentPart::InputImage { .. }
-                        | ResponseContentPart::InputFile { .. }
-                        | ResponseContentPart::Refusal { .. } => None,
+                        | ResponseContentPart::InputFile { .. } => None,
                     })
                     .collect();
 
@@ -681,16 +683,19 @@ impl HarmonyBuilder {
                 let text = match content {
                     StringOrContentParts::String(s) => s.clone(),
                     StringOrContentParts::Array(parts) => {
-                        // Extract text from content parts. Non-text parts
-                        // (images, files, refusals) are dropped here.
+                        // Extract text from content parts. `Refusal` is
+                        // losslessly representable as text and is preserved
+                        // verbatim. Image / file parts are currently dropped
+                        // (R1/R2/R3 will implement full media handling).
                         parts
                             .iter()
                             .filter_map(|part| match part {
                                 ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                                 ResponseContentPart::InputText { text } => Some(text.clone()),
+                                ResponseContentPart::Refusal { refusal } => Some(refusal.clone()),
+                                // R1/R2/R3 will implement full media handling
                                 ResponseContentPart::InputImage { .. }
-                                | ResponseContentPart::InputFile { .. }
-                                | ResponseContentPart::Refusal { .. } => None,
+                                | ResponseContentPart::InputFile { .. } => None,
                             })
                             .collect::<Vec<_>>()
                             .join("\n")

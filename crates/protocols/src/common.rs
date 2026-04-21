@@ -713,7 +713,7 @@ pub enum PromptVariableTyped {
     },
 }
 
-/// Image detail level for [`PromptVariableTyped::InputImage`] and
+/// Image detail level for [`PromptVariableTyped::ResponseInputImage`] and
 /// [`crate::responses::ResponseContentPart::InputImage`]. Spec allows
 /// `"low" | "high" | "auto" | "original"`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]

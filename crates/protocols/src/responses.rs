@@ -366,9 +366,10 @@ pub enum ResponseInputOutputItem {
 /// Detail level for [`ResponseContentPart::InputFile`]. Spec restricts this
 /// to `"low" | "high"` (defaults to `low`); it is narrower than [`Detail`]
 /// used for images which also admits `auto` / `original`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileDetail {
+    #[default]
     Low,
     High,
 }
@@ -376,19 +377,16 @@ pub enum FileDetail {
 /// Typed annotation attached to [`ResponseContentPart::OutputText`]. Matches
 /// the OpenAI Responses API `Annotation` union; a `type` discriminator selects
 /// the variant on the wire.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Annotation {
     /// `type: "file_citation"` — points at a file previously uploaded.
-    #[serde(rename = "file_citation")]
     FileCitation {
         file_id: String,
         filename: String,
         index: u32,
     },
     /// `type: "url_citation"` — citation back to a URL in a web-search result.
-    #[serde(rename = "url_citation")]
     UrlCitation {
         url: String,
         title: String,
@@ -397,7 +395,6 @@ pub enum Annotation {
     },
     /// `type: "container_file_citation"` — citation to a file inside a
     /// code-interpreter / computer-use container.
-    #[serde(rename = "container_file_citation")]
     ContainerFileCitation {
         container_id: String,
         file_id: String,
@@ -406,7 +403,6 @@ pub enum Annotation {
         end_index: u32,
     },
     /// `type: "file_path"` — reference to a generated file path.
-    #[serde(rename = "file_path")]
     FilePath { file_id: String, index: u32 },
 }
 
@@ -430,13 +426,10 @@ pub enum ResponseContentPart {
     /// absent when only `detail` is being conveyed.
     #[serde(rename = "input_image")]
     InputImage {
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<Detail>,
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         file_id: Option<String>,
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         image_url: Option<String>,
     },
@@ -444,19 +437,14 @@ pub enum ResponseContentPart {
     /// base64 blob; `file_url` / `file_id` reference external/uploaded files.
     #[serde(rename = "input_file")]
     InputFile {
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<FileDetail>,
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         file_data: Option<String>,
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         file_id: Option<String>,
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         file_url: Option<String>,
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
     },
