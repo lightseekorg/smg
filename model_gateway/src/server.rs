@@ -965,6 +965,8 @@ pub fn build_app(
     };
     let admin_routes = apply_control_plane_auth(admin_routes);
     let worker_routes = apply_control_plane_auth(worker_routes);
+    // Reserve the existing admin-gated surface for future skills CRUD/internal routes.
+    let skills_admin_routes = apply_control_plane_auth(Router::new());
 
     // HA management routes
     let mesh_routes = Router::new()
@@ -991,6 +993,7 @@ pub fn build_app(
         .merge(multipart_upload_routes)
         .merge(public_routes)
         .merge(admin_routes)
+        .merge(skills_admin_routes)
         .merge(worker_routes)
         .merge(mesh_routes)
         .layer(axum::extract::DefaultBodyLimit::max(max_payload_size))

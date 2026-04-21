@@ -635,8 +635,10 @@ impl AppContextBuilder {
         }
 
         let Some(skills_config) = config.skills.as_ref() else {
-            self.skill_service = None;
-            return Ok(self);
+            return Err(
+                "Skills are enabled but no validated skills config was loaded at startup"
+                    .to_string(),
+            );
         };
 
         let blob_store =

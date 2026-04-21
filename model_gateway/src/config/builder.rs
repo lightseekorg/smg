@@ -846,7 +846,10 @@ impl RouterConfigBuilder {
                 })?;
             self.config.skills = Some(skills_config);
         } else {
-            self.config.skills = Some(SkillsConfig::default());
+            return Err(ConfigError::ValidationFailed {
+                reason: "skills are enabled but no skills config was provided; set --skills-config-path or preload RouterConfig.skills"
+                    .to_string(),
+            });
         }
 
         Ok(self)
@@ -954,7 +957,7 @@ mod tests {
         let mut skills_config = NamedTempFile::new().unwrap();
         writeln!(
             skills_config,
-            "max_skills_per_request: 3\nexecution:\n  executor_url: http://executor.internal\n"
+            "max_skills_per_request: 3\nexecution:\n  executor_url: http://executor.internal\n  executor_api_key: secret\n"
         )
         .unwrap();
 
@@ -977,6 +980,16 @@ mod tests {
                 .as_deref(),
             Some("http://executor.internal")
         );
+        assert_eq!(
+            config
+                .skills
+                .as_ref()
+                .unwrap()
+                .execution
+                .executor_api_key
+                .as_deref(),
+            Some("secret")
+        );
     }
 
     #[test]
@@ -993,5 +1006,18 @@ mod tests {
 
         assert!(!config.skills_enabled);
         assert!(config.skills.is_none());
+    }
+
+    #[test]
+    fn test_builder_rejects_enabled_skills_without_nested_config() {
+        let error = RouterConfigBuilder::new()
+            .regular_mode(vec!["http://worker1:8000".to_string()])
+            .skills_enabled(true)
+            .build()
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("skills are enabled but no skills config was provided"));
     }
 }
