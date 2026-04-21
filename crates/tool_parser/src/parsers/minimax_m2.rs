@@ -28,6 +28,7 @@ pub struct MinimaxM2Parser {
     // Regex patterns
     tool_call_extractor: Regex,
     invoke_extractor: Regex,
+    invoke_open_extractor: Regex,
     param_extractor: Regex,
 
     // Streaming state
@@ -87,12 +88,20 @@ impl MinimaxM2Parser {
         let invoke_pattern = r#"(?s)<invoke\s+name="([^"]+)">(.*?)</invoke>"#;
         let invoke_extractor = Regex::new(invoke_pattern).expect("Valid regex pattern");
 
+        // Matches just the opening `<invoke name="...">` tag.  Used to
+        // recover a trailing invoke whose closing `</invoke>` was never
+        // emitted (e.g. the model produced EOS mid-block).
+        let invoke_open_pattern = r#"<invoke\s+name="([^"]+)">"#;
+        let invoke_open_extractor =
+            Regex::new(invoke_open_pattern).expect("Valid regex pattern");
+
         let param_pattern = r#"(?s)<parameter\s+name="([^"]+)">(.*?)</parameter>"#;
         let param_extractor = Regex::new(param_pattern).expect("Valid regex pattern");
 
         Self {
             tool_call_extractor,
             invoke_extractor,
+            invoke_open_extractor,
             param_extractor,
             buffer: String::new(),
             prev_tool_call_arr: Vec::new(),
@@ -312,33 +321,72 @@ impl MinimaxM2Parser {
     ///
     /// MiniMax wraps parallel tool calls in a **single** `<minimax:tool_call>`
     /// block with multiple `<invoke>` children, so we must iterate all matches.
+    /// Also recovers a trailing `<invoke name="…"><parameter>…</parameter>`
+    /// sequence whose closing `</invoke>` never arrived (e.g. model emitted
+    /// EOS mid-block). Matches upstream sglang python parser behavior so
+    /// streaming and non-streaming both produce the same tool-call count
+    /// for truncated outputs.
     fn parse_tool_call_block(
         &self,
         block: &str,
         tools: &[Tool],
     ) -> ParserResult<Vec<ToolCall>> {
         let mut results = Vec::new();
+        let mut last_invoke_end = 0;
 
         for captures in self.invoke_extractor.captures_iter(block) {
             let func_name = captures.get(1).map_or("", |m| m.as_str()).trim();
             let params_text = captures.get(2).map_or("", |m| m.as_str());
-            let parameters = self.parse_parameters(params_text, func_name, tools);
+            results.push(self.build_tool_call(func_name, params_text, tools)?);
 
-            // Use Python-`json.dumps`-compatible spacing so
-            // `tool_calls[].function.arguments` matches what sglang's HTTP
-            // path produces (`{"a": 1, "b": 2}` not `{"a":1,"b":2}`).
-            let arguments_str = helpers::python_json_to_string(&parameters)
-                .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
+            if let Some(m) = captures.get(0) {
+                last_invoke_end = m.end();
+            }
+        }
 
-            results.push(ToolCall {
-                function: FunctionCall {
-                    name: func_name.to_string(),
-                    arguments: arguments_str,
-                },
-            });
+        // Recover any trailing `<invoke name="X">…` that never received its
+        // `</invoke>`. Only emit when at least one parameter parses so we
+        // don't fabricate a tool call from a bare opening tag.
+        let tail = &block[last_invoke_end..];
+        if let Some(name_cap) = self.invoke_open_extractor.captures(tail) {
+            let func_name = name_cap.get(1).map_or("", |m| m.as_str()).trim();
+            let after_open = name_cap.get(0).map_or(0, |m| m.end());
+            if !func_name.is_empty() {
+                let params = self.parse_parameters(&tail[after_open..], func_name, tools);
+                if !params.is_empty() {
+                    let arguments_str = helpers::python_json_to_string(&params)
+                        .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
+                    results.push(ToolCall {
+                        function: FunctionCall {
+                            name: func_name.to_string(),
+                            arguments: arguments_str,
+                        },
+                    });
+                }
+            }
         }
 
         Ok(results)
+    }
+
+    /// Build a single ToolCall from a parsed `<invoke>` block. Preserves
+    /// zero-parameter tool calls (`<invoke name="X"></invoke>`) by always
+    /// emitting an arguments string, even if empty.
+    fn build_tool_call(
+        &self,
+        func_name: &str,
+        params_text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<ToolCall> {
+        let parameters = self.parse_parameters(params_text, func_name, tools);
+        let arguments_str = helpers::python_json_to_string(&parameters)
+            .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
+        Ok(ToolCall {
+            function: FunctionCall {
+                name: func_name.to_string(),
+                arguments: arguments_str,
+            },
+        })
     }
 
     /// Parse all tool calls from text and return first valid position.
