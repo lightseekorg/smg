@@ -25,7 +25,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          REGEX='^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)+$'
+          REGEX='^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(/[a-zA-Z0-9._-]+)+$'
 
           if [[ "$BRANCH" =~ $REGEX ]]; then
             echo "✅ Branch name is valid: '$BRANCH'"
