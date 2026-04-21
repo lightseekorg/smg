@@ -286,7 +286,6 @@ jobs:
 
   benchmarks:
     needs: build-wheel
-    if: github.actor != 'dependabot[bot]'
     runs-on: 4-gpu-h100
     timeout-minutes: 30
     permissions:
@@ -432,7 +431,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -463,7 +461,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -492,7 +489,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -522,7 +518,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -575,7 +570,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -664,7 +658,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
@@ -811,7 +804,6 @@ jobs:
       always()
       && !cancelled()
       && needs.build-wheel.result == 'success'
-      && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
