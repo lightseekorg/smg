@@ -236,20 +236,21 @@ fn load_tokenizer_from_bundle(
 }
 
 /// Best-effort read of `config.json` + `preprocessor_config.json` from an
-/// extracted tokenizer bundle directory. Returns `None` if either file is
-/// missing or unparsable — text-only tokenizers legitimately ship without
-/// a `preprocessor_config.json`, and we do not want to fail tokenizer
-/// registration over multimodal artifacts.
+/// extracted tokenizer bundle directory.
+///
+/// Returns `None` only when `config.json` is missing or unparsable — that
+/// file is needed to identify the model type and drive multimodal spec
+/// lookup. A missing or unparsable `preprocessor_config.json` is
+/// non-fatal: every image processor in `llm_multimodal` falls back to
+/// its own model-specific defaults (CLIP mean/std, canonical patch/tile
+/// sizes, etc.) via `.unwrap_or(...)`, so `PreProcessorConfig::default()`
+/// produces correct tensors for the model the processor was written for.
 fn try_load_multimodal_config(tokenizer_dir: &std::path::Path) -> Option<MultimodalModelConfig> {
     let config_path = tokenizer_dir.join("config.json");
     let pp_config_path = tokenizer_dir.join("preprocessor_config.json");
 
-    if !config_path.exists() || !pp_config_path.exists() {
-        debug!(
-            "Bundle has no multimodal config (config.json present: {}, preprocessor_config.json present: {})",
-            config_path.exists(),
-            pp_config_path.exists()
-        );
+    if !config_path.exists() {
+        debug!("Bundle has no config.json; skipping multimodal config preload");
         return None;
     }
 
@@ -268,19 +269,31 @@ fn try_load_multimodal_config(tokenizer_dir: &std::path::Path) -> Option<Multimo
         }
     };
 
-    let pp_str = match std::fs::read_to_string(&pp_config_path) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("Failed to read preprocessor_config.json from bundle: {e}");
-            return None;
+    // `preprocessor_config.json` is optional: image processors use
+    // model-specific hard-coded defaults when fields are absent.
+    let preprocessor_config = if pp_config_path.exists() {
+        match std::fs::read_to_string(&pp_config_path) {
+            Ok(pp_str) => match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse preprocessor_config.json from bundle: {e}; \
+                         falling back to defaults"
+                    );
+                    llm_multimodal::PreProcessorConfig::default()
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to read preprocessor_config.json from bundle: {e}; \
+                     falling back to defaults"
+                );
+                llm_multimodal::PreProcessorConfig::default()
+            }
         }
-    };
-    let preprocessor_config = match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to parse preprocessor_config.json from bundle: {e}");
-            return None;
-        }
+    } else {
+        debug!("No preprocessor_config.json in bundle; using PreProcessorConfig defaults");
+        llm_multimodal::PreProcessorConfig::default()
     };
 
     Some(MultimodalModelConfig {
