@@ -287,9 +287,8 @@ impl BlobStore for CachedBlobStore {
     }
 
     async fn get(&self, key: &BlobKey) -> Result<GetBlobResponse, BlobStoreError> {
-        match self.cache.get(key).await {
-            Ok(Some(response)) => return Ok(response),
-            Ok(None) | Err(_) => {}
+        if let Ok(Some(response)) = self.cache.get(key).await {
+            return Ok(response);
         }
 
         let response = self.inner.get(key).await?;

@@ -705,8 +705,10 @@ mod tests {
     fn with_skill_service_builds_single_process_service_when_enabled() -> Result<()> {
         let blob_root = TempDir::new()?;
         let cache_root = TempDir::new()?;
-        let mut config = RouterConfig::default();
-        config.skills_enabled = true;
+        let mut config = RouterConfig {
+            skills_enabled: true,
+            ..RouterConfig::default()
+        };
         let mut skills = SkillsConfig::default();
         skills.blob_store.path = blob_root.path().display().to_string();
         skills.cache.path = cache_root.path().display().to_string();
