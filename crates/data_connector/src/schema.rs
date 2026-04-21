@@ -44,6 +44,16 @@ pub struct SchemaConfig {
     pub conversation_items: TableConfig,
     pub conversation_item_links: TableConfig,
     pub conversation_memories: TableConfig,
+
+    /// Background-mode work queue; one row per queued / in-progress response.
+    /// Populated by `BackgroundResponseRepository::enqueue` and drained by
+    /// `claim_next`. Created by migration v5.
+    pub background_queue: TableConfig,
+
+    /// Append-only per-response SSE event log for background-mode streaming
+    /// resume. Rows are GC'd after `background_stream_retention`. Created by
+    /// migration v6.
+    pub response_stream_chunks: TableConfig,
 }
 
 /// Per-table schema configuration.
@@ -105,6 +115,8 @@ impl Default for SchemaConfig {
             conversation_items: TableConfig::with_table("conversation_items"),
             conversation_item_links: TableConfig::with_table("conversation_item_links"),
             conversation_memories: TableConfig::with_table("conversation_memories"),
+            background_queue: TableConfig::with_table("background_queue"),
+            response_stream_chunks: TableConfig::with_table("response_stream_chunks"),
         }
     }
 }
@@ -170,6 +182,8 @@ impl SchemaConfig {
             &mut self.conversation_items,
             &mut self.conversation_item_links,
             &mut self.conversation_memories,
+            &mut self.background_queue,
+            &mut self.response_stream_chunks,
         ] {
             tc.table.make_ascii_uppercase();
             for val in tc.columns.values_mut() {
@@ -203,6 +217,8 @@ impl SchemaConfig {
         Self::validate_table("conversation_items", &self.conversation_items)?;
         Self::validate_table("conversation_item_links", &self.conversation_item_links)?;
         Self::validate_table("conversation_memories", &self.conversation_memories)?;
+        Self::validate_table("background_queue", &self.background_queue)?;
+        Self::validate_table("response_stream_chunks", &self.response_stream_chunks)?;
 
         Ok(())
     }
@@ -282,6 +298,8 @@ impl SchemaConfig {
 fn primary_key_columns_for(label: &str) -> &'static [&'static str] {
     match label {
         "conversation_memories" => &["memory_id"],
+        "background_queue" => &["response_id"],
+        "response_stream_chunks" => &["response_id", "sequence"],
         _ => &["id"],
     }
 }
@@ -300,6 +318,16 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "safety_identifier",
             "model",
             "raw_response",
+            // Background-mode columns (added by migration v4).
+            "status",
+            "background",
+            "stream_enabled",
+            "cancel_requested",
+            "request_json",
+            "request_context_json",
+            "started_at",
+            "completed_at",
+            "next_stream_sequence",
         ],
         "conversation_items" => &[
             "id",
@@ -328,6 +356,22 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "error_msg",
             "created_at",
             "updated_at",
+        ],
+        "background_queue" => &[
+            "response_id",
+            "priority",
+            "retry_attempt",
+            "next_attempt_at",
+            "lease_expires_at",
+            "worker_id",
+            "created_at",
+        ],
+        "response_stream_chunks" => &[
+            "response_id",
+            "sequence",
+            "event_type",
+            "data",
+            "created_at",
         ],
         _ => &[],
     }
@@ -393,6 +437,13 @@ mod tests {
     use super::*;
 
     // ── Default config ────────────────────────────────────────────────────
+
+    #[test]
+    fn default_config_includes_background_tables() {
+        let cfg = SchemaConfig::default();
+        assert_eq!(cfg.background_queue.table, "background_queue");
+        assert_eq!(cfg.response_stream_chunks.table, "response_stream_chunks");
+    }
 
     #[test]
     fn default_config_matches_hardcoded_names() {

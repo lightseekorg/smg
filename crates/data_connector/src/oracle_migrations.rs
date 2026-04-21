@@ -7,7 +7,7 @@
 use crate::{schema::SchemaConfig, versioning::Migration};
 
 /// Oracle migration list. Append new migrations here.
-pub(crate) static ORACLE_MIGRATIONS: [Migration; 8] = [
+pub(crate) static ORACLE_MIGRATIONS: [Migration; 11] = [
     Migration {
         version: 1,
         description: "Add safety_identifier column to responses",
@@ -48,6 +48,21 @@ pub(crate) static ORACLE_MIGRATIONS: [Migration; 8] = [
         version: 8,
         description: "Create continuation_cookies table",
         up: oracle_v8_up,
+    },
+    Migration {
+        version: 9,
+        description: "Extend responses with background-mode columns",
+        up: oracle_v9_up,
+    },
+    Migration {
+        version: 10,
+        description: "Create background_queue table",
+        up: oracle_v10_up,
+    },
+    Migration {
+        version: 11,
+        description: "Create response_stream_chunks table",
+        up: oracle_v11_up,
     },
 ];
 
@@ -248,6 +263,160 @@ fn oracle_qualified_name(schema: &SchemaConfig, object_name: &str) -> String {
     }
 }
 
+/// Extend `responses` with background-mode columns + backfill
+/// `started_at` / `completed_at` from `created_at` on historical rows.
+///
+/// Oracle quirks: no native BOOLEAN (use `NUMBER(1)`), no `JSONB`
+/// (use `CLOB` with an `IS JSON` check), no `TIMESTAMPTZ` (use
+/// `TIMESTAMP WITH TIME ZONE`). Each `ALTER TABLE` is PL/SQL-wrapped so a
+/// previously-added column (ORA-01430) is a no-op.
+fn oracle_v9_up(schema: &SchemaConfig) -> Vec<String> {
+    let s = &schema.responses;
+    let table = s.qualified_table(schema.owner.as_deref());
+    let created_at_col = s.col("created_at").to_uppercase();
+
+    // CLOB + `IS JSON` check constraint ensures only valid JSON lands in
+    // request_json / request_context_json (Oracle < 21c has no native JSON type).
+    let request_json_col = s.col("request_json").to_uppercase();
+    let request_context_json_col = s.col("request_context_json").to_uppercase();
+    let request_json_ty = format!("CLOB CHECK ({request_json_col} IS JSON)");
+    let request_context_json_ty = format!("CLOB CHECK ({request_context_json_col} IS JSON)");
+
+    let bg_columns: &[(&str, &str)] = &[
+        ("status", "VARCHAR2(32) DEFAULT 'completed' NOT NULL"),
+        ("background", "NUMBER(1) DEFAULT 0 NOT NULL"),
+        ("stream_enabled", "NUMBER(1) DEFAULT 0 NOT NULL"),
+        ("cancel_requested", "NUMBER(1) DEFAULT 0 NOT NULL"),
+        ("request_json", request_json_ty.as_str()),
+        ("request_context_json", request_context_json_ty.as_str()),
+        ("started_at", "TIMESTAMP WITH TIME ZONE"),
+        ("completed_at", "TIMESTAMP WITH TIME ZONE"),
+        ("next_stream_sequence", "NUMBER(19) DEFAULT 0 NOT NULL"),
+    ];
+
+    let mut stmts: Vec<String> = bg_columns
+        .iter()
+        .filter(|(field, _)| !s.is_skipped(field))
+        .map(|(field, ty)| {
+            let col = s.col(field).to_uppercase();
+            // ORA-01430 = "column being added already exists in table"
+            format!(
+                "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE {table} ADD ({col} {ty})'; \
+                 EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF; END;"
+            )
+        })
+        .collect();
+
+    // Backfill started_at / completed_at from created_at for historical rows.
+    // Guarded on created_at being present — deployments that skip created_at
+    // would otherwise generate UPDATEs against a non-existent column.
+    let created_at_present = !s.is_skipped("created_at");
+    if created_at_present && !s.is_skipped("started_at") {
+        let col = s.col("started_at").to_uppercase();
+        stmts.push(format!(
+            "UPDATE {table} SET {col} = {created_at_col} WHERE {col} IS NULL"
+        ));
+    }
+    if created_at_present && !s.is_skipped("completed_at") {
+        let col = s.col("completed_at").to_uppercase();
+        stmts.push(format!(
+            "UPDATE {table} SET {col} = {created_at_col} WHERE {col} IS NULL"
+        ));
+    }
+
+    stmts
+}
+
+/// Create the `background_queue` work-queue table.
+///
+/// Oracle lacks Postgres-style partial indexes (`CREATE INDEX ... WHERE ...`),
+/// so the claim index is a plain composite. The lease-sweep index on
+/// `lease_expires_at` naturally excludes NULL rows in Oracle single-column
+/// B-tree indexes (which is what we want — we only sweep claimed rows).
+fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
+    let q = &schema.background_queue;
+    let r = &schema.responses;
+    let queue_table = q.qualified_table(schema.owner.as_deref());
+    let resp_table = r.qualified_table(schema.owner.as_deref());
+    let resp_id_col = r.col("id").to_uppercase();
+
+    let response_id = q.col("response_id").to_uppercase();
+    let priority = q.col("priority").to_uppercase();
+    let retry_attempt = q.col("retry_attempt").to_uppercase();
+    let next_attempt_at = q.col("next_attempt_at").to_uppercase();
+    let lease_expires_at = q.col("lease_expires_at").to_uppercase();
+    let worker_id = q.col("worker_id").to_uppercase();
+    let created_at = q.col("created_at").to_uppercase();
+    let queue_table_name = q.table.to_uppercase();
+
+    vec![
+        // ORA-00955 = "name is already used by an existing object"
+        format!(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {queue_table} (\
+                {response_id} VARCHAR2(64) PRIMARY KEY, \
+                {priority} NUMBER(10) NOT NULL, \
+                {retry_attempt} NUMBER(10) DEFAULT 0 NOT NULL, \
+                {next_attempt_at} TIMESTAMP WITH TIME ZONE NOT NULL, \
+                {lease_expires_at} TIMESTAMP WITH TIME ZONE, \
+                {worker_id} VARCHAR2(256), \
+                {created_at} TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL, \
+                CONSTRAINT {queue_table_name}_FK FOREIGN KEY ({response_id}) \
+                    REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE\
+            )'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+        ),
+        // Claim index — plain composite (Oracle has no partial indexes).
+        format!(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {queue_table_name}_CLAIM_IDX \
+                ON {queue_table} ({priority}, {next_attempt_at}, {created_at})'; \
+             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+        ),
+        // Lease-sweep index — Oracle single-column B-tree indexes exclude
+        // NULL rows by default, which matches the design's intent.
+        format!(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {queue_table_name}_LEASE_SWEEP_IDX \
+                ON {queue_table} ({lease_expires_at})'; \
+             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+        ),
+    ]
+}
+
+/// Create the `response_stream_chunks` per-response SSE log table.
+fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
+    let c = &schema.response_stream_chunks;
+    let r = &schema.responses;
+    let chunks_table = c.qualified_table(schema.owner.as_deref());
+    let resp_table = r.qualified_table(schema.owner.as_deref());
+    let resp_id_col = r.col("id").to_uppercase();
+
+    let response_id = c.col("response_id").to_uppercase();
+    let sequence = c.col("sequence").to_uppercase();
+    let event_type = c.col("event_type").to_uppercase();
+    let data = c.col("data").to_uppercase();
+    let created_at = c.col("created_at").to_uppercase();
+    let chunks_table_name = c.table.to_uppercase();
+
+    vec![
+        format!(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE {chunks_table} (\
+                {response_id} VARCHAR2(64) NOT NULL, \
+                {sequence} NUMBER(19) NOT NULL, \
+                {event_type} VARCHAR2(128) NOT NULL, \
+                {data} CLOB CHECK ({data} IS JSON) NOT NULL, \
+                {created_at} TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL, \
+                CONSTRAINT {chunks_table_name}_PK PRIMARY KEY ({response_id}, {sequence}), \
+                CONSTRAINT {chunks_table_name}_FK FOREIGN KEY ({response_id}) \
+                    REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE\
+            )'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+        ),
+        // Cleanup index for the retention-window janitor.
+        format!(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {chunks_table_name}_CLEANUP_IDX \
+                ON {chunks_table} ({created_at})'; \
+             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
+        ),
+    ]
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -282,6 +451,82 @@ mod tests {
         };
         let stmts = oracle_v1_up(&schema);
         assert!(stmts.is_empty());
+    }
+
+    // ── v9: extend responses with background-mode columns ─────────────────
+
+    #[test]
+    fn oracle_v9_up_adds_nine_columns_with_plsql_wrappers() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v9_up(&schema);
+        // 9 ADD + 2 UPDATE
+        assert_eq!(stmts.len(), 11, "got: {stmts:?}");
+        for col in [
+            "STATUS",
+            "BACKGROUND",
+            "STREAM_ENABLED",
+            "CANCEL_REQUESTED",
+            "REQUEST_JSON",
+            "REQUEST_CONTEXT_JSON",
+            "STARTED_AT",
+            "COMPLETED_AT",
+            "NEXT_STREAM_SEQUENCE",
+        ] {
+            assert!(
+                stmts
+                    .iter()
+                    .any(|s| s.contains(col) && s.contains("SQLCODE != -1430")),
+                "missing PL/SQL-wrapped ADD for {col}: {stmts:?}"
+            );
+        }
+        assert!(
+            stmts.iter().any(|s| s.contains("NUMBER(1)")),
+            "Oracle should use NUMBER(1) for booleans: {stmts:?}"
+        );
+        assert!(
+            stmts.iter().any(|s| s.contains("TIMESTAMP WITH TIME ZONE")),
+            "Oracle should use TIMESTAMP WITH TIME ZONE: {stmts:?}"
+        );
+    }
+
+    // ── v10: create background_queue ───────────────────────────────────────
+
+    #[test]
+    fn oracle_v10_up_creates_table_and_two_indexes() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v10_up(&schema);
+        assert_eq!(stmts.len(), 3, "got: {stmts:?}");
+        // Table name is lowercase (from qualified_table); columns/indexes are
+        // uppercased to match existing Oracle migration convention.
+        assert!(stmts[0].contains("CREATE TABLE background_queue"));
+        assert!(stmts[0].contains("ON DELETE CASCADE"));
+        assert!(
+            stmts[0].contains("SQLCODE != -955"),
+            "idempotency via ORA-00955: {stmts:?}"
+        );
+        assert!(stmts[1].contains("BACKGROUND_QUEUE_CLAIM_IDX"));
+        // Oracle has no partial indexes — no WHERE clause on CREATE INDEX.
+        assert!(
+            !stmts[1].contains("WHERE"),
+            "Oracle claim index must be plain composite (no WHERE): {stmts:?}"
+        );
+        assert!(stmts[2].contains("BACKGROUND_QUEUE_LEASE_SWEEP_IDX"));
+    }
+
+    // ── v11: create response_stream_chunks ─────────────────────────────────
+
+    #[test]
+    fn oracle_v11_up_creates_table_with_composite_pk() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v11_up(&schema);
+        assert_eq!(stmts.len(), 2, "got: {stmts:?}");
+        assert!(stmts[0].contains("CREATE TABLE response_stream_chunks"));
+        assert!(
+            stmts[0].contains("PRIMARY KEY (RESPONSE_ID, SEQUENCE)"),
+            "composite PK on (response_id, sequence): {stmts:?}"
+        );
+        assert!(stmts[0].contains("ON DELETE CASCADE"));
+        assert!(stmts[1].contains("RESPONSE_STREAM_CHUNKS_CLEANUP_IDX"));
     }
 
     #[test]

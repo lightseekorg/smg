@@ -319,6 +319,12 @@ impl ResponseId {
     }
 }
 
+impl Display for ResponseId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl Default for ResponseId {
     fn default() -> Self {
         Self::new()

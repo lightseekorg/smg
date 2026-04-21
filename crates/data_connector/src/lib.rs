@@ -12,6 +12,7 @@
 //! - Postgres
 //! - Redis
 
+pub mod background;
 mod common;
 pub mod config;
 pub mod context;
@@ -39,6 +40,11 @@ pub use core::{
     ResponseId, ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
 };
 
+pub use background::{
+    BackgroundRepositoryError, BackgroundRepositoryResult, BackgroundResponseRepository,
+    DeleteResult, EnqueueRequest, FinalizeRequest, FinalizeResult, FinalizeStatus, LeasedJob,
+    QueuedResponse, ResumeEventBatch, StoredCancelResult, StoredStreamEvent,
+};
 pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 // Re-export hook infrastructure
 pub use context::{
