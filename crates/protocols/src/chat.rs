@@ -138,6 +138,35 @@ impl MessageContent {
 }
 
 // ============================================================================
+// Reasoning Configuration (OpenAI-style)
+// ============================================================================
+
+/// Configuration for reasoning models on the Chat Completions API.
+///
+/// OpenAI clients send this as ``{"reasoning": {"enabled": bool}}`` to
+/// explicitly toggle thinking for reasoning-capable models such as
+/// Kimi-K2.5 or Qwen3.  The value is mapped to ``chat_template_kwargs``
+/// (``enable_thinking`` / ``thinking``) by ``ChatCompletionRequest::
+/// normalize()`` so the chat template sees the caller's intent.
+///
+/// Without this struct, serde silently drops the field and reasoning
+/// models think by default -- inflating output sequence length on
+/// traffic that explicitly disabled it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReasoningConfig {
+    /// Whether reasoning / thinking should run for this request.
+    pub enabled: bool,
+
+    /// Optional effort hint (``low`` / ``medium`` / ``high``).  Migrated
+    /// to the top-level ``reasoning_effort`` field by ``normalize()``
+    /// (which is the field ``chat_utils.rs`` forwards to the chat
+    /// template).  The top-level ``reasoning_effort`` wins when both
+    /// are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+// ============================================================================
 // Chat Completion Request
 // ============================================================================
 
@@ -206,6 +235,12 @@ pub struct ChatCompletionRequest {
     /// Configuration for extended thinking (Anthropic-style).
     /// Maps to chat_template_kwargs for thinking-capable models.
     pub thinking: Option<ThinkingConfig>,
+
+    /// OpenAI-style reasoning config, e.g. ``{"reasoning": {"enabled": false}}``.
+    /// Mapped to ``chat_template_kwargs`` (``enable_thinking`` /
+    /// ``thinking``) by ``normalize()`` so reasoning-capable chat
+    /// templates (Kimi-K2.5, Qwen3, etc.) respect the caller's intent.
+    pub reasoning: Option<ReasoningConfig>,
 
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
@@ -569,7 +604,7 @@ impl Normalizable for ChatCompletionRequest {
             self.function_call = None; // Clear deprecated field
         }
 
-        // Migrate thinking → chat_template_kwargs
+        // Migrate Anthropic-style ``thinking`` → ``chat_template_kwargs``.
         if let Some(ref thinking) = self.thinking {
             let kwargs = self.chat_template_kwargs.get_or_insert_with(HashMap::new);
             match thinking {
@@ -589,6 +624,24 @@ impl Normalizable for ChatCompletionRequest {
                         .entry("thinking".to_string())
                         .or_insert(Value::Bool(false));
                 }
+            }
+        }
+
+        // Migrate OpenAI-style ``reasoning`` → ``chat_template_kwargs``
+        // and top-level ``reasoning_effort``.  ``.or_insert()`` preserves
+        // values the caller set directly, so the top-level
+        // ``reasoning_effort`` field wins over ``reasoning.effort``; when
+        // both ``thinking`` and ``reasoning`` are sent, ``thinking`` wins.
+        if let Some(ref reasoning) = self.reasoning {
+            let kwargs = self.chat_template_kwargs.get_or_insert_with(HashMap::new);
+            kwargs
+                .entry("enable_thinking".to_string())
+                .or_insert(Value::Bool(reasoning.enabled));
+            kwargs
+                .entry("thinking".to_string())
+                .or_insert(Value::Bool(reasoning.enabled));
+            if let Some(ref effort) = reasoning.effort {
+                self.reasoning_effort.get_or_insert_with(|| effort.clone());
             }
         }
 
@@ -776,4 +829,111 @@ pub struct ChatStreamChoice {
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_stop: Option<Value>,
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip JSON body through serde + Normalizable; return the
+    /// resulting ``chat_template_kwargs``.  Exercises both the field's
+    /// presence on ``ChatCompletionRequest`` (so it isn't silently
+    /// dropped by serde) and the migration in ``normalize()``.
+    fn normalize_and_get_kwargs(body: &str) -> HashMap<String, Value> {
+        let mut req: ChatCompletionRequest =
+            serde_json::from_str(body).expect("valid request JSON");
+        req.normalize();
+        req.chat_template_kwargs.unwrap_or_default()
+    }
+
+    #[test]
+    fn reasoning_enabled_false_sets_kwargs() {
+        let kwargs = normalize_and_get_kwargs(
+            r#"{"model":"m","messages":[],"reasoning":{"enabled":false}}"#,
+        );
+        assert_eq!(kwargs.get("enable_thinking"), Some(&Value::Bool(false)));
+        assert_eq!(kwargs.get("thinking"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn reasoning_enabled_true_sets_kwargs() {
+        let kwargs =
+            normalize_and_get_kwargs(r#"{"model":"m","messages":[],"reasoning":{"enabled":true}}"#);
+        assert_eq!(kwargs.get("enable_thinking"), Some(&Value::Bool(true)));
+        assert_eq!(kwargs.get("thinking"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn reasoning_field_without_enabled_is_rejected() {
+        // Verify the ``enabled`` key is required; serde should surface
+        // a deserialization error rather than silently accepting {}.
+        let err = serde_json::from_str::<ChatCompletionRequest>(
+            r#"{"model":"m","messages":[],"reasoning":{}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("enabled"),
+            "expected error about missing `enabled`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_migrates_to_top_level() {
+        // ``reasoning.effort`` MUST populate ``request.reasoning_effort``
+        // because the chat_utils consumer reads only the top-level field
+        // when forwarding to the chat template.  Without this, setting
+        // ``reasoning.effort`` would be silently dropped downstream.
+        let mut req: ChatCompletionRequest = serde_json::from_str(
+            r#"{"model":"m","messages":[],"reasoning":{"enabled":true,"effort":"low"}}"#,
+        )
+        .unwrap();
+        assert!(req.reasoning_effort.is_none());
+        req.normalize();
+        assert_eq!(req.reasoning_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn top_level_reasoning_effort_wins_over_reasoning_effort() {
+        // Precedence: explicit top-level ``reasoning_effort`` is more
+        // specific and wins when both are sent.
+        let mut req: ChatCompletionRequest = serde_json::from_str(
+            r#"{
+                "model":"m","messages":[],
+                "reasoning_effort":"high",
+                "reasoning":{"enabled":true,"effort":"low"}
+            }"#,
+        )
+        .unwrap();
+        req.normalize();
+        assert_eq!(req.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn no_reasoning_field_leaves_kwargs_untouched() {
+        let mut req: ChatCompletionRequest =
+            serde_json::from_str(r#"{"model":"m","messages":[]}"#).unwrap();
+        assert!(req.reasoning.is_none());
+        req.normalize();
+        assert!(req.chat_template_kwargs.is_none());
+    }
+
+    #[test]
+    fn explicit_chat_template_kwargs_wins_over_reasoning() {
+        // ``.or_insert()`` contract: explicit operator overrides via
+        // ``chat_template_kwargs`` directly are preserved even when a
+        // reasoning field is also present.
+        let kwargs = normalize_and_get_kwargs(
+            r#"{
+                "model":"m","messages":[],
+                "reasoning":{"enabled":false},
+                "chat_template_kwargs":{"enable_thinking":true,"thinking":true}
+            }"#,
+        );
+        assert_eq!(kwargs.get("enable_thinking"), Some(&Value::Bool(true)));
+        assert_eq!(kwargs.get("thinking"), Some(&Value::Bool(true)));
+    }
 }
