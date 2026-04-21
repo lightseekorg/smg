@@ -190,11 +190,11 @@ impl BlobStore for FilesystemBlobStore {
         limit: usize,
     ) -> Result<ListBlobsPage, BlobStoreError> {
         let normalized_prefix = normalize_prefix(&prefix.0)?;
-        let mut blob_keys = Vec::new();
+        let mut blobs = Vec::new();
         let search_root = search_root_for_prefix(&self.root_dir, &normalized_prefix);
         match fs::metadata(&search_root).await {
             Ok(metadata) if metadata.is_dir() => {
-                collect_blob_keys(&self.root_dir, &search_root, &mut blob_keys).await?;
+                collect_blob_metadata(&self.root_dir, &search_root, &mut blobs).await?;
             }
             Ok(_) => {
                 return Ok(ListBlobsPage {
@@ -215,11 +215,14 @@ impl BlobStore for FilesystemBlobStore {
                 });
             }
         }
-        blob_keys.retain(|key| key.starts_with(&normalized_prefix));
-        blob_keys.sort();
+        blobs.retain(|metadata| metadata.key.0.starts_with(&normalized_prefix));
+        blobs.sort_by(|left, right| left.key.0.cmp(&right.key.0));
 
         let start_index = match cursor.as_ref() {
-            Some(cursor_key) => match blob_keys.iter().position(|key| key > cursor_key) {
+            Some(cursor_key) => match blobs
+                .iter()
+                .position(|metadata| metadata.key.0 > *cursor_key)
+            {
                 Some(index) => index,
                 None => {
                     return Ok(ListBlobsPage {
@@ -232,24 +235,21 @@ impl BlobStore for FilesystemBlobStore {
         };
 
         let end_index =
-            start_index.saturating_add(limit.min(blob_keys.len().saturating_sub(start_index)));
-        let page_keys = &blob_keys[start_index..end_index];
+            start_index.saturating_add(limit.min(blobs.len().saturating_sub(start_index)));
+        let page_blobs = blobs[start_index..end_index].to_vec();
 
-        let mut blobs = Vec::with_capacity(page_keys.len());
-        for key_str in page_keys {
-            let key = BlobKey(key_str.clone());
-            if let Some(metadata) = self.head(&key).await? {
-                blobs.push(metadata);
-            }
-        }
-
-        let next_cursor = if end_index < blob_keys.len() && end_index > start_index {
-            blob_keys.get(end_index - 1).cloned()
+        let next_cursor = if end_index < blobs.len() && end_index > start_index {
+            blobs
+                .get(end_index - 1)
+                .map(|metadata| metadata.key.0.clone())
         } else {
             None
         };
 
-        Ok(ListBlobsPage { blobs, next_cursor })
+        Ok(ListBlobsPage {
+            blobs: page_blobs,
+            next_cursor,
+        })
     }
 }
 
@@ -264,10 +264,10 @@ fn search_root_for_prefix(root_dir: &Path, normalized_prefix: &str) -> PathBuf {
     path
 }
 
-async fn collect_blob_keys(
+async fn collect_blob_metadata(
     root_dir: &Path,
     current_dir: &Path,
-    blob_keys: &mut Vec<String>,
+    blobs: &mut Vec<BlobMetadata>,
 ) -> Result<(), BlobStoreError> {
     let mut entries =
         fs::read_dir(current_dir)
@@ -295,7 +295,7 @@ async fn collect_blob_keys(
             })?;
         let path = entry.path();
         if file_type.is_dir() {
-            Box::pin(collect_blob_keys(root_dir, &path, blob_keys)).await?;
+            Box::pin(collect_blob_metadata(root_dir, &path, blobs)).await?;
             continue;
         }
         if !file_type.is_file() {
@@ -308,12 +308,21 @@ async fn collect_blob_keys(
                     operation: "strip_prefix",
                     message: error.to_string(),
                 })?;
-        let key = relative_path
-            .iter()
-            .map(|segment| segment.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        blob_keys.push(key);
+        let key = BlobKey(
+            relative_path
+                .iter()
+                .map(|segment| segment.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+        );
+        let metadata = entry
+            .metadata()
+            .await
+            .map_err(|error| BlobStoreError::Operation {
+                operation: "metadata",
+                message: error.to_string(),
+            })?;
+        blobs.push(FilesystemBlobStore::metadata_for_path(&key, metadata));
     }
 
     Ok(())

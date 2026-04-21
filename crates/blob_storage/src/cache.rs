@@ -59,6 +59,19 @@ impl LocalBlobCache {
                 message: "blob cache max_size_mb must be greater than zero".to_string(),
             });
         }
+        // This cache is invalidation-driven and process-local. Start from an
+        // empty directory so stale hashed files from earlier runs never count
+        // against the current budget or get mistaken for live entries.
+        match std::fs::remove_dir_all(&cache_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BlobStoreInitError::Io {
+                    path: cache_dir.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        }
         std::fs::create_dir_all(&cache_dir).map_err(|error| BlobStoreInitError::Io {
             path: cache_dir.display().to_string(),
             message: error.to_string(),
@@ -109,6 +122,10 @@ impl LocalBlobCache {
         key: &BlobKey,
         response: GetBlobResponse,
     ) -> Result<GetBlobResponse, BlobStoreError> {
+        if response.metadata.size_bytes > self.max_size_bytes {
+            return Ok(response);
+        }
+
         let cache_key = cache_key_for(key);
         let cache_path = cache_path_for(&self.cache_dir, &cache_key);
         let temp_path = cache_path.with_extension(format!("{}.tmp", Uuid::now_v7()));
