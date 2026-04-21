@@ -9,8 +9,9 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
-        PromptTokenUsageInfo, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
+        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, Detail, Function,
+        GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo, ResponsePrompt,
+        StreamOptions, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
@@ -362,6 +363,49 @@ pub enum ResponseInputOutputItem {
     },
 }
 
+/// Detail level for [`ResponseContentPart::InputFile`]. Spec restricts this
+/// to `"low" | "high"` (defaults to `low`); it is narrower than [`Detail`]
+/// used for images which also admits `auto` / `original`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDetail {
+    #[default]
+    Low,
+    High,
+}
+
+/// Typed annotation attached to [`ResponseContentPart::OutputText`]. Matches
+/// the OpenAI Responses API `Annotation` union; a `type` discriminator selects
+/// the variant on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Annotation {
+    /// `type: "file_citation"` — points at a file previously uploaded.
+    FileCitation {
+        file_id: String,
+        filename: String,
+        index: u32,
+    },
+    /// `type: "url_citation"` — citation back to a URL in a web-search result.
+    UrlCitation {
+        url: String,
+        title: String,
+        start_index: u32,
+        end_index: u32,
+    },
+    /// `type: "container_file_citation"` — citation to a file inside a
+    /// code-interpreter / computer-use container.
+    ContainerFileCitation {
+        container_id: String,
+        file_id: String,
+        filename: String,
+        start_index: u32,
+        end_index: u32,
+    },
+    /// `type: "file_path"` — reference to a generated file path.
+    FilePath { file_id: String, index: u32 },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -371,14 +415,43 @@ pub enum ResponseContentPart {
         text: String,
         #[serde(default)]
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        annotations: Vec<String>,
+        annotations: Vec<Annotation>,
         #[serde(skip_serializing_if = "Option::is_none")]
         logprobs: Option<ChatLogProbs>,
     },
     #[serde(rename = "input_text")]
     InputText { text: String },
-    #[serde(other)]
-    Unknown,
+    /// `type: "input_image"` — reference to an image supplied by the client.
+    /// Exactly one of `file_id` / `image_url` is typically set; both may be
+    /// absent when only `detail` is being conveyed.
+    #[serde(rename = "input_image")]
+    InputImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<Detail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+    },
+    /// `type: "input_file"` — reference to an attached file. `file_data` is a
+    /// base64 blob; `file_url` / `file_id` reference external/uploaded files.
+    #[serde(rename = "input_file")]
+    InputFile {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<FileDetail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+    /// `type: "refusal"` — model refusal surfaced as a content part (spec's
+    /// `ResponseOutputRefusal`).
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -931,6 +1004,38 @@ pub struct ResponsesRequest {
     #[validate(custom(function = "validate_stop"))]
     pub stop: Option<StringOrArray>,
 
+    /// Reference to a prompt template and its variables.
+    /// Spec: body param `prompt` (ResponsePrompt).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<ResponsePrompt>,
+
+    /// Stable cache key used by upstream to share prompt-prefix caches across
+    /// requests. Spec: body param `prompt_cache_key` (replaces `user`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+
+    /// Retention policy for prompt-cache entries.
+    /// Spec: body param `prompt_cache_retention` (`"in-memory"` | `"24h"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+
+    /// Stable user identifier for policy/abuse detection (max 64 chars on the
+    /// spec, but we do not enforce length here — routers may pass through).
+    /// Spec: body param `safety_identifier` (replaces `user` on request side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_identifier: Option<String>,
+
+    /// Streaming-only options. Spec: body param `stream_options`.
+    /// On the Responses API the only documented field is `include_obfuscation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+
+    /// Per-request context-management configuration.
+    /// Spec: body param `context_management` — array of entries describing how
+    /// the upstream should compact context for this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Vec<ContextManagementEntry>>,
+
     /// Top-k sampling parameter (SGLang extension)
     #[serde(default = "default_top_k")]
     #[validate(custom(function = "validate_top_k_value"))]
@@ -985,6 +1090,12 @@ impl Default for ResponsesRequest {
             frequency_penalty: None,
             presence_penalty: None,
             stop: None,
+            prompt: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            safety_identifier: None,
+            stream_options: None,
+            context_management: None,
             top_k: default_top_k(),
             min_p: 0.0,
             repetition_penalty: default_repetition_penalty(),
@@ -1056,7 +1167,11 @@ impl GenerationRequest for ResponsesRequest {
                                         Some(text.as_str())
                                     }
                                     ResponseContentPart::InputText { text } => Some(text.as_str()),
-                                    ResponseContentPart::Unknown => None,
+                                    // Non-text parts (images, files, refusals) contribute no
+                                    // prompt text; skip without appending.
+                                    ResponseContentPart::InputImage { .. }
+                                    | ResponseContentPart::InputFile { .. }
+                                    | ResponseContentPart::Refusal { .. } => None,
                                 };
                                 if let Some(t) = text {
                                     append_text(t);
@@ -1077,7 +1192,9 @@ impl GenerationRequest for ResponsesRequest {
                                             ResponseContentPart::InputText { text } => {
                                                 Some(text.as_str())
                                             }
-                                            ResponseContentPart::Unknown => None,
+                                            ResponseContentPart::InputImage { .. }
+                                            | ResponseContentPart::InputFile { .. }
+                                            | ResponseContentPart::Refusal { .. } => None,
                                         };
                                         if let Some(t) = text {
                                             append_text(t);
@@ -1713,10 +1830,10 @@ impl ResponseOutputItem {
 }
 
 impl ResponseContentPart {
-    /// Create a new text content part
+    /// Create a new `output_text` content part.
     pub fn new_text(
         text: String,
-        annotations: Vec<String>,
+        annotations: Vec<Annotation>,
         logprobs: Option<ChatLogProbs>,
     ) -> Self {
         Self::OutputText {
@@ -1965,5 +2082,289 @@ mod tests {
 
         let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
         assert_eq!(serialized, payload);
+    }
+
+    // ------------------------------------------------------------------
+    // P2: new top-level ResponsesRequest fields
+    // ------------------------------------------------------------------
+
+    /// Acceptance: the six new top-level fields deserialize and re-serialize
+    /// without loss (`prompt`, `prompt_cache_key`, `prompt_cache_retention`,
+    /// `safety_identifier`, `stream_options`, `context_management`).
+    #[test]
+    fn test_responses_request_new_top_level_fields_round_trip() {
+        let payload = json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "prompt": {
+                "id": "pmpt_abc",
+                "variables": {
+                    "name": "ada",
+                    "picture": {
+                        "type": "input_image",
+                        "image_url": "https://example.com/pic.png",
+                        "detail": "high"
+                    }
+                },
+                "version": "1"
+            },
+            "prompt_cache_key": "pck-123",
+            "prompt_cache_retention": "24h",
+            "safety_identifier": "sid-123",
+            "stream_options": { "include_obfuscation": false },
+            "context_management": [{
+                "type": "compaction",
+                "compact_threshold": 4096
+            }]
+        });
+
+        let request: ResponsesRequest =
+            serde_json::from_value(payload.clone()).expect("request should deserialize");
+
+        assert!(request.prompt.is_some());
+        assert_eq!(
+            request.prompt.as_ref().map(|p| p.id.as_str()),
+            Some("pmpt_abc")
+        );
+        assert_eq!(
+            request.prompt.as_ref().and_then(|p| p.version.as_deref()),
+            Some("1")
+        );
+        assert_eq!(request.prompt_cache_key.as_deref(), Some("pck-123"));
+        assert_eq!(
+            request.prompt_cache_retention,
+            Some(PromptCacheRetention::Duration24h)
+        );
+        assert_eq!(request.safety_identifier.as_deref(), Some("sid-123"));
+        assert_eq!(
+            request
+                .stream_options
+                .as_ref()
+                .and_then(|s| s.include_obfuscation),
+            Some(false)
+        );
+        let ctx = request
+            .context_management
+            .as_ref()
+            .expect("context_management must round-trip");
+        assert_eq!(ctx.len(), 1);
+        assert_eq!(
+            ctx[0].r#type,
+            crate::common::ContextManagementType::Compaction
+        );
+        assert_eq!(ctx[0].compact_threshold, Some(4096));
+
+        // Re-serialize and confirm the wire form matches the inputs.
+        let reserialized = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(reserialized["prompt"]["id"], "pmpt_abc");
+        assert_eq!(reserialized["prompt_cache_key"], "pck-123");
+        assert_eq!(reserialized["prompt_cache_retention"], "24h");
+        assert_eq!(reserialized["safety_identifier"], "sid-123");
+        assert_eq!(reserialized["stream_options"]["include_obfuscation"], false);
+        assert_eq!(reserialized["context_management"][0]["type"], "compaction");
+        assert_eq!(
+            reserialized["context_management"][0]["compact_threshold"],
+            4096
+        );
+    }
+
+    /// `prompt_cache_retention` accepts the other spec value and serializes
+    /// back with the hyphenated rename.
+    #[test]
+    fn test_prompt_cache_retention_in_memory_round_trip() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "prompt_cache_retention": "in-memory"
+        }))
+        .expect("should deserialize");
+
+        assert_eq!(
+            request.prompt_cache_retention,
+            Some(PromptCacheRetention::InMemory)
+        );
+
+        let reserialized = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(reserialized["prompt_cache_retention"], "in-memory");
+    }
+
+    /// Absent fields must stay absent on the wire (no `"prompt": null` etc.),
+    /// matching every other `Option<_>` field on `ResponsesRequest`.
+    #[test]
+    fn test_responses_request_new_fields_omitted_when_absent() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello"
+        }))
+        .expect("should deserialize");
+
+        assert!(request.prompt.is_none());
+        assert!(request.prompt_cache_key.is_none());
+        assert!(request.prompt_cache_retention.is_none());
+        assert!(request.safety_identifier.is_none());
+        assert!(request.stream_options.is_none());
+        assert!(request.context_management.is_none());
+
+        let serialized = serde_json::to_value(&request).expect("should serialize");
+        for key in [
+            "prompt",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "safety_identifier",
+            "stream_options",
+            "context_management",
+        ] {
+            assert!(
+                serialized.get(key).is_none(),
+                "field {key} should be skipped when absent"
+            );
+        }
+    }
+
+    // ---- P1: rich content parts + typed annotations ----
+
+    #[test]
+    fn content_part_input_image_roundtrip() {
+        // `original` is the spec-new detail level; exercising it here
+        // also covers the rest of the variant shape.
+        let raw = json!({
+            "type": "input_image",
+            "detail": "original",
+            "image_url": "https://example.com/cat.png"
+        });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("input_image should deserialize");
+        match &part {
+            ResponseContentPart::InputImage {
+                detail,
+                file_id,
+                image_url,
+            } => {
+                assert!(matches!(detail, Some(Detail::Original)));
+                assert!(file_id.is_none());
+                assert_eq!(image_url.as_deref(), Some("https://example.com/cat.png"));
+            }
+            other => panic!("expected InputImage, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_input_file_roundtrip() {
+        let raw = json!({
+            "type": "input_file",
+            "detail": "low",
+            "file_data": "BASE64DATA",
+            "filename": "report.pdf"
+        });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("input_file should deserialize");
+        match &part {
+            ResponseContentPart::InputFile {
+                detail,
+                file_data,
+                file_id,
+                file_url,
+                filename,
+            } => {
+                assert!(matches!(detail, Some(FileDetail::Low)));
+                assert_eq!(file_data.as_deref(), Some("BASE64DATA"));
+                assert!(file_id.is_none());
+                assert!(file_url.is_none());
+                assert_eq!(filename.as_deref(), Some("report.pdf"));
+            }
+            other => panic!("expected InputFile, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_refusal_roundtrip() {
+        let raw = json!({ "type": "refusal", "refusal": "I cannot help with that." });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("refusal should deserialize");
+        match &part {
+            ResponseContentPart::Refusal { refusal } => {
+                assert_eq!(refusal, "I cannot help with that.");
+            }
+            other => panic!("expected Refusal, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_output_text_with_typed_annotations() {
+        let raw = json!({
+            "type": "output_text",
+            "text": "See [1] and [2].",
+            "annotations": [
+                {
+                    "type": "file_citation",
+                    "file_id": "file-abc",
+                    "filename": "source.pdf",
+                    "index": 5
+                },
+                {
+                    "type": "url_citation",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "start_index": 0,
+                    "end_index": 18
+                },
+                {
+                    "type": "container_file_citation",
+                    "container_id": "cntr-1",
+                    "file_id": "file-xyz",
+                    "filename": "out.txt",
+                    "start_index": 0,
+                    "end_index": 4
+                },
+                {
+                    "type": "file_path",
+                    "file_id": "file-gen",
+                    "index": 7
+                }
+            ]
+        });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("output_text should deserialize");
+        match &part {
+            ResponseContentPart::OutputText {
+                text,
+                annotations,
+                logprobs,
+            } => {
+                assert_eq!(text, "See [1] and [2].");
+                assert_eq!(annotations.len(), 4);
+                assert!(logprobs.is_none());
+                assert!(matches!(&annotations[0], Annotation::FileCitation { .. }));
+                assert!(matches!(&annotations[1], Annotation::UrlCitation { .. }));
+                assert!(matches!(
+                    &annotations[2],
+                    Annotation::ContainerFileCitation { .. }
+                ));
+                assert!(matches!(&annotations[3], Annotation::FilePath { .. }));
+            }
+            other => panic!("expected OutputText, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_unknown_type_fails_fast() {
+        // Previously `#[serde(other)] Unknown` silently swallowed unknown
+        // types; P1 removes that arm so spec-invalid payloads fail cleanly.
+        let raw = json!({ "type": "totally_made_up", "text": "x" });
+        let err = serde_json::from_value::<ResponseContentPart>(raw)
+            .expect_err("unknown content-part type must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("totally_made_up") || msg.contains("unknown variant"),
+            "error should mention the unknown variant, got: {msg}"
+        );
     }
 }

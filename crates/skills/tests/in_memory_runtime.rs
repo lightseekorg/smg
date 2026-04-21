@@ -239,6 +239,21 @@ async fn in_memory_service_scopes_listings_to_exact_tenant_and_skill() -> Result
         })
         .await?;
     metadata_store
+        .put_skill(SkillRecord {
+            tenant_id: "tenant-b".to_string(),
+            skill_id: "skill-10".to_string(),
+            name: "map-10".to_string(),
+            short_description: None,
+            description: None,
+            source: "custom".to_string(),
+            has_code_files: false,
+            latest_version: Some("1".to_string()),
+            default_version: Some("1".to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    metadata_store
         .put_skill_version(SkillVersionRecord {
             skill_id: "skill-1".to_string(),
             version: "1".to_string(),
@@ -285,8 +300,7 @@ async fn in_memory_service_scopes_listings_to_exact_tenant_and_skill() -> Result
 }
 
 #[tokio::test]
-async fn in_memory_service_only_deletes_versions_when_last_tenant_mapping_is_removed() -> Result<()>
-{
+async fn in_memory_service_rejects_cross_tenant_skill_id_reuse() -> Result<()> {
     let blob_root = TempDir::new()?;
     let blob_store = create_blob_store(
         &BlobStoreConfig {
@@ -302,26 +316,124 @@ async fn in_memory_service_only_deletes_versions_when_last_tenant_mapping_is_rem
         .metadata_store()
         .ok_or_else(|| anyhow!("metadata store missing"))?;
 
-    for tenant_id in ["tenant-a", "tenant-b"] {
-        metadata_store
-            .put_skill(SkillRecord {
-                tenant_id: tenant_id.to_string(),
-                skill_id: "shared-skill".to_string(),
-                name: "map".to_string(),
-                short_description: None,
-                description: None,
-                source: "custom".to_string(),
-                has_code_files: false,
-                latest_version: Some("1".to_string()),
-                default_version: Some("1".to_string()),
-                created_at: now,
-                updated_at: now,
-            })
-            .await?;
-    }
+    metadata_store
+        .put_skill(SkillRecord {
+            tenant_id: "tenant-a".to_string(),
+            skill_id: "shared-skill".to_string(),
+            name: "map".to_string(),
+            short_description: None,
+            description: None,
+            source: "custom".to_string(),
+            has_code_files: false,
+            latest_version: Some("1".to_string()),
+            default_version: Some("1".to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+
+    let error = metadata_store
+        .put_skill(SkillRecord {
+            tenant_id: "tenant-b".to_string(),
+            skill_id: "shared-skill".to_string(),
+            name: "map".to_string(),
+            short_description: None,
+            description: None,
+            source: "custom".to_string(),
+            has_code_files: false,
+            latest_version: Some("1".to_string()),
+            default_version: Some("1".to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect_err("cross-tenant skill_id reuse should fail");
+    assert!(matches!(
+        error,
+        smg_skills::SkillsStoreError::InvalidData(_)
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_memory_service_requires_parent_skill_before_writing_versions() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let blob_store = create_blob_store(
+        &BlobStoreConfig {
+            backend: BlobStoreBackend::Filesystem,
+            path: blob_root.path().display().to_string(),
+            ..BlobStoreConfig::default()
+        },
+        None,
+    )?;
+    let service = SkillService::in_memory(blob_store);
+    let metadata_store = service
+        .metadata_store()
+        .ok_or_else(|| anyhow!("metadata store missing"))?;
+
+    let error = metadata_store
+        .put_skill_version(SkillVersionRecord {
+            skill_id: "missing-skill".to_string(),
+            version: "1".to_string(),
+            version_number: 1,
+            name: "map".to_string(),
+            short_description: None,
+            description: "map".to_string(),
+            interface: None,
+            dependencies: None,
+            policy: None,
+            deprecated: false,
+            file_manifest: Vec::new(),
+            instruction_token_counts: Default::default(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect_err("writing a version without a parent skill should fail");
+
+    assert!(matches!(
+        error,
+        smg_skills::SkillsStoreError::InvalidData(_)
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_memory_service_deletes_versions_with_their_parent_skill() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let blob_store = create_blob_store(
+        &BlobStoreConfig {
+            backend: BlobStoreBackend::Filesystem,
+            path: blob_root.path().display().to_string(),
+            ..BlobStoreConfig::default()
+        },
+        None,
+    )?;
+    let service = SkillService::in_memory(blob_store);
+    let now = Utc::now();
+    let metadata_store = service
+        .metadata_store()
+        .ok_or_else(|| anyhow!("metadata store missing"))?;
+
+    metadata_store
+        .put_skill(SkillRecord {
+            tenant_id: "tenant-a".to_string(),
+            skill_id: "skill-1".to_string(),
+            name: "map".to_string(),
+            short_description: None,
+            description: None,
+            source: "custom".to_string(),
+            has_code_files: false,
+            latest_version: Some("1".to_string()),
+            default_version: Some("1".to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
     metadata_store
         .put_skill_version(SkillVersionRecord {
-            skill_id: "shared-skill".to_string(),
+            skill_id: "skill-1".to_string(),
             version: "1".to_string(),
             version_number: 1,
             name: "map".to_string(),
@@ -337,25 +449,16 @@ async fn in_memory_service_only_deletes_versions_when_last_tenant_mapping_is_rem
         })
         .await?;
 
-    assert!(
-        metadata_store
-            .delete_skill("tenant-a", "shared-skill")
-            .await?
-    );
+    assert!(metadata_store.delete_skill("tenant-a", "skill-1").await?);
     assert!(metadata_store
-        .get_skill_version("shared-skill", "1")
-        .await?
-        .is_some());
-
-    assert!(
-        metadata_store
-            .delete_skill("tenant-b", "shared-skill")
-            .await?
-    );
-    assert!(metadata_store
-        .get_skill_version("shared-skill", "1")
+        .get_skill("tenant-a", "skill-1")
         .await?
         .is_none());
+    assert!(metadata_store
+        .get_skill_version("skill-1", "1")
+        .await?
+        .is_none());
+
     Ok(())
 }
 

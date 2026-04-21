@@ -190,11 +190,11 @@ impl BlobStore for FilesystemBlobStore {
         limit: usize,
     ) -> Result<ListBlobsPage, BlobStoreError> {
         let normalized_prefix = normalize_prefix(&prefix.0)?;
-        let mut blob_keys = Vec::new();
+        let mut blob_entries = Vec::new();
         let search_root = search_root_for_prefix(&self.root_dir, &normalized_prefix);
         match fs::metadata(&search_root).await {
             Ok(metadata) if metadata.is_dir() => {
-                collect_blob_keys(&self.root_dir, &search_root, &mut blob_keys).await?;
+                collect_blob_entries(&self.root_dir, &search_root, &mut blob_entries).await?;
             }
             Ok(_) => {
                 return Ok(ListBlobsPage {
@@ -215,11 +215,14 @@ impl BlobStore for FilesystemBlobStore {
                 });
             }
         }
-        blob_keys.retain(|key| key.starts_with(&normalized_prefix));
-        blob_keys.sort();
+        blob_entries.retain(|entry| entry.key.starts_with(&normalized_prefix));
+        blob_entries.sort_by(|left, right| left.key.cmp(&right.key));
 
         let start_index = match cursor.as_ref() {
-            Some(cursor_key) => match blob_keys.iter().position(|key| key > cursor_key) {
+            Some(cursor_key) => match blob_entries
+                .iter()
+                .position(|entry| entry.key > *cursor_key)
+            {
                 Some(index) => index,
                 None => {
                     return Ok(ListBlobsPage {
@@ -232,19 +235,30 @@ impl BlobStore for FilesystemBlobStore {
         };
 
         let end_index =
-            start_index.saturating_add(limit.min(blob_keys.len().saturating_sub(start_index)));
-        let page_keys = &blob_keys[start_index..end_index];
-
-        let mut blobs = Vec::with_capacity(page_keys.len());
-        for key_str in page_keys {
-            let key = BlobKey(key_str.clone());
-            if let Some(metadata) = self.head(&key).await? {
-                blobs.push(metadata);
+            start_index.saturating_add(limit.min(blob_entries.len().saturating_sub(start_index)));
+        let mut blobs = Vec::with_capacity(end_index.saturating_sub(start_index));
+        for entry in &blob_entries[start_index..end_index] {
+            match fs::metadata(&entry.path).await {
+                Ok(metadata) => {
+                    blobs.push(Self::metadata_for_path(
+                        &BlobKey(entry.key.clone()),
+                        metadata,
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(BlobStoreError::Operation {
+                        operation: "metadata",
+                        message: error.to_string(),
+                    });
+                }
             }
         }
 
-        let next_cursor = if end_index < blob_keys.len() && end_index > start_index {
-            blob_keys.get(end_index - 1).cloned()
+        let next_cursor = if end_index < blob_entries.len() && end_index > start_index {
+            blob_entries
+                .get(end_index - 1)
+                .map(|entry| entry.key.clone())
         } else {
             None
         };
@@ -264,10 +278,16 @@ fn search_root_for_prefix(root_dir: &Path, normalized_prefix: &str) -> PathBuf {
     path
 }
 
-async fn collect_blob_keys(
+#[derive(Debug, Clone)]
+struct BlobListEntry {
+    key: String,
+    path: PathBuf,
+}
+
+async fn collect_blob_entries(
     root_dir: &Path,
     current_dir: &Path,
-    blob_keys: &mut Vec<String>,
+    blob_entries: &mut Vec<BlobListEntry>,
 ) -> Result<(), BlobStoreError> {
     let mut entries =
         fs::read_dir(current_dir)
@@ -286,16 +306,19 @@ async fn collect_blob_keys(
                 message: error.to_string(),
             })?
     {
-        let file_type = entry
-            .file_type()
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "file_type",
-                message: error.to_string(),
-            })?;
         let path = entry.path();
+        let file_type = match entry.file_type().await {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BlobStoreError::Operation {
+                    operation: "file_type",
+                    message: error.to_string(),
+                });
+            }
+        };
         if file_type.is_dir() {
-            Box::pin(collect_blob_keys(root_dir, &path, blob_keys)).await?;
+            Box::pin(collect_blob_entries(root_dir, &path, blob_entries)).await?;
             continue;
         }
         if !file_type.is_file() {
@@ -313,7 +336,7 @@ async fn collect_blob_keys(
             .map(|segment| segment.to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        blob_keys.push(key);
+        blob_entries.push(BlobListEntry { key, path });
     }
 
     Ok(())

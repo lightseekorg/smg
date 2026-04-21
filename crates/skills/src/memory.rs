@@ -19,7 +19,8 @@ use crate::{
 
 #[derive(Debug, Default)]
 struct InMemorySkillState {
-    skills: BTreeMap<(String, String), SkillRecord>,
+    skills: BTreeMap<String, SkillRecord>,
+    skill_ids_by_tenant: BTreeMap<String, BTreeSet<String>>,
     skill_versions: BTreeMap<(String, String), SkillVersionRecord>,
     skill_versions_by_skill: BTreeMap<String, BTreeSet<String>>,
     tenant_aliases: BTreeMap<String, TenantAliasRecord>,
@@ -39,8 +40,22 @@ pub struct InMemorySkillStore {
 #[async_trait]
 impl SkillMetadataStore for InMemorySkillStore {
     async fn put_skill(&self, record: SkillRecord) -> SkillsStoreResult<()> {
-        let key = (record.tenant_id.clone(), record.skill_id.clone());
-        self.state.write().skills.insert(key, record);
+        let mut state = self.state.write();
+        if let Some(existing) = state.skills.get(&record.skill_id) {
+            if existing.tenant_id != record.tenant_id {
+                return Err(crate::storage::SkillsStoreError::InvalidData(format!(
+                    "skill_id '{}' already belongs to tenant '{}'",
+                    record.skill_id, existing.tenant_id
+                )));
+            }
+        }
+
+        state
+            .skill_ids_by_tenant
+            .entry(record.tenant_id.clone())
+            .or_default()
+            .insert(record.skill_id.clone());
+        state.skills.insert(record.skill_id.clone(), record);
         Ok(())
     }
 
@@ -53,19 +68,19 @@ impl SkillMetadataStore for InMemorySkillStore {
             .state
             .read()
             .skills
-            .get(&(tenant_id.to_string(), skill_id.to_string()))
-            .cloned())
+            .get(skill_id)
+            .and_then(|record| (record.tenant_id == tenant_id).then(|| record.clone())))
     }
 
     async fn list_skills(&self, tenant_id: &str) -> SkillsStoreResult<Vec<SkillRecord>> {
-        let start = (tenant_id.to_string(), String::new());
-        let end = (tenant_id.to_string(), max_sort_key());
-        let mut skills = self
-            .state
-            .read()
-            .skills
-            .range((Included(start), Included(end)))
-            .map(|(_, record)| record.clone())
+        let state = self.state.read();
+        let mut skills = state
+            .skill_ids_by_tenant
+            .get(tenant_id)
+            .into_iter()
+            .flat_map(|skill_ids| skill_ids.iter())
+            .filter_map(|skill_id| state.skills.get(skill_id))
+            .cloned()
             .collect::<Vec<_>>();
         skills.sort_by(|left, right| {
             left.name
@@ -77,25 +92,29 @@ impl SkillMetadataStore for InMemorySkillStore {
 
     async fn delete_skill(&self, tenant_id: &str, skill_id: &str) -> SkillsStoreResult<bool> {
         let mut state = self.state.write();
-        let removed = state
-            .skills
-            .remove(&(tenant_id.to_string(), skill_id.to_string()))
-            .is_some();
-        if !removed {
+        let Some(record) = state.skills.get(skill_id) else {
+            return Ok(false);
+        };
+        if record.tenant_id != tenant_id {
             return Ok(false);
         }
 
-        let skill_still_referenced = state
-            .skills
-            .keys()
-            .any(|(_, existing_skill_id)| existing_skill_id == skill_id);
-        if !skill_still_referenced {
-            if let Some(versions) = state.skill_versions_by_skill.remove(skill_id) {
-                for version in versions {
-                    state
-                        .skill_versions
-                        .remove(&(skill_id.to_string(), version));
-                }
+        state.skills.remove(skill_id);
+        let tenant_has_no_skills =
+            if let Some(skill_ids) = state.skill_ids_by_tenant.get_mut(tenant_id) {
+                skill_ids.remove(skill_id);
+                skill_ids.is_empty()
+            } else {
+                false
+            };
+        if tenant_has_no_skills {
+            state.skill_ids_by_tenant.remove(tenant_id);
+        }
+        if let Some(versions) = state.skill_versions_by_skill.remove(skill_id) {
+            for version in versions {
+                state
+                    .skill_versions
+                    .remove(&(skill_id.to_string(), version));
             }
         }
 
@@ -105,6 +124,12 @@ impl SkillMetadataStore for InMemorySkillStore {
     async fn put_skill_version(&self, record: SkillVersionRecord) -> SkillsStoreResult<()> {
         let key = (record.skill_id.clone(), record.version.clone());
         let mut state = self.state.write();
+        if !state.skills.contains_key(&record.skill_id) {
+            return Err(crate::storage::SkillsStoreError::InvalidData(format!(
+                "skill_id '{}' must exist before inserting a version",
+                record.skill_id
+            )));
+        }
         state
             .skill_versions_by_skill
             .entry(record.skill_id.clone())

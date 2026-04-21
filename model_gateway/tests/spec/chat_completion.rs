@@ -204,6 +204,7 @@ fn test_stream_options_requires_stream_enabled() {
         stream: false,
         stream_options: Some(StreamOptions {
             include_usage: Some(true),
+            ..StreamOptions::default()
         }),
         ..Default::default()
     };
@@ -231,6 +232,7 @@ fn test_stream_options_valid_when_stream_enabled() {
         stream: true,
         stream_options: Some(StreamOptions {
             include_usage: Some(true),
+            ..StreamOptions::default()
         }),
         ..Default::default()
     };

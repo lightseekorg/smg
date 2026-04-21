@@ -218,7 +218,7 @@ fn cached_store_rejects_zero_sized_cache_config() -> Result<()> {
 }
 
 #[tokio::test]
-async fn cached_store_keeps_oversized_latest_blob_readable() -> Result<()> {
+async fn cached_store_skips_oversized_blobs() -> Result<()> {
     let blob_root = TempDir::new()?;
     let cache_root = TempDir::new()?;
     let inner = Arc::new(CountingBlobStore {
@@ -244,7 +244,7 @@ async fn cached_store_keeps_oversized_latest_blob_readable() -> Result<()> {
 
     assert_eq!(first.len(), payload.len());
     assert_eq!(second.len(), payload.len());
-    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -304,6 +304,87 @@ async fn cached_store_returns_backend_payload_when_cache_population_fails() -> R
     let body = read_all(store.get(&key).await?).await?;
 
     assert_eq!(body, b"fallback");
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_store_starts_from_an_empty_process_local_directory() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let inner = Arc::new(CountingBlobStore {
+        inner: FilesystemBlobStore::new(blob_root.path())?,
+        get_calls: AtomicUsize::new(0),
+        etag: None,
+    });
+    let key = BlobKey::from("skills/t1/s1/v1/restart.txt");
+
+    inner.put_stream(&key, put_request(b"restart")).await?;
+
+    let first_store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+    assert_eq!(read_all(first_store.get(&key).await?).await?, b"restart");
+    drop(first_store);
+
+    let second_store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+    assert_eq!(read_all(second_store.get(&key).await?).await?, b"restart");
+
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_store_instances_with_shared_root_do_not_clobber_each_other() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let inner = Arc::new(CountingBlobStore {
+        inner: FilesystemBlobStore::new(blob_root.path())?,
+        get_calls: AtomicUsize::new(0),
+        etag: None,
+    });
+    let key = BlobKey::from("skills/t1/s1/v1/shared-root.txt");
+
+    inner.put_stream(&key, put_request(b"shared-root")).await?;
+
+    let first_store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+    assert_eq!(
+        read_all(first_store.get(&key).await?).await?,
+        b"shared-root"
+    );
+
+    let second_store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+    assert_eq!(
+        read_all(second_store.get(&key).await?).await?,
+        b"shared-root"
+    );
+    assert_eq!(
+        read_all(first_store.get(&key).await?).await?,
+        b"shared-root"
+    );
+
     assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
     Ok(())
 }

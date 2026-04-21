@@ -48,8 +48,8 @@ struct LocalBlobCache {
 
 impl LocalBlobCache {
     fn new(config: &BlobCacheConfig) -> Result<Self, BlobStoreInitError> {
-        let cache_dir = PathBuf::from(&config.path);
-        if cache_dir.as_os_str().is_empty() {
+        let cache_root = PathBuf::from(&config.path);
+        if cache_root.as_os_str().is_empty() {
             return Err(BlobStoreInitError::InvalidConfig {
                 message: "blob cache path must not be empty".to_string(),
             });
@@ -59,6 +59,13 @@ impl LocalBlobCache {
                 message: "blob cache max_size_mb must be greater than zero".to_string(),
             });
         }
+        std::fs::create_dir_all(&cache_root).map_err(|error| BlobStoreInitError::Io {
+            path: cache_root.display().to_string(),
+            message: error.to_string(),
+        })?;
+        // Keep cache state process-local without deleting the configured root.
+        // Each instance gets its own empty subdirectory under that root.
+        let cache_dir = cache_root.join(format!("instance-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&cache_dir).map_err(|error| BlobStoreInitError::Io {
             path: cache_dir.display().to_string(),
             message: error.to_string(),
@@ -109,6 +116,10 @@ impl LocalBlobCache {
         key: &BlobKey,
         response: GetBlobResponse,
     ) -> Result<GetBlobResponse, BlobStoreError> {
+        if response.metadata.size_bytes > self.max_size_bytes {
+            return Ok(response);
+        }
+
         let cache_key = cache_key_for(key);
         let cache_path = cache_path_for(&self.cache_dir, &cache_key);
         let temp_path = cache_path.with_extension(format!("{}.tmp", Uuid::now_v7()));

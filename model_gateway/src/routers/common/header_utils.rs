@@ -331,22 +331,20 @@ pub(crate) struct ShortTermMemoryConfig {
 
 /// Extract memory configuration from the `x-conversation-memory-config` JSON header.
 ///
-/// Returns defaults when the header is absent or unparsable.
+/// Returns `None` when the header is absent or unparsable — callers should skip
+/// memory injection entirely so the common (no-memory) path is zero-cost.
 pub(crate) fn extract_conversation_memory_config(
     headers: Option<&HeaderMap>,
-) -> ConversationMemoryConfig {
-    let Some(value) = headers.and_then(|h| h.get(&HEADER_CONVERSATION_MEMORY_CONFIG)) else {
-        return ConversationMemoryConfig::default();
-    };
+) -> Option<ConversationMemoryConfig> {
+    let value = headers.and_then(|h| h.get(&HEADER_CONVERSATION_MEMORY_CONFIG))?;
 
-    let Ok(raw) = value.to_str() else {
-        debug!("Invalid UTF-8 in x-conversation-memory-config header; using defaults");
-        return ConversationMemoryConfig::default();
+    let raw = match value.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            debug!("Invalid or empty x-conversation-memory-config header; ignoring");
+            return None;
+        }
     };
-
-    if raw.is_empty() {
-        return ConversationMemoryConfig::default();
-    }
 
     match serde_json::from_str::<ConversationMemoryConfig>(raw) {
         Ok(mut cfg) => {
@@ -359,11 +357,11 @@ pub(crate) fn extract_conversation_memory_config(
                 normalize_optional_string(cfg.long_term_memory.extraction_model_id);
             cfg.short_term_memory.condenser_model_id =
                 normalize_optional_string(cfg.short_term_memory.condenser_model_id);
-            cfg
+            Some(cfg)
         }
         Err(e) => {
-            debug!(error = %e, "Failed to parse x-conversation-memory-config header; using defaults");
-            ConversationMemoryConfig::default()
+            debug!(error = %e, "Failed to parse x-conversation-memory-config header; ignoring");
+            None
         }
     }
 }
@@ -533,7 +531,8 @@ mod tests {
                 .unwrap(),
         );
 
-        let cfg = extract_conversation_memory_config(Some(&headers));
+        let cfg = extract_conversation_memory_config(Some(&headers))
+            .expect("valid JSON must parse to Some");
 
         assert!(cfg.long_term_memory.enabled);
         assert_eq!(cfg.long_term_memory.policy.as_deref(), Some("recall_only"));
@@ -554,13 +553,20 @@ mod tests {
     }
 
     #[test]
-    fn extract_conversation_memory_config_with_invalid_json_returns_defaults() {
+    fn extract_conversation_memory_config_with_invalid_json_returns_none() {
         let mut headers = HeaderMap::new();
         headers.insert("x-conversation-memory-config", "not-json".parse().unwrap());
 
-        let cfg = extract_conversation_memory_config(Some(&headers));
+        assert!(extract_conversation_memory_config(Some(&headers)).is_none());
+    }
 
-        assert!(!cfg.long_term_memory.enabled);
-        assert!(!cfg.short_term_memory.enabled);
+    #[test]
+    fn extract_conversation_memory_config_with_absent_header_returns_none() {
+        assert!(extract_conversation_memory_config(Some(&HeaderMap::new())).is_none());
+    }
+
+    #[test]
+    fn extract_conversation_memory_config_with_no_headers_returns_none() {
+        assert!(extract_conversation_memory_config(None).is_none());
     }
 }
