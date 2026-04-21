@@ -47,12 +47,12 @@ pub struct SchemaConfig {
 
     /// Background-mode work queue; one row per queued / in-progress response.
     /// Populated by `BackgroundResponseRepository::enqueue` and drained by
-    /// `claim_next`. Created by migration v5.
+    /// `claim_next`. Created by migration v10.
     pub background_queue: TableConfig,
 
     /// Append-only per-response SSE event log for background-mode streaming
     /// resume. Rows are GC'd after `background_stream_retention`. Created by
-    /// migration v6.
+    /// migration v11.
     pub response_stream_chunks: TableConfig,
 }
 
@@ -276,6 +276,22 @@ impl SchemaConfig {
             }
         }
 
+        // `background_queue` and `response_stream_chunks` are fully managed by
+        // BackgroundResponseRepository; their CREATE TABLE DDLs (v10/v11) emit a
+        // fixed column list rather than iterating over schema config, so
+        // honoring skip_columns here would silently diverge config from DDL.
+        // Reject non-empty skip_columns explicitly — operators who need to
+        // customize these tables should open an issue rather than get a
+        // half-applied config.
+        if matches!(label, "background_queue" | "response_stream_chunks")
+            && !tc.skip_columns.is_empty()
+        {
+            return Err(format!(
+                "{label}.skip_columns: not supported on this table \
+                 (its DDL emits a fixed column list; file an issue if needed)"
+            ));
+        }
+
         for name in &tc.skip_columns {
             validate_identifier(name).map_err(|e| format!("{label}.skip_columns '{name}': {e}"))?;
             if primary_key_columns_for(label).contains(&name.as_str()) {
@@ -318,7 +334,7 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "safety_identifier",
             "model",
             "raw_response",
-            // Background-mode columns (added by migration v4).
+            // Background-mode columns (added by migration v9).
             "status",
             "background",
             "stream_enabled",
@@ -784,6 +800,34 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         assert!(
             err.contains("cannot skip 'memory_id'") && err.contains("primary key"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_skip_columns_on_background_queue() {
+        // `background_queue` DDL emits a fixed column list, so honoring
+        // skip_columns here would silently diverge config from schema.
+        let mut cfg = SchemaConfig::default();
+        cfg.background_queue
+            .skip_columns
+            .insert("worker_id".to_string());
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("background_queue.skip_columns") && err.contains("not supported"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_skip_columns_on_response_stream_chunks() {
+        let mut cfg = SchemaConfig::default();
+        cfg.response_stream_chunks
+            .skip_columns
+            .insert("event_type".to_string());
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("response_stream_chunks.skip_columns") && err.contains("not supported"),
             "unexpected: {err}"
         );
     }

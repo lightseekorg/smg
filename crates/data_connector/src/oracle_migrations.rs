@@ -282,8 +282,11 @@ fn oracle_v9_up(schema: &SchemaConfig) -> Vec<String> {
     let request_json_ty = format!("CLOB CHECK ({request_json_col} IS JSON)");
     let request_context_json_ty = format!("CLOB CHECK ({request_context_json_col} IS JSON)");
 
+    // NOTE: the string default below uses doubled single quotes (`''completed''`)
+    // because the entire DDL is wrapped in EXECUTE IMMEDIATE '…'; a single quote
+    // would terminate the outer literal and produce ORA-00922 at run time.
     let bg_columns: &[(&str, &str)] = &[
-        ("status", "VARCHAR2(32) DEFAULT 'completed' NOT NULL"),
+        ("status", "VARCHAR2(32) DEFAULT ''completed'' NOT NULL"),
         ("background", "NUMBER(1) DEFAULT 0 NOT NULL"),
         ("stream_enabled", "NUMBER(1) DEFAULT 0 NOT NULL"),
         ("cancel_requested", "NUMBER(1) DEFAULT 0 NOT NULL"),
@@ -348,6 +351,12 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
     let worker_id = q.col("worker_id").to_uppercase();
     let created_at = q.col("created_at").to_uppercase();
     let queue_table_name = q.table.to_uppercase();
+    // Indexes live in their own namespace and need owner qualification in
+    // owner-scoped deployments (constraints are auto-qualified to the table's
+    // owner, indexes are not).
+    let claim_idx = oracle_qualified_name(schema, &format!("{queue_table_name}_CLAIM_IDX"));
+    let lease_sweep_idx =
+        oracle_qualified_name(schema, &format!("{queue_table_name}_LEASE_SWEEP_IDX"));
 
     vec![
         // ORA-00955 = "name is already used by an existing object"
@@ -366,14 +375,14 @@ fn oracle_v10_up(schema: &SchemaConfig) -> Vec<String> {
         ),
         // Claim index — plain composite (Oracle has no partial indexes).
         format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {queue_table_name}_CLAIM_IDX \
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {claim_idx} \
                 ON {queue_table} ({priority}, {next_attempt_at}, {created_at})'; \
              EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ),
         // Lease-sweep index — Oracle single-column B-tree indexes exclude
         // NULL rows by default, which matches the design's intent.
         format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {queue_table_name}_LEASE_SWEEP_IDX \
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {lease_sweep_idx} \
                 ON {queue_table} ({lease_expires_at})'; \
              EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ),
@@ -394,6 +403,7 @@ fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
     let data = c.col("data").to_uppercase();
     let created_at = c.col("created_at").to_uppercase();
     let chunks_table_name = c.table.to_uppercase();
+    let cleanup_idx = oracle_qualified_name(schema, &format!("{chunks_table_name}_CLEANUP_IDX"));
 
     vec![
         format!(
@@ -410,7 +420,7 @@ fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
         ),
         // Cleanup index for the retention-window janitor.
         format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {chunks_table_name}_CLEANUP_IDX \
+            "BEGIN EXECUTE IMMEDIATE 'CREATE INDEX {cleanup_idx} \
                 ON {chunks_table} ({created_at})'; \
              EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ),
@@ -489,6 +499,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oracle_v9_up_status_default_has_escaped_quotes() {
+        // The DDL lives inside `EXECUTE IMMEDIATE '...'`; a single quote in the
+        // default would terminate the outer literal. Must be doubled.
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v9_up(&schema);
+        let status_stmt = stmts
+            .iter()
+            .find(|s| s.contains("STATUS"))
+            .expect("STATUS stmt missing");
+        assert!(
+            status_stmt.contains("DEFAULT ''completed''"),
+            "status default must use '' escape for EXECUTE IMMEDIATE: {status_stmt}"
+        );
+        assert!(
+            !status_stmt.contains("DEFAULT 'completed'"),
+            "unescaped single quote would break the outer literal: {status_stmt}"
+        );
+    }
+
     // ── v10: create background_queue ───────────────────────────────────────
 
     #[test]
@@ -513,6 +543,23 @@ mod tests {
         assert!(stmts[2].contains("BACKGROUND_QUEUE_LEASE_SWEEP_IDX"));
     }
 
+    #[test]
+    fn oracle_v10_up_qualifies_indexes_with_owner() {
+        let schema = SchemaConfig {
+            owner: Some("OWNER".to_string()),
+            ..Default::default()
+        };
+        let stmts = oracle_v10_up(&schema);
+        assert!(
+            stmts[1].contains("CREATE INDEX OWNER.BACKGROUND_QUEUE_CLAIM_IDX"),
+            "claim index must be owner-qualified: {stmts:?}"
+        );
+        assert!(
+            stmts[2].contains("CREATE INDEX OWNER.BACKGROUND_QUEUE_LEASE_SWEEP_IDX"),
+            "lease-sweep index must be owner-qualified: {stmts:?}"
+        );
+    }
+
     // ── v11: create response_stream_chunks ─────────────────────────────────
 
     #[test]
@@ -527,6 +574,19 @@ mod tests {
         );
         assert!(stmts[0].contains("ON DELETE CASCADE"));
         assert!(stmts[1].contains("RESPONSE_STREAM_CHUNKS_CLEANUP_IDX"));
+    }
+
+    #[test]
+    fn oracle_v11_up_qualifies_index_with_owner() {
+        let schema = SchemaConfig {
+            owner: Some("OWNER".to_string()),
+            ..Default::default()
+        };
+        let stmts = oracle_v11_up(&schema);
+        assert!(
+            stmts[1].contains("CREATE INDEX OWNER.RESPONSE_STREAM_CHUNKS_CLEANUP_IDX"),
+            "cleanup index must be owner-qualified: {stmts:?}"
+        );
     }
 
     #[test]

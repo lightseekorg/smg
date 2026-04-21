@@ -381,9 +381,12 @@ pub trait BackgroundResponseRepository: Send + Sync {
         lease: Duration,
     ) -> BackgroundRepositoryResult<()>;
 
-    /// Request cancellation. Behavior depends on current state:
-    /// queued → cancelled immediately; in-progress → `cancel_requested=true`;
-    /// terminal → no-op with the stored response returned unchanged.
+    /// Request cancellation. The returned [`StoredCancelResult`] reflects
+    /// the state the repository observed:
+    /// queued → [`StoredCancelResult::QueuedCancelled`];
+    /// in-progress → [`StoredCancelResult::CancelRequested`];
+    /// terminal → [`StoredCancelResult::AlreadyTerminal`];
+    /// missing → [`StoredCancelResult::NotFound`].
     async fn request_cancel(
         &self,
         response_id: &ResponseId,
