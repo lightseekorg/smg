@@ -234,10 +234,16 @@ pub struct JsonSchemaFormat {
 // Streaming
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct StreamOptions {
+    /// Chat Completions / Completions: include usage block at end of stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_usage: Option<bool>,
+
+    /// Responses API: add random chars on `obfuscation` field of delta events
+    /// to normalize payload sizes. Defaults to `true` upstream when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_obfuscation: Option<bool>,
 }
 
 #[serde_with::skip_serializing_none]
@@ -715,6 +721,67 @@ pub enum Detail {
     High,
     #[default]
     Auto,
+}
+
+// ============================================================================
+// Responses API: prompt-cache retention & context management
+// ============================================================================
+
+/// Retention policy for prompt-cache entries on the Responses API.
+///
+/// Spec: `prompt_cache_retention: "in-memory" | "24h"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum PromptCacheRetention {
+    #[serde(rename = "in-memory")]
+    InMemory,
+    #[serde(rename = "24h")]
+    Duration24h,
+}
+
+/// A single entry in the Responses API `context_management` array.
+///
+/// Spec: each entry has `type` (currently only `"compaction"`) and an optional
+/// `compact_threshold` token count.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ContextManagementEntry {
+    #[serde(rename = "type")]
+    pub r#type: ContextManagementType,
+    pub compact_threshold: Option<u32>,
+}
+
+/// Type tag for [`ContextManagementEntry`]. Currently only `compaction` is
+/// defined by the spec; the enum is kept small so unknown values serde-fail
+/// (consistent with P5's fail-fast direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextManagementType {
+    Compaction,
+}
+
+// ============================================================================
+// Responses API: conversation reference
+// ============================================================================
+
+/// Reference to a conversation the response belongs to.
+///
+/// Spec: `conversation: string | { id: string }`. Variant order matters for
+/// `#[serde(untagged)]`: a bare JSON string succeeds as `Id`; an object falls
+/// through to `Object`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ConversationRef {
+    Id(String),
+    Object { id: String },
+}
+
+impl ConversationRef {
+    /// Return the underlying conversation id regardless of the wire shape.
+    pub fn as_id(&self) -> &str {
+        match self {
+            Self::Id(id) | Self::Object { id } => id.as_str(),
+        }
+    }
 }
 
 #[cfg(test)]

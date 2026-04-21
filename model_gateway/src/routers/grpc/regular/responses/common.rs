@@ -406,6 +406,16 @@ pub(super) fn build_next_request(
         frequency_penalty: current_request.frequency_penalty,
         presence_penalty: current_request.presence_penalty,
         stop: current_request.stop,
+        // Responses API top-level fields (P2): propagate per-request knobs so
+        // multi-turn tool-loop continuations keep the same prompt template,
+        // cache key, safety identifier, streaming options, and context-
+        // management config as the original request.
+        prompt: current_request.prompt,
+        prompt_cache_key: current_request.prompt_cache_key,
+        prompt_cache_retention: current_request.prompt_cache_retention,
+        safety_identifier: current_request.safety_identifier,
+        stream_options: current_request.stream_options,
+        context_management: current_request.context_management,
         top_k: current_request.top_k,
         min_p: current_request.min_p,
         repetition_penalty: current_request.repetition_penalty,

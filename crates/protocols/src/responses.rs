@@ -9,8 +9,9 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
-        PromptTokenUsageInfo, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
+        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, Function,
+        GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo, ResponsePrompt,
+        StreamOptions, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
@@ -931,6 +932,38 @@ pub struct ResponsesRequest {
     #[validate(custom(function = "validate_stop"))]
     pub stop: Option<StringOrArray>,
 
+    /// Reference to a prompt template and its variables.
+    /// Spec: body param `prompt` (ResponsePrompt).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<ResponsePrompt>,
+
+    /// Stable cache key used by upstream to share prompt-prefix caches across
+    /// requests. Spec: body param `prompt_cache_key` (replaces `user`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+
+    /// Retention policy for prompt-cache entries.
+    /// Spec: body param `prompt_cache_retention` (`"in-memory"` | `"24h"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+
+    /// Stable user identifier for policy/abuse detection (max 64 chars on the
+    /// spec, but we do not enforce length here — routers may pass through).
+    /// Spec: body param `safety_identifier` (replaces `user` on request side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_identifier: Option<String>,
+
+    /// Streaming-only options. Spec: body param `stream_options`.
+    /// On the Responses API the only documented field is `include_obfuscation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+
+    /// Per-request context-management configuration.
+    /// Spec: body param `context_management` — array of entries describing how
+    /// the upstream should compact context for this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Vec<ContextManagementEntry>>,
+
     /// Top-k sampling parameter (SGLang extension)
     #[serde(default = "default_top_k")]
     #[validate(custom(function = "validate_top_k_value"))]
@@ -985,6 +1018,12 @@ impl Default for ResponsesRequest {
             frequency_penalty: None,
             presence_penalty: None,
             stop: None,
+            prompt: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            safety_identifier: None,
+            stream_options: None,
+            context_management: None,
             top_k: default_top_k(),
             min_p: 0.0,
             repetition_penalty: default_repetition_penalty(),
@@ -1965,5 +2004,142 @@ mod tests {
 
         let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
         assert_eq!(serialized, payload);
+    }
+
+    // ------------------------------------------------------------------
+    // P2: new top-level ResponsesRequest fields
+    // ------------------------------------------------------------------
+
+    /// Acceptance: the six new top-level fields deserialize and re-serialize
+    /// without loss (`prompt`, `prompt_cache_key`, `prompt_cache_retention`,
+    /// `safety_identifier`, `stream_options`, `context_management`).
+    #[test]
+    fn test_responses_request_new_top_level_fields_round_trip() {
+        let payload = json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "prompt": {
+                "id": "pmpt_abc",
+                "variables": {
+                    "name": "ada",
+                    "picture": {
+                        "type": "input_image",
+                        "image_url": "https://example.com/pic.png",
+                        "detail": "high"
+                    }
+                },
+                "version": "1"
+            },
+            "prompt_cache_key": "pck-123",
+            "prompt_cache_retention": "24h",
+            "safety_identifier": "sid-123",
+            "stream_options": { "include_obfuscation": false },
+            "context_management": [{
+                "type": "compaction",
+                "compact_threshold": 4096
+            }]
+        });
+
+        let request: ResponsesRequest =
+            serde_json::from_value(payload.clone()).expect("request should deserialize");
+
+        assert!(request.prompt.is_some());
+        assert_eq!(
+            request.prompt.as_ref().map(|p| p.id.as_str()),
+            Some("pmpt_abc")
+        );
+        assert_eq!(
+            request.prompt.as_ref().and_then(|p| p.version.as_deref()),
+            Some("1")
+        );
+        assert_eq!(request.prompt_cache_key.as_deref(), Some("pck-123"));
+        assert_eq!(
+            request.prompt_cache_retention,
+            Some(PromptCacheRetention::Duration24h)
+        );
+        assert_eq!(request.safety_identifier.as_deref(), Some("sid-123"));
+        assert_eq!(
+            request
+                .stream_options
+                .as_ref()
+                .and_then(|s| s.include_obfuscation),
+            Some(false)
+        );
+        let ctx = request
+            .context_management
+            .as_ref()
+            .expect("context_management must round-trip");
+        assert_eq!(ctx.len(), 1);
+        assert_eq!(
+            ctx[0].r#type,
+            crate::common::ContextManagementType::Compaction
+        );
+        assert_eq!(ctx[0].compact_threshold, Some(4096));
+
+        // Re-serialize and confirm the wire form matches the inputs.
+        let reserialized = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(reserialized["prompt"]["id"], "pmpt_abc");
+        assert_eq!(reserialized["prompt_cache_key"], "pck-123");
+        assert_eq!(reserialized["prompt_cache_retention"], "24h");
+        assert_eq!(reserialized["safety_identifier"], "sid-123");
+        assert_eq!(reserialized["stream_options"]["include_obfuscation"], false);
+        assert_eq!(reserialized["context_management"][0]["type"], "compaction");
+        assert_eq!(
+            reserialized["context_management"][0]["compact_threshold"],
+            4096
+        );
+    }
+
+    /// `prompt_cache_retention` accepts the other spec value and serializes
+    /// back with the hyphenated rename.
+    #[test]
+    fn test_prompt_cache_retention_in_memory_round_trip() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello",
+            "prompt_cache_retention": "in-memory"
+        }))
+        .expect("should deserialize");
+
+        assert_eq!(
+            request.prompt_cache_retention,
+            Some(PromptCacheRetention::InMemory)
+        );
+
+        let reserialized = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(reserialized["prompt_cache_retention"], "in-memory");
+    }
+
+    /// Absent fields must stay absent on the wire (no `"prompt": null` etc.),
+    /// matching every other `Option<_>` field on `ResponsesRequest`.
+    #[test]
+    fn test_responses_request_new_fields_omitted_when_absent() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.4",
+            "input": "hello"
+        }))
+        .expect("should deserialize");
+
+        assert!(request.prompt.is_none());
+        assert!(request.prompt_cache_key.is_none());
+        assert!(request.prompt_cache_retention.is_none());
+        assert!(request.safety_identifier.is_none());
+        assert!(request.stream_options.is_none());
+        assert!(request.context_management.is_none());
+
+        let serialized = serde_json::to_value(&request).expect("should serialize");
+        for key in [
+            "prompt",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "safety_identifier",
+            "stream_options",
+            "context_management",
+        ] {
+            assert!(
+                serialized.get(key).is_none(),
+                "field {key} should be skipped when absent"
+            );
+        }
     }
 }
