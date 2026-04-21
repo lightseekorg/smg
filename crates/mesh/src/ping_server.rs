@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::Result;
-use bytes::Bytes;
 use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -616,7 +615,7 @@ impl Gossip for GossipService {
                                 entries.extend(chunk_value(
                                     key.clone(),
                                     next_generation(),
-                                    Bytes::from(value.clone()),
+                                    value.clone(),
                                     MAX_STREAM_CHUNK_BYTES,
                                 ));
                             }

@@ -110,9 +110,13 @@ pub struct Subscription {
     pub receiver: mpsc::Receiver<SubscriptionEvent>,
 }
 
-/// Function signature for stream drain callbacks. Called exactly once per gossip
-/// round. Returns accumulated entries to be sent in this round's batch.
-pub type StreamDrainFn = Box<dyn Fn() -> Vec<(String, Vec<u8>)> + Send + Sync>;
+/// Function signature for stream drain callbacks. Called exactly once per
+/// gossip round. Returns accumulated entries to be sent in this round's
+/// batch. Values are `Bytes` so fan-out to N peers is an Arc refcount bump
+/// per peer rather than N heap copies — keeps a single ~1.5 GB tenant-delta
+/// round from ballooning to 20 × 1.5 GB when chunked across every peer's
+/// sender task.
+pub type StreamDrainFn = Box<dyn Fn() -> Vec<(String, Bytes)> + Send + Sync>;
 
 /// Handle returned by `register_drain`. Dropping unregisters the drain callback.
 /// Use `drop(handle)` to explicitly unregister.
@@ -223,7 +227,7 @@ impl DrainRegistry {
 
     /// Call all registered drains. Returns accumulated entries.
     /// Called exactly once per gossip round.
-    fn drain_all(&self) -> Vec<(String, Vec<u8>)> {
+    fn drain_all(&self) -> Vec<(String, Bytes)> {
         let mut all_entries = Vec::new();
         for entry in &self.drains {
             let drain_fn = entry.value();
@@ -438,7 +442,9 @@ pub struct RoundBatch {
     pub targeted_entries: Vec<(String, String, Bytes)>,
     /// Entries from registered drain callbacks (e.g., TreeSyncAdapter pending deltas).
     /// Broadcast traffic (td:*) flows through this path, not through a buffer.
-    pub drain_entries: Vec<(String, Vec<u8>)>,
+    /// Values are `Bytes` so per-peer senders clone by Arc-refcount bump when
+    /// fanning out, not by a full heap copy per peer.
+    pub drain_entries: Vec<(String, Bytes)>,
 }
 
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
@@ -874,7 +880,10 @@ mod tests {
         );
 
         let _handle = ns.register_drain(Box::new(|| {
-            vec![("td:from-drain".to_string(), b"drain-data".to_vec())]
+            vec![(
+                "td:from-drain".to_string(),
+                Bytes::from_static(b"drain-data"),
+            )]
         }));
 
         let batch = kv.collect_round_batch();

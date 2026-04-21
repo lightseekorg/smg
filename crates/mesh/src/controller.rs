@@ -9,7 +9,6 @@ use std::{
 };
 
 use anyhow::Result;
-use bytes::Bytes;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::{mpsc, watch, Mutex};
 use tonic::transport::{ClientTlsConfig, Endpoint};
@@ -672,7 +671,7 @@ impl MeshController {
                                     entries.extend(chunk_value(
                                         key.clone(),
                                         next_generation(),
-                                        Bytes::from(value.clone()),
+                                        value.clone(),
                                         MAX_STREAM_CHUNK_BYTES,
                                     ));
                                 }
