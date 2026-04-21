@@ -261,3 +261,130 @@ pub fn encode_stream_batches(entries: &[(String, Bytes)]) -> Vec<StreamBatch> {
         MAX_STREAM_CHUNK_BYTES,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn poll_broadcast_rounds_reports_gap_from_oldest_retained_round() {
+        let dispatch = StreamDispatch::new(2, 2);
+
+        for idx in 1..=3 {
+            dispatch.publish_round(RoundBatch {
+                drain_entries: vec![(format!("td:{idx}"), vec![idx as u8])],
+                targeted_entries: Vec::new(),
+            });
+        }
+
+        let poll = dispatch.poll_broadcast_rounds(1);
+        let gap = poll.gap.expect("gap should be reported");
+        assert_eq!(gap.missing_rounds, 1);
+        assert_eq!(gap.resume_from_broadcast_round_id, 2);
+        assert_eq!(poll.rounds.len(), 2);
+        assert_eq!(poll.rounds[0].broadcast_round_id, 2);
+        assert_eq!(poll.rounds[1].broadcast_round_id, 3);
+    }
+
+    #[tokio::test]
+    async fn publish_round_groups_targeted_entries_once_per_peer() {
+        let dispatch = Arc::new(StreamDispatch::new(2, 2));
+        let mut peer_a = dispatch.subscribe_targeted("peer-A");
+        let mut peer_b = dispatch.subscribe_targeted("peer-B");
+
+        dispatch.publish_round(RoundBatch {
+            drain_entries: Vec::new(),
+            targeted_entries: vec![
+                (
+                    "peer-A".to_string(),
+                    "tree:req:a1".to_string(),
+                    Bytes::from("a1"),
+                ),
+                (
+                    "peer-A".to_string(),
+                    "tree:req:a2".to_string(),
+                    Bytes::from("a2"),
+                ),
+                (
+                    "peer-B".to_string(),
+                    "tree:req:b1".to_string(),
+                    Bytes::from("b1"),
+                ),
+            ],
+        });
+
+        let round_a = tokio::time::timeout(Duration::from_millis(100), peer_a.receiver.recv())
+            .await
+            .expect("peer A timeout")
+            .expect("peer A closed");
+        assert_eq!(round_a.entries.len(), 2);
+        assert_eq!(round_a.entries[0].0, "tree:req:a1");
+        assert_eq!(round_a.entries[1].0, "tree:req:a2");
+
+        let round_b = tokio::time::timeout(Duration::from_millis(100), peer_b.receiver.recv())
+            .await
+            .expect("peer B timeout")
+            .expect("peer B closed");
+        assert_eq!(round_b.entries.len(), 1);
+        assert_eq!(round_b.entries[0].0, "tree:req:b1");
+    }
+
+    #[tokio::test]
+    async fn dropping_older_subscription_does_not_unregister_newer_peer_queue() {
+        let dispatch = Arc::new(StreamDispatch::new(2, 2));
+        let stale = dispatch.subscribe_targeted("peer-A");
+        let mut active = dispatch.subscribe_targeted("peer-A");
+        drop(stale);
+
+        dispatch.publish_round(RoundBatch {
+            drain_entries: Vec::new(),
+            targeted_entries: vec![(
+                "peer-A".to_string(),
+                "tree:req:a1".to_string(),
+                Bytes::from("a1"),
+            )],
+        });
+
+        let round = tokio::time::timeout(Duration::from_millis(100), active.receiver.recv())
+            .await
+            .expect("active timeout")
+            .expect("active closed");
+        assert_eq!(round.entries.len(), 1);
+        assert_eq!(round.entries[0].0, "tree:req:a1");
+    }
+
+    #[tokio::test]
+    async fn targeted_rounds_drop_when_peer_queue_is_full() {
+        let dispatch = Arc::new(StreamDispatch::new(2, 1));
+        let mut peer = dispatch.subscribe_targeted("peer-A");
+
+        dispatch.publish_round(RoundBatch {
+            drain_entries: Vec::new(),
+            targeted_entries: vec![(
+                "peer-A".to_string(),
+                "tree:req:first".to_string(),
+                Bytes::from("first"),
+            )],
+        });
+        dispatch.publish_round(RoundBatch {
+            drain_entries: Vec::new(),
+            targeted_entries: vec![(
+                "peer-A".to_string(),
+                "tree:req:second".to_string(),
+                Bytes::from("second"),
+            )],
+        });
+
+        let first = tokio::time::timeout(Duration::from_millis(100), peer.receiver.recv())
+            .await
+            .expect("first timeout")
+            .expect("first closed");
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(first.entries[0].0, "tree:req:first");
+
+        let second = tokio::time::timeout(Duration::from_millis(100), peer.receiver.recv()).await;
+        assert!(second.is_err(), "second round should have been dropped");
+    }
+}
