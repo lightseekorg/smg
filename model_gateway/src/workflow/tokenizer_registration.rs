@@ -235,16 +235,10 @@ fn load_tokenizer_from_bundle(
     .map_err(|e| format!("bundle extraction/load failed: {e}"))
 }
 
-/// Best-effort read of `config.json` + `preprocessor_config.json` from an
-/// extracted tokenizer bundle directory.
-///
-/// Returns `None` only when `config.json` is missing or unparsable — that
-/// file is needed to identify the model type and drive multimodal spec
-/// lookup. A missing or unparsable `preprocessor_config.json` is
-/// non-fatal: every image processor in `llm_multimodal` falls back to
-/// its own model-specific defaults (CLIP mean/std, canonical patch/tile
-/// sizes, etc.) via `.unwrap_or(...)`, so `PreProcessorConfig::default()`
-/// produces correct tensors for the model the processor was written for.
+/// Best-effort read of `config.json` + `preprocessor_config.json` from a
+/// tokenizer bundle. Returns `None` only if `config.json` is missing or
+/// unparsable; `preprocessor_config.json` is optional because each image
+/// processor supplies its own model-specific defaults.
 fn try_load_multimodal_config(tokenizer_dir: &std::path::Path) -> Option<MultimodalModelConfig> {
     let config_path = tokenizer_dir.join("config.json");
     let pp_config_path = tokenizer_dir.join("preprocessor_config.json");
@@ -269,8 +263,6 @@ fn try_load_multimodal_config(tokenizer_dir: &std::path::Path) -> Option<Multimo
         }
     };
 
-    // `preprocessor_config.json` is optional: image processors use
-    // model-specific hard-coded defaults when fields are absent.
     let preprocessor_config = if pp_config_path.exists() {
         match std::fs::read_to_string(&pp_config_path) {
             Ok(pp_str) => match llm_multimodal::PreProcessorConfig::from_json(&pp_str) {
