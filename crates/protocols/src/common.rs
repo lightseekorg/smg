@@ -759,31 +759,6 @@ pub enum ContextManagementType {
     Compaction,
 }
 
-// ============================================================================
-// Responses API: conversation reference
-// ============================================================================
-
-/// Reference to a conversation the response belongs to.
-///
-/// Spec: `conversation: string | { id: string }`. Variant order matters for
-/// `#[serde(untagged)]`: a bare JSON string succeeds as `Id`; an object falls
-/// through to `Object`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum ConversationRef {
-    Id(String),
-    Object { id: String },
-}
-
-impl ConversationRef {
-    /// Return the underlying conversation id regardless of the wire shape.
-    pub fn as_id(&self) -> &str {
-        match self {
-            Self::Id(id) | Self::Object { id } => id.as_str(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
