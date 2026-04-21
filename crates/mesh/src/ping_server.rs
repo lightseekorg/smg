@@ -748,11 +748,29 @@ impl Gossip for GossipService {
                         peer_id.clone_from(&msg.peer_id);
                         // Publish the learned remote peer id once it's known
                         // so the server-side sender task can start emitting
-                        // targeted_entries addressed to this peer. Only write
-                        // when unset to avoid redundant lock contention and
-                        // to ignore spurious empty peer_id fields.
-                        if !msg.peer_id.is_empty() && learned_peer_inbound.read().is_none() {
-                            *learned_peer_inbound.write() = Some(msg.peer_id.clone());
+                        // targeted_entries addressed to this peer. Reject
+                        // mid-stream changes: the stream's remote identity
+                        // is fixed for the connection, so a different
+                        // peer_id on a subsequent message is either a bug
+                        // or a peer trying to claim another node's
+                        // targeted entries. Close the stream and let the
+                        // client reconnect. Pre-mTLS-binding defence;
+                        // mTLS-derived identity is the authoritative
+                        // long-term fix.
+                        if !msg.peer_id.is_empty() {
+                            let mut learned = learned_peer_inbound.write();
+                            match learned.as_ref() {
+                                None => *learned = Some(msg.peer_id.clone()),
+                                Some(existing) if existing == &msg.peer_id => {}
+                                Some(existing) => {
+                                    log::warn!(
+                                        expected_peer_id = %existing,
+                                        received_peer_id = %msg.peer_id,
+                                        "peer_id changed mid-stream; closing sync_stream"
+                                    );
+                                    break;
+                                }
+                            }
                         }
 
                         match msg.message_type() {
