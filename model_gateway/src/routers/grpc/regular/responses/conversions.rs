@@ -9,9 +9,7 @@
 
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
-    common::{
-        FunctionCallResponse, JsonSchemaFormat, ResponseFormat, StreamOptions, ToolCall, UsageInfo,
-    },
+    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall, UsageInfo},
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
         ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
@@ -184,11 +182,15 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         temperature: req.temperature,
         max_completion_tokens: req.max_output_tokens,
         stream: is_streaming,
+        // Preserve caller-provided stream_options (e.g. `include_obfuscation: false`
+        // on the Responses API) and only default `include_usage` when the caller
+        // did not set it. Non-streaming requests intentionally drop stream_options.
         stream_options: if is_streaming {
-            Some(StreamOptions {
-                include_usage: Some(true),
-                ..StreamOptions::default()
-            })
+            let mut opts = req.stream_options.clone().unwrap_or_default();
+            if opts.include_usage.is_none() {
+                opts.include_usage = Some(true);
+            }
+            Some(opts)
         } else {
             None
         },
@@ -373,6 +375,8 @@ pub(crate) fn chat_to_responses(
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::common::StreamOptions;
+
     use super::*;
 
     #[test]
@@ -433,5 +437,67 @@ mod tests {
         // Empty text should still create a user message, so this should succeed
         let result = responses_to_chat(&req);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_stream_options_include_obfuscation_roundtrip() {
+        // Regression: ensure caller-provided stream_options (e.g. `include_obfuscation`)
+        // are preserved through the Responses → Chat conversion when streaming.
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("hi".to_string()),
+            stream: Some(true),
+            stream_options: Some(StreamOptions {
+                include_usage: None,
+                include_obfuscation: Some(false),
+            }),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert!(chat_req.stream);
+        let opts = chat_req
+            .stream_options
+            .expect("stream_options populated when streaming");
+        // Caller-provided value is preserved verbatim.
+        assert_eq!(opts.include_obfuscation, Some(false));
+        // include_usage defaults to true when absent so downstream consumers
+        // still emit the usage block at end-of-stream.
+        assert_eq!(opts.include_usage, Some(true));
+    }
+
+    #[test]
+    fn test_stream_options_caller_include_usage_preserved() {
+        // Caller-set `include_usage` must not be clobbered by the conversion layer.
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("hi".to_string()),
+            stream: Some(true),
+            stream_options: Some(StreamOptions {
+                include_usage: Some(false),
+                include_obfuscation: Some(true),
+            }),
+            ..Default::default()
+        };
+
+        let opts = responses_to_chat(&req).unwrap().stream_options.unwrap();
+        assert_eq!(opts.include_usage, Some(false));
+        assert_eq!(opts.include_obfuscation, Some(true));
+    }
+
+    #[test]
+    fn test_stream_options_non_streaming_dropped() {
+        // stream=false must produce None stream_options even if caller set it.
+        let req = ResponsesRequest {
+            input: ResponseInput::Text("hi".to_string()),
+            stream: Some(false),
+            stream_options: Some(StreamOptions {
+                include_usage: Some(true),
+                include_obfuscation: Some(false),
+            }),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert!(!chat_req.stream);
+        assert!(chat_req.stream_options.is_none());
     }
 }
