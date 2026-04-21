@@ -389,7 +389,10 @@ async fn fetch_tokenizer_from_worker(
                 }
                 return Ok(tokenizer);
             }
-            Err(e) => failures.push(e),
+            Err(e) => failures.push(format!(
+                "worker {} (runtime: {runtime}) bundle extraction/load failed: {e}",
+                worker.url(),
+            )),
         };
     }
 
