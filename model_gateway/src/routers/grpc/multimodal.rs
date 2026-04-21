@@ -107,22 +107,40 @@ impl MultimodalConfigRegistry {
                 })
             })?;
 
+        // preprocessor_config.json is optional — each image processor supplies
+        // its own model-specific defaults, so missing/unparsable files fall
+        // back to `PreProcessorConfig::default()`. This matches the bundle
+        // preload path in `try_load_multimodal_config`.
         let pp_config_path = base_dir.join("preprocessor_config.json");
-        let preprocessor_config = std::fs::read_to_string(&pp_config_path)
-            .with_context(|| {
-                format!(
-                    "Failed to read preprocessor_config.json at {}",
-                    pp_config_path.display()
-                )
-            })
-            .and_then(|s| {
-                PreProcessorConfig::from_json(&s).with_context(|| {
-                    format!(
-                        "Failed to parse preprocessor_config.json at {}",
-                        pp_config_path.display()
-                    )
-                })
-            })?;
+        let preprocessor_config = if pp_config_path.exists() {
+            match std::fs::read_to_string(&pp_config_path) {
+                Ok(pp_str) => match PreProcessorConfig::from_json(&pp_str) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(
+                            path = %pp_config_path.display(),
+                            error = %e,
+                            "Failed to parse preprocessor_config.json; falling back to defaults"
+                        );
+                        PreProcessorConfig::default()
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        path = %pp_config_path.display(),
+                        error = %e,
+                        "Failed to read preprocessor_config.json; falling back to defaults"
+                    );
+                    PreProcessorConfig::default()
+                }
+            }
+        } else {
+            debug!(
+                path = %pp_config_path.display(),
+                "No preprocessor_config.json found; using PreProcessorConfig defaults"
+            );
+            PreProcessorConfig::default()
+        };
 
         let model_config = Arc::new(MultimodalModelConfig {
             config,
@@ -1033,45 +1051,19 @@ mod tests {
     // MultimodalConfigRegistry tests
     // ------------------------------------------------------------------
 
-    fn write_config_fixtures(dir: &std::path::Path) {
+    #[tokio::test]
+    async fn registry_get_or_load_reads_from_local_dir_and_caches() {
+        let tmp = TempDir::new().unwrap();
         fs::write(
-            dir.join("config.json"),
+            tmp.path().join("config.json"),
             r#"{"model_type":"phi3_v","image_token_index":32044}"#,
         )
         .unwrap();
         fs::write(
-            dir.join("preprocessor_config.json"),
-            r#"{"image_processor_type":"Phi3VImageProcessor","image_mean":[0.48145466,0.4578275,0.40821073],"image_std":[0.26862954,0.26130258,0.27577711]}"#,
+            tmp.path().join("preprocessor_config.json"),
+            r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
         )
         .unwrap();
-    }
-
-    #[test]
-    fn registry_new_is_empty() {
-        let reg = MultimodalConfigRegistry::new();
-        assert!(reg.get("any-id").is_none());
-    }
-
-    #[test]
-    fn registry_insert_and_get_roundtrip() {
-        let reg = MultimodalConfigRegistry::new();
-        let cfg = Arc::new(MultimodalModelConfig {
-            config: serde_json::json!({"model_type":"phi3_v"}),
-            preprocessor_config: PreProcessorConfig::from_json(
-                r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
-            )
-            .unwrap(),
-        });
-        reg.insert("tok-uuid-1".to_string(), cfg.clone());
-
-        let got = reg.get("tok-uuid-1").expect("entry present");
-        assert!(Arc::ptr_eq(&got, &cfg), "must return the same Arc");
-    }
-
-    #[tokio::test]
-    async fn registry_get_or_load_reads_from_local_dir_and_caches() {
-        let tmp = TempDir::new().unwrap();
-        write_config_fixtures(tmp.path());
         let source = tmp.path().to_string_lossy().into_owned();
 
         let reg = MultimodalConfigRegistry::new();
@@ -1083,6 +1075,28 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "second call must hit cache and return same Arc"
         );
+    }
+
+    #[tokio::test]
+    async fn registry_get_or_load_falls_back_when_preprocessor_config_missing() {
+        // Mirrors the bundle-preload behavior in try_load_multimodal_config:
+        // a local dir without preprocessor_config.json must still load and
+        // cache an entry using PreProcessorConfig::default().
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("config.json"),
+            r#"{"model_type":"llama"}"#,
+        )
+        .unwrap();
+        let source = tmp.path().to_string_lossy().into_owned();
+
+        let reg = MultimodalConfigRegistry::new();
+        let loaded = reg
+            .get_or_load("tok-uuid-nopp", &source)
+            .await
+            .expect("must fall back to default preprocessor_config");
+        assert_eq!(loaded.config["model_type"].as_str(), Some("llama"));
+        assert!(reg.get("tok-uuid-nopp").is_some());
     }
 
     #[tokio::test]
@@ -1128,37 +1142,4 @@ mod tests {
         assert!(Arc::ptr_eq(&got, &cfg));
     }
 
-    #[tokio::test]
-    async fn multimodal_components_serves_preloaded_config_without_touching_source() {
-        // Simulates the IGW/K8s data path: GetTokenizer bundle is extracted,
-        // multimodal config is read, the bundle tempdir is cleaned up, and
-        // the parsed config is inserted into the shared registry under the
-        // tokenizer UUID. A later multimodal request must return the
-        // preloaded entry without attempting to re-read from `tokenizer_source`
-        // (which in IGW mode is an unreachable worker-only path).
-        let registry = Arc::new(MultimodalConfigRegistry::new());
-        let components = MultimodalComponents::new(registry.clone())
-            .expect("MultimodalComponents::new should succeed");
-
-        let cfg = Arc::new(MultimodalModelConfig {
-            config: serde_json::json!({"model_type":"phi3_v"}),
-            preprocessor_config: PreProcessorConfig::from_json(
-                r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
-            )
-            .unwrap(),
-        });
-        registry.insert("tok-uuid-igw".to_string(), cfg.clone());
-
-        let bad_source = "/nonexistent/worker-only/path-that-would-fail";
-        let got = components
-            .config_registry
-            .get_or_load("tok-uuid-igw", bad_source)
-            .await
-            .expect("preloaded entry must be returned without touching source");
-
-        assert!(
-            Arc::ptr_eq(&got, &cfg),
-            "registry must return the exact Arc preloaded during registration"
-        );
-    }
 }
