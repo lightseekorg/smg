@@ -1,9 +1,6 @@
-use std::{
-    io::Cursor,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use anyhow::Result;
@@ -13,22 +10,11 @@ use smg_blob_storage::{
     GetBlobResponse, ListBlobsPage, PutBlobRequest,
 };
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt;
 
-fn put_request(bytes: &[u8]) -> PutBlobRequest {
-    PutBlobRequest {
-        reader: Box::pin(Cursor::new(bytes.to_vec())),
-        content_length: bytes.len() as u64,
-        content_type: None,
-    }
-}
+#[path = "../../../test_support/blob_test_utils.rs"]
+mod blob_test_utils;
 
-async fn read_all(response: GetBlobResponse) -> Result<Vec<u8>> {
-    let mut reader = response.reader;
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await?;
-    Ok(buffer)
-}
+use blob_test_utils::{put_request, read_all};
 
 #[tokio::test]
 async fn filesystem_store_round_trips_and_lists_prefixes() -> Result<()> {
@@ -61,6 +47,52 @@ async fn filesystem_store_round_trips_and_lists_prefixes() -> Result<()> {
 
     store.delete(&key).await?;
     assert!(store.head(&key).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn filesystem_store_returns_empty_page_for_stale_cursor() -> Result<()> {
+    let root = TempDir::new()?;
+    let store = FilesystemBlobStore::new(root.path())?;
+
+    store
+        .put_stream(&BlobKey::from("skills/t1/a.txt"), put_request(b"a"))
+        .await?;
+    store
+        .put_stream(&BlobKey::from("skills/t1/b.txt"), put_request(b"b"))
+        .await?;
+
+    let page = store
+        .list_prefix(
+            &BlobPrefix::from("skills/t1"),
+            Some("skills/t1/z.txt".to_string()),
+            10,
+        )
+        .await?;
+
+    assert!(page.blobs.is_empty());
+    assert!(page.next_cursor.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn filesystem_store_preserves_trailing_slash_prefix_boundaries() -> Result<()> {
+    let root = TempDir::new()?;
+    let store = FilesystemBlobStore::new(root.path())?;
+
+    store
+        .put_stream(&BlobKey::from("skills/t1/file.txt"), put_request(b"one"))
+        .await?;
+    store
+        .put_stream(&BlobKey::from("skills/t10/file.txt"), put_request(b"ten"))
+        .await?;
+
+    let page = store
+        .list_prefix(&BlobPrefix::from("skills/t1/"), None, 10)
+        .await?;
+
+    assert_eq!(page.blobs.len(), 1);
+    assert_eq!(page.blobs[0].key, BlobKey::from("skills/t1/file.txt"));
     Ok(())
 }
 
@@ -243,5 +275,35 @@ async fn cached_store_hits_when_backend_returns_etag_metadata() -> Result<()> {
     assert_eq!(first, b"etagged");
     assert_eq!(second, b"etagged");
     assert_eq!(inner.get_calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_store_returns_backend_payload_when_cache_population_fails() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let inner = Arc::new(CountingBlobStore {
+        inner: FilesystemBlobStore::new(blob_root.path())?,
+        get_calls: AtomicUsize::new(0),
+        etag: None,
+    });
+    let key = BlobKey::from("skills/t1/s1/v1/fallback.txt");
+
+    inner.put_stream(&key, put_request(b"fallback")).await?;
+
+    let store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+
+    std::fs::remove_dir_all(cache_root.path())?;
+
+    let body = read_all(store.get(&key).await?).await?;
+
+    assert_eq!(body, b"fallback");
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 2);
     Ok(())
 }

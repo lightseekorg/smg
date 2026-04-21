@@ -46,6 +46,9 @@ impl Default for BlobStoreConfig {
 }
 
 /// Local read-cache configuration layered in front of blob reads.
+///
+/// The cache stays disabled by default until the operator opts in with a
+/// positive `max_size_mb`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct BlobCacheConfig {
@@ -69,7 +72,7 @@ impl Default for BlobCacheConfig {
     fn default() -> Self {
         Self {
             path: "/var/smg/cache/skills".to_string(),
-            max_size_mb: 1024,
+            max_size_mb: 0,
         }
     }
 }

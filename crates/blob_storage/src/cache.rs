@@ -282,17 +282,21 @@ impl BlobStore for CachedBlobStore {
         key: &BlobKey,
         request: PutBlobRequest,
     ) -> Result<BlobMetadata, BlobStoreError> {
-        self.cache.invalidate(key).await?;
+        let _ = self.cache.invalidate(key).await;
         self.inner.put_stream(key, request).await
     }
 
     async fn get(&self, key: &BlobKey) -> Result<GetBlobResponse, BlobStoreError> {
-        if let Some(response) = self.cache.get(key).await? {
-            return Ok(response);
+        match self.cache.get(key).await {
+            Ok(Some(response)) => return Ok(response),
+            Ok(None) | Err(_) => {}
         }
 
         let response = self.inner.get(key).await?;
-        self.cache.insert(key, response).await
+        match self.cache.insert(key, response).await {
+            Ok(cached) => Ok(cached),
+            Err(_) => self.inner.get(key).await,
+        }
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMetadata>, BlobStoreError> {
@@ -300,7 +304,7 @@ impl BlobStore for CachedBlobStore {
     }
 
     async fn delete(&self, key: &BlobKey) -> Result<(), BlobStoreError> {
-        self.cache.invalidate(key).await?;
+        let _ = self.cache.invalidate(key).await;
         self.inner.delete(key).await
     }
 

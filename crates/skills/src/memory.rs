@@ -85,11 +85,17 @@ impl SkillMetadataStore for InMemorySkillStore {
             return Ok(false);
         }
 
-        if let Some(versions) = state.skill_versions_by_skill.remove(skill_id) {
-            for version in versions {
-                state
-                    .skill_versions
-                    .remove(&(skill_id.to_string(), version));
+        let skill_still_referenced = state
+            .skills
+            .keys()
+            .any(|(_, existing_skill_id)| existing_skill_id == skill_id);
+        if !skill_still_referenced {
+            if let Some(versions) = state.skill_versions_by_skill.remove(skill_id) {
+                for version in versions {
+                    state
+                        .skill_versions
+                        .remove(&(skill_id.to_string(), version));
+                }
             }
         }
 
@@ -203,12 +209,21 @@ impl TenantAliasStore for InMemorySkillStore {
 impl BundleTokenStore for InMemorySkillStore {
     async fn put_bundle_token(&self, claim: BundleTokenClaim) -> SkillsStoreResult<()> {
         let mut state = self.state.write();
+        let token_hash = claim.token_hash.clone();
+        let exec_id = claim.exec_id.clone();
+        if let Some(previous) = state.bundle_tokens.insert(token_hash.clone(), claim) {
+            if let Some(tokens) = state.bundle_tokens_by_exec.get_mut(&previous.exec_id) {
+                tokens.remove(&token_hash);
+                if tokens.is_empty() {
+                    state.bundle_tokens_by_exec.remove(&previous.exec_id);
+                }
+            }
+        }
         state
             .bundle_tokens_by_exec
-            .entry(claim.exec_id.clone())
+            .entry(exec_id)
             .or_default()
-            .insert(claim.token_hash.clone());
-        state.bundle_tokens.insert(claim.token_hash.clone(), claim);
+            .insert(token_hash);
         Ok(())
     }
 
@@ -253,14 +268,27 @@ impl ContinuationCookieStore for InMemorySkillStore {
         claim: ContinuationCookieClaim,
     ) -> SkillsStoreResult<()> {
         let mut state = self.state.write();
+        let cookie_hash = claim.cookie_hash.clone();
+        let exec_id = claim.exec_id.clone();
+        if let Some(previous) = state
+            .continuation_cookies
+            .insert(cookie_hash.clone(), claim)
+        {
+            if let Some(cookies) = state
+                .continuation_cookies_by_exec
+                .get_mut(&previous.exec_id)
+            {
+                cookies.remove(&cookie_hash);
+                if cookies.is_empty() {
+                    state.continuation_cookies_by_exec.remove(&previous.exec_id);
+                }
+            }
+        }
         state
             .continuation_cookies_by_exec
-            .entry(claim.exec_id.clone())
+            .entry(exec_id)
             .or_default()
-            .insert(claim.cookie_hash.clone());
-        state
-            .continuation_cookies
-            .insert(claim.cookie_hash.clone(), claim);
+            .insert(cookie_hash);
         Ok(())
     }
 

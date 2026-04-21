@@ -218,10 +218,18 @@ impl BlobStore for FilesystemBlobStore {
         blob_keys.retain(|key| key.starts_with(&normalized_prefix));
         blob_keys.sort();
 
-        let start_index = cursor
-            .as_ref()
-            .and_then(|cursor_key| blob_keys.iter().position(|key| key > cursor_key))
-            .unwrap_or(0);
+        let start_index = match cursor.as_ref() {
+            Some(cursor_key) => match blob_keys.iter().position(|key| key > cursor_key) {
+                Some(index) => index,
+                None => {
+                    return Ok(ListBlobsPage {
+                        blobs: Vec::new(),
+                        next_cursor: None,
+                    });
+                }
+            },
+            None => 0,
+        };
 
         let end_index =
             start_index.saturating_add(limit.min(blob_keys.len().saturating_sub(start_index)));
@@ -350,12 +358,23 @@ fn validate_blob_key(raw_key: &str) -> Result<(), BlobStoreError> {
 }
 
 fn normalize_prefix(raw_prefix: &str) -> Result<String, BlobStoreError> {
-    let trimmed = raw_prefix.trim_matches('/');
+    let trimmed = raw_prefix.trim_start_matches('/');
     if trimmed.is_empty() {
         return Ok(String::new());
     }
-    validate_blob_key(trimmed)?;
-    Ok(trimmed.to_string())
+
+    let has_trailing_slash = trimmed.ends_with('/');
+    let core = trimmed.trim_end_matches('/');
+    if core.is_empty() {
+        return Ok(String::new());
+    }
+
+    validate_blob_key(core)?;
+    if has_trailing_slash {
+        Ok(format!("{core}/"))
+    } else {
+        Ok(core.to_string())
+    }
 }
 
 fn to_utc(system_time: SystemTime) -> DateTime<Utc> {

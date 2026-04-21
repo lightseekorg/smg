@@ -410,6 +410,7 @@ mod tests {
         let skills = SkillsConfig::default();
         assert_eq!(skills.resolution_mode, SkillsResolutionMode::Auto);
         assert_eq!(skills.max_skills_per_request, 8);
+        assert_eq!(skills.cache.max_size_mb, 0);
     }
 
     #[test]
@@ -436,6 +437,6 @@ mod tests {
             Some("http://executor.internal")
         );
         assert_eq!(parsed.tool_loop.max_steps, 8);
-        assert_eq!(parsed.cache.max_size_mb, 1024);
+        assert_eq!(parsed.cache.max_size_mb, 0);
     }
 }

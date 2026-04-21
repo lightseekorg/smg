@@ -1,32 +1,18 @@
-use std::io::Cursor;
-
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use smg_blob_storage::{
     create_blob_store, BlobCacheConfig, BlobKey, BlobStoreBackend, BlobStoreConfig,
-    GetBlobResponse, PutBlobRequest,
 };
 use smg_skills::{
     BundleTokenClaim, ContinuationCookieClaim, NormalizedSkillBundle, NormalizedSkillFile,
     SkillRecord, SkillService, SkillVersionRecord, TenantAliasRecord,
 };
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt;
 
-fn put_request(bytes: &[u8]) -> PutBlobRequest {
-    PutBlobRequest {
-        reader: Box::pin(Cursor::new(bytes.to_vec())),
-        content_length: bytes.len() as u64,
-        content_type: None,
-    }
-}
+#[path = "../../../test_support/blob_test_utils.rs"]
+mod blob_test_utils;
 
-async fn read_all(response: GetBlobResponse) -> Result<Vec<u8>> {
-    let mut reader = response.reader;
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await?;
-    Ok(buffer)
-}
+use blob_test_utils::{put_request, read_all};
 
 #[tokio::test]
 async fn in_memory_service_supports_metadata_tokens_and_filesystem_blob_reads() -> Result<()> {
@@ -294,6 +280,190 @@ async fn in_memory_service_scopes_listings_to_exact_tenant_and_skill() -> Result
     let skill_1_versions = metadata_store.list_skill_versions("skill-1").await?;
     assert_eq!(skill_1_versions.len(), 1);
     assert_eq!(skill_1_versions[0].skill_id, "skill-1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_memory_service_only_deletes_versions_when_last_tenant_mapping_is_removed() -> Result<()>
+{
+    let blob_root = TempDir::new()?;
+    let blob_store = create_blob_store(
+        &BlobStoreConfig {
+            backend: BlobStoreBackend::Filesystem,
+            path: blob_root.path().display().to_string(),
+            ..BlobStoreConfig::default()
+        },
+        None,
+    )?;
+    let service = SkillService::in_memory(blob_store);
+    let now = Utc::now();
+    let metadata_store = service
+        .metadata_store()
+        .ok_or_else(|| anyhow!("metadata store missing"))?;
+
+    for tenant_id in ["tenant-a", "tenant-b"] {
+        metadata_store
+            .put_skill(SkillRecord {
+                tenant_id: tenant_id.to_string(),
+                skill_id: "shared-skill".to_string(),
+                name: "map".to_string(),
+                short_description: None,
+                description: None,
+                source: "custom".to_string(),
+                has_code_files: false,
+                latest_version: Some("1".to_string()),
+                default_version: Some("1".to_string()),
+                created_at: now,
+                updated_at: now,
+            })
+            .await?;
+    }
+    metadata_store
+        .put_skill_version(SkillVersionRecord {
+            skill_id: "shared-skill".to_string(),
+            version: "1".to_string(),
+            version_number: 1,
+            name: "map".to_string(),
+            short_description: None,
+            description: "map".to_string(),
+            interface: None,
+            dependencies: None,
+            policy: None,
+            deprecated: false,
+            file_manifest: Vec::new(),
+            instruction_token_counts: Default::default(),
+            created_at: now,
+        })
+        .await?;
+
+    assert!(
+        metadata_store
+            .delete_skill("tenant-a", "shared-skill")
+            .await?
+    );
+    assert!(metadata_store
+        .get_skill_version("shared-skill", "1")
+        .await?
+        .is_some());
+
+    assert!(
+        metadata_store
+            .delete_skill("tenant-b", "shared-skill")
+            .await?
+    );
+    assert!(metadata_store
+        .get_skill_version("shared-skill", "1")
+        .await?
+        .is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_memory_service_reindexes_reused_bundle_and_cookie_hashes() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let blob_store = create_blob_store(
+        &BlobStoreConfig {
+            backend: BlobStoreBackend::Filesystem,
+            path: blob_root.path().display().to_string(),
+            ..BlobStoreConfig::default()
+        },
+        None,
+    )?;
+    let service = SkillService::in_memory(blob_store);
+    let now = Utc::now();
+
+    let bundle_token_store = service
+        .bundle_token_store()
+        .ok_or_else(|| anyhow!("bundle token store missing"))?;
+    bundle_token_store
+        .put_bundle_token(BundleTokenClaim {
+            token_hash: "tokhash".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            exec_id: "exec-1".to_string(),
+            skill_id: "skill-1".to_string(),
+            skill_version: "1".to_string(),
+            created_at: now,
+            expires_at: now,
+        })
+        .await?;
+    bundle_token_store
+        .put_bundle_token(BundleTokenClaim {
+            token_hash: "tokhash".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            exec_id: "exec-2".to_string(),
+            skill_id: "skill-1".to_string(),
+            skill_version: "1".to_string(),
+            created_at: now,
+            expires_at: now,
+        })
+        .await?;
+
+    assert_eq!(
+        bundle_token_store
+            .revoke_bundle_tokens_for_exec("exec-1")
+            .await?,
+        0
+    );
+    assert_eq!(
+        bundle_token_store
+            .get_bundle_token("tokhash")
+            .await?
+            .ok_or_else(|| anyhow!("bundle token missing"))?
+            .exec_id,
+        "exec-2"
+    );
+    assert_eq!(
+        bundle_token_store
+            .revoke_bundle_tokens_for_exec("exec-2")
+            .await?,
+        1
+    );
+
+    let continuation_cookie_store = service
+        .continuation_cookie_store()
+        .ok_or_else(|| anyhow!("continuation cookie store missing"))?;
+    continuation_cookie_store
+        .put_continuation_cookie(ContinuationCookieClaim {
+            cookie_hash: "cookiehash".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            exec_id: "exec-3".to_string(),
+            request_id: "req-1".to_string(),
+            created_at: now,
+            expires_at: now,
+        })
+        .await?;
+    continuation_cookie_store
+        .put_continuation_cookie(ContinuationCookieClaim {
+            cookie_hash: "cookiehash".to_string(),
+            tenant_id: "tenant-a".to_string(),
+            exec_id: "exec-4".to_string(),
+            request_id: "req-1".to_string(),
+            created_at: now,
+            expires_at: now,
+        })
+        .await?;
+
+    assert_eq!(
+        continuation_cookie_store
+            .revoke_continuation_cookies_for_exec("exec-3")
+            .await?,
+        0
+    );
+    assert_eq!(
+        continuation_cookie_store
+            .get_continuation_cookie("cookiehash")
+            .await?
+            .ok_or_else(|| anyhow!("continuation cookie missing"))?
+            .exec_id,
+        "exec-4"
+    );
+    assert_eq!(
+        continuation_cookie_store
+            .revoke_continuation_cookies_for_exec("exec-4")
+            .await?,
+        1
+    );
 
     Ok(())
 }
