@@ -315,11 +315,7 @@ fn item_to_new_conversation_item(
 
     let content = if store_whole_item {
         item_value.clone()
-    } else if item_type == "message"
-        && item_value
-            .get("phase")
-            .is_some_and(|v| !v.is_null())
-    {
+    } else if item_type == "message" && item_value.get("phase").is_some_and(|v| !v.is_null()) {
         // Message carries a phase label: wrap the content array alongside
         // `phase` so multi-turn retrieval preserves it (P3). `item_to_json`
         // and the history load paths both recognize this shape.
