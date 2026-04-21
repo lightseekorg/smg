@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use super::pd_types::api_path;
 use crate::{
@@ -638,16 +638,36 @@ impl PDRouter {
         // hits a transport error, the other is cancelled immediately — otherwise
         // the surviving request hangs waiting for a PD bootstrap that will never
         // come (see #831).
+        let send_start = Instant::now();
         let pd_result = tokio::try_join!(prefill_request.send(), decode_request.send());
+        let backend_duration_ms = send_start.elapsed().as_millis() as u64;
 
         events::RequestReceivedEvent {}.emit();
 
         let (prefill_response, decode_response) = match pd_result {
-            Ok((prefill_resp, decode_resp)) => (prefill_resp, decode_resp),
+            Ok((prefill_resp, decode_resp)) => {
+                info!(
+                    target: "smg::upstream",
+                    prefill_url = prefill.url(),
+                    decode_url = decode.url(),
+                    prefill_status = prefill_resp.status().as_u16(),
+                    decode_status = decode_resp.status().as_u16(),
+                    duration_ms = backend_duration_ms,
+                    streaming = context.is_stream,
+                    "PD backend request completed"
+                );
+                (prefill_resp, decode_resp)
+            }
             Err(e) => {
+                warn!(
+                    target: "smg::upstream",
+                    prefill_url = prefill.url(),
+                    decode_url = decode.url(),
+                    duration_ms = backend_duration_ms,
+                    error = %e,
+                    "PD backend request failed"
+                );
                 error!("PD request transport error, both sides aborted: {e}");
-                // Don't record_outcome here — the caller (execute_dual_dispatch)
-                // records outcomes from the response status after we return.
                 return error::bad_gateway(
                     "PD disaggregation request failed",
                     format!("Transport error: {e}"),
@@ -825,6 +845,16 @@ impl PDRouter {
             metrics_labels::CONNECTION_HTTP,
             model,
             decode_policy.name(),
+        );
+
+        info!(
+            target: "smg::routing",
+            model_id = model,
+            prefill_policy = prefill_policy.name(),
+            decode_policy = decode_policy.name(),
+            prefill_worker = prefill.url(),
+            decode_worker = decode.url(),
+            "PD pair selected"
         );
 
         Ok((prefill, decode))

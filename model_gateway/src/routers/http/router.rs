@@ -25,7 +25,7 @@ use reqwest::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
-use tracing::error;
+use tracing::{error, info, warn};
 
 use crate::{
     app_context::AppContext,
@@ -189,6 +189,14 @@ impl Router {
             policy.name(),
         );
 
+        info!(
+            target: "smg::routing",
+            model_id = model_id,
+            policy = policy.name(),
+            worker_url = available[idx].url(),
+            "Worker selected"
+        );
+
         Some(available[idx].clone())
     }
 
@@ -325,6 +333,7 @@ impl Router {
         inject_trace_context_http(&mut headers_with_trace);
         let headers = Some(&headers_with_trace);
 
+        let send_start = Instant::now();
         let response = self
             .send_typed_request(
                 headers,
@@ -335,18 +344,35 @@ impl Router {
                 load_guard,
             )
             .await;
+        let backend_duration_ms = send_start.elapsed().as_millis() as u64;
 
         events::RequestReceivedEvent {}.emit();
 
         let status = response.status();
         worker.record_outcome(status.as_u16());
 
-        // Record worker errors for server errors (5xx)
         if status.is_server_error() {
             Metrics::record_worker_error(
                 metrics_labels::WORKER_REGULAR,
                 metrics_labels::CONNECTION_HTTP,
                 error_type_from_status(status),
+            );
+            warn!(
+                target: "smg::upstream",
+                worker_url = worker.url(),
+                status = status.as_u16(),
+                duration_ms = backend_duration_ms,
+                streaming = is_stream,
+                "Backend request failed"
+            );
+        } else {
+            info!(
+                target: "smg::upstream",
+                worker_url = worker.url(),
+                status = status.as_u16(),
+                duration_ms = backend_duration_ms,
+                streaming = is_stream,
+                "Backend request completed"
             );
         }
 

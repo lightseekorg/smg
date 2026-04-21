@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use super::PipelineStage;
 use crate::{
@@ -173,6 +173,14 @@ impl WorkerSelectionStage {
             policy.name(),
         );
 
+        info!(
+            target: "smg::routing",
+            model_id = model_id,
+            policy = policy.name(),
+            worker_url = selected.url(),
+            "Worker selected"
+        );
+
         Some(selected)
     }
 
@@ -291,6 +299,15 @@ impl WorkerSelectionStage {
             metrics_labels::CONNECTION_GRPC,
             model,
             policy_name,
+        );
+
+        info!(
+            target: "smg::routing",
+            model_id = model,
+            policy = policy_name,
+            prefill_worker = available_prefill[prefill_idx].url(),
+            decode_worker = available_decode[decode_idx].url(),
+            "PD pair selected"
         );
 
         Some((
