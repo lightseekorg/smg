@@ -205,14 +205,18 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
     })
 }
 
-/// Extract text content from ResponseContentPart array
+/// Extract text content from ResponseContentPart array. Non-textual parts
+/// (images, files, refusals) are skipped; the gRPC regular path is
+/// text-only and relies on the multimodal pipeline for media handling.
 fn extract_text_from_content(content: &[ResponseContentPart]) -> String {
     content
         .iter()
         .filter_map(|part| match part {
             ResponseContentPart::InputText { text } => Some(text.as_str()),
             ResponseContentPart::OutputText { text, .. } => Some(text.as_str()),
-            ResponseContentPart::Unknown => None,
+            ResponseContentPart::InputImage { .. }
+            | ResponseContentPart::InputFile { .. }
+            | ResponseContentPart::Refusal { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")

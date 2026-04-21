@@ -525,13 +525,17 @@ impl HarmonyBuilder {
                     _ => Role::User, // Default to user for unknown roles
                 };
 
-                // Extract text from content parts
+                // Extract text from content parts. Non-text parts (images,
+                // files, refusals) are dropped here because the harmony
+                // builder currently only emits text content.
                 let text_parts: Vec<String> = content
                     .iter()
                     .filter_map(|part| match part {
                         ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                         ResponseContentPart::InputText { text } => Some(text.clone()),
-                        ResponseContentPart::Unknown => None,
+                        ResponseContentPart::InputImage { .. }
+                        | ResponseContentPart::InputFile { .. }
+                        | ResponseContentPart::Refusal { .. } => None,
                     })
                     .collect();
 
@@ -677,13 +681,16 @@ impl HarmonyBuilder {
                 let text = match content {
                     StringOrContentParts::String(s) => s.clone(),
                     StringOrContentParts::Array(parts) => {
-                        // Extract text from content parts
+                        // Extract text from content parts. Non-text parts
+                        // (images, files, refusals) are dropped here.
                         parts
                             .iter()
                             .filter_map(|part| match part {
                                 ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                                 ResponseContentPart::InputText { text } => Some(text.clone()),
-                                ResponseContentPart::Unknown => None,
+                                ResponseContentPart::InputImage { .. }
+                                | ResponseContentPart::InputFile { .. }
+                                | ResponseContentPart::Refusal { .. } => None,
                             })
                             .collect::<Vec<_>>()
                             .join("\n")

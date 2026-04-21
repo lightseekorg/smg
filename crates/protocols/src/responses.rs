@@ -9,7 +9,7 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, Function,
+        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, Detail, Function,
         GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo, ResponsePrompt,
         StreamOptions, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
     },
@@ -363,6 +363,53 @@ pub enum ResponseInputOutputItem {
     },
 }
 
+/// Detail level for [`ResponseContentPart::InputFile`]. Spec restricts this
+/// to `"low" | "high"` (defaults to `low`); it is narrower than [`Detail`]
+/// used for images which also admits `auto` / `original`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDetail {
+    Low,
+    High,
+}
+
+/// Typed annotation attached to [`ResponseContentPart::OutputText`]. Matches
+/// the OpenAI Responses API `Annotation` union; a `type` discriminator selects
+/// the variant on the wire.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Annotation {
+    /// `type: "file_citation"` — points at a file previously uploaded.
+    #[serde(rename = "file_citation")]
+    FileCitation {
+        file_id: String,
+        filename: String,
+        index: u32,
+    },
+    /// `type: "url_citation"` — citation back to a URL in a web-search result.
+    #[serde(rename = "url_citation")]
+    UrlCitation {
+        url: String,
+        title: String,
+        start_index: u32,
+        end_index: u32,
+    },
+    /// `type: "container_file_citation"` — citation to a file inside a
+    /// code-interpreter / computer-use container.
+    #[serde(rename = "container_file_citation")]
+    ContainerFileCitation {
+        container_id: String,
+        file_id: String,
+        filename: String,
+        start_index: u32,
+        end_index: u32,
+    },
+    /// `type: "file_path"` — reference to a generated file path.
+    #[serde(rename = "file_path")]
+    FilePath { file_id: String, index: u32 },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -372,14 +419,51 @@ pub enum ResponseContentPart {
         text: String,
         #[serde(default)]
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        annotations: Vec<String>,
+        annotations: Vec<Annotation>,
         #[serde(skip_serializing_if = "Option::is_none")]
         logprobs: Option<ChatLogProbs>,
     },
     #[serde(rename = "input_text")]
     InputText { text: String },
-    #[serde(other)]
-    Unknown,
+    /// `type: "input_image"` — reference to an image supplied by the client.
+    /// Exactly one of `file_id` / `image_url` is typically set; both may be
+    /// absent when only `detail` is being conveyed.
+    #[serde(rename = "input_image")]
+    InputImage {
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<Detail>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+    },
+    /// `type: "input_file"` — reference to an attached file. `file_data` is a
+    /// base64 blob; `file_url` / `file_id` reference external/uploaded files.
+    #[serde(rename = "input_file")]
+    InputFile {
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<FileDetail>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+    /// `type: "refusal"` — model refusal surfaced as a content part (spec's
+    /// `ResponseOutputRefusal`).
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -1095,7 +1179,11 @@ impl GenerationRequest for ResponsesRequest {
                                         Some(text.as_str())
                                     }
                                     ResponseContentPart::InputText { text } => Some(text.as_str()),
-                                    ResponseContentPart::Unknown => None,
+                                    // Non-text parts (images, files, refusals) contribute no
+                                    // prompt text; skip without appending.
+                                    ResponseContentPart::InputImage { .. }
+                                    | ResponseContentPart::InputFile { .. }
+                                    | ResponseContentPart::Refusal { .. } => None,
                                 };
                                 if let Some(t) = text {
                                     append_text(t);
@@ -1116,7 +1204,9 @@ impl GenerationRequest for ResponsesRequest {
                                             ResponseContentPart::InputText { text } => {
                                                 Some(text.as_str())
                                             }
-                                            ResponseContentPart::Unknown => None,
+                                            ResponseContentPart::InputImage { .. }
+                                            | ResponseContentPart::InputFile { .. }
+                                            | ResponseContentPart::Refusal { .. } => None,
                                         };
                                         if let Some(t) = text {
                                             append_text(t);
@@ -1752,10 +1842,10 @@ impl ResponseOutputItem {
 }
 
 impl ResponseContentPart {
-    /// Create a new text content part
+    /// Create a new `output_text` content part.
     pub fn new_text(
         text: String,
-        annotations: Vec<String>,
+        annotations: Vec<Annotation>,
         logprobs: Option<ChatLogProbs>,
     ) -> Self {
         Self::OutputText {
@@ -2141,5 +2231,152 @@ mod tests {
                 "field {key} should be skipped when absent"
             );
         }
+    }
+
+    // ---- P1: rich content parts + typed annotations ----
+
+    #[test]
+    fn content_part_input_image_roundtrip() {
+        // `original` is the spec-new detail level; exercising it here
+        // also covers the rest of the variant shape.
+        let raw = json!({
+            "type": "input_image",
+            "detail": "original",
+            "image_url": "https://example.com/cat.png"
+        });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("input_image should deserialize");
+        match &part {
+            ResponseContentPart::InputImage {
+                detail,
+                file_id,
+                image_url,
+            } => {
+                assert!(matches!(detail, Some(Detail::Original)));
+                assert!(file_id.is_none());
+                assert_eq!(image_url.as_deref(), Some("https://example.com/cat.png"));
+            }
+            other => panic!("expected InputImage, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_input_file_roundtrip() {
+        let raw = json!({
+            "type": "input_file",
+            "detail": "low",
+            "file_data": "BASE64DATA",
+            "filename": "report.pdf"
+        });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("input_file should deserialize");
+        match &part {
+            ResponseContentPart::InputFile {
+                detail,
+                file_data,
+                file_id,
+                file_url,
+                filename,
+            } => {
+                assert!(matches!(detail, Some(FileDetail::Low)));
+                assert_eq!(file_data.as_deref(), Some("BASE64DATA"));
+                assert!(file_id.is_none());
+                assert!(file_url.is_none());
+                assert_eq!(filename.as_deref(), Some("report.pdf"));
+            }
+            other => panic!("expected InputFile, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_refusal_roundtrip() {
+        let raw = json!({ "type": "refusal", "refusal": "I cannot help with that." });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("refusal should deserialize");
+        match &part {
+            ResponseContentPart::Refusal { refusal } => {
+                assert_eq!(refusal, "I cannot help with that.");
+            }
+            other => panic!("expected Refusal, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_output_text_with_typed_annotations() {
+        let raw = json!({
+            "type": "output_text",
+            "text": "See [1] and [2].",
+            "annotations": [
+                {
+                    "type": "file_citation",
+                    "file_id": "file-abc",
+                    "filename": "source.pdf",
+                    "index": 5
+                },
+                {
+                    "type": "url_citation",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "start_index": 0,
+                    "end_index": 18
+                },
+                {
+                    "type": "container_file_citation",
+                    "container_id": "cntr-1",
+                    "file_id": "file-xyz",
+                    "filename": "out.txt",
+                    "start_index": 0,
+                    "end_index": 4
+                },
+                {
+                    "type": "file_path",
+                    "file_id": "file-gen",
+                    "index": 7
+                }
+            ]
+        });
+        let part: ResponseContentPart =
+            serde_json::from_value(raw.clone()).expect("output_text should deserialize");
+        match &part {
+            ResponseContentPart::OutputText {
+                text,
+                annotations,
+                logprobs,
+            } => {
+                assert_eq!(text, "See [1] and [2].");
+                assert_eq!(annotations.len(), 4);
+                assert!(logprobs.is_none());
+                assert!(matches!(&annotations[0], Annotation::FileCitation { .. }));
+                assert!(matches!(&annotations[1], Annotation::UrlCitation { .. }));
+                assert!(matches!(
+                    &annotations[2],
+                    Annotation::ContainerFileCitation { .. }
+                ));
+                assert!(matches!(&annotations[3], Annotation::FilePath { .. }));
+            }
+            other => panic!("expected OutputText, got {other:?}"),
+        }
+        let roundtripped = serde_json::to_value(&part).unwrap();
+        assert_eq!(roundtripped, raw);
+    }
+
+    #[test]
+    fn content_part_unknown_type_fails_fast() {
+        // Previously `#[serde(other)] Unknown` silently swallowed unknown
+        // types; P1 removes that arm so spec-invalid payloads fail cleanly.
+        let raw = json!({ "type": "totally_made_up", "text": "x" });
+        let err = serde_json::from_value::<ResponseContentPart>(raw)
+            .expect_err("unknown content-part type must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("totally_made_up") || msg.contains("unknown variant"),
+            "error should mention the unknown variant, got: {msg}"
+        );
     }
 }
