@@ -851,13 +851,15 @@ impl WorkerManager {
                 {
                     Ok(r) if r.status().is_success() => {
                         if let Ok(text) = r.text().await {
-                            metric_packs.push(MetricPack {
-                                labels: vec![(
-                                    "worker_addr".into(),
-                                    worker.url().to_string(),
-                                )],
-                                metrics_text: text,
-                            });
+                            if !text.trim().is_empty() {
+                                metric_packs.push(MetricPack {
+                                    labels: vec![(
+                                        "worker_addr".into(),
+                                        worker.url().to_string(),
+                                    )],
+                                    metrics_text: text,
+                                });
+                            }
                         }
                     }
                     Ok(r) => {
