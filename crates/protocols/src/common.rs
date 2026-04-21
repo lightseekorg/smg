@@ -707,7 +707,9 @@ pub enum PromptVariableTyped {
     },
 }
 
-/// Image detail level for [`PromptVariableTyped::InputImage`].
+/// Image detail level for [`PromptVariableTyped::InputImage`] and
+/// [`crate::responses::ResponseContentPart::InputImage`]. Spec allows
+/// `"low" | "high" | "auto" | "original"`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Detail {
@@ -715,6 +717,7 @@ pub enum Detail {
     High,
     #[default]
     Auto,
+    Original,
 }
 
 #[cfg(test)]
