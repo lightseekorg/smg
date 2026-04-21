@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound::Included,
+};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -55,13 +58,14 @@ impl SkillMetadataStore for InMemorySkillStore {
     }
 
     async fn list_skills(&self, tenant_id: &str) -> SkillsStoreResult<Vec<SkillRecord>> {
+        let start = (tenant_id.to_string(), String::new());
+        let end = (tenant_id.to_string(), max_sort_key());
         let mut skills = self
             .state
             .read()
             .skills
-            .values()
-            .filter(|record| record.tenant_id == tenant_id)
-            .cloned()
+            .range((Included(start), Included(end)))
+            .map(|(_, record)| record.clone())
             .collect::<Vec<_>>();
         skills.sort_by(|left, right| {
             left.name
@@ -121,13 +125,14 @@ impl SkillMetadataStore for InMemorySkillStore {
         &self,
         skill_id: &str,
     ) -> SkillsStoreResult<Vec<SkillVersionRecord>> {
+        let start = (skill_id.to_string(), String::new());
+        let end = (skill_id.to_string(), max_sort_key());
         let mut versions = self
             .state
             .read()
             .skill_versions
-            .values()
-            .filter(|record| record.skill_id == skill_id)
-            .cloned()
+            .range((Included(start), Included(end)))
+            .map(|(_, record)| record.clone())
             .collect::<Vec<_>>();
         versions.sort_by(|left, right| {
             left.version_number
@@ -156,6 +161,10 @@ impl SkillMetadataStore for InMemorySkillStore {
 
         Ok(true)
     }
+}
+
+fn max_sort_key() -> String {
+    char::MAX.to_string()
 }
 
 #[async_trait]

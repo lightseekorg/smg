@@ -85,6 +85,7 @@ async fn filesystem_store_rejects_invalid_blob_keys() -> Result<()> {
 struct CountingBlobStore {
     inner: FilesystemBlobStore,
     get_calls: AtomicUsize,
+    etag: Option<&'static str>,
 }
 
 #[async_trait]
@@ -102,7 +103,9 @@ impl BlobStore for CountingBlobStore {
         key: &BlobKey,
     ) -> Result<GetBlobResponse, smg_blob_storage::BlobStoreError> {
         self.get_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.get(key).await
+        let mut response = self.inner.get(key).await?;
+        response.metadata.etag = self.etag.map(str::to_string);
+        Ok(response)
     }
 
     async fn head(
@@ -133,6 +136,7 @@ async fn cached_store_avoids_repeated_backend_reads() -> Result<()> {
     let inner = Arc::new(CountingBlobStore {
         inner: FilesystemBlobStore::new(blob_root.path())?,
         get_calls: AtomicUsize::new(0),
+        etag: None,
     });
     let key = BlobKey::from("skills/t1/s1/v1/scripts/run.py");
 
@@ -155,6 +159,89 @@ async fn cached_store_avoids_repeated_backend_reads() -> Result<()> {
 
     assert_eq!(first, b"print('cached')");
     assert_eq!(second, b"print('cached')");
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
+fn cached_store_rejects_zero_sized_cache_config() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let inner = Arc::new(FilesystemBlobStore::new(blob_root.path())?) as Arc<dyn BlobStore>;
+    let cache_root = TempDir::new()?;
+
+    let error = smg_blob_storage::CachedBlobStore::new(
+        inner,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 0,
+        },
+    )
+    .expect_err("zero-sized cache config should be rejected");
+
+    assert!(matches!(
+        error,
+        smg_blob_storage::BlobStoreInitError::InvalidConfig { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_store_keeps_oversized_latest_blob_readable() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let inner = Arc::new(CountingBlobStore {
+        inner: FilesystemBlobStore::new(blob_root.path())?,
+        get_calls: AtomicUsize::new(0),
+        etag: None,
+    });
+    let key = BlobKey::from("skills/t1/s1/v1/large.bin");
+    let payload = vec![b'x'; 2 * 1024 * 1024];
+
+    inner.put_stream(&key, put_request(&payload)).await?;
+
+    let store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 1,
+        },
+    )?) as Arc<dyn BlobStore>;
+
+    let first = read_all(store.get(&key).await?).await?;
+    let second = read_all(store.get(&key).await?).await?;
+
+    assert_eq!(first.len(), payload.len());
+    assert_eq!(second.len(), payload.len());
+    assert_eq!(inner.get_calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_store_hits_when_backend_returns_etag_metadata() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let inner = Arc::new(CountingBlobStore {
+        inner: FilesystemBlobStore::new(blob_root.path())?,
+        get_calls: AtomicUsize::new(0),
+        etag: Some("etag-v1"),
+    });
+    let key = BlobKey::from("skills/t1/s1/v1/SKILL.md");
+
+    inner.put_stream(&key, put_request(b"etagged")).await?;
+
+    let store = Arc::new(smg_blob_storage::CachedBlobStore::new(
+        inner.clone() as Arc<dyn BlobStore>,
+        &BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 8,
+        },
+    )?) as Arc<dyn BlobStore>;
+
+    let first = read_all(store.get(&key).await?).await?;
+    let second = read_all(store.get(&key).await?).await?;
+
+    assert_eq!(first, b"etagged");
+    assert_eq!(second, b"etagged");
     assert_eq!(inner.get_calls.load(Ordering::SeqCst), 1);
     Ok(())
 }

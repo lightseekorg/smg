@@ -56,7 +56,7 @@ pub struct BlobCacheConfig {
 impl BlobCacheConfig {
     #[must_use]
     pub fn max_size_bytes(&self) -> u64 {
-        self.max_size_mb as u64 * 1024 * 1024
+        (self.max_size_mb as u64).saturating_mul(1024 * 1024)
     }
 
     #[must_use]

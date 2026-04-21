@@ -19,7 +19,6 @@ use crate::{
 
 #[derive(Debug)]
 struct CacheEntry {
-    logical_key: String,
     path: PathBuf,
     size_bytes: u64,
     metadata: BlobMetadata,
@@ -55,6 +54,11 @@ impl LocalBlobCache {
                 message: "blob cache path must not be empty".to_string(),
             });
         }
+        if config.max_size_bytes() == 0 {
+            return Err(BlobStoreInitError::InvalidConfig {
+                message: "blob cache max_size_mb must be greater than zero".to_string(),
+            });
+        }
         std::fs::create_dir_all(&cache_dir).map_err(|error| BlobStoreInitError::Io {
             path: cache_dir.display().to_string(),
             message: error.to_string(),
@@ -71,7 +75,7 @@ impl LocalBlobCache {
     }
 
     async fn get(&self, key: &BlobKey) -> Result<Option<GetBlobResponse>, BlobStoreError> {
-        let cache_key = cache_key_for(key, None);
+        let cache_key = cache_key_for(key);
         let cached = {
             let mut state = self.state.lock();
             state.entries.get(&cache_key).map(|entry| CachedLookup {
@@ -105,38 +109,50 @@ impl LocalBlobCache {
         key: &BlobKey,
         response: GetBlobResponse,
     ) -> Result<GetBlobResponse, BlobStoreError> {
-        let cache_key = cache_key_for(key, response.metadata.etag.as_deref());
+        let cache_key = cache_key_for(key);
         let cache_path = cache_path_for(&self.cache_dir, &cache_key);
         let temp_path = cache_path.with_extension(format!("{}.tmp", Uuid::now_v7()));
 
         let mut reader = response.reader;
-        let mut file =
-            File::create(&temp_path)
+        let copied_result = async {
+            let mut file =
+                File::create(&temp_path)
+                    .await
+                    .map_err(|error| BlobStoreError::Operation {
+                        operation: "cache_create",
+                        message: error.to_string(),
+                    })?;
+            let copied = tokio::io::copy(&mut reader, &mut file)
                 .await
                 .map_err(|error| BlobStoreError::Operation {
-                    operation: "cache_create",
+                    operation: "cache_write",
                     message: error.to_string(),
                 })?;
-        let copied = tokio::io::copy(&mut reader, &mut file)
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "cache_write",
-                message: error.to_string(),
-            })?;
-        file.sync_all()
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "cache_sync_all",
-                message: error.to_string(),
-            })?;
-        drop(file);
+            file.sync_all()
+                .await
+                .map_err(|error| BlobStoreError::Operation {
+                    operation: "cache_sync_all",
+                    message: error.to_string(),
+                })?;
+            drop(file);
 
-        fs::rename(&temp_path, &cache_path)
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "cache_rename",
-                message: error.to_string(),
+            fs::rename(&temp_path, &cache_path).await.map_err(|error| {
+                BlobStoreError::Operation {
+                    operation: "cache_rename",
+                    message: error.to_string(),
+                }
             })?;
+
+            Ok::<u64, BlobStoreError>(copied)
+        }
+        .await;
+        let copied = match copied_result {
+            Ok(copied) => copied,
+            Err(error) => {
+                let _ = remove_file_if_present(&temp_path).await;
+                return Err(error);
+            }
+        };
 
         let mut metadata = response.metadata;
         metadata.size_bytes = copied;
@@ -146,7 +162,6 @@ impl LocalBlobCache {
             if let Some(previous) = state.entries.put(
                 cache_key.clone(),
                 CacheEntry {
-                    logical_key: key.0.clone(),
                     path: cache_path.clone(),
                     size_bytes: copied,
                     metadata: metadata.clone(),
@@ -158,7 +173,7 @@ impl LocalBlobCache {
             state.current_size_bytes = state.current_size_bytes.saturating_add(copied);
         }
 
-        self.evict_if_needed().await?;
+        self.evict_if_needed(Some(&cache_key)).await?;
 
         let file = File::open(&cache_path)
             .await
@@ -174,35 +189,34 @@ impl LocalBlobCache {
     }
 
     async fn invalidate(&self, key: &BlobKey) -> Result<(), BlobStoreError> {
-        let cache_keys = {
-            let state = self.state.lock();
-            state
-                .entries
-                .iter()
-                .filter(|(_, entry)| entry.logical_key == key.0)
-                .map(|(cache_key, _)| cache_key.clone())
-                .collect::<Vec<_>>()
-        };
-
-        for cache_key in cache_keys {
-            self.remove_cache_key(&cache_key).await?;
-        }
-
-        Ok(())
+        self.remove_cache_key(&cache_key_for(key)).await
     }
 
-    async fn evict_if_needed(&self) -> Result<(), BlobStoreError> {
+    async fn evict_if_needed(
+        &self,
+        protected_cache_key: Option<&str>,
+    ) -> Result<(), BlobStoreError> {
         loop {
             let evicted = {
                 let mut state = self.state.lock();
                 if state.current_size_bytes <= self.max_size_bytes {
                     None
                 } else {
-                    state.entries.pop_lru().map(|(_, entry)| {
-                        state.current_size_bytes =
-                            state.current_size_bytes.saturating_sub(entry.size_bytes);
-                        entry
-                    })
+                    match state.entries.pop_lru() {
+                        Some((cache_key, entry))
+                            if protected_cache_key
+                                .is_some_and(|protected| protected == cache_key) =>
+                        {
+                            state.entries.put(cache_key, entry);
+                            None
+                        }
+                        Some((_, entry)) => {
+                            state.current_size_bytes =
+                                state.current_size_bytes.saturating_sub(entry.size_bytes);
+                            Some(entry)
+                        }
+                        None => None,
+                    }
                 }
             };
 
@@ -311,11 +325,12 @@ async fn remove_file_if_present(path: &Path) -> Result<(), BlobStoreError> {
     }
 }
 
-fn cache_key_for(key: &BlobKey, etag: Option<&str>) -> String {
-    match etag {
-        Some(etag) => format!("{}#{etag}", key.0),
-        None => key.0.clone(),
-    }
+fn cache_key_for(key: &BlobKey) -> String {
+    // This local cache is invalidation-driven within the current process, so it
+    // keys by the logical blob key rather than embedding the backend etag.
+    // Doing otherwise makes cached etag-bearing reads unreachable because the
+    // lookup path does not know the current etag ahead of time.
+    key.0.clone()
 }
 
 fn cache_path_for(cache_dir: &Path, cache_key: &str) -> PathBuf {

@@ -200,3 +200,100 @@ async fn in_memory_service_supports_metadata_tokens_and_filesystem_blob_reads() 
 
     Ok(())
 }
+
+#[tokio::test]
+async fn in_memory_service_scopes_listings_to_exact_tenant_and_skill() -> Result<()> {
+    let blob_root = TempDir::new()?;
+    let cache_root = TempDir::new()?;
+    let blob_store = create_blob_store(
+        &BlobStoreConfig {
+            backend: BlobStoreBackend::Filesystem,
+            path: blob_root.path().display().to_string(),
+            ..BlobStoreConfig::default()
+        },
+        Some(&BlobCacheConfig {
+            path: cache_root.path().display().to_string(),
+            max_size_mb: 16,
+        }),
+    )?;
+    let service = SkillService::in_memory(blob_store);
+    let now = Utc::now();
+    let metadata_store = service
+        .metadata_store()
+        .ok_or_else(|| anyhow!("metadata store missing"))?;
+
+    metadata_store
+        .put_skill(SkillRecord {
+            tenant_id: "tenant-a".to_string(),
+            skill_id: "skill-1".to_string(),
+            name: "map".to_string(),
+            short_description: None,
+            description: None,
+            source: "custom".to_string(),
+            has_code_files: false,
+            latest_version: Some("1".to_string()),
+            default_version: Some("1".to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    metadata_store
+        .put_skill(SkillRecord {
+            tenant_id: "tenant-b".to_string(),
+            skill_id: "skill-2".to_string(),
+            name: "review".to_string(),
+            short_description: None,
+            description: None,
+            source: "custom".to_string(),
+            has_code_files: false,
+            latest_version: Some("1".to_string()),
+            default_version: Some("1".to_string()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
+    metadata_store
+        .put_skill_version(SkillVersionRecord {
+            skill_id: "skill-1".to_string(),
+            version: "1".to_string(),
+            version_number: 1,
+            name: "map".to_string(),
+            short_description: None,
+            description: "map".to_string(),
+            interface: None,
+            dependencies: None,
+            policy: None,
+            deprecated: false,
+            file_manifest: Vec::new(),
+            instruction_token_counts: Default::default(),
+            created_at: now,
+        })
+        .await?;
+    metadata_store
+        .put_skill_version(SkillVersionRecord {
+            skill_id: "skill-10".to_string(),
+            version: "1".to_string(),
+            version_number: 1,
+            name: "map-10".to_string(),
+            short_description: None,
+            description: "map-10".to_string(),
+            interface: None,
+            dependencies: None,
+            policy: None,
+            deprecated: false,
+            file_manifest: Vec::new(),
+            instruction_token_counts: Default::default(),
+            created_at: now,
+        })
+        .await?;
+
+    let tenant_a_skills = metadata_store.list_skills("tenant-a").await?;
+    assert_eq!(tenant_a_skills.len(), 1);
+    assert_eq!(tenant_a_skills[0].skill_id, "skill-1");
+
+    let skill_1_versions = metadata_store.list_skill_versions("skill-1").await?;
+    assert_eq!(skill_1_versions.len(), 1);
+    assert_eq!(skill_1_versions[0].skill_id, "skill-1");
+
+    Ok(())
+}

@@ -79,34 +79,46 @@ impl BlobStore for FilesystemBlobStore {
             })?;
 
         let temp_path = path.with_extension(format!("{}.tmp", Uuid::now_v7()));
-        let mut file =
-            File::create(&temp_path)
+        let copied_result = async {
+            let mut file =
+                File::create(&temp_path)
+                    .await
+                    .map_err(|error| BlobStoreError::Operation {
+                        operation: "create",
+                        message: error.to_string(),
+                    })?;
+
+            let copied = tokio::io::copy(&mut request.reader, &mut file)
                 .await
                 .map_err(|error| BlobStoreError::Operation {
-                    operation: "create",
+                    operation: "write",
+                    message: error.to_string(),
+                })?;
+            file.sync_all()
+                .await
+                .map_err(|error| BlobStoreError::Operation {
+                    operation: "sync_all",
+                    message: error.to_string(),
+                })?;
+            drop(file);
+
+            fs::rename(&temp_path, &path)
+                .await
+                .map_err(|error| BlobStoreError::Operation {
+                    operation: "rename",
                     message: error.to_string(),
                 })?;
 
-        let copied = tokio::io::copy(&mut request.reader, &mut file)
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "write",
-                message: error.to_string(),
-            })?;
-        file.sync_all()
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "sync_all",
-                message: error.to_string(),
-            })?;
-        drop(file);
-
-        fs::rename(&temp_path, &path)
-            .await
-            .map_err(|error| BlobStoreError::Operation {
-                operation: "rename",
-                message: error.to_string(),
-            })?;
+            Ok::<u64, BlobStoreError>(copied)
+        }
+        .await;
+        let copied = match copied_result {
+            Ok(copied) => copied,
+            Err(error) => {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(error);
+            }
+        };
 
         let metadata = fs::metadata(&path)
             .await
@@ -179,7 +191,30 @@ impl BlobStore for FilesystemBlobStore {
     ) -> Result<ListBlobsPage, BlobStoreError> {
         let normalized_prefix = normalize_prefix(&prefix.0)?;
         let mut blob_keys = Vec::new();
-        collect_blob_keys(&self.root_dir, &self.root_dir, &mut blob_keys).await?;
+        let search_root = search_root_for_prefix(&self.root_dir, &normalized_prefix);
+        match fs::metadata(&search_root).await {
+            Ok(metadata) if metadata.is_dir() => {
+                collect_blob_keys(&self.root_dir, &search_root, &mut blob_keys).await?;
+            }
+            Ok(_) => {
+                return Ok(ListBlobsPage {
+                    blobs: Vec::new(),
+                    next_cursor: None,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ListBlobsPage {
+                    blobs: Vec::new(),
+                    next_cursor: None,
+                });
+            }
+            Err(error) => {
+                return Err(BlobStoreError::Operation {
+                    operation: "metadata",
+                    message: error.to_string(),
+                });
+            }
+        }
         blob_keys.retain(|key| key.starts_with(&normalized_prefix));
         blob_keys.sort();
 
@@ -208,6 +243,17 @@ impl BlobStore for FilesystemBlobStore {
 
         Ok(ListBlobsPage { blobs, next_cursor })
     }
+}
+
+fn search_root_for_prefix(root_dir: &Path, normalized_prefix: &str) -> PathBuf {
+    let Some((parent_prefix, _)) = normalized_prefix.rsplit_once('/') else {
+        return root_dir.to_path_buf();
+    };
+    let mut path = root_dir.to_path_buf();
+    for segment in parent_prefix.split('/') {
+        path.push(segment);
+    }
+    path
 }
 
 async fn collect_blob_keys(
