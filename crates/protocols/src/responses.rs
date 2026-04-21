@@ -186,7 +186,7 @@ pub enum ResponseInputOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
         content: Vec<ResponseReasoningContent>,
@@ -270,6 +270,19 @@ pub enum ResponseReasoningContent {
     ReasoningText { text: String },
 }
 
+/// Tagged content element carried in `Reasoning.summary`.
+///
+/// OpenAI spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
+/// Replaces the prior `Vec<String>` wire-type that broke bidirectional
+/// interoperability with spec-compliant clients.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryTextContent {
+    #[serde(rename = "summary_text")]
+    SummaryText { text: String },
+}
+
 /// MCP Tool information for the mcp_list_tools output item
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -296,7 +309,7 @@ pub enum ResponseOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
         /// Opaque to SMG; preserved verbatim.
@@ -1452,7 +1465,7 @@ impl ResponseInputOutputItem {
     /// o-series encrypted reasoning.
     pub fn new_reasoning(
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         status: Option<String>,
     ) -> Self {
@@ -1470,7 +1483,7 @@ impl ResponseInputOutputItem {
     /// ciphertext.
     pub fn new_reasoning_encrypted(
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         encrypted_content: String,
         status: Option<String>,
@@ -1508,7 +1521,7 @@ impl ResponseOutputItem {
     /// encrypted reasoning.
     pub fn new_reasoning(
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         status: Option<String>,
     ) -> Self {
@@ -1528,7 +1541,7 @@ impl ResponseOutputItem {
     /// without ciphertext should use [`Self::new_reasoning`] instead.
     pub fn new_reasoning_encrypted(
         id: String,
-        summary: Vec<String>,
+        summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         encrypted_content: String,
         status: Option<String>,
@@ -1589,6 +1602,37 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn summary_text_content_round_trips_spec_shape() {
+        // Spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
+        let item: ResponseOutputItem = serde_json::from_value(json!({
+            "type": "reasoning",
+            "id": "r_1",
+            "summary": [{"text": "step 1", "type": "summary_text"}],
+            "content": [],
+            "status": "completed",
+        }))
+        .expect("spec-shape reasoning should deserialize");
+
+        match &item {
+            ResponseOutputItem::Reasoning { summary, .. } => {
+                assert_eq!(summary.len(), 1);
+                match &summary[0] {
+                    SummaryTextContent::SummaryText { text } => {
+                        assert_eq!(text, "step 1");
+                    }
+                }
+            }
+            _ => panic!("expected Reasoning variant"),
+        }
+
+        let v = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(
+            v["summary"],
+            json!([{"text": "step 1", "type": "summary_text"}])
+        );
+    }
 
     #[test]
     fn test_responses_request_omitted_top_p_deserializes_to_none() {

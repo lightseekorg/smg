@@ -17,7 +17,7 @@
 
 use openai_protocol::responses::{
     ResponseInputOutputItem, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
-    ResponsesRequest, ResponsesResponse,
+    ResponsesRequest, ResponsesResponse, SummaryTextContent,
 };
 use serde_json::json;
 
@@ -42,7 +42,9 @@ fn response_status_incomplete_serializes_snake_case() {
 fn reasoning_output_item_round_trips_encrypted_content() {
     let item = ResponseOutputItem::new_reasoning_encrypted(
         "r_1".to_string(),
-        vec!["thought summary".to_string()],
+        vec![SummaryTextContent::SummaryText {
+            text: "thought summary".to_string(),
+        }],
         vec![ResponseReasoningContent::ReasoningText {
             text: "inner thought".to_string(),
         }],
