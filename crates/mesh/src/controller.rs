@@ -716,7 +716,45 @@ impl MeshController {
                                 next_broadcast_round_id = gap.resume_from_broadcast_round_id;
                             }
 
+                            let mut stream_backpressured = false;
                             for round in broadcast_poll.rounds {
+                                loop {
+                                    let targeted_round = match pending_targeted_round.take() {
+                                        Some(round) => round,
+                                        None => match targeted_subscription.receiver.try_recv() {
+                                            Ok(round) => round,
+                                            Err(mpsc::error::TryRecvError::Empty) => break,
+                                            Err(mpsc::error::TryRecvError::Disconnected) => break,
+                                        },
+                                    };
+
+                                    if targeted_round.dispatch_round_id >= round.dispatch_round_id {
+                                        pending_targeted_round = Some(targeted_round);
+                                        break;
+                                    }
+
+                                    match try_send_stream_round(
+                                        &tx_incremental,
+                                        &self_name_incremental,
+                                        &peer_name_incremental,
+                                        &shared_sequence,
+                                        targeted_round.entries.as_slice(),
+                                        "targeted",
+                                        targeted_round.dispatch_round_id,
+                                    ) {
+                                        StreamRoundSendOutcome::Sent => {}
+                                        StreamRoundSendOutcome::DroppedOnBackpressure => {
+                                            pending_targeted_round = Some(targeted_round);
+                                            stream_backpressured = true;
+                                            break;
+                                        }
+                                        StreamRoundSendOutcome::Closed => return,
+                                    }
+                                }
+                                if stream_backpressured {
+                                    break;
+                                }
+
                                 match try_send_stream_round(
                                     &tx_incremental,
                                     &self_name_incremental,
@@ -729,9 +767,47 @@ impl MeshController {
                                     StreamRoundSendOutcome::Sent => {
                                         next_broadcast_round_id = round.broadcast_round_id + 1;
                                     }
-                                    StreamRoundSendOutcome::DroppedOnBackpressure => break,
+                                    StreamRoundSendOutcome::DroppedOnBackpressure => {
+                                        stream_backpressured = true;
+                                        break;
+                                    }
                                     StreamRoundSendOutcome::Closed => return,
                                 }
+
+                                let targeted_round = match pending_targeted_round.take() {
+                                    Some(targeted_round)
+                                        if targeted_round.dispatch_round_id == round.dispatch_round_id =>
+                                    {
+                                        targeted_round
+                                    }
+                                    Some(targeted_round) => {
+                                        pending_targeted_round = Some(targeted_round);
+                                        continue;
+                                    }
+                                    None => continue,
+                                };
+
+                                match try_send_stream_round(
+                                    &tx_incremental,
+                                    &self_name_incremental,
+                                    &peer_name_incremental,
+                                    &shared_sequence,
+                                    targeted_round.entries.as_slice(),
+                                    "targeted",
+                                    targeted_round.dispatch_round_id,
+                                ) {
+                                    StreamRoundSendOutcome::Sent => {}
+                                    StreamRoundSendOutcome::DroppedOnBackpressure => {
+                                        pending_targeted_round = Some(targeted_round);
+                                        stream_backpressured = true;
+                                        break;
+                                    }
+                                    StreamRoundSendOutcome::Closed => return,
+                                }
+                            }
+
+                            if stream_backpressured {
+                                continue;
                             }
 
                             loop {

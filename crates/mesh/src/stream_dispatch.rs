@@ -28,10 +28,6 @@ pub struct BroadcastRound {
     /// Monotonic broadcast-only sequence used for per-peer gap detection.
     pub broadcast_round_id: u64,
     /// Monotonic stream-dispatch sequence for this collection round.
-    #[expect(
-        dead_code,
-        reason = "reserved for cross-queue ordering and diagnostics"
-    )]
     pub dispatch_round_id: u64,
     pub entries: Vec<(String, Bytes)>,
 }
