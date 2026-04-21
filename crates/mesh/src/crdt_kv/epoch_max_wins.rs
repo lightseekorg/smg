@@ -1,42 +1,26 @@
 //! Epoch-aware max-wins merge for rate-limit counter values.
 //!
-//! Rate-limit counters can't merge with plain max-wins because
-//! window resets would be silently undone: one node resets its
-//! counter to 0 while another still carries the pre-reset count of
-//! 100 — plain max(0, 100) = 100 reverts the reset cluster-wide.
-//! The merge here compares an explicit epoch (window number) first
-//! and only falls back to max-count within the same epoch, so a
-//! reset (higher epoch, count = 0) always beats a higher count at an
-//! older epoch.
+//! Plain max-wins undoes window resets: A resets to 0, B still has
+//! 100, max(0, 100) reverts the reset. This merge compares epoch
+//! first, then max-count within the same epoch — a reset (higher
+//! epoch, count = 0) always beats a higher count at an older epoch.
 //!
-//! Wire format is a fixed 16-byte payload chosen so the mesh crate
-//! can interpret and compare values without an application callback:
+//! Wire format: 16 bytes, `u64` big-endian epoch in bytes 0..8,
+//! `i64` big-endian count in bytes 8..16. Fixed-size + big-endian so
+//! the mesh crate can compare values without an application
+//! callback. Signed count leaves room for future sentinels.
 //!
-//! ```text
-//! bytes 0..8  : epoch  (u64, big-endian)
-//! bytes 8..16 : count  (i64, big-endian)
-//! ```
-//!
-//! Big-endian is the single public encoding so both sides of the
-//! gossip stream agree byte-for-byte; a floating mix of host
-//! endiannesses would corrupt the compare. `count` is signed because
-//! the caller may choose to encode deltas or reserved sentinels
-//! (e.g. eviction markers) in the same slot; the merge itself only
-//! uses max-compare on the value.
-//!
-//! Malformed input (any length ≠ 16) is kept-if-well-formed-else-
-//! local: a single corrupt gossip message must never crash the merge
-//! loop or retroactively erase a healthy value. If both sides are
-//! malformed, the local copy survives — there's nothing better the
-//! merger can do locally, and a later healthy message from either
-//! side resolves the state.
+//! Malformed input (length ≠ 16): if one side decodes, it wins. If
+//! both fail, keep `local` per the `MergeStrategy::EpochMaxWins`
+//! contract in `kv.rs` — a no-op on the store. This sacrifices
+//! commutativity for the malformed/malformed case, but rate-limit
+//! counters write on every increment and reset every window, so a
+//! well-formed write restores clean state before the non-convergence
+//! matters.
 
-// All items below are intentionally unused in non-test compilation
-// of this PR: the RateLimitSyncAdapter in the follow-up PR registers
-// them against the `rl:*` prefix. Isolating the merge function first
-// lets it be reviewed without the wider adapter change. Gated on
-// `not(test)` so the attribute only applies where dead_code actually
-// fires (tests do exercise every item below).
+// Consumed by RateLimitSyncAdapter in a follow-up PR. `not(test)`
+// gate so the expectation applies only where the lint fires (tests
+// exercise every item).
 #![cfg_attr(
     not(test),
     expect(
@@ -47,20 +31,18 @@
 
 use std::cmp::Ordering;
 
-/// Fixed wire size: 8 bytes big-endian epoch + 8 bytes big-endian count.
+/// Fixed wire size: 8-byte big-endian epoch + 8-byte big-endian count.
 pub const EPOCH_MAX_WINS_ENCODED_LEN: usize = 16;
 
-/// Parsed value from the 16-byte wire format. Returned as an owned
-/// pair rather than a struct to keep this module free of application
-/// types — adapters layer their own newtype on top.
+/// Parsed value returned owned so callers don't need to keep the
+/// source slice alive across the merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochCount {
     pub epoch: u64,
     pub count: i64,
 }
 
-/// Encode `(epoch, count)` into the fixed 16-byte big-endian
-/// representation used on the wire.
+/// Encode `(epoch, count)` to the 16-byte big-endian wire format.
 #[must_use]
 pub fn encode(epoch: u64, count: i64) -> [u8; EPOCH_MAX_WINS_ENCODED_LEN] {
     let mut buf = [0u8; EPOCH_MAX_WINS_ENCODED_LEN];
@@ -69,9 +51,8 @@ pub fn encode(epoch: u64, count: i64) -> [u8; EPOCH_MAX_WINS_ENCODED_LEN] {
     buf
 }
 
-/// Decode 16 bytes of big-endian `(epoch, count)`. Returns `None` if
-/// the slice is not exactly 16 bytes — callers must treat that as
-/// "malformed" and defer to the merge's keep-well-formed behaviour.
+/// Decode 16 bytes. `None` on any other length (caller treats as
+/// malformed).
 #[must_use]
 pub fn decode(bytes: &[u8]) -> Option<EpochCount> {
     if bytes.len() != EPOCH_MAX_WINS_ENCODED_LEN {
@@ -82,22 +63,13 @@ pub fn decode(bytes: &[u8]) -> Option<EpochCount> {
     Some(EpochCount { epoch, count })
 }
 
-/// Merge two rate-limit values using the epoch-max-wins rule.
+/// Merge two rate-limit values per the epoch-max-wins rule.
 ///
-/// - If only one side decodes to a valid 16-byte value, that one
-///   wins (the other was corrupt / truncated; keeping a garbage
-///   payload would propagate corruption to every future merge).
-/// - If both sides decode, compare epochs first; higher epoch wins
-///   outright. On equal epochs, `max(local.count, remote.count)`
-///   wins — within a single window, the highest observed count is
-///   the authoritative one.
-/// - If both sides fail to decode, return `local` unchanged; at
-///   worst this preserves whatever the node already had so traffic
-///   keeps flowing until a healthy message arrives.
+/// Both decode: higher epoch wins; on equal epochs, max count wins.
+/// One decodes: the well-formed side wins. Neither decodes: keep
+/// `local` (no-op, per the `EpochMaxWins` contract in `kv.rs`).
 ///
-/// Returns an owned `Vec<u8>` rather than borrowing because the
-/// caller usually needs to write the result back into storage and
-/// re-emit it on the next gossip round.
+/// Returned `Vec<u8>` so the caller can write it straight back.
 #[must_use]
 pub fn merge(local: &[u8], remote: &[u8]) -> Vec<u8> {
     match (decode(local), decode(remote)) {
@@ -150,9 +122,8 @@ mod tests {
 
     #[test]
     fn same_epoch_max_count_wins() {
-        // Both nodes counting within window 5. Higher count is the
-        // cluster-wide truth; the other side has simply not yet seen
-        // recent requests.
+        // Normal counting within a window; highest observed count is
+        // the cluster-wide truth. Also asserts commutativity.
         let local = encode(5, 30);
         let remote = encode(5, 42);
         let merged = merge(&local, &remote);
@@ -163,32 +134,21 @@ mod tests {
                 count: 42
             }
         );
-
-        // Symmetric: same call with sides swapped yields the same
-        // winner — merge is commutative.
-        let merged_rev = merge(&remote, &local);
-        assert_eq!(merged_rev, merged);
+        assert_eq!(merge(&remote, &local), merged);
     }
 
     #[test]
     fn higher_epoch_wins_even_with_lower_count() {
-        // Node A is partway through window 5 with 30 requests. Node
-        // B has reset to window 6 with 0. B's reset must propagate
-        // even though its count is smaller — otherwise resets silently
-        // unwind.
-        let local = encode(5, 30);
-        let remote = encode(6, 0);
-        let merged = merge(&local, &remote);
+        // Reset must propagate: epoch 6 count 0 beats epoch 5 count 30.
+        let merged = merge(&encode(5, 30), &encode(6, 0));
         assert_eq!(decode(&merged).unwrap(), EpochCount { epoch: 6, count: 0 });
     }
 
     #[test]
     fn lower_epoch_loses_to_local_newer_window() {
-        // Local already advanced to window 6, remote gossip arrives
-        // from the old window 5. The remote is stale — keep local.
-        let local = encode(6, 10);
-        let remote = encode(5, 100);
-        let merged = merge(&local, &remote);
+        // Stale remote from old window is dropped; local window-6
+        // state survives.
+        let merged = merge(&encode(6, 10), &encode(5, 100));
         assert_eq!(
             decode(&merged).unwrap(),
             EpochCount {
@@ -200,57 +160,41 @@ mod tests {
 
     #[test]
     fn near_simultaneous_reset_both_at_zero() {
-        // Both nodes entered window 5 at roughly the same moment;
-        // neither has counted yet. max(0, 0) = 0.
-        let local = encode(5, 0);
-        let remote = encode(5, 0);
-        let merged = merge(&local, &remote);
+        // Both sides at epoch 5 count 0. max(0, 0) = 0.
+        let merged = merge(&encode(5, 0), &encode(5, 0));
         assert_eq!(decode(&merged).unwrap(), EpochCount { epoch: 5, count: 0 });
     }
 
     #[test]
     fn malformed_remote_keeps_local() {
-        // Remote carrier was truncated (e.g. protocol downgrade / MTU
-        // issue). Local well-formed value must not be replaced with
-        // garbage — doing so would poison every subsequent merge.
+        // Corrupt remote must not overwrite healthy local.
         let local = encode(5, 30);
-        let corrupt_remote = &[0xFFu8; 15];
-        let merged = merge(&local, corrupt_remote);
+        let merged = merge(&local, &[0xFFu8; 15]);
         assert_eq!(merged, local.to_vec());
     }
 
     #[test]
     fn malformed_local_is_replaced_by_remote() {
-        // Whatever persisted locally was corrupt (crash mid-write,
-        // partial disk page, etc). A well-formed remote message is a
-        // chance to recover cleanly.
-        let corrupt_local = vec![];
+        // Healthy remote recovers a corrupt local.
         let remote = encode(5, 30);
-        let merged = merge(&corrupt_local, &remote);
+        let merged = merge(&[], &remote);
         assert_eq!(merged, remote.to_vec());
     }
 
     #[test]
-    fn both_malformed_returns_local_no_panic() {
-        // Neither side has a value we can trust. Keep local so the
-        // cluster doesn't churn on garbage; a later healthy message
-        // from either side will repair the state.
+    fn both_malformed_keeps_local_no_panic() {
+        // Per EpochMaxWins contract, both-malformed is a no-op that
+        // keeps local. Non-commutative by design — see module docs.
         let corrupt_local = vec![1u8, 2, 3];
-        let corrupt_remote = &[0xFFu8; 17];
-        let merged = merge(&corrupt_local, corrupt_remote);
+        let merged = merge(&corrupt_local, &[0xFFu8; 17]);
         assert_eq!(merged, corrupt_local);
     }
 
     #[test]
     fn signed_count_preserves_sign() {
-        // The count is an i64 on the wire. Negative values are valid
-        // inputs as far as this merge is concerned (the spec reserves
-        // signed semantics for future use; this merge must not silently
-        // reinterpret the bit pattern as unsigned).
-        let local = encode(5, -10);
-        let remote = encode(5, -5);
-        // -5 > -10, so -5 wins on max-count within the same epoch.
-        let merged = merge(&local, &remote);
+        // Negative counts round-trip; the merge must not silently
+        // reinterpret as unsigned.
+        let merged = merge(&encode(5, -10), &encode(5, -5));
         assert_eq!(
             decode(&merged).unwrap(),
             EpochCount {
@@ -262,27 +206,21 @@ mod tests {
 
     #[test]
     fn merge_is_idempotent() {
-        // Merging a value with itself is a no-op. Gossip protocols
-        // re-deliver the same payload frequently; the merge must not
-        // drift under repeated self-merges.
+        // merge(v, v) == v — gossip re-delivery must not drift.
         let value = encode(42, 7);
-        let merged = merge(&value, &value);
-        assert_eq!(merged, value.to_vec());
+        assert_eq!(merge(&value, &value), value.to_vec());
     }
 
     #[test]
     fn merge_is_associative_on_three_values() {
         // ((a ⊕ b) ⊕ c) == (a ⊕ (b ⊕ c)). Required for eventual
-        // consistency: peers observing the same set of updates in
-        // different orders must converge to the same value.
+        // consistency under reordering.
         let a = encode(5, 10);
-        let b = encode(6, 3); // higher epoch
-        let c = encode(6, 9); // same epoch as b, higher count
-
+        let b = encode(6, 3);
+        let c = encode(6, 9);
         let ab_then_c = merge(&merge(&a, &b), &c);
         let a_then_bc = merge(&a, &merge(&b, &c));
         assert_eq!(ab_then_c, a_then_bc);
-        // The fixed-point: epoch 6 with max count 9.
         assert_eq!(
             decode(&ab_then_c).unwrap(),
             EpochCount { epoch: 6, count: 9 }
