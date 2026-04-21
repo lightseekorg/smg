@@ -48,7 +48,7 @@ pub fn next_generation() -> u64 {
 /// Maximum chunks packed into a single `StreamBatch` message. This is
 /// a message-shape cap, not a bandwidth throttle: `build_stream_batches`
 /// emits multiple batches as needed to carry every entry in the round.
-/// The 128-slot sync channel's backpressure provides rate limiting.
+/// The bounded channel's backpressure provides rate limiting.
 /// A hard per-round chunk cap would combine with the drained-per-round
 /// buffer to make any value with more chunks than the cap permanently
 /// undeliverable, so none is enforced here.
