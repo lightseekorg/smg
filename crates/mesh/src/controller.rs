@@ -598,6 +598,8 @@ impl MeshController {
                     let size_validator = MessageSizeValidator::default();
                     let batch_handle = current_batch.clone();
                     let stream_dispatch_handle = stream_dispatch.clone();
+                    let targeted_subscription =
+                        stream_dispatch_handle.subscribe_targeted(&peer_name_incremental);
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -605,7 +607,7 @@ impl MeshController {
                         let mut next_broadcast_round_id =
                             stream_dispatch_handle.initial_broadcast_round_id();
                         let mut targeted_subscription: TargetedPeerSubscription =
-                            stream_dispatch_handle.subscribe_targeted(&peer_name_incremental);
+                            targeted_subscription;
 
                         loop {
                             interval.tick().await;
