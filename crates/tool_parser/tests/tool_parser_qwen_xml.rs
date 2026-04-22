@@ -65,9 +65,10 @@ async fn test_qwen_xml_nested_json_in_parameters() {
     assert_eq!(tools[0].function.name, "process_data");
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
-    // JSON values should be parsed
+    // JSON objects/arrays still parsed without schema
     assert_eq!(args["config"]["nested"]["value"], json!([1, 2, 3]));
-    assert_eq!(args["enabled"], true);
+    // Without schema, bare "true" stays as string (conservative)
+    assert_eq!(args["enabled"], "true");
 }
 
 #[tokio::test]
@@ -85,8 +86,8 @@ async fn test_qwen_xml_string_parameters() {
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
     assert_eq!(args["text"], "Hello World");
-    // JSON numbers should be parsed as numbers (consistent with Python's json.loads)
-    assert_eq!(args["number"], 42);
+    // Without schema, numbers stay as strings (conservative to match sglang behaviour)
+    assert_eq!(args["number"], "42");
 }
 
 #[tokio::test]
@@ -329,7 +330,7 @@ async fn test_qwen_xml_invalid_function_name() {
 }
 
 #[tokio::test]
-async fn test_qwen_xml_type_conversion() {
+async fn test_qwen_xml_type_conversion_without_schema() {
     let parser = QwenXmlParser::new();
 
     let input = r"<tool_call>
@@ -346,11 +347,61 @@ async fn test_qwen_xml_type_conversion() {
     assert_eq!(tools.len(), 1);
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
-    // JSON values should be parsed
+    // Without schema, all scalar values stay as strings (conservative)
+    assert_eq!(args["count"], "42");
+    assert_eq!(args["rate"], "1.5");
+    assert_eq!(args["enabled"], "true");
+    assert_eq!(args["data"], "null");
+    assert_eq!(args["text"], "string value");
+}
+
+#[tokio::test]
+async fn test_qwen_xml_type_conversion_with_schema() {
+    use openai_protocol::common::{Function as ToolFunction, Tool};
+
+    let parser = QwenXmlParser::new();
+    let schema_tools = vec![Tool {
+        tool_type: "function".to_string(),
+        function: ToolFunction {
+            name: "process".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "rate": {"type": "number"},
+                    "enabled": {"type": "boolean"},
+                    "data": {"type": "string"},
+                    "text": {"type": "string"}
+                }
+            }),
+            strict: None,
+        },
+    }];
+
+    let input = r"<tool_call>
+<function=process>
+<parameter=count>42</parameter>
+<parameter=rate>1.5</parameter>
+<parameter=enabled>true</parameter>
+<parameter=data>null</parameter>
+<parameter=text>string value</parameter>
+</function>
+</tool_call>";
+
+    let (_normal_text, tools) = parser
+        .parse_complete_with_tools(input, &schema_tools)
+        .await
+        .unwrap();
+    assert_eq!(tools.len(), 1);
+
+    let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
+    // With schema, types are coerced correctly
     assert_eq!(args["count"], 42);
     assert_eq!(args["rate"], 1.5);
     assert_eq!(args["enabled"], true);
-    assert_eq!(args["data"], serde_json::Value::Null);
+    // "null" stays as string when schema says string (the key regression fix)
+    assert_eq!(args["data"], "null");
     assert_eq!(args["text"], "string value");
 }
 
@@ -904,7 +955,6 @@ async fn test_qwen_xml_html_numeric_entities() {
 async fn test_qwen_xml_python_literals() {
     let parser = QwenXmlParser::new();
 
-    // Test Python-style literals (True, False, None)
     let input = r"<tool_call>
 <function=process>
 <parameter=py_true>True</parameter>
@@ -920,14 +970,14 @@ async fn test_qwen_xml_python_literals() {
     assert_eq!(tools.len(), 1);
 
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
-    // Python literals should be converted
+    // Python capitals still converted (unambiguous intent)
     assert_eq!(args["py_true"], true);
     assert_eq!(args["py_false"], false);
     assert_eq!(args["py_none"], serde_json::Value::Null);
-    // JSON literals should also work
-    assert_eq!(args["json_true"], true);
-    assert_eq!(args["json_false"], false);
-    assert_eq!(args["json_null"], serde_json::Value::Null);
+    // JSON lowercase stays as string without schema (conservative)
+    assert_eq!(args["json_true"], "true");
+    assert_eq!(args["json_false"], "false");
+    assert_eq!(args["json_null"], "null");
 }
 
 #[tokio::test]
