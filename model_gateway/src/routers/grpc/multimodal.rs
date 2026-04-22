@@ -191,6 +191,7 @@ pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
             ChatMessage::User { content, .. } => Some(content),
             ChatMessage::System { content, .. } => Some(content),
             ChatMessage::Developer { content, .. } => Some(content),
+            ChatMessage::Tool { content, .. } => Some(content),
             _ => None,
         };
         content.is_some_and(|c| match c {
@@ -212,6 +213,7 @@ fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaContentPart> {
             ChatMessage::User { content, .. } => Some(content),
             ChatMessage::System { content, .. } => Some(content),
             ChatMessage::Developer { content, .. } => Some(content),
+            ChatMessage::Tool { content, .. } => Some(content),
             _ => None,
         };
 
