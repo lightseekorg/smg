@@ -1725,3 +1725,70 @@ fn test_custom_tool_call_output_parts_reject_output_text() {
         other => panic!("expected CustomToolCallOutput, got {other:?}"),
     }
 }
+
+#[test]
+fn test_custom_tool_call_output_validation_rejects_empty_text_and_parts() {
+    use validator::Validate;
+
+    // cross-parameter validation (L2145-2160) requires a Message/SimpleInputMessage
+    // alongside any tool item, so every payload below pairs the custom_tool_call_output
+    // with a plain user message to isolate the CustomToolCallOutput branch we want
+    // to cover.
+    let user_msg = json!({"role": "user", "content": "hi"});
+
+    // Empty string output — validate_input_item's
+    // `CustomToolCallOutputContent::Text(s) if s.is_empty()` branch.
+    let empty_text: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            user_msg,
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_abc123",
+                "output": ""
+            }
+        ]
+    }))
+    .expect("request should deserialize");
+    assert!(
+        empty_text.validate().is_err(),
+        "empty CustomToolCallOutput text must be rejected"
+    );
+
+    // Empty parts array output — validate_input_item's
+    // `CustomToolCallOutputContent::Parts(parts) if parts.is_empty()` branch.
+    let empty_parts: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            user_msg,
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_abc123",
+                "output": []
+            }
+        ]
+    }))
+    .expect("request should deserialize");
+    assert!(
+        empty_parts.validate().is_err(),
+        "empty CustomToolCallOutput parts array must be rejected"
+    );
+
+    // Sanity: a non-empty string output passes the same validator.
+    let ok_text: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            user_msg,
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_abc123",
+                "output": "42"
+            }
+        ]
+    }))
+    .expect("request should deserialize");
+    assert!(
+        ok_text.validate().is_ok(),
+        "non-empty CustomToolCallOutput must validate",
+    );
+}
