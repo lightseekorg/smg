@@ -360,6 +360,13 @@ pub enum ResponseTool {
     /// Built-in file search tool over vector stores.
     #[serde(rename = "file_search")]
     FileSearch(FileSearchTool),
+
+    /// Built-in image generation tool. Spec:
+    /// `{ type: "image_generation", action?, background?, input_fidelity?,
+    ///    input_image_mask?, model?, moderation?, output_compression?,
+    ///    output_format?, partial_images?, quality?, size? }`.
+    #[serde(rename = "image_generation")]
+    ImageGeneration(ImageGenerationTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -497,6 +504,65 @@ pub struct CodeInterpreterTool {
 #[serde(deny_unknown_fields)]
 pub struct ResponseToolEnvironment {
     pub skills: Option<Vec<ResponsesSkillEntry>>,
+}
+
+/// Configuration payload for the `image_generation` built-in tool.
+///
+/// Spec: `{ type: "image_generation", action?, background?, input_fidelity?,
+/// input_image_mask?, model?, moderation?, output_compression?, output_format?,
+/// partial_images?, quality?, size? }`. All inner fields are optional; the
+/// model picks defaults documented in the spec.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageGenerationTool {
+    /// `"generate" | "edit" | "auto"` (default `auto`). Free-form string here so
+    /// future actions added by OpenAI deserialize without a wire break.
+    pub action: Option<String>,
+    /// `"transparent" | "opaque" | "auto"` (default `auto`).
+    pub background: Option<String>,
+    /// `"high" | "low"` — gpt-image-1 / gpt-image-1.5 only (not 1-mini).
+    pub input_fidelity: Option<String>,
+    /// Reference image used by `edit` action; mask either by uploaded file or URL.
+    pub input_image_mask: Option<ImageInputMask>,
+    /// `string | "gpt-image-1" | "gpt-image-1-mini" | "gpt-image-1.5"` — kept as
+    /// `String` so unknown model identifiers passed through unchanged.
+    pub model: Option<String>,
+    /// `"auto" | "low"`.
+    pub moderation: Option<String>,
+    /// Output compression level. Spec default `100` when omitted; we keep
+    /// `Option` so an unset field round-trips as `null` rather than forcing 100.
+    pub output_compression: Option<u32>,
+    /// `"png" | "webp" | "jpeg"`.
+    pub output_format: Option<String>,
+    /// `0..3` — number of partial images to stream.
+    pub partial_images: Option<u32>,
+    /// `"low" | "medium" | "high" | "auto"`.
+    pub quality: Option<String>,
+    /// `"1024x1024" | "1024x1536" | "1536x1024" | "auto"`.
+    pub size: Option<String>,
+}
+
+/// Mask reference for image-generation `edit` calls. Spec: `{ file_id?, image_url? }`.
+/// Reuses the same upload conventions as P1 `InputImage`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageInputMask {
+    pub file_id: Option<String>,
+    pub image_url: Option<String>,
+}
+
+/// Status values for an `image_generation_call` output item.
+///
+/// Spec: `"in_progress" | "completed" | "generating" | "failed"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerationCallStatus {
+    InProgress,
+    Completed,
+    Generating,
+    Failed,
 }
 
 /// `require_approval` values.
@@ -660,6 +726,15 @@ pub enum ResponseInputOutputItem {
         approve: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+    },
+    /// `type: "image_generation_call"` — round-trip form for an image generated
+    /// in a prior turn. Spec: `{ id, result: base64 string, status, type }`.
+    #[serde(rename = "image_generation_call")]
+    ImageGenerationCall {
+        id: String,
+        /// Base64-encoded image bytes.
+        result: String,
+        status: ImageGenerationCallStatus,
     },
     #[serde(untagged)]
     SimpleInputMessage {
@@ -884,6 +959,16 @@ pub enum ResponseOutputItem {
         status: FileSearchCallStatus,
         queries: Vec<String>,
         results: Option<Vec<FileSearchResult>>,
+    },
+    /// `type: "image_generation_call"` — output item carrying a base64 image
+    /// produced by the `image_generation` built-in tool. Spec:
+    /// `{ id, result: base64 string, status, type }`.
+    #[serde(rename = "image_generation_call")]
+    ImageGenerationCall {
+        id: String,
+        /// Base64-encoded image bytes.
+        result: String,
+        status: ImageGenerationCallStatus,
     },
 }
 
@@ -1529,7 +1614,8 @@ impl GenerationRequest for ResponsesRequest {
                         ResponseInputOutputItem::FunctionToolCall { .. }
                         | ResponseInputOutputItem::FunctionCallOutput { .. }
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
-                        | ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+                        | ResponseInputOutputItem::McpApprovalResponse { .. }
+                        | ResponseInputOutputItem::ImageGenerationCall { .. } => {}
                     }
                 }
 
@@ -1794,6 +1880,7 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::FunctionToolCall { .. } => {}
         ResponseInputOutputItem::McpApprovalRequest { .. } => {}
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+        ResponseInputOutputItem::ImageGenerationCall { .. } => {}
     }
     Ok(())
 }
@@ -3033,5 +3120,133 @@ mod tests {
             ResponsesToolChoice::default(),
             ResponsesToolChoice::Options(ToolChoiceOptions::Auto)
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // T4: image_generation tool + image_generation_call item round-trips
+    // ------------------------------------------------------------------
+
+    /// `ResponseTool::ImageGeneration` — bare `{type}` and full spec payload
+    /// round-trip with every optional field preserved byte-for-byte.
+    #[test]
+    fn image_generation_tool_round_trips_spec_shape() {
+        // Minimal spec shape: just the discriminator, no config.
+        let minimal = json!({"type": "image_generation"});
+        let tool: ResponseTool =
+            serde_json::from_value(minimal.clone()).expect("minimal image_generation deserialize");
+        match &tool {
+            ResponseTool::ImageGeneration(cfg) => {
+                assert!(cfg.action.is_none());
+                assert!(cfg.background.is_none());
+                assert!(cfg.input_fidelity.is_none());
+                assert!(cfg.input_image_mask.is_none());
+                assert!(cfg.model.is_none());
+                assert!(cfg.moderation.is_none());
+                assert!(cfg.output_compression.is_none());
+                assert!(cfg.output_format.is_none());
+                assert!(cfg.partial_images.is_none());
+                assert!(cfg.quality.is_none());
+                assert!(cfg.size.is_none());
+            }
+            other => panic!("expected ImageGeneration, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&tool).expect("serialize"), minimal);
+
+        // Full spec shape: every optional field populated.
+        let full = json!({
+            "type": "image_generation",
+            "action": "edit",
+            "background": "transparent",
+            "input_fidelity": "high",
+            "input_image_mask": {
+                "file_id": "file_abc",
+                "image_url": "https://example.com/mask.png"
+            },
+            "model": "gpt-image-1",
+            "moderation": "low",
+            "output_compression": 80,
+            "output_format": "png",
+            "partial_images": 2,
+            "quality": "high",
+            "size": "1024x1024"
+        });
+        let tool: ResponseTool =
+            serde_json::from_value(full.clone()).expect("full image_generation deserialize");
+        match &tool {
+            ResponseTool::ImageGeneration(cfg) => {
+                assert_eq!(cfg.action.as_deref(), Some("edit"));
+                assert_eq!(cfg.background.as_deref(), Some("transparent"));
+                assert_eq!(cfg.input_fidelity.as_deref(), Some("high"));
+                let mask = cfg.input_image_mask.as_ref().expect("mask present");
+                assert_eq!(mask.file_id.as_deref(), Some("file_abc"));
+                assert_eq!(
+                    mask.image_url.as_deref(),
+                    Some("https://example.com/mask.png")
+                );
+                assert_eq!(cfg.model.as_deref(), Some("gpt-image-1"));
+                assert_eq!(cfg.moderation.as_deref(), Some("low"));
+                assert_eq!(cfg.output_compression, Some(80));
+                assert_eq!(cfg.output_format.as_deref(), Some("png"));
+                assert_eq!(cfg.partial_images, Some(2));
+                assert_eq!(cfg.quality.as_deref(), Some("high"));
+                assert_eq!(cfg.size.as_deref(), Some("1024x1024"));
+            }
+            other => panic!("expected ImageGeneration, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&tool).expect("serialize"), full);
+    }
+
+    /// `ResponseOutputItem::ImageGenerationCall` — `{id, result, status, type}`
+    /// round-trips with every spec-listed status variant.
+    #[test]
+    fn image_generation_call_output_item_round_trips_spec_shape() {
+        for (status_json, expected) in [
+            ("in_progress", ImageGenerationCallStatus::InProgress),
+            ("completed", ImageGenerationCallStatus::Completed),
+            ("generating", ImageGenerationCallStatus::Generating),
+            ("failed", ImageGenerationCallStatus::Failed),
+        ] {
+            let payload = json!({
+                "type": "image_generation_call",
+                "id": "ig_1",
+                "result": "aGVsbG8=",
+                "status": status_json,
+            });
+            let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+                .expect("image_generation_call output item deserialize");
+            match &item {
+                ResponseOutputItem::ImageGenerationCall { id, result, status } => {
+                    assert_eq!(id, "ig_1");
+                    assert_eq!(result, "aGVsbG8=");
+                    assert_eq!(*status, expected);
+                }
+                other => panic!("expected ImageGenerationCall, got {other:?}"),
+            }
+            assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+        }
+    }
+
+    /// `ResponseInputOutputItem::ImageGenerationCall` mirrors the output-item
+    /// shape so clients can replay a prior-turn image generation through the
+    /// `input` array for stateless round-trips.
+    #[test]
+    fn image_generation_call_input_item_round_trips_spec_shape() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_2",
+            "result": "d29ybGQ=",
+            "status": "completed",
+        });
+        let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+            .expect("image_generation_call input item deserialize");
+        match &item {
+            ResponseInputOutputItem::ImageGenerationCall { id, result, status } => {
+                assert_eq!(id, "ig_2");
+                assert_eq!(result, "d29ybGQ=");
+                assert_eq!(*status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
     }
 }

@@ -150,6 +150,11 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         );
                         return Err("Unsupported input item type".to_string());
                     }
+                    ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                        // ImageGenerationCall round-trip items carry only base64
+                        // image bytes; no textual form to inject into a Chat
+                        // Completions transcript.
+                    }
                 }
             }
         }
