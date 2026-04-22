@@ -129,7 +129,7 @@ spec:
 |--------|------|-------------|
 | `smg_http_requests_total` | Counter | Requests by method, path |
 | `smg_http_request_duration_seconds` | Histogram | Request latency |
-| `smg_http_responses_total` | Counter | Responses by status_code, error_code |
+| `smg_http_responses_total` | Counter | Responses by path, status_code, error_code |
 | `smg_http_connections_active` | Gauge | Active connections |
 | `smg_http_rate_limit_total` | Counter | Rate limit decisions |
 
@@ -182,6 +182,12 @@ histogram_quantile(0.99, rate(smg_http_request_duration_seconds_bucket[5m]))
 ```promql
 sum(rate(smg_http_responses_total{status_code=~"5.."}[5m]))
 / sum(rate(smg_http_responses_total[5m]))
+```
+
+**`/v1/responses` Success Rate**
+```promql
+sum(rate(smg_http_responses_total{path="/v1/responses",status_code=~"2.."}[5m]))
+/ sum(rate(smg_http_responses_total{path="/v1/responses"}[5m]))
 ```
 
 **Time to First Token (TTFT)**
