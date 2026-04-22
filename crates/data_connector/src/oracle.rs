@@ -19,9 +19,11 @@ use serde_json::Value;
 
 use super::core::{
     make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationItemStorageError, ConversationMetadata,
-    ConversationStorage, ConversationStorageError, ListParams, NewConversation,
-    NewConversationItem, ResponseId, ResponseStorage, ResponseStorageError, SortOrder,
+    ConversationItemStorage, ConversationItemStorageError, ConversationMemoryId,
+    ConversationMemoryResult, ConversationMemoryStatus, ConversationMemoryStorageError,
+    ConversationMemoryType, ConversationMemoryWriter, ConversationMetadata, ConversationStorage,
+    ConversationStorageError, ListParams, NewConversation, NewConversationItem,
+    NewConversationMemory, ResponseId, ResponseStorage, ResponseStorageError, SortOrder,
     StoredResponse,
 };
 use crate::{
@@ -1094,7 +1096,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 }
 
 // ============================================================================
-// PART 4: OracleResponseStorage
+// PART 4: OracleConversationMemoryWriter
 // ============================================================================
 
 /// Parse a single `oracle::Row` into a `ConversationItem`, respecting
@@ -1149,6 +1151,215 @@ fn build_item_from_oracle_row(
         created_at,
     })
 }
+
+#[derive(Clone)]
+pub(super) struct OracleConversationMemoryWriter {
+    store: OracleStore,
+}
+
+impl OracleConversationMemoryWriter {
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
+
+    pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
+        let s = &schema.conversation_memories;
+        let table = s.qualified_table(schema.owner.as_deref());
+
+        let exists: i64 = conn
+            .query_row_as(
+                &format!(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
+                    s.table
+                ),
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+
+        if exists == 0 {
+            let mut col_defs = vec![format!("{} VARCHAR2(255) PRIMARY KEY", s.col("memory_id"))];
+            let core_cols: [(&str, &str); 15] = [
+                ("conversation_id", "VARCHAR2(255) NOT NULL"),
+                ("conversation_version", "NUMBER"),
+                ("response_id", "VARCHAR2(255)"),
+                ("memory_type", "VARCHAR2(32) NOT NULL"),
+                ("status", "VARCHAR2(32) NOT NULL"),
+                ("attempt", "NUMBER DEFAULT 0 NOT NULL"),
+                ("owner_id", "VARCHAR2(255)"),
+                ("next_run_at", "TIMESTAMP WITH TIME ZONE NOT NULL"),
+                ("lease_until", "TIMESTAMP WITH TIME ZONE"),
+                ("content", "CLOB"),
+                ("memory_config", "CLOB"),
+                ("scope_id", "VARCHAR2(255)"),
+                ("error_msg", "CLOB"),
+                (
+                    "created_at",
+                    "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL",
+                ),
+                (
+                    "updated_at",
+                    "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL",
+                ),
+            ];
+
+            for (logical, sql_type) in &core_cols {
+                if !s.is_skipped(logical) {
+                    col_defs.push(format!("{} {sql_type}", s.col(logical)));
+                }
+            }
+
+            conn.execute(
+                &format!("CREATE TABLE {table} ({})", col_defs.join(", ")),
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
+
+        if !s.is_skipped("conversation_id") {
+            create_index_if_missing(
+                conn,
+                &s.table,
+                "IDX_CONV_MEMORIES_CONV_ID",
+                &format!(
+                    "CREATE INDEX IDX_CONV_MEMORIES_CONV_ID ON {table} ({})",
+                    s.col("conversation_id")
+                ),
+            )?;
+        }
+        if !s.is_skipped("next_run_at") {
+            create_index_if_missing(
+                conn,
+                &s.table,
+                "IDX_CONV_MEMORIES_NEXT_RUN_AT",
+                &format!(
+                    "CREATE INDEX IDX_CONV_MEMORIES_NEXT_RUN_AT ON {table} ({})",
+                    s.col("next_run_at")
+                ),
+            )?;
+        }
+        if !s.is_skipped("status") {
+            create_index_if_missing(
+                conn,
+                &s.table,
+                "IDX_CONV_MEMORIES_STATUS",
+                &format!(
+                    "CREATE INDEX IDX_CONV_MEMORIES_STATUS ON {table} ({})",
+                    s.col("status")
+                ),
+            )?;
+        }
+        if !s.is_skipped("response_id") {
+            create_index_if_missing(
+                conn,
+                &s.table,
+                "IDX_CONV_MEMORIES_RESPONSE_ID",
+                &format!(
+                    "CREATE INDEX IDX_CONV_MEMORIES_RESPONSE_ID ON {table} ({})",
+                    s.col("response_id")
+                ),
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConversationMemoryWriter for OracleConversationMemoryWriter {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId> {
+        let NewConversationMemory {
+            conversation_id,
+            conversation_version,
+            response_id,
+            memory_type,
+            status,
+            attempt,
+            owner_id,
+            next_run_at,
+            lease_until,
+            content,
+            memory_config,
+            scope_id,
+            error_msg,
+        } = input;
+
+        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
+        let id_for_insert = id.clone();
+        let response_id = response_id.map(|value| value.0);
+        let memory_type = conversation_memory_type_label(memory_type);
+        let status = conversation_memory_status_label(status);
+        let schema = self.store.schema.clone();
+
+        self.store
+            .execute(move |conn| {
+                let s = &schema.conversation_memories;
+                let table = s.qualified_table(schema.owner.as_deref());
+
+                let mut columns: Vec<&str> = vec![s.col("memory_id")];
+                let mut params: Vec<&dyn ToSql> = vec![&id_for_insert.0];
+
+                macro_rules! push_col {
+                    ($logical:literal, $value:expr) => {
+                        if !s.is_skipped($logical) {
+                            columns.push(s.col($logical));
+                            params.push($value);
+                        }
+                    };
+                }
+
+                push_col!("conversation_id", &conversation_id.0);
+                push_col!("conversation_version", &conversation_version);
+                push_col!("response_id", &response_id);
+                push_col!("memory_type", &memory_type);
+                push_col!("status", &status);
+                push_col!("attempt", &attempt);
+                push_col!("owner_id", &owner_id);
+                push_col!("next_run_at", &next_run_at);
+                push_col!("lease_until", &lease_until);
+                push_col!("content", &content);
+                push_col!("memory_config", &memory_config);
+                push_col!("scope_id", &scope_id);
+                push_col!("error_msg", &error_msg);
+
+                let placeholders = (1..=params.len())
+                    .map(|i| format!(":{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "INSERT INTO {table} ({}) VALUES ({placeholders})",
+                    columns.join(", "),
+                );
+                conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+                Ok(id_for_insert)
+            })
+            .await
+            .map_err(ConversationMemoryStorageError::StorageError)
+    }
+}
+
+fn conversation_memory_type_label(memory_type: ConversationMemoryType) -> &'static str {
+    match memory_type {
+        ConversationMemoryType::OnDemand => "ONDEMAND",
+        ConversationMemoryType::Ltm => "LTM",
+        ConversationMemoryType::Stmo => "STMO",
+    }
+}
+
+fn conversation_memory_status_label(status: ConversationMemoryStatus) -> &'static str {
+    match status {
+        ConversationMemoryStatus::Ready => "READY",
+        ConversationMemoryStatus::Running => "RUNNING",
+        ConversationMemoryStatus::Success => "SUCCESS",
+        ConversationMemoryStatus::Failed => "FAILED",
+    }
+}
+
+// ============================================================================
+// PART 5: OracleResponseStorage
+// ============================================================================
 
 #[derive(Clone)]
 pub(super) struct OracleResponseStorage {

@@ -24,9 +24,11 @@ use crate::{
     core::{
         make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
         ConversationItemResult, ConversationItemStorage, ConversationItemStorageError,
+        ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStatus,
+        ConversationMemoryStorageError, ConversationMemoryType, ConversationMemoryWriter,
         ConversationMetadata, ConversationResult, ConversationStorage, ConversationStorageError,
-        ListParams, NewConversation, NewConversationItem, ResponseId, ResponseResult,
-        ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
+        ListParams, NewConversation, NewConversationItem, NewConversationMemory, ResponseId,
+        ResponseResult, ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
     },
     postgres_migrations::POSTGRES_HISTORY_MIGRATIONS,
     schema::SchemaConfig,
@@ -818,6 +820,174 @@ fn build_item_from_row(
         status,
         created_at,
     })
+}
+
+pub(super) struct PostgresConversationMemoryWriter {
+    store: PostgresStore,
+}
+
+impl PostgresConversationMemoryWriter {
+    pub async fn new(store: PostgresStore) -> Result<Self, ConversationMemoryStorageError> {
+        let s = &store.schema.conversation_memories;
+        let table = s.qualified_table(store.schema.owner.as_deref());
+
+        let mut col_defs = vec![format!("{} VARCHAR(255) PRIMARY KEY", s.col("memory_id"))];
+        let core_cols: [(&str, &str); 15] = [
+            ("conversation_id", "VARCHAR(255) NOT NULL"),
+            ("conversation_version", "BIGINT"),
+            ("response_id", "VARCHAR(255)"),
+            ("memory_type", "VARCHAR(32) NOT NULL"),
+            ("status", "VARCHAR(32) NOT NULL"),
+            ("attempt", "BIGINT NOT NULL DEFAULT 0"),
+            ("owner_id", "VARCHAR(255)"),
+            ("next_run_at", "TIMESTAMPTZ NOT NULL"),
+            ("lease_until", "TIMESTAMPTZ"),
+            ("content", "TEXT"),
+            ("memory_config", "TEXT"),
+            ("scope_id", "VARCHAR(255)"),
+            ("error_msg", "TEXT"),
+            (
+                "created_at",
+                "TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            ),
+            (
+                "updated_at",
+                "TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            ),
+        ];
+
+        for (logical, sql_type) in &core_cols {
+            if !s.is_skipped(logical) {
+                col_defs.push(format!("{} {sql_type}", s.col(logical)));
+            }
+        }
+
+        let mut ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {table} ({});",
+            col_defs.join(", "),
+        );
+        if !s.is_skipped("conversation_id") {
+            ddl.push_str(&format!(
+                "CREATE INDEX IF NOT EXISTS conversation_memories_conv_idx \
+                 ON {table} ({});",
+                s.col("conversation_id")
+            ));
+        }
+        if !s.is_skipped("next_run_at") {
+            ddl.push_str(&format!(
+                "CREATE INDEX IF NOT EXISTS conversation_memories_next_run_idx \
+                 ON {table} ({});",
+                s.col("next_run_at")
+            ));
+        }
+        if !s.is_skipped("status") {
+            ddl.push_str(&format!(
+                "CREATE INDEX IF NOT EXISTS conversation_memories_status_idx \
+                 ON {table} ({});",
+                s.col("status")
+            ));
+        }
+        if !s.is_skipped("response_id") {
+            ddl.push_str(&format!(
+                "CREATE INDEX IF NOT EXISTS conversation_memories_response_idx \
+                 ON {table} ({});",
+                s.col("response_id")
+            ));
+        }
+
+        let client = store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+        client
+            .batch_execute(&ddl)
+            .await
+            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+
+        Ok(Self { store })
+    }
+}
+
+#[async_trait]
+impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId> {
+        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
+        let response_id = input.response_id.as_ref().map(|value| value.0.clone());
+        let memory_type = conversation_memory_type_label(input.memory_type);
+        let status = conversation_memory_status_label(input.status);
+
+        let s = &self.store.schema.conversation_memories;
+        let table = s.qualified_table(self.store.schema.owner.as_deref());
+
+        let mut col_names: Vec<&str> = vec![s.col("memory_id")];
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&id.0];
+
+        macro_rules! push_col {
+            ($logical:literal, $value:expr) => {
+                if !s.is_skipped($logical) {
+                    col_names.push(s.col($logical));
+                    params.push($value);
+                }
+            };
+        }
+
+        push_col!("conversation_id", &input.conversation_id.0);
+        push_col!("conversation_version", &input.conversation_version);
+        push_col!("response_id", &response_id);
+        push_col!("memory_type", &memory_type);
+        push_col!("status", &status);
+        push_col!("attempt", &input.attempt);
+        push_col!("owner_id", &input.owner_id);
+        push_col!("next_run_at", &input.next_run_at);
+        push_col!("lease_until", &input.lease_until);
+        push_col!("content", &input.content);
+        push_col!("memory_config", &input.memory_config);
+        push_col!("scope_id", &input.scope_id);
+        push_col!("error_msg", &input.error_msg);
+
+        let placeholders = (1..=params.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+            col_names.join(", "),
+        );
+
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+        client
+            .execute(&sql, &params)
+            .await
+            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+
+        Ok(id)
+    }
+}
+
+fn conversation_memory_type_label(memory_type: ConversationMemoryType) -> &'static str {
+    match memory_type {
+        ConversationMemoryType::OnDemand => "ONDEMAND",
+        ConversationMemoryType::Ltm => "LTM",
+        ConversationMemoryType::Stmo => "STMO",
+    }
+}
+
+fn conversation_memory_status_label(status: ConversationMemoryStatus) -> &'static str {
+    match status {
+        ConversationMemoryStatus::Ready => "READY",
+        ConversationMemoryStatus::Running => "RUNNING",
+        ConversationMemoryStatus::Success => "SUCCESS",
+        ConversationMemoryStatus::Failed => "FAILED",
+    }
 }
 
 pub(super) struct PostgresResponseStorage {

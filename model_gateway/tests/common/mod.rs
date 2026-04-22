@@ -4,6 +4,7 @@
 pub mod mock_mcp_server;
 pub mod mock_openai_server;
 pub mod mock_worker;
+pub mod recording_memory_writer;
 pub mod streaming_helpers;
 pub mod test_app;
 pub mod test_certs;
@@ -37,8 +38,8 @@ use smg::{
     workflow::Job,
 };
 use smg_data_connector::{
-    MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
-    NoOpConversationMemoryWriter,
+    ConversationMemoryWriter, MemoryConversationItemStorage, MemoryConversationStorage,
+    MemoryResponseStorage, NoOpConversationMemoryWriter,
 };
 #[allow(unused_imports)]
 pub use test_config::{TestRouterConfig, TestWorkerConfig};
@@ -310,13 +311,23 @@ impl AppTestContext {
 }
 
 /// Helper function to create AppContext for tests
+pub fn create_test_context(
+    config: RouterConfig,
+) -> Pin<Box<dyn Future<Output = Arc<AppContext>> + Send>> {
+    let conversation_memory_writer: Arc<dyn ConversationMemoryWriter> =
+        Arc::new(NoOpConversationMemoryWriter::new());
+    create_test_context_with_memory_writer(config, conversation_memory_writer)
+}
+
+/// Helper function to create AppContext for tests with a custom memory writer.
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "test helper - panicking on failure is intentional"
 )]
-pub fn create_test_context(
+pub fn create_test_context_with_memory_writer(
     config: RouterConfig,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
 ) -> Pin<Box<dyn Future<Output = Arc<AppContext>> + Send>> {
     Box::pin(async move {
         let client = reqwest::Client::new();
@@ -344,8 +355,6 @@ pub fn create_test_context(
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
-
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
             worker_registry.clone(),

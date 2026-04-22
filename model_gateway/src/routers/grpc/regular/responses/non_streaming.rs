@@ -22,6 +22,7 @@ use super::{
     conversions,
 };
 use crate::{
+    memory::MemoryExecutionContext,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
@@ -67,6 +68,8 @@ pub(super) async fn route_responses_internal(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
+        ctx.conversation_memory_writer.clone(),
+        MemoryExecutionContext::default(),
         &responses_response,
         &request,
         ctx.request_context.clone(),

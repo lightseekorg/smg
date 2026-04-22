@@ -22,10 +22,13 @@ use crate::{
         NoOpConversationItemStorage, NoOpConversationMemoryWriter, NoOpConversationStorage,
         NoOpResponseStorage,
     },
-    oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
+    oracle::{
+        OracleConversationItemStorage, OracleConversationMemoryWriter, OracleConversationStorage,
+        OracleResponseStorage,
+    },
     postgres::{
-        PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
-        PostgresStore,
+        PostgresConversationItemStorage, PostgresConversationMemoryWriter,
+        PostgresConversationStorage, PostgresResponseStorage, PostgresStore,
     },
     redis::{
         RedisConversationItemStorage, RedisConversationStorage, RedisResponseStorage, RedisStore,
@@ -55,7 +58,13 @@ pub struct StorageFactoryConfig<'a> {
 
 /// Returns whether a backend currently provides `ConversationMemoryWriter`.
 pub const fn backend_supports_memory_writer(backend: &HistoryBackend) -> bool {
-    matches!(backend, HistoryBackend::Memory)
+    // Durable enqueue targets for this round are Oracle and Postgres.
+    // Memory stays enabled for local/test behavior.
+    // Redis and None remain out of scope for durable enqueue.
+    matches!(
+        backend,
+        HistoryBackend::Memory | HistoryBackend::Oracle | HistoryBackend::Postgres
+    )
 }
 
 /// Create all configured storage handles, including conversation memory writer.
@@ -184,6 +193,7 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageBundle, Str
         &[
             OracleConversationStorage::init_schema,
             OracleConversationItemStorage::init_schema,
+            OracleConversationMemoryWriter::init_schema,
             OracleResponseStorage::init_schema,
         ],
     )?;
@@ -191,8 +201,8 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageBundle, Str
     Ok(StorageBundle {
         response_storage: Arc::new(OracleResponseStorage::new(store.clone())),
         conversation_storage: Arc::new(OracleConversationStorage::new(store.clone())),
-        conversation_item_storage: Arc::new(OracleConversationItemStorage::new(store)),
-        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+        conversation_item_storage: Arc::new(OracleConversationItemStorage::new(store.clone())),
+        conversation_memory_writer: Arc::new(OracleConversationMemoryWriter::new(store)),
         background_repository: None,
     })
 }
@@ -208,6 +218,11 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
     let postgres_item = PostgresConversationItemStorage::new(store.clone())
         .await
         .map_err(|err| format!("failed to initialize Postgres conversation item storage: {err}"))?;
+    let postgres_memory = PostgresConversationMemoryWriter::new(store.clone())
+        .await
+        .map_err(|err| {
+            format!("failed to initialize Postgres conversation memory writer: {err}")
+        })?;
 
     // Run versioned migrations after all tables are created
     let applied = store.run_migrations().await?;
@@ -222,7 +237,7 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
         response_storage: Arc::new(postgres_resp),
         conversation_storage: Arc::new(postgres_conv),
         conversation_item_storage: Arc::new(postgres_item),
-        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+        conversation_memory_writer: Arc::new(postgres_memory),
         background_repository: None,
     })
 }
@@ -248,6 +263,15 @@ mod tests {
 
     use super::*;
     use crate::core::{NewConversation, NewConversationItem, StoredResponse};
+
+    #[test]
+    fn backend_supports_memory_writer_matches_real_backends() {
+        assert!(backend_supports_memory_writer(&HistoryBackend::Memory));
+        assert!(backend_supports_memory_writer(&HistoryBackend::Oracle));
+        assert!(backend_supports_memory_writer(&HistoryBackend::Postgres));
+        assert!(!backend_supports_memory_writer(&HistoryBackend::Redis));
+        assert!(!backend_supports_memory_writer(&HistoryBackend::None));
+    }
 
     #[tokio::test]
     async fn test_create_storage_memory() {

@@ -31,8 +31,8 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::{
-    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
-    ResponseStorage,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    RequestContext as StorageRequestContext, ResponseStorage,
 };
 use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
@@ -48,6 +48,7 @@ use super::{
     conversions,
 };
 use crate::{
+    memory::MemoryExecutionContext,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
@@ -105,6 +106,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let response_storage = ctx.response_storage.clone();
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
+    let conversation_memory_writer = ctx.conversation_memory_writer.clone();
     let request_context = ctx.request_context.clone();
 
     #[expect(
@@ -118,6 +120,8 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             response_storage,
             conversation_storage,
             conversation_item_storage,
+            conversation_memory_writer,
+            MemoryExecutionContext::default(),
             request_context,
             tx.clone(),
         )
@@ -136,12 +140,18 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 }
 
 /// Process chat SSE stream and transform to responses format
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming transformation keeps explicit handles to avoid additional heap boxing on hot path"
+)]
 async fn process_and_transform_sse_stream(
     body: Body,
     original_request: ResponsesRequest,
     response_storage: Arc<dyn ResponseStorage>,
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     request_context: Option<StorageRequestContext>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
@@ -234,6 +244,8 @@ async fn process_and_transform_sse_stream(
         conversation_storage,
         conversation_item_storage,
         response_storage,
+        conversation_memory_writer,
+        memory_execution_context,
         &final_response,
         &original_request,
         request_context,
