@@ -7,10 +7,7 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::{
-    routers::error,
-    worker::registry::WorkerRegistry,
-};
+use crate::{routers::error, worker::registry::WorkerRegistry};
 
 pub(super) fn health_generate(registry: &WorkerRegistry) -> Response {
     let workers = registry.get_all();
