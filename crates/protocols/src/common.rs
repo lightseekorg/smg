@@ -794,18 +794,6 @@ impl ConversationRef {
     }
 }
 
-impl From<String> for ConversationRef {
-    fn from(id: String) -> Self {
-        Self::Id(id)
-    }
-}
-
-impl From<&str> for ConversationRef {
-    fn from(id: &str) -> Self {
-        Self::Id(id.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
@@ -856,16 +844,13 @@ mod tests {
         assert!(matches!(r, ConversationRef::Object { ref id } if id == "conv_xyz"));
         assert_eq!(r.as_id(), "conv_xyz");
         // Object round-trips back to an object.
-        assert_eq!(
-            serde_json::to_value(&r).unwrap(),
-            json!({"id": "conv_xyz"})
-        );
+        assert_eq!(serde_json::to_value(&r).unwrap(), json!({"id": "conv_xyz"}));
     }
 
     #[test]
     fn conversation_ref_is_empty() {
-        assert!(ConversationRef::from("").is_empty());
-        assert!(!ConversationRef::from("conv_1").is_empty());
+        assert!(ConversationRef::Id(String::new()).is_empty());
+        assert!(!ConversationRef::Id("conv_1".to_string()).is_empty());
         assert!(ConversationRef::Object { id: String::new() }.is_empty());
     }
 }

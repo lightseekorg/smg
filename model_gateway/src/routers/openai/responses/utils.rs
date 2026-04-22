@@ -97,9 +97,11 @@ pub(super) fn patch_response_with_request_metadata(
         }
     }
 
-    // Attach conversation id for client response
+    // Attach conversation id for client response. Unwrap via `as_id()` so we
+    // emit a flat `{ "id": "conv_..." }` object regardless of whether the
+    // original request used the string or object variant of `ConversationRef`.
     if let Some(conv_id) = &original_body.conversation {
-        obj.insert("conversation".to_string(), json!({ "id": conv_id }));
+        obj.insert("conversation".to_string(), json!({ "id": conv_id.as_id() }));
     }
 }
 
@@ -172,9 +174,11 @@ pub(super) fn rewrite_streaming_block(
         }
     }
 
-    // Attach conversation id
+    // Attach conversation id. Unwrap via `as_id()` so the SSE payload emits a
+    // flat `{ "id": "conv_..." }` even when the original request used the
+    // object form of `ConversationRef`.
     if let Some(conv_id) = &original_body.conversation {
-        response_obj.insert("conversation".to_string(), json!({ "id": conv_id }));
+        response_obj.insert("conversation".to_string(), json!({ "id": conv_id.as_id() }));
         changed = true;
     }
 
@@ -386,7 +390,7 @@ fn function_tool_name(tool: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use openai_protocol::{
-        common::Function,
+        common::{ConversationRef, Function},
         responses::{FunctionTool, McpTool, ResponseInput, ResponseTool, ResponsesRequest},
     };
     use serde_json::json;
@@ -395,7 +399,9 @@ mod tests {
         McpToolSession, McpTransport, Tool, ToolEntry,
     };
 
-    use super::restore_original_tools;
+    use super::{
+        patch_response_with_request_metadata, restore_original_tools, rewrite_streaming_block,
+    };
 
     fn test_tool(name: &str) -> Tool {
         let mut schema = serde_json::Map::new();
@@ -1228,6 +1234,83 @@ mod tests {
                     "content": [{"type": "output_text", "text": "visible"}]
                 }
             ])
+        );
+    }
+
+    /// Regression: when the client sends `conversation` as an object
+    /// (`ConversationRef::Object { id }`), the non-streaming response patcher
+    /// must emit a flat `{ "conversation": { "id": "conv_..." } }`. Before the
+    /// `as_id()` fix, the old code interpolated the whole `ConversationRef`,
+    /// serializing the `Object` variant as `{"id": "conv_..."}` and producing
+    /// a nested `{"conversation": {"id": {"id": "conv_..."}}}`.
+    #[test]
+    fn patch_response_flattens_object_conversation_ref() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            conversation: Some(ConversationRef::Object {
+                id: "conv_abc".to_string(),
+            }),
+            ..Default::default()
+        };
+        let mut response = json!({});
+        patch_response_with_request_metadata(&mut response, &original_body, None);
+
+        assert_eq!(
+            response.get("conversation"),
+            Some(&json!({ "id": "conv_abc" })),
+            "object-form conversation must emit flat {{id}}, not nested {{id:{{id}}}}"
+        );
+        // Negative guard: the inner value must be a string, not an object.
+        let inner = response
+            .get("conversation")
+            .and_then(|v| v.get("id"))
+            .expect("conversation.id present");
+        assert!(
+            inner.is_string(),
+            "conversation.id must be a plain string, got {inner:?}"
+        );
+    }
+
+    /// Regression: same invariant for the streaming SSE rewriter.
+    #[test]
+    fn rewrite_streaming_block_flattens_object_conversation_ref() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            conversation: Some(ConversationRef::Object {
+                id: "conv_xyz".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        // Minimal response.created SSE block with a `response` object to patch.
+        let block = "event: response.created\n\
+                     data: {\"type\":\"response.created\",\"response\":{}}\n";
+
+        let rewritten =
+            rewrite_streaming_block(block, &original_body, None).expect("block rewritten");
+
+        // Extract the `data:` line payload and re-parse it.
+        let data_line = rewritten
+            .lines()
+            .find(|l| l.starts_with("data: "))
+            .expect("data line");
+        let payload: serde_json::Value =
+            serde_json::from_str(data_line.trim_start_matches("data: ")).expect("json");
+        let conv = payload
+            .get("response")
+            .and_then(|r| r.get("conversation"))
+            .expect("conversation attached");
+
+        assert_eq!(
+            conv,
+            &json!({ "id": "conv_xyz" }),
+            "streaming payload must flatten object-form conversation"
+        );
+        assert!(
+            conv.get("id").unwrap().is_string(),
+            "conversation.id must be a plain string, got {conv:?}"
         );
     }
 }

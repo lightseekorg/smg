@@ -100,10 +100,7 @@ impl ResponsesResponseBuilder {
         // ResponsesResponse stores `conversation` as a plain `Option<String>`
         // (response side per spec is `optional { id }` only); flatten the
         // request's union-typed reference down to its underlying id string.
-        self.conversation = request
-            .conversation
-            .as_ref()
-            .map(|c| c.as_id().to_string());
+        self.conversation = request.conversation.as_ref().map(|c| c.as_id().to_string());
         self.temperature = request.temperature;
         self.tool_choice = if let Some(ref tc) = request.tool_choice {
             serde_json::to_string(tc).unwrap_or_else(|_| "auto".to_string())

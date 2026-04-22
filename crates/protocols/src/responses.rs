@@ -9,11 +9,10 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, ConversationRef,
-        Detail, Function, FunctionChoice, GenerationRequest, PromptCacheRetention,
-        PromptTokenUsageInfo, ResponsePrompt, StreamOptions, StringOrArray,
-        ToolChoice as ChatToolChoice, ToolChoiceValue as ChatToolChoiceValue, ToolReference,
-        UsageInfo,
+        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, ConversationRef, Detail,
+        Function, FunctionChoice, GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo,
+        ResponsePrompt, StreamOptions, StringOrArray, ToolChoice as ChatToolChoice,
+        ToolChoiceValue as ChatToolChoiceValue, ToolReference, UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
