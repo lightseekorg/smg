@@ -187,6 +187,11 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         );
                         return Err("Unsupported input item type".to_string());
                     }
+                    // T5 schema-only: forced-cascade arm, no behavior.
+                    ResponseInputOutputItem::LocalShellCall { .. }
+                    | ResponseInputOutputItem::LocalShellCallOutput { .. } => {
+                        return Err("Unsupported input item type".to_string());
+                    }
                 }
             }
         }

@@ -439,6 +439,17 @@ pub enum ResponseTool {
     /// [`ResponsesToolChoice::ApplyPatch`] when callers want to force usage.
     #[serde(rename = "apply_patch")]
     ApplyPatch,
+
+    /// Built-in host-execute shell tool — `{ type: "local_shell" }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools L462): `LocalShell { type:
+    /// "local_shell" }` — carries no payload. Distinct from `shell` (T6),
+    /// which carries a containerized `environment`. The model emits
+    /// `local_shell_call` output items carrying a `LocalShellExec` action;
+    /// the client executes the command on the host and replies with a
+    /// matching `local_shell_call_output` item.
+    #[serde(rename = "local_shell")]
+    LocalShell,
 }
 
 /// Payload carried by [`ResponseTool::Namespace`].
@@ -1740,6 +1751,35 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         output: Option<String>,
     },
+    /// `type: "local_shell_call"` — assistant's call into the
+    /// `local_shell` built-in tool. Spec
+    /// (openai-responses-api-spec.md §LocalShellCall L219-222):
+    /// `{ id, action, call_id, status, type }` where `action` is a
+    /// [`LocalShellExec`] payload describing the command to run on the
+    /// host. The client executes the command and replies with a
+    /// matching [`Self::LocalShellCallOutput`].
+    #[serde(rename = "local_shell_call")]
+    LocalShellCall {
+        id: String,
+        call_id: String,
+        action: LocalShellExec,
+        status: LocalShellCallStatus,
+    },
+    /// `type: "local_shell_call_output"` — client's response to a
+    /// `local_shell_call`. Spec
+    /// (openai-responses-api-spec.md §LocalShellCallOutput L224-226):
+    /// `{ id, output, type, status }`. `output` is a single string
+    /// carrying the command's serialized JSON output; `status` is
+    /// optional per SDK v2.8.1 (`openai==2.8.1`,
+    /// `types/responses/response_input_item_param.py`
+    /// `LocalShellCallOutput` — `Optional` on `status`).
+    #[serde(rename = "local_shell_call_output")]
+    LocalShellCallOutput {
+        id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<LocalShellCallStatus>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -2165,6 +2205,30 @@ pub enum ResponseOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
     },
+    /// `type: "local_shell_call"` — output-side mirror of the input
+    /// variant — emitted when the model issues a `local_shell` tool call.
+    /// Spec (openai-responses-api-spec.md §LocalShellCall L219-222):
+    /// `{ id, action, call_id, status, type }` with `action` as a
+    /// [`LocalShellExec`] payload. See [`ResponseInputOutputItem::LocalShellCall`].
+    #[serde(rename = "local_shell_call")]
+    LocalShellCall {
+        id: String,
+        call_id: String,
+        action: LocalShellExec,
+        status: LocalShellCallStatus,
+    },
+    /// `type: "local_shell_call_output"` — output-side mirror of the
+    /// input variant. Spec
+    /// (openai-responses-api-spec.md §LocalShellCallOutput L224-226):
+    /// `{ id, output, type, status }` with `status` optional per SDK
+    /// v2.8.1. See [`ResponseInputOutputItem::LocalShellCallOutput`].
+    #[serde(rename = "local_shell_call_output")]
+    LocalShellCallOutput {
+        id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<LocalShellCallStatus>,
+    },
 }
 
 // ============================================================================
@@ -2268,6 +2332,52 @@ pub struct FileSearchResult {
     pub text: Option<String>,
     pub score: Option<f32>,
     pub attributes: Option<Value>,
+}
+
+/// Status for `local_shell` tool calls.
+///
+/// Spec (openai-responses-api-spec.md §LocalShellCall L221): `"in_progress"
+/// | "completed" | "incomplete"`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalShellCallStatus {
+    InProgress,
+    Completed,
+    Incomplete,
+}
+
+/// `action` payload carried by a [`ResponseInputOutputItem::LocalShellCall`] /
+/// [`ResponseOutputItem::LocalShellCall`] item.
+///
+/// Spec (openai-responses-api-spec.md §LocalShellCall L220):
+/// `{ command: array of string, env: map[string], type: "exec",
+///   timeout_ms?, user?, working_directory? }`. `env` is always present
+/// (an empty object is semantically distinct from omitting the field),
+/// matching the OpenAI Python SDK (`openai==2.8.1`,
+/// `types/responses/response_input_item_param.py` `LocalShellCallAction`
+/// — non-`Optional` `Dict[str, str]`).
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocalShellExec {
+    /// `type: "exec"` — the only action kind defined by the spec today.
+    #[serde(rename = "exec")]
+    Exec {
+        /// Argv of the command to run on the host.
+        command: Vec<String>,
+        /// Environment variables overlaid on the host process env.
+        /// Always serialized (possibly empty) to match SDK shape.
+        env: std::collections::BTreeMap<String, String>,
+        /// Hard timeout in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        /// User to run the command as.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        /// Working directory for the command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_directory: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -2844,7 +2954,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::ShellCallOutput { .. }
                         | ResponseInputOutputItem::ItemReference { .. }
                         | ResponseInputOutputItem::ApplyPatchCall { .. }
-                        | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
+                        | ResponseInputOutputItem::ApplyPatchCallOutput { .. }
+                        | ResponseInputOutputItem::LocalShellCall { .. }
+                        | ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
                     }
                 }
 
@@ -3167,6 +3279,11 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // output, or a `failed` where the executor had nothing to log) so
         // no emptiness check applies here.
         ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
+        // Schema-only pass-through: T5 adds the protocol variants for the
+        // `local_shell` built-in tool. Validation mirrors `ComputerCall` /
+        // `ImageGenerationCall` above (no payload-level content checks).
+        ResponseInputOutputItem::LocalShellCall { .. } => {}
+        ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
     }
     Ok(())
 }

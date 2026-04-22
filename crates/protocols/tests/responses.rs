@@ -2431,6 +2431,71 @@ fn shell_call_output_item_round_trips_on_response_side() {
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
 
+// ============================================================================
+// T5: local_shell tool + local_shell_call / local_shell_call_output round-trips
+// ============================================================================
+
+/// `ResponseTool::LocalShell` is a unit tool whose on-wire shape is just
+/// `{ "type": "local_shell" }`. Spec (openai-responses-api-spec.md §tools
+/// L462): `LocalShell { type: "local_shell" }`.
+#[test]
+fn local_shell_tool_round_trips_spec_shape() {
+    let payload = json!({ "type": "local_shell" });
+    let tool: ResponseTool =
+        serde_json::from_value(payload.clone()).expect("local_shell tool should deserialize");
+    assert!(matches!(tool, ResponseTool::LocalShell));
+    assert_eq!(serde_json::to_value(&tool).expect("serialize"), payload);
+}
+
+/// `ResponseInputOutputItem::LocalShellCall` carries the minimum spec shape:
+/// `{ id, action: { command, env, type: "exec" }, call_id, status, type }`.
+/// Spec (openai-responses-api-spec.md §LocalShellCall L219-222).
+#[test]
+fn local_shell_call_input_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "local_shell_call",
+        "id": "ls_1",
+        "call_id": "call_ls_1",
+        "action": {
+            "type": "exec",
+            "command": ["/bin/echo", "hello"],
+            "env": {}
+        },
+        "status": "in_progress"
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("local_shell_call input item should deserialize");
+    match &item {
+        ResponseInputOutputItem::LocalShellCall {
+            id,
+            call_id,
+            action,
+            status,
+        } => {
+            assert_eq!(id, "ls_1");
+            assert_eq!(call_id, "call_ls_1");
+            assert_eq!(*status, LocalShellCallStatus::InProgress);
+            match action {
+                LocalShellExec::Exec {
+                    command,
+                    env,
+                    timeout_ms,
+                    user,
+                    working_directory,
+                } => {
+                    assert_eq!(command, &vec!["/bin/echo".to_string(), "hello".to_string()]);
+                    assert!(env.is_empty());
+                    assert!(timeout_ms.is_none());
+                    assert!(user.is_none());
+                    assert!(working_directory.is_none());
+                }
+            }
+        }
+        other => panic!("expected LocalShellCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
 #[test]
 fn shell_call_container_reference_on_response_side_round_trip() {
     // Spec (openai-responses-api-spec.md §returns L512-513): the
@@ -2476,6 +2541,52 @@ fn shell_call_container_reference_on_response_side_round_trip() {
             assert_eq!(*status, ShellCallStatus::Completed);
         }
         other => panic!("expected ResponseOutputItem::ShellCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// All optional `LocalShellExec::Exec` fields (`timeout_ms`, `user`,
+/// `working_directory`) plus populated `env` round-trip through a full
+/// (de)serialize cycle.
+#[test]
+fn local_shell_call_input_item_round_trips_with_all_optionals() {
+    let payload = json!({
+        "type": "local_shell_call",
+        "id": "ls_2",
+        "call_id": "call_ls_2",
+        "action": {
+            "type": "exec",
+            "command": ["python", "-c", "print('hi')"],
+            "env": { "PYTHONUNBUFFERED": "1", "LANG": "C.UTF-8" },
+            "timeout_ms": 5000,
+            "user": "root",
+            "working_directory": "/tmp"
+        },
+        "status": "completed"
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("local_shell_call with optionals should deserialize");
+    match &item {
+        ResponseInputOutputItem::LocalShellCall { action, status, .. } => {
+            assert_eq!(*status, LocalShellCallStatus::Completed);
+            match action {
+                LocalShellExec::Exec {
+                    command,
+                    env,
+                    timeout_ms,
+                    user,
+                    working_directory,
+                } => {
+                    assert_eq!(command.len(), 3);
+                    assert_eq!(env.get("LANG").map(String::as_str), Some("C.UTF-8"));
+                    assert_eq!(env.get("PYTHONUNBUFFERED").map(String::as_str), Some("1"));
+                    assert_eq!(*timeout_ms, Some(5000));
+                    assert_eq!(user.as_deref(), Some("root"));
+                    assert_eq!(working_directory.as_deref(), Some("/tmp"));
+                }
+            }
+        }
+        other => panic!("expected LocalShellCall, got {other:?}"),
     }
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
@@ -3280,5 +3391,120 @@ fn test_apply_patch_request_validate_accepts_relaxed_shapes() {
     assert!(
         empty_update_diff.validate().is_ok(),
         "empty ApplyPatchCall.operation.diff on update_file must pass validation"
+    );
+}
+
+/// `ResponseInputOutputItem::LocalShellCallOutput` carries a string
+/// `output` + optional `status`. Spec
+/// (openai-responses-api-spec.md §LocalShellCallOutput L224-226):
+/// `{ id, output, type, status }`.
+#[test]
+fn local_shell_call_output_input_item_round_trips_spec_shape() {
+    // With status present.
+    let payload_with_status = json!({
+        "type": "local_shell_call_output",
+        "id": "lso_1",
+        "output": "{\"exit_code\":0,\"stdout\":\"hello\\n\",\"stderr\":\"\"}",
+        "status": "completed"
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload_with_status.clone())
+        .expect("local_shell_call_output should deserialize");
+    match &item {
+        ResponseInputOutputItem::LocalShellCallOutput { id, output, status } => {
+            assert_eq!(id, "lso_1");
+            assert!(output.contains("exit_code"));
+            assert_eq!(*status, Some(LocalShellCallStatus::Completed));
+        }
+        other => panic!("expected LocalShellCallOutput, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&item).expect("serialize"),
+        payload_with_status,
+    );
+
+    // Without status — SDK v2.8.1 types the field as Optional.
+    let payload_no_status = json!({
+        "type": "local_shell_call_output",
+        "id": "lso_2",
+        "output": "raw log"
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload_no_status.clone())
+        .expect("local_shell_call_output without status should deserialize");
+    match &item {
+        ResponseInputOutputItem::LocalShellCallOutput { id, output, status } => {
+            assert_eq!(id, "lso_2");
+            assert_eq!(output, "raw log");
+            assert!(status.is_none());
+        }
+        other => panic!("expected LocalShellCallOutput, got {other:?}"),
+    }
+    // No `"status": null` should leak via skip_serializing_if.
+    assert_eq!(
+        serde_json::to_value(&item).expect("serialize"),
+        payload_no_status,
+    );
+}
+
+/// Output-side mirror: `ResponseOutputItem::LocalShellCall` +
+/// `LocalShellCallOutput` round-trip the same on-wire shape the input-side
+/// variants carry. Spec (openai-responses-api-spec.md L507-516) lists both
+/// under `output: array of ResponseOutputItem`.
+#[test]
+fn local_shell_output_item_variants_round_trip_spec_shape() {
+    let call_payload = json!({
+        "type": "local_shell_call",
+        "id": "ls_out_1",
+        "call_id": "call_ls_out_1",
+        "action": {
+            "type": "exec",
+            "command": ["ls", "-la"],
+            "env": {}
+        },
+        "status": "incomplete"
+    });
+    let call_item: ResponseOutputItem = serde_json::from_value(call_payload.clone())
+        .expect("local_shell_call output item should deserialize");
+    match &call_item {
+        ResponseOutputItem::LocalShellCall {
+            id,
+            call_id,
+            action,
+            status,
+        } => {
+            assert_eq!(id, "ls_out_1");
+            assert_eq!(call_id, "call_ls_out_1");
+            assert_eq!(*status, LocalShellCallStatus::Incomplete);
+            match action {
+                LocalShellExec::Exec { command, .. } => {
+                    assert_eq!(command, &vec!["ls".to_string(), "-la".to_string()]);
+                }
+            }
+        }
+        other => panic!("expected ResponseOutputItem::LocalShellCall, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&call_item).expect("serialize"),
+        call_payload,
+    );
+
+    let output_payload = json!({
+        "type": "local_shell_call_output",
+        "id": "lso_out_1",
+        "output": "{\"exit_code\":0}",
+        "status": "completed"
+    });
+    let output_item: ResponseOutputItem = serde_json::from_value(output_payload.clone())
+        .expect("local_shell_call_output output item should deserialize");
+    match &output_item {
+        ResponseOutputItem::LocalShellCallOutput { id, output, status } => {
+            assert_eq!(id, "lso_out_1");
+            assert!(output.contains("exit_code"));
+            assert_eq!(*status, Some(LocalShellCallStatus::Completed));
+        }
+        other => panic!("expected ResponseOutputItem::LocalShellCallOutput, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&output_item).expect("serialize"),
+        output_payload,
     );
 }

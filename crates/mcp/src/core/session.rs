@@ -567,7 +567,9 @@ impl<'a> McpToolSession<'a> {
             | ResponseOutputItem::ApplyPatchCallOutput { .. }
             | ResponseOutputItem::Message { .. }
             | ResponseOutputItem::Reasoning { .. }
-            | ResponseOutputItem::Compaction { .. } => true,
+            | ResponseOutputItem::Compaction { .. }
+            | ResponseOutputItem::LocalShellCall { .. }
+            | ResponseOutputItem::LocalShellCallOutput { .. } => true,
         }
     }
 
