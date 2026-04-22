@@ -412,21 +412,31 @@ pub enum ResponseTool {
     /// are restricted to `Function` or `Custom`. Nested namespaces and
     /// hosted/built-in tools are explicitly not permitted as elements.
     #[serde(rename = "namespace")]
-    Namespace {
-        /// Human-readable description surfaced to the model alongside the group.
-        description: String,
-        /// Stable identifier the model uses to address the namespace in
-        /// `function_call` / `custom_tool_call` items (via the `namespace` field).
-        name: String,
-        /// Tools in this namespace. Spec restricts elements to `Function` or
-        /// `Custom`; the dedicated [`NamespaceTool`] enum prevents nested
-        /// namespaces and hosted-tool leakage that the parent `ResponseTool`
-        /// enum would otherwise allow.
-        tools: Vec<NamespaceTool>,
-    },
+    Namespace(NamespaceToolDef),
 }
 
-/// Element type accepted inside a [`ResponseTool::Namespace`]'s `tools` array.
+/// Payload carried by [`ResponseTool::Namespace`].
+///
+/// Using a dedicated struct (rather than inline struct-variant fields) lets
+/// us apply `#[serde(deny_unknown_fields)]`, matching sibling variants like
+/// [`CustomTool`] and [`FunctionTool`] so unrecognized namespace-level keys
+/// are rejected instead of silently swallowed.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NamespaceToolDef {
+    /// Human-readable description surfaced to the model alongside the group.
+    pub description: String,
+    /// Stable identifier the model uses to address the namespace in
+    /// `function_call` / `custom_tool_call` items (via the `namespace` field).
+    pub name: String,
+    /// Tools in this namespace. Spec restricts elements to `Function` or
+    /// `Custom`; the dedicated [`NamespaceTool`] enum prevents nested
+    /// namespaces and hosted-tool leakage that the parent `ResponseTool`
+    /// enum would otherwise allow.
+    pub tools: Vec<NamespaceTool>,
+}
+
+/// Element type accepted inside a [`NamespaceToolDef`]'s `tools` array.
 ///
 /// Spec (openai-responses-api-spec.md §tools L475): namespace elements must be
 /// either a `Function` or a `Custom` tool. Using a dedicated enum rather than

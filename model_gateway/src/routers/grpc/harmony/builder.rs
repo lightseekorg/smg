@@ -441,7 +441,7 @@ impl HarmonyBuilder {
                             ResponseTool::Computer => "computer",
                             ResponseTool::ComputerUsePreview(_) => "computer_use_preview",
                             ResponseTool::Custom(_) => "custom",
-                            ResponseTool::Namespace { .. } => "namespace",
+                            ResponseTool::Namespace(_) => "namespace",
                         })
                         .collect()
                 })

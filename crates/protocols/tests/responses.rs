@@ -1484,15 +1484,11 @@ fn test_namespace_tool_with_function_round_trip() {
     let tool: ResponseTool = serde_json::from_value(payload.clone())
         .expect("namespace tool with function element should deserialize");
     match &tool {
-        ResponseTool::Namespace {
-            description,
-            name,
-            tools,
-        } => {
-            assert_eq!(name, "sql");
-            assert_eq!(description, "Tools for interacting with the warehouse");
-            assert_eq!(tools.len(), 1);
-            match &tools[0] {
+        ResponseTool::Namespace(def) => {
+            assert_eq!(def.name, "sql");
+            assert_eq!(def.description, "Tools for interacting with the warehouse");
+            assert_eq!(def.tools.len(), 1);
+            match &def.tools[0] {
                 NamespaceTool::Function(ft) => {
                     assert_eq!(ft.function.name, "select");
                     assert_eq!(ft.function.strict, Some(true));
@@ -1531,9 +1527,9 @@ fn test_namespace_tool_with_custom_text_format_round_trip() {
     let tool: ResponseTool = serde_json::from_value(payload.clone())
         .expect("namespace tool with custom/text element should deserialize");
     match &tool {
-        ResponseTool::Namespace { tools, .. } => {
-            assert_eq!(tools.len(), 1);
-            match &tools[0] {
+        ResponseTool::Namespace(def) => {
+            assert_eq!(def.tools.len(), 1);
+            match &def.tools[0] {
                 NamespaceTool::Custom(c) => {
                     assert_eq!(c.name, "raw_cmd");
                     assert!(matches!(c.format, Some(CustomToolInputFormat::Text)));
@@ -1576,7 +1572,7 @@ fn test_namespace_tool_with_custom_grammar_format_round_trip() {
         let tool: ResponseTool = serde_json::from_value(payload.clone())
             .expect("namespace tool with custom/grammar element should deserialize");
         match &tool {
-            ResponseTool::Namespace { tools, .. } => match &tools[0] {
+            ResponseTool::Namespace(def) => match &def.tools[0] {
                 NamespaceTool::Custom(c) => match &c.format {
                     Some(CustomToolInputFormat::Grammar(g)) => {
                         assert_eq!(g.definition, "start: NUMBER");
@@ -1632,18 +1628,65 @@ fn test_namespace_tool_mixed_elements_round_trip() {
     let tool: ResponseTool = serde_json::from_value(payload.clone())
         .expect("namespace tool with mixed elements should deserialize");
     match &tool {
-        ResponseTool::Namespace { tools, .. } => {
-            assert_eq!(tools.len(), 2);
+        ResponseTool::Namespace(def) => {
+            assert_eq!(def.tools.len(), 2);
             assert!(
-                matches!(&tools[0], NamespaceTool::Function(ft) if ft.function.name == "read_file")
+                matches!(&def.tools[0], NamespaceTool::Function(ft) if ft.function.name == "read_file")
             );
-            assert!(matches!(&tools[1], NamespaceTool::Custom(c) if c.name == "write_file"));
+            assert!(matches!(&def.tools[1], NamespaceTool::Custom(c) if c.name == "write_file"));
         }
         other => panic!("expected ResponseTool::Namespace, got {other:?}"),
     }
 
     let serialized = serde_json::to_value(&tool).expect("namespace tool should serialize");
     assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_namespace_tool_rejects_nested_namespace_element() {
+    // Spec (openai-responses-api-spec.md §tools L475): a Namespace's `tools`
+    // may contain only Function or Custom — nested Namespace elements are
+    // forbidden. The dedicated NamespaceTool enum (without a Namespace arm)
+    // is what enforces this at the protocol layer.
+    let payload = json!({
+        "type": "namespace",
+        "name": "outer",
+        "description": "outer namespace",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "inner",
+                "description": "inner namespace",
+                "tools": []
+            }
+        ]
+    });
+
+    assert!(
+        serde_json::from_value::<ResponseTool>(payload).is_err(),
+        "nested namespace elements must be rejected"
+    );
+}
+
+#[test]
+fn test_namespace_tool_rejects_hosted_tool_element() {
+    // Spec (openai-responses-api-spec.md §tools L475): hosted / built-in tool
+    // types (e.g. `file_search`, `web_search_preview`, `code_interpreter`)
+    // may appear as top-level ResponseTool entries but MUST NOT appear as
+    // namespace elements.
+    let payload = json!({
+        "type": "namespace",
+        "name": "ns",
+        "description": "namespace",
+        "tools": [
+            { "type": "file_search", "vector_store_ids": ["vs_123"] }
+        ]
+    });
+
+    assert!(
+        serde_json::from_value::<ResponseTool>(payload).is_err(),
+        "hosted/built-in tools must be rejected inside namespace.tools"
+    );
 }
 
 #[test]
