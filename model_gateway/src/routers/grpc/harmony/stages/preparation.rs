@@ -174,11 +174,6 @@ impl HarmonyPreparationStage {
         // Step 1: Extract function tools with schemas from ResponseTools
         let mut function_tools = extract_tools_from_response_tools(request.tools.as_deref());
 
-        // Project the Responses `tool_choice` onto Chat Completions' shape so
-        // we can reuse the shared chat-utility helpers (filter + structural
-        // tag generator). Responses-only variants (hosted / mcp / custom /
-        // apply_patch / shell) collapse onto `auto` — the Harmony pipeline is
-        // chat-shaped and has no dedicated representation for them.
         let chat_tool_choice = request
             .tool_choice
             .as_ref()
