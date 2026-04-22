@@ -68,6 +68,7 @@ fn extract_text_for_routing_old(req: &ResponsesRequest) -> String {
                 ResponseInputOutputItem::FunctionCallOutput { output, .. } => Some(output.clone()),
                 ResponseInputOutputItem::McpApprovalRequest { .. } => None,
                 ResponseInputOutputItem::McpApprovalResponse { .. } => None,
+                ResponseInputOutputItem::ImageGenerationCall { .. } => None,
             })
             .collect::<Vec<String>>()
             .join(" "),

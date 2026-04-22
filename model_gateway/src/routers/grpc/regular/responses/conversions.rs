@@ -150,6 +150,19 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         );
                         return Err("Unsupported input item type".to_string());
                     }
+                    ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                        // ImageGenerationCall round-trip items carry only base64
+                        // image bytes; no textual form to inject into a Chat
+                        // Completions transcript. Mirror the Harmony path
+                        // (see `harmony/builder.rs`) and reject loudly rather
+                        // than silently dropping — keeps both conversion paths
+                        // consistent with other non-text input items.
+                        warn!(
+                            function = "responses_to_chat",
+                            "image_generation_call input item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
                 }
             }
         }

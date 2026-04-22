@@ -66,6 +66,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     "code_interpreter",
     "container",
     "file_search",
+    "image_generation",
 ];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
@@ -436,6 +437,7 @@ impl HarmonyBuilder {
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
                             ResponseTool::Mcp(_) => "mcp",
                             ResponseTool::FileSearch(_) => "file_search",
+                            ResponseTool::ImageGeneration(_) => "image_generation",
                         })
                         .collect()
                 })
@@ -723,6 +725,14 @@ impl HarmonyBuilder {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
                     "Approval item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "image_generation_call input item reached Harmony conversion"
                 );
                 Err("Unsupported input item type".to_string())
             }
