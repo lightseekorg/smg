@@ -298,6 +298,17 @@ async def serve_grpc(
                 logger.warning("SGL_FORCE_SHUTDOWN set; skipping drain")
                 break
 
+            # If handle_loop has died (e.g. fatal ZMQError, scheduler
+            # crash), scheduler outputs will never be forwarded and
+            # in-flight rids can never be marked finished — abort the
+            # drain instead of blocking until SIGKILL.
+            handle_loop_task = servicer.request_manager.handle_loop_task
+            if handle_loop_task is not None and handle_loop_task.done():
+                logger.warning(
+                    "handle_loop task has terminated; aborting drain and proceeding to shutdown"
+                )
+                break
+
             # Finished requests linger in rid_to_state for 5 s via the
             # cleanup() task in _handle_batch_output; exclude them so
             # the drain loop exits promptly once real work is done.
@@ -311,10 +322,16 @@ async def serve_grpc(
                 logger.info("Drain complete; no in-flight requests")
                 break
 
+            # Truncate rid list in logs: under high load there can be
+            # thousands of in-flight requests and the full list would
+            # flood the log every poll interval.
+            log_rids = remaining_rids[:10]
+            if remain_num_req > 10:
+                log_rids = log_rids + ["..."]
             logger.info(
                 "Gracefully exiting... Remaining number of requests %d. Remaining requests %s",
                 remain_num_req,
-                remaining_rids,
+                log_rids,
             )
             await asyncio.sleep(5)
 

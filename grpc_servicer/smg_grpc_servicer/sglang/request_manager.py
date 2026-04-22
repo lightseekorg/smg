@@ -195,6 +195,10 @@ class GrpcRequestManager:
         # State Management (from TokenizerManager)
         self.rid_to_state: dict[str, GrpcReqState] = {}
         self.asyncio_tasks: set = set()
+        # Separate handle_loop ref so the drain loop can detect if scheduler
+        # output forwarding has died — without it, rid_to_state would never
+        # drain and the pod would wait for SIGKILL.
+        self.handle_loop_task: asyncio.Task | None = None
         self.gracefully_exit = False
         self.no_create_loop = False
         self.event_loop = None
@@ -916,7 +920,8 @@ class GrpcRequestManager:
 
         self.no_create_loop = True
         loop = get_or_create_event_loop()
-        self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.handle_loop)))
+        self.handle_loop_task = loop.create_task(print_exception_wrapper(self.handle_loop))
+        self.asyncio_tasks.add(self.handle_loop_task)
 
         self.event_loop = loop
 
