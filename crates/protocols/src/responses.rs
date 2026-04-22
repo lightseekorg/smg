@@ -805,13 +805,18 @@ pub enum ComputerCallStatus {
 /// One pending or acknowledged safety check attached to a computer-use call.
 ///
 /// Spec (openai-responses-api-spec.md §ComputerCall): `pending_safety_checks:
-/// array of { id, code, message }`.
+/// array of { id, code, message }`. Per SDK v2.8.1
+/// (`types/responses/response_computer_tool_call.py::PendingSafetyCheck`),
+/// `code` and `message` are `Optional[str] = None`, so we mirror that here to
+/// round-trip payloads that omit either field.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerSafetyCheck {
     pub id: String,
-    pub code: String,
-    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Output payload of a [`ResponseInputOutputItem::ComputerCallOutput`] item.

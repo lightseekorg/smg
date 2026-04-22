@@ -1449,3 +1449,46 @@ fn computer_call_output_output_item_round_trips_spec_shape() {
     ));
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
+
+#[test]
+fn computer_safety_check_accepts_optional_code_and_message() {
+    // Per SDK v2.8.1 (types/responses/response_computer_tool_call.py::PendingSafetyCheck),
+    // both `code` and `message` are `Optional[str] = None`. Payloads that omit
+    // either field must deserialize, and the serialization round-trip must
+    // preserve the missing fields (not invent empty strings).
+    let payload = json!({
+        "type": "computer_call",
+        "id": "cc_1",
+        "call_id": "call_1",
+        "action": {"type": "screenshot"},
+        "status": "in_progress",
+        "pending_safety_checks": [
+            {"id": "psc_only_id"},
+            {"id": "psc_with_code", "code": "malicious_instructions"},
+            {"id": "psc_with_message", "message": "details"},
+            {"id": "psc_full", "code": "c", "message": "m"},
+        ],
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone()).expect("deserialize");
+    match &item {
+        ResponseOutputItem::ComputerCall {
+            pending_safety_checks,
+            ..
+        } => {
+            assert_eq!(pending_safety_checks.len(), 4);
+            assert!(pending_safety_checks[0].code.is_none());
+            assert!(pending_safety_checks[0].message.is_none());
+            assert_eq!(
+                pending_safety_checks[1].code.as_deref(),
+                Some("malicious_instructions")
+            );
+            assert!(pending_safety_checks[1].message.is_none());
+            assert!(pending_safety_checks[2].code.is_none());
+            assert_eq!(pending_safety_checks[2].message.as_deref(), Some("details"));
+            assert_eq!(pending_safety_checks[3].code.as_deref(), Some("c"));
+            assert_eq!(pending_safety_checks[3].message.as_deref(), Some("m"));
+        }
+        other => panic!("expected ComputerCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
