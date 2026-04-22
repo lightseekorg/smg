@@ -438,6 +438,8 @@ impl HarmonyBuilder {
                             ResponseTool::Mcp(_) => "mcp",
                             ResponseTool::FileSearch(_) => "file_search",
                             ResponseTool::ImageGeneration(_) => "image_generation",
+                            ResponseTool::Computer => "computer",
+                            ResponseTool::ComputerUsePreview(_) => "computer_use_preview",
                         })
                         .collect()
                 })
@@ -721,7 +723,9 @@ impl HarmonyBuilder {
             }
 
             ResponseInputOutputItem::McpApprovalResponse { .. }
-            | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+            | ResponseInputOutputItem::McpApprovalRequest { .. }
+            | ResponseInputOutputItem::ComputerCall { .. }
+            | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
                     "Approval item reached Harmony conversion"

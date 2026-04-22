@@ -248,6 +248,9 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         ResponseTool::CodeInterpreter(_) => serde_json::to_value(tool).ok(),
         ResponseTool::FileSearch(_) => serde_json::to_value(tool).ok(),
         ResponseTool::ImageGeneration(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Computer | ResponseTool::ComputerUsePreview(_) => {
+            serde_json::to_value(tool).ok()
+        }
         ResponseTool::Function(_) => None,
     }
 }

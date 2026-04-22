@@ -143,7 +143,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         });
                     }
                     ResponseInputOutputItem::McpApprovalResponse { .. }
-                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                    | ResponseInputOutputItem::McpApprovalRequest { .. }
+                    | ResponseInputOutputItem::ComputerCall { .. }
+                    | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                         warn!(
                             function = "responses_to_chat",
                             "Approval item reached chat conversion"

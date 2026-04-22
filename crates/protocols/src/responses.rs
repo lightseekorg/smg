@@ -371,6 +371,23 @@ pub enum ResponseTool {
     ///    output_format?, partial_images?, quality?, size? }`.
     #[serde(rename = "image_generation")]
     ImageGeneration(ImageGenerationTool),
+
+    /// Generic computer tool — `{ type: "computer" }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools): `Computer { type: "computer" }`.
+    /// Carries no payload; the model is told that a computer-control surface is
+    /// available without committing to display dimensions or environment.
+    #[serde(rename = "computer")]
+    Computer,
+
+    /// Computer-use preview tool — `{ type: "computer_use_preview",
+    /// display_height, display_width, environment }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools): `ComputerUsePreview
+    /// { display_height, display_width, environment: "browser"|"ubuntu"|
+    /// "windows"|"mac", type: "computer_use_preview" }`.
+    #[serde(rename = "computer_use_preview")]
+    ComputerUsePreview(ComputerUsePreviewTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -663,6 +680,159 @@ pub struct RequireApprovalFilter {
 }
 
 // ============================================================================
+// Computer Tool (T2)
+// ============================================================================
+
+/// Computer-use preview tool payload.
+///
+/// Spec (openai-responses-api-spec.md §tools): `ComputerUsePreview
+/// { display_height, display_width, environment, type: "computer_use_preview" }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerUsePreviewTool {
+    /// Height of the simulated display in pixels.
+    pub display_height: u32,
+    /// Width of the simulated display in pixels.
+    pub display_width: u32,
+    /// Operating environment the model should target.
+    pub environment: ComputerEnvironment,
+}
+
+/// Environment selector for [`ComputerUsePreviewTool`].
+///
+/// Spec (openai-responses-api-spec.md §tools): `environment:
+/// "windows"|"mac"|"linux"|"ubuntu"|"browser"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerEnvironment {
+    Windows,
+    Mac,
+    Linux,
+    Ubuntu,
+    Browser,
+}
+
+/// Mouse button used by the `Click` action.
+///
+/// Spec (openai-responses-api-spec.md §ComputerAction): `button:
+/// "left"|"right"|"wheel"|"back"|"forward"`. Only the `Click` action carries a
+/// `button` field; `Scroll` uses `scroll_x`/`scroll_y` offsets.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Wheel,
+    Back,
+    Forward,
+}
+
+/// `(x, y)` coordinate pair used in `Drag.path` and `Move/Click/Scroll` actions.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerCoordinate {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Discriminated union of computer-use actions the model may emit.
+///
+/// Spec (openai-responses-api-spec.md §ComputerAction):
+/// `Click | DoubleClick | Drag | Keypress | Move | Screenshot | Scroll | Type | Wait`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComputerAction {
+    /// `{ type: "click", button, x, y, keys? }`.
+    Click {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "double_click", x, y, keys? }`.
+    DoubleClick {
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "drag", path, keys? }`.
+    Drag {
+        path: Vec<ComputerCoordinate>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "keypress", keys }`.
+    Keypress { keys: Vec<String> },
+    /// `{ type: "move", x, y, keys? }`.
+    Move {
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "screenshot" }`.
+    Screenshot,
+    /// `{ type: "scroll", scroll_x, scroll_y, x, y, keys? }`.
+    Scroll {
+        scroll_x: i32,
+        scroll_y: i32,
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "type", text }`.
+    Type { text: String },
+    /// `{ type: "wait" }`.
+    Wait,
+}
+
+/// Status for a [`ResponseInputOutputItem::ComputerCall`] /
+/// [`ResponseOutputItem::ComputerCall`] item.
+///
+/// Spec (openai-responses-api-spec.md §ComputerCall): `status: "in_progress"
+/// | "completed" | "incomplete"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerCallStatus {
+    InProgress,
+    Completed,
+    Incomplete,
+}
+
+/// One pending or acknowledged safety check attached to a computer-use call.
+///
+/// Spec (openai-responses-api-spec.md §ComputerCall): `pending_safety_checks:
+/// array of { id, code, message }`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerSafetyCheck {
+    pub id: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// Output payload of a [`ResponseInputOutputItem::ComputerCallOutput`] item.
+///
+/// Spec (openai-responses-api-spec.md §ComputerCallOutput.output):
+/// `ResponseComputerToolCallOutputScreenshot { type: "computer_screenshot",
+/// file_id?, image_url? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComputerCallOutputContent {
+    /// `{ type: "computer_screenshot", file_id?, image_url? }`.
+    ComputerScreenshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+    },
+}
+
+// ============================================================================
 // Reasoning Parameters
 // ============================================================================
 
@@ -827,6 +997,48 @@ pub enum ResponseInputOutputItem {
         encrypted_content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+    },
+    /// `{ type: "computer_call", id, call_id, action?, actions?, status,
+    /// pending_safety_checks }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCall): single-action
+    /// `action` is the legacy shape; `actions` carries the flattened batch
+    /// for `computer_use`. Both fields are optional independently, so callers
+    /// can roundtrip either form.
+    #[serde(rename = "computer_call")]
+    ComputerCall {
+        id: String,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ComputerAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actions: Option<Vec<ComputerAction>>,
+        status: ComputerCallStatus,
+        /// Always serialized (including an empty `[]`). The official OpenAI
+        /// Python SDK (`openai==2.8.1`,
+        /// `types/responses/response_computer_tool_call.py`) declares this as a
+        /// non-`Optional` `List[PendingSafetyCheck]`, so the field must always
+        /// appear on the wire — an empty array is semantically distinct from
+        /// omitting the field.
+        #[serde(default)]
+        pending_safety_checks: Vec<ComputerSafetyCheck>,
+    },
+    /// `{ type: "computer_call_output", id?, call_id, output,
+    /// acknowledged_safety_checks?, status? }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCallOutput): `output` is the
+    /// [`ComputerCallOutputContent::ComputerScreenshot`] payload;
+    /// `acknowledged_safety_checks` and `status` are both optional per spec.
+    #[serde(rename = "computer_call_output")]
+    ComputerCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        call_id: String,
+        output: ComputerCallOutputContent,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        acknowledged_safety_checks: Vec<ComputerSafetyCheck>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ComputerCallStatus>,
     },
     #[serde(untagged)]
     SimpleInputMessage {
@@ -1095,6 +1307,45 @@ pub enum ResponseOutputItem {
     Compaction {
         id: String,
         encrypted_content: String,
+    },
+    /// `{ type: "computer_call", id, call_id, action?, actions?, status,
+    /// pending_safety_checks }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCall): output-side mirror of
+    /// the input variant — emitted when the model issues a computer-use action.
+    /// See [`ComputerAction`].
+    #[serde(rename = "computer_call")]
+    ComputerCall {
+        id: String,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ComputerAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actions: Option<Vec<ComputerAction>>,
+        status: ComputerCallStatus,
+        /// Always serialized (including an empty `[]`). The official OpenAI
+        /// Python SDK (`openai==2.8.1`,
+        /// `types/responses/response_computer_tool_call.py`) declares this as a
+        /// non-`Optional` `List[PendingSafetyCheck]`, so the field must always
+        /// appear on the wire — an empty array is semantically distinct from
+        /// omitting the field.
+        #[serde(default)]
+        pending_safety_checks: Vec<ComputerSafetyCheck>,
+    },
+    /// `{ type: "computer_call_output", id?, call_id, output,
+    /// acknowledged_safety_checks?, status? }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCallOutput).
+    #[serde(rename = "computer_call_output")]
+    ComputerCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        call_id: String,
+        output: ComputerCallOutputContent,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        acknowledged_safety_checks: Vec<ComputerSafetyCheck>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ComputerCallStatus>,
     },
 }
 
@@ -1766,7 +2017,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. }
                         | ResponseInputOutputItem::ImageGenerationCall { .. }
-                        | ResponseInputOutputItem::Compaction { .. } => {}
+                        | ResponseInputOutputItem::Compaction { .. }
+                        | ResponseInputOutputItem::ComputerCall { .. }
+                        | ResponseInputOutputItem::ComputerCallOutput { .. } => {}
                     }
                 }
 
@@ -2040,6 +2293,8 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
         ResponseInputOutputItem::ImageGenerationCall { .. } => {}
         ResponseInputOutputItem::Compaction { .. } => {}
+        ResponseInputOutputItem::ComputerCall { .. } => {}
+        ResponseInputOutputItem::ComputerCallOutput { .. } => {}
     }
     Ok(())
 }

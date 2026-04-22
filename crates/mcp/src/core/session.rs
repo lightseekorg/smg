@@ -559,6 +559,8 @@ impl<'a> McpToolSession<'a> {
             | ResponseOutputItem::CodeInterpreterCall { .. }
             | ResponseOutputItem::FileSearchCall { .. }
             | ResponseOutputItem::ImageGenerationCall { .. }
+            | ResponseOutputItem::ComputerCall { .. }
+            | ResponseOutputItem::ComputerCallOutput { .. }
             | ResponseOutputItem::Message { .. }
             | ResponseOutputItem::Reasoning { .. }
             | ResponseOutputItem::Compaction { .. } => true,

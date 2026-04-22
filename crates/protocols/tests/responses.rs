@@ -1327,3 +1327,125 @@ fn compaction_input_item_accepts_missing_id() {
     }
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
+
+#[test]
+fn computer_tool_round_trips_spec_shape() {
+    let payload = json!({ "type": "computer" });
+    let tool: ResponseTool = serde_json::from_value(payload.clone()).expect("deserialize");
+    assert!(matches!(tool, ResponseTool::Computer));
+    assert_eq!(serde_json::to_value(&tool).expect("serialize"), payload);
+}
+
+#[test]
+fn computer_use_preview_tool_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "computer_use_preview",
+        "display_height": 1080,
+        "display_width": 1920,
+        "environment": "browser",
+    });
+    let tool: ResponseTool = serde_json::from_value(payload.clone()).expect("deserialize");
+    match &tool {
+        ResponseTool::ComputerUsePreview(cup) => {
+            assert_eq!(cup.display_height, 1080);
+            assert_eq!(cup.display_width, 1920);
+            assert_eq!(cup.environment, ComputerEnvironment::Browser);
+        }
+        other => panic!("expected ComputerUsePreview, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&tool).expect("serialize"), payload);
+}
+
+#[test]
+fn computer_action_variants_round_trip() {
+    let fixtures = [
+        json!({"type": "click", "button": "left", "x": 10, "y": 20}),
+        json!({"type": "double_click", "x": 100, "y": 200}),
+        json!({
+            "type": "drag",
+            "path": [{"x": 0, "y": 0}, {"x": 10, "y": 10}],
+        }),
+        json!({"type": "keypress", "keys": ["ctrl", "c"]}),
+        json!({"type": "move", "x": 50, "y": 60}),
+        json!({"type": "screenshot"}),
+        json!({
+            "type": "scroll",
+            "scroll_x": 0,
+            "scroll_y": -120,
+            "x": 100,
+            "y": 200,
+        }),
+        json!({"type": "type", "text": "hello"}),
+        json!({"type": "wait"}),
+    ];
+    for payload in fixtures {
+        let action: ComputerAction =
+            serde_json::from_value(payload.clone()).expect("action deserialize");
+        assert_eq!(
+            serde_json::to_value(&action).expect("action serialize"),
+            payload,
+        );
+    }
+}
+
+#[test]
+fn computer_call_input_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "computer_call",
+        "id": "cc_1",
+        "call_id": "call_1",
+        "action": {"type": "screenshot"},
+        "status": "completed",
+        "pending_safety_checks": [],
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("deserialize");
+    assert!(matches!(item, ResponseInputOutputItem::ComputerCall { .. }));
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn computer_call_output_input_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "computer_call_output",
+        "call_id": "call_1",
+        "output": {"type": "computer_screenshot", "file_id": "file_1"},
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("deserialize");
+    assert!(matches!(
+        item,
+        ResponseInputOutputItem::ComputerCallOutput { .. }
+    ));
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn computer_call_output_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "computer_call",
+        "id": "cc_1",
+        "call_id": "call_1",
+        "action": {"type": "click", "button": "left", "x": 10, "y": 20},
+        "status": "in_progress",
+        "pending_safety_checks": [],
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone()).expect("deserialize");
+    assert!(matches!(item, ResponseOutputItem::ComputerCall { .. }));
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn computer_call_output_output_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "computer_call_output",
+        "call_id": "call_1",
+        "output": {"type": "computer_screenshot", "image_url": "https://example/s.png"},
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone()).expect("deserialize");
+    assert!(matches!(
+        item,
+        ResponseOutputItem::ComputerCallOutput { .. }
+    ));
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
