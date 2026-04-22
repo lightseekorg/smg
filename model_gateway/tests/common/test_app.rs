@@ -17,6 +17,7 @@ use smg::{
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
+    NoOpConversationMemoryWriter,
 };
 use smg_mcp::{McpConfig, McpOrchestrator};
 
@@ -53,6 +54,7 @@ pub fn create_test_app(
     let response_storage = Arc::new(MemoryResponseStorage::new());
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
+    let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
     // Initialize the worker monitor with the same interval the
     // production builder uses so tests exercise the real polling
@@ -82,6 +84,7 @@ pub fn create_test_app(
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
+            .conversation_memory_writer(conversation_memory_writer)
             .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
@@ -118,6 +121,10 @@ pub fn create_test_app(
     let auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper assumes router config is already validated"
+    )]
     build_app(
         app_state,
         auth_config,
@@ -126,6 +133,7 @@ pub fn create_test_app(
         request_id_headers,
         router_config.cors_allowed_origins.clone(),
     )
+    .expect("valid tenant resolution config")
 }
 
 /// Create a test Axum application with an existing AppContext
@@ -158,6 +166,10 @@ pub fn create_test_app_with_context(
     let auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper assumes router config is already validated"
+    )]
     build_app(
         app_state,
         auth_config,
@@ -166,6 +178,7 @@ pub fn create_test_app_with_context(
         request_id_headers,
         router_config.cors_allowed_origins.clone(),
     )
+    .expect("valid tenant resolution config")
 }
 
 /// Create a minimal test AppContext for unit tests
@@ -205,6 +218,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
     let response_storage = Arc::new(MemoryResponseStorage::new());
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
+    let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
     Arc::new(
         AppContext::builder()
@@ -219,6 +233,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
+            .conversation_memory_writer(conversation_memory_writer)
             .worker_monitor(None)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)

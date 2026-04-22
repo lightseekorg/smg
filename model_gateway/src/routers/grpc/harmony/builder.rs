@@ -62,9 +62,11 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
 /// Built-in tools that are added to the system message
 const BUILTIN_TOOLS: &[&str] = &[
     "web_search_preview",
+    "web_search",
     "code_interpreter",
     "container",
     "file_search",
+    "image_generation",
 ];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
@@ -107,7 +109,9 @@ impl ToolLike for ResponseTool {
     fn is_builtin(&self) -> bool {
         matches!(
             self,
-            ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+            ResponseTool::WebSearchPreview(_)
+                | ResponseTool::WebSearch(_)
+                | ResponseTool::CodeInterpreter(_)
         )
     }
 
@@ -429,9 +433,13 @@ impl HarmonyBuilder {
                         .map(|tool| match tool {
                             ResponseTool::Function(_) => "function",
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
+                            ResponseTool::WebSearch(_) => "web_search",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
                             ResponseTool::Mcp(_) => "mcp",
                             ResponseTool::FileSearch(_) => "file_search",
+                            ResponseTool::ImageGeneration(_) => "image_generation",
+                            ResponseTool::Computer => "computer",
+                            ResponseTool::ComputerUsePreview(_) => "computer_use_preview",
                         })
                         .collect()
                 })
@@ -715,11 +723,25 @@ impl HarmonyBuilder {
             }
 
             ResponseInputOutputItem::McpApprovalResponse { .. }
-            | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+            | ResponseInputOutputItem::McpApprovalRequest { .. }
+            | ResponseInputOutputItem::ComputerCall { .. }
+            | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
                     "Approval item reached Harmony conversion"
                 );
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "image_generation_call input item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::Compaction { .. } => {
                 Err("Unsupported input item type".to_string())
             }
         }

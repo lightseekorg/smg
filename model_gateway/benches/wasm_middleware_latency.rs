@@ -11,8 +11,11 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use http_body_util::BodyExt;
 use openai_protocol::chat::ChatCompletionRequest;
 use smg::{
-    app_context::AppContext, config::RouterConfig, middleware::wasm_middleware,
-    routers::RouterTrait, server::AppState,
+    app_context::AppContext,
+    config::RouterConfig,
+    middleware::{wasm_middleware, TenantRequestMeta},
+    routers::RouterTrait,
+    server::AppState,
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 use tower::{Layer, Service};
@@ -28,6 +31,7 @@ impl RouterTrait for MockRouter {
     async fn route_chat(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &ChatCompletionRequest,
         _model_id: &str,
     ) -> Response<Body> {

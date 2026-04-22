@@ -8,7 +8,15 @@ pub use smg_data_connector::{
 };
 
 use super::{validation::ConfigValidator, ConfigResult, SkillsConfig};
-use crate::worker::ConnectionMode;
+use crate::{tenant::DEFAULT_TENANT_HEADER_NAME, worker::ConnectionMode};
+
+/// Runtime feature flags for memory behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryRuntimeConfig {
+    /// Master switch for memory features.
+    pub enabled: bool,
+}
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +45,10 @@ pub struct RouterConfig {
     pub request_id_headers: Option<Vec<String>>,
     #[serde(default)]
     pub storage_context_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub memory_runtime: MemoryRuntimeConfig,
+    #[serde(default)]
+    pub tenant_resolution: TenantResolutionConfig,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
     pub queue_size: usize,
@@ -109,6 +121,22 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TenantResolutionConfig {
+    pub trust_tenant_header: bool,
+    pub tenant_header_name: String,
+}
+
+impl Default for TenantResolutionConfig {
+    fn default() -> Self {
+        Self {
+            trust_tenant_header: false,
+            tenant_header_name: DEFAULT_TENANT_HEADER_NAME.to_string(),
+        }
+    }
 }
 
 /// Tokenizer cache configuration
@@ -554,6 +582,8 @@ impl Default for RouterConfig {
             log_level: None,
             request_id_headers: None,
             storage_context_headers: HashMap::new(),
+            memory_runtime: MemoryRuntimeConfig::default(),
+            tenant_resolution: TenantResolutionConfig::default(),
             max_concurrent_requests: -1,
             queue_size: 100,
             queue_timeout_secs: 60,
@@ -682,6 +712,11 @@ mod tests {
         assert!(config.trace_config.is_none());
         assert!(config.log_dir.is_none());
         assert!(config.log_level.is_none());
+        assert!(!config.tenant_resolution.trust_tenant_header);
+        assert_eq!(
+            config.tenant_resolution.tenant_header_name,
+            DEFAULT_TENANT_HEADER_NAME
+        );
         assert!(!config.skills_enabled);
         assert!(config.skills.is_none());
     }
@@ -782,6 +817,11 @@ mod tests {
 
         assert!(deserialized.skills_enabled);
         assert!(deserialized.skills.is_none());
+        assert!(!deserialized.tenant_resolution.trust_tenant_header);
+        assert_eq!(
+            deserialized.tenant_resolution.tenant_header_name,
+            DEFAULT_TENANT_HEADER_NAME
+        );
     }
 
     #[test]

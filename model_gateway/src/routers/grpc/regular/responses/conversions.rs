@@ -143,11 +143,23 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         });
                     }
                     ResponseInputOutputItem::McpApprovalResponse { .. }
-                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                    | ResponseInputOutputItem::McpApprovalRequest { .. }
+                    | ResponseInputOutputItem::ComputerCall { .. }
+                    | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                         warn!(
                             function = "responses_to_chat",
                             "Approval item reached chat conversion"
                         );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "image_generation_call input item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::Compaction { .. } => {
                         return Err("Unsupported input item type".to_string());
                     }
                 }
@@ -199,7 +211,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         top_p: req.top_p,
         skip_special_tokens: true,
         tools,
-        tool_choice: req.tool_choice.clone(),
+        tool_choice: req.tool_choice.as_ref().map(|tc| tc.to_chat_tool_choice()),
         response_format: map_text_to_response_format(req.text.as_ref()),
         ..Default::default()
     })

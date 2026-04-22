@@ -3,7 +3,7 @@ use openai_protocol::{
     responses::{CodeInterpreterTool, ResponseTool},
     skills::{
         MessagesSkillRef, OpaqueOpenAIObject, ResponsesSkillEntry, ResponsesSkillRef,
-        SkillVersionRef,
+        SkillMutationResponse, SkillVersionRef, SkillsErrorEnvelope,
     },
 };
 use schemars::schema_for;
@@ -215,6 +215,52 @@ fn responses_code_interpreter_legacy_container_round_trips() {
 
     let tool: ResponseTool = serde_json::from_value(raw.clone()).unwrap();
     assert_eq!(serde_json::to_value(&tool).unwrap(), raw);
+}
+
+#[test]
+fn skill_mutation_response_round_trips() {
+    let raw = json!({
+        "skill": {
+            "id": "skill_01jw4v0w53k9mz4bzr0t7k8a9n",
+            "name": "acme:map",
+            "short_description": "Map it",
+            "description": "Map the repo",
+            "source": "custom",
+            "latest_version": "1759178010641129",
+            "default_version": "1759178010641129",
+            "has_code_files": true,
+            "created_at": "2026-03-16T00:00:00Z",
+            "updated_at": "2026-03-16T00:00:00Z"
+        },
+        "version": {
+            "skill_id": "skill_01jw4v0w53k9mz4bzr0t7k8a9n",
+            "version": "1759178010641129",
+            "version_number": 1,
+            "name": "acme:map",
+            "short_description": "Map it",
+            "description": "Map the repo",
+            "deprecated": false,
+            "files": [{"path": "SKILL.md", "size_bytes": 123}],
+            "created_at": "2026-03-16T00:00:00Z"
+        },
+        "warnings": [{"kind": "SidecarFileIgnored", "path": "agents/openai.yaml", "message": "ignored"}]
+    });
+
+    let parsed: SkillMutationResponse = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+}
+
+#[test]
+fn skills_error_envelope_round_trips() {
+    let raw = json!({
+        "error": {
+            "code": "missing_target_tenant",
+            "message": "target tenant id is required"
+        }
+    });
+
+    let parsed: SkillsErrorEnvelope = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
 }
 
 #[test]

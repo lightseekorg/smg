@@ -23,6 +23,7 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
+    middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
@@ -89,6 +90,7 @@ impl OpenAIRouter {
 
         let shared_components = Arc::new(SharedComponents {
             client: ctx.client.clone(),
+            router_config: Arc::new(ctx.router_config.clone()),
         });
 
         let responses_components = Arc::new(ResponsesComponents {
@@ -97,6 +99,7 @@ impl OpenAIRouter {
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),
+            conversation_memory_writer: ctx.conversation_memory_writer.clone(),
         });
 
         Ok(Self {
@@ -143,6 +146,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -158,12 +162,13 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             shared_components: &self.shared_components,
             retry_config,
         };
-        chat::route_chat(&deps, headers, body, model_id).await
+        chat::route_chat(&deps, headers, tenant_meta, body, model_id).await
     }
 
     async fn route_responses(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
@@ -172,7 +177,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             provider_registry: &self.provider_registry,
             responses_components: &self.responses_components,
         };
-        responses_route::route_responses(&deps, headers, body, model_id).await
+        responses_route::route_responses(&deps, headers, tenant_meta, body, model_id).await
     }
 
     async fn route_realtime_session(

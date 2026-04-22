@@ -333,6 +333,7 @@ mod tests {
         let config = ConversationMemoryConfig {
             long_term_memory: LongTermMemoryConfig {
                 enabled: true,
+                policy: None,
                 subject_id: Some("subj-1".to_string()),
                 embedding_model_id: Some("embed-1".to_string()),
                 extraction_model_id: Some("extract-1".to_string()),

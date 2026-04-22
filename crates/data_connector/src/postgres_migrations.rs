@@ -7,7 +7,7 @@
 use crate::{schema::SchemaConfig, versioning::Migration};
 
 /// Postgres migration list. Append new migrations here.
-pub(crate) static POSTGRES_MIGRATIONS: [Migration; 8] = [
+pub(crate) static POSTGRES_MIGRATIONS: [Migration; 11] = [
     Migration {
         version: 1,
         description: "Add safety_identifier column to responses",
@@ -48,6 +48,21 @@ pub(crate) static POSTGRES_MIGRATIONS: [Migration; 8] = [
         version: 8,
         description: "Create continuation_cookies table",
         up: pg_v8_up,
+    },
+    Migration {
+        version: 9,
+        description: "Extend responses with background-mode columns",
+        up: pg_v9_up,
+    },
+    Migration {
+        version: 10,
+        description: "Create background_queue table",
+        up: pg_v10_up,
+    },
+    Migration {
+        version: 11,
+        description: "Create response_stream_chunks table",
+        up: pg_v11_up,
     },
 ];
 
@@ -221,6 +236,155 @@ fn pg_qualified_table(schema: &SchemaConfig, table: &str) -> String {
         Some(owner) => format!("{owner}.{table}"),
         None => table.to_string(),
     }
+}
+
+/// Extend `responses` with background-mode columns + backfill `started_at` /
+/// `completed_at` from `created_at` on historical rows (legacy rows were
+/// persisted only after synchronous completion, so conflating the three
+/// timestamps is semantically correct per the design).
+fn pg_v9_up(schema: &SchemaConfig) -> Vec<String> {
+    let s = &schema.responses;
+    let table = s.qualified_table(schema.owner.as_deref());
+    let created_at_col = s.col("created_at");
+
+    // Inline CHECK on `status` — DB-level guard against stringly-typed state
+    // drift. Values mirror the `ResponseStatus` enum. `ADD COLUMN IF NOT EXISTS`
+    // applies the CHECK on first add and is a no-op on re-run; safe.
+    let status_col = s.col("status");
+    let status_ty = format!(
+        "TEXT NOT NULL DEFAULT 'completed' \
+         CHECK ({status_col} IN ('queued', 'in_progress', 'completed', \
+                                  'failed', 'cancelled', 'incomplete'))"
+    );
+    // JSONB (not JSON) for request_json / request_context_json — gives us
+    // indexing, operator support, and faster reads at a small write cost.
+    let bg_columns: &[(&str, &str)] = &[
+        ("status", status_ty.as_str()),
+        ("background", "BOOLEAN NOT NULL DEFAULT false"),
+        ("stream_enabled", "BOOLEAN NOT NULL DEFAULT false"),
+        ("cancel_requested", "BOOLEAN NOT NULL DEFAULT false"),
+        ("request_json", "JSONB"),
+        ("request_context_json", "JSONB"),
+        ("started_at", "TIMESTAMPTZ"),
+        ("completed_at", "TIMESTAMPTZ"),
+        ("next_stream_sequence", "BIGINT NOT NULL DEFAULT 0"),
+    ];
+
+    let mut stmts: Vec<String> = bg_columns
+        .iter()
+        .filter(|(field, _)| !s.is_skipped(field))
+        .map(|(field, ty)| {
+            let col = s.col(field);
+            format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ty}")
+        })
+        .collect();
+
+    // Backfill started_at / completed_at from created_at for historical rows.
+    // Guarded on created_at being present — deployments that skip created_at
+    // would otherwise generate UPDATEs against a non-existent column.
+    let created_at_present = !s.is_skipped("created_at");
+    if created_at_present && !s.is_skipped("started_at") {
+        let col = s.col("started_at");
+        stmts.push(format!(
+            "UPDATE {table} SET {col} = {created_at_col} WHERE {col} IS NULL"
+        ));
+    }
+    if created_at_present && !s.is_skipped("completed_at") {
+        let col = s.col("completed_at");
+        stmts.push(format!(
+            "UPDATE {table} SET {col} = {created_at_col} WHERE {col} IS NULL"
+        ));
+    }
+
+    stmts
+}
+
+/// Create the `background_queue` work-queue table.
+fn pg_v10_up(schema: &SchemaConfig) -> Vec<String> {
+    let q = &schema.background_queue;
+    let r = &schema.responses;
+    let queue_table = q.qualified_table(schema.owner.as_deref());
+    let resp_table = r.qualified_table(schema.owner.as_deref());
+    let resp_id_col = r.col("id");
+
+    let response_id = q.col("response_id");
+    let priority = q.col("priority");
+    let retry_attempt = q.col("retry_attempt");
+    let next_attempt_at = q.col("next_attempt_at");
+    let lease_expires_at = q.col("lease_expires_at");
+    let worker_id = q.col("worker_id");
+    let created_at = q.col("created_at");
+
+    vec![
+        format!(
+            "CREATE TABLE IF NOT EXISTS {queue_table} (\
+                {response_id} VARCHAR(64) PRIMARY KEY \
+                    REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE, \
+                {priority} INT NOT NULL, \
+                {retry_attempt} INT NOT NULL DEFAULT 0, \
+                {next_attempt_at} TIMESTAMPTZ NOT NULL, \
+                {lease_expires_at} TIMESTAMPTZ, \
+                {worker_id} TEXT, \
+                {created_at} TIMESTAMPTZ NOT NULL DEFAULT now(), \
+                CONSTRAINT bg_queue_lease_pairing_chk \
+                    CHECK (({worker_id} IS NULL) = ({lease_expires_at} IS NULL))\
+            )"
+        ),
+        // Claim index: partial index over unclaimed rows, ordered to match the
+        // claim query (priority asc, next_attempt_at asc, created_at asc).
+        //
+        // Fixed names (not derived from the table identifier) so custom table
+        // names can't collide via Postgres' 63-byte identifier truncation, and
+        // so the matching Oracle names stay ≤30 chars.
+        format!(
+            "CREATE INDEX IF NOT EXISTS bg_queue_claim_idx ON {queue_table} \
+                ({priority}, {next_attempt_at}, {created_at}) \
+                WHERE {lease_expires_at} IS NULL"
+        ),
+        // Lease-sweep index for the janitor that requeues expired leases.
+        format!(
+            "CREATE INDEX IF NOT EXISTS bg_queue_sweep_idx ON {queue_table} \
+                ({lease_expires_at}) \
+                WHERE {lease_expires_at} IS NOT NULL"
+        ),
+    ]
+}
+
+/// Create the `response_stream_chunks` per-response SSE log table.
+fn pg_v11_up(schema: &SchemaConfig) -> Vec<String> {
+    let c = &schema.response_stream_chunks;
+    let r = &schema.responses;
+    let chunks_table = c.qualified_table(schema.owner.as_deref());
+    let resp_table = r.qualified_table(schema.owner.as_deref());
+    let resp_id_col = r.col("id");
+
+    let response_id = c.col("response_id");
+    let sequence = c.col("sequence");
+    let event_type = c.col("event_type");
+    let data = c.col("data");
+    let created_at = c.col("created_at");
+
+    vec![
+        format!(
+            "CREATE TABLE IF NOT EXISTS {chunks_table} (\
+                {response_id} VARCHAR(64) NOT NULL \
+                    REFERENCES {resp_table}({resp_id_col}) ON DELETE CASCADE, \
+                {sequence} BIGINT NOT NULL, \
+                {event_type} TEXT NOT NULL, \
+                {data} JSONB NOT NULL, \
+                {created_at} TIMESTAMPTZ NOT NULL DEFAULT now(), \
+                PRIMARY KEY ({response_id}, {sequence})\
+            )"
+        ),
+        // Cleanup index for the retention-window janitor.
+        // Named `stream_chunks_cleanup_idx` rather than
+        // `response_stream_chunks_cleanup_idx` so the corresponding Oracle
+        // identifier stays ≤30 chars (pre-12.2 limit).
+        format!(
+            "CREATE INDEX IF NOT EXISTS stream_chunks_cleanup_idx \
+                ON {chunks_table} ({created_at})"
+        ),
+    ]
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -413,5 +577,164 @@ mod tests {
         assert!(stmts[0].contains("cookie_hash VARCHAR(64) PRIMARY KEY"));
         assert!(stmts[1].contains("idx_continuation_cookies_exec_id"));
         assert!(stmts[2].contains("idx_continuation_cookies_expires_at"));
+    }
+
+    // ── v9: extend responses with background-mode columns ─────────────────
+
+    #[test]
+    fn pg_v9_up_status_column_has_check_constraint() {
+        let schema = SchemaConfig::default();
+        let stmts = pg_v9_up(&schema);
+        let status_stmt = stmts
+            .iter()
+            .find(|s| s.contains("ADD COLUMN IF NOT EXISTS status"))
+            .expect("status ADD COLUMN missing");
+        assert!(
+            status_stmt.contains("CHECK (status IN"),
+            "status must have a CHECK constraint: {status_stmt}"
+        );
+        for val in [
+            "'queued'",
+            "'in_progress'",
+            "'completed'",
+            "'failed'",
+            "'cancelled'",
+            "'incomplete'",
+        ] {
+            assert!(
+                status_stmt.contains(val),
+                "CHECK must enumerate {val}: {status_stmt}"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_v9_up_adds_all_nine_columns_and_backfill() {
+        let schema = SchemaConfig::default();
+        let stmts = pg_v9_up(&schema);
+        // 9 ADD COLUMN + 2 UPDATE backfills
+        assert_eq!(stmts.len(), 11, "got: {stmts:?}");
+        for col in [
+            "status",
+            "background",
+            "stream_enabled",
+            "cancel_requested",
+            "request_json",
+            "request_context_json",
+            "started_at",
+            "completed_at",
+            "next_stream_sequence",
+        ] {
+            assert!(
+                stmts
+                    .iter()
+                    .any(|s| s.contains(&format!("COLUMN IF NOT EXISTS {col}"))),
+                "missing ADD COLUMN for {col}: {stmts:?}"
+            );
+        }
+        // Backfill UPDATEs
+        assert!(stmts
+            .iter()
+            .any(|s| s.contains("SET started_at = created_at")));
+        assert!(stmts
+            .iter()
+            .any(|s| s.contains("SET completed_at = created_at")));
+    }
+
+    #[test]
+    fn pg_v9_up_honors_skip_columns() {
+        let schema = SchemaConfig {
+            responses: TableConfig {
+                skip_columns: ["background".to_string(), "started_at".to_string()]
+                    .into_iter()
+                    .collect(),
+                ..TableConfig::with_table("responses")
+            },
+            ..Default::default()
+        };
+        let stmts = pg_v9_up(&schema);
+        assert!(
+            !stmts
+                .iter()
+                .any(|s| s.contains("ADD COLUMN IF NOT EXISTS background")),
+            "should skip background column: {stmts:?}"
+        );
+        // Skipping started_at must also skip its backfill UPDATE.
+        assert!(
+            !stmts.iter().any(|s| s.contains("SET started_at")),
+            "should skip started_at backfill: {stmts:?}"
+        );
+        // completed_at is NOT skipped so its backfill must still be there.
+        assert!(stmts
+            .iter()
+            .any(|s| s.contains("SET completed_at = created_at")));
+    }
+
+    // ── v10: create background_queue ───────────────────────────────────────
+
+    #[test]
+    fn pg_v10_up_creates_table_and_two_indexes() {
+        let schema = SchemaConfig::default();
+        let stmts = pg_v10_up(&schema);
+        assert_eq!(stmts.len(), 3, "got: {stmts:?}");
+        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS background_queue"));
+        assert!(
+            stmts[0].contains("ON DELETE CASCADE"),
+            "FK must cascade: {stmts:?}"
+        );
+        assert!(stmts[1].contains("bg_queue_claim_idx"));
+        assert!(
+            stmts[1].contains("WHERE lease_expires_at IS NULL"),
+            "claim index must be partial over unclaimed rows: {stmts:?}"
+        );
+        assert!(stmts[2].contains("bg_queue_sweep_idx"));
+        assert!(stmts[2].contains("WHERE lease_expires_at IS NOT NULL"));
+    }
+
+    #[test]
+    fn pg_v10_up_enforces_lease_pairing_invariant() {
+        // worker_id and lease_expires_at must be both NULL or both set.
+        let schema = SchemaConfig::default();
+        let stmts = pg_v10_up(&schema);
+        assert!(
+            stmts[0].contains("CONSTRAINT bg_queue_lease_pairing_chk")
+                && stmts[0].contains("CHECK ((worker_id IS NULL) = (lease_expires_at IS NULL))"),
+            "lease pairing CHECK constraint missing: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn pg_v10_up_uses_fixed_object_names_independent_of_table_identifier() {
+        // If an operator customizes `background_queue.table` to a long name,
+        // Postgres truncates identifiers to 63 bytes — derived index names
+        // like `{table}_claim_idx` and `{table}_sweep_idx` would collide, and
+        // `CREATE INDEX IF NOT EXISTS` would silently skip the second one.
+        // Fix: fixed non-derived names.
+        let mut schema = SchemaConfig::default();
+        schema.background_queue.table =
+            "custom_background_queue_name_that_is_really_quite_long".to_string();
+        let stmts = pg_v10_up(&schema);
+        assert!(
+            stmts[0].contains("CONSTRAINT bg_queue_lease_pairing_chk"),
+            "constraint name must be fixed: {stmts:?}"
+        );
+        assert!(stmts[1].contains("bg_queue_claim_idx"));
+        assert!(stmts[2].contains("bg_queue_sweep_idx"));
+    }
+
+    // ── v11: create response_stream_chunks ─────────────────────────────────
+
+    #[test]
+    fn pg_v11_up_creates_table_with_composite_pk_and_cleanup_index() {
+        let schema = SchemaConfig::default();
+        let stmts = pg_v11_up(&schema);
+        assert_eq!(stmts.len(), 2, "got: {stmts:?}");
+        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS response_stream_chunks"));
+        assert!(
+            stmts[0].contains("PRIMARY KEY (response_id, sequence)"),
+            "composite PK on (response_id, sequence): {stmts:?}"
+        );
+        assert!(stmts[0].contains("ON DELETE CASCADE"));
+        assert!(stmts[1].contains("stream_chunks_cleanup_idx"));
     }
 }

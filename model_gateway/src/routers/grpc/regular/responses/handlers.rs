@@ -51,6 +51,7 @@ pub(crate) async fn route_responses(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     headers: Option<http::HeaderMap>,
+    tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
     // 1. Reject background mode (no longer supported)
@@ -69,6 +70,7 @@ pub(crate) async fn route_responses(
             headers,
             model_id,
             response_id: None,
+            tenant_request_meta,
         };
         route_responses_streaming(ctx, request, params).await
     } else {
@@ -76,6 +78,7 @@ pub(crate) async fn route_responses(
             headers,
             model_id,
             response_id: Some(format!("resp_{}", Uuid::now_v7())),
+            tenant_request_meta,
         };
         route_responses_sync(ctx, request, params).await
     }

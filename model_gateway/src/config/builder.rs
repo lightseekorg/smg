@@ -4,8 +4,9 @@ use smg_mcp::McpConfig;
 
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-    HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
-    RetryConfig, RouterConfig, RoutingMode, SkillsConfig, TokenizerCacheConfig, TraceConfig,
+    HistoryBackend, MemoryRuntimeConfig, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig,
+    RedisConfig, RetryConfig, RouterConfig, RoutingMode, SkillsConfig, TokenizerCacheConfig,
+    TraceConfig,
 };
 use crate::worker::ConnectionMode;
 
@@ -353,6 +354,24 @@ impl RouterConfigBuilder {
         self
     }
 
+    /// Configure memory runtime feature flags for store/recall behavior.
+    /// Currently intended for staged rollout via config/programmatic construction.
+    /// CLI/Python wiring is intentionally not exposed yet.
+    pub fn memory_runtime_config(mut self, config: MemoryRuntimeConfig) -> Self {
+        self.config.memory_runtime = config;
+        self
+    }
+
+    pub fn trust_tenant_header(mut self, trust: bool) -> Self {
+        self.config.tenant_resolution.trust_tenant_header = trust;
+        self
+    }
+
+    pub fn tenant_header_name<S: Into<String>>(mut self, header_name: S) -> Self {
+        self.config.tenant_resolution.tenant_header_name = header_name.into();
+        self
+    }
+
     // ==================== IGW Mode ====================
 
     pub fn enable_igw(mut self) -> Self {
@@ -546,6 +565,13 @@ impl RouterConfigBuilder {
         headers: Option<HashMap<String, String>>,
     ) -> Self {
         self.config.storage_context_headers = headers.unwrap_or_default();
+        self
+    }
+
+    pub fn maybe_tenant_header_name(mut self, header_name: Option<impl Into<String>>) -> Self {
+        if let Some(header_name) = header_name {
+            self.config.tenant_resolution.tenant_header_name = header_name.into();
+        }
         self
     }
 
@@ -846,7 +872,10 @@ impl RouterConfigBuilder {
                 })?;
             self.config.skills = Some(skills_config);
         } else {
-            self.config.skills = Some(SkillsConfig::default());
+            return Err(ConfigError::ValidationFailed {
+                reason: "skills are enabled but no skills config was provided; set --skills-config-path or preload RouterConfig.skills"
+                    .to_string(),
+            });
         }
 
         Ok(self)
@@ -954,7 +983,7 @@ mod tests {
         let mut skills_config = NamedTempFile::new().unwrap();
         writeln!(
             skills_config,
-            "max_skills_per_request: 3\nexecution:\n  executor_url: http://executor.internal\n"
+            "max_skills_per_request: 3\nexecution:\n  executor_url: http://executor.internal\n  executor_api_key: secret\n"
         )
         .unwrap();
 
@@ -977,6 +1006,16 @@ mod tests {
                 .as_deref(),
             Some("http://executor.internal")
         );
+        assert_eq!(
+            config
+                .skills
+                .as_ref()
+                .unwrap()
+                .execution
+                .executor_api_key
+                .as_deref(),
+            Some("secret")
+        );
     }
 
     #[test]
@@ -993,5 +1032,18 @@ mod tests {
 
         assert!(!config.skills_enabled);
         assert!(config.skills.is_none());
+    }
+
+    #[test]
+    fn test_builder_rejects_enabled_skills_without_nested_config() {
+        let error = RouterConfigBuilder::new()
+            .regular_mode(vec!["http://worker1:8000".to_string()])
+            .skills_enabled(true)
+            .build()
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("skills are enabled but no skills config was provided"));
     }
 }

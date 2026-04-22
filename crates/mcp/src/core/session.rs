@@ -571,8 +571,12 @@ impl<'a> McpToolSession<'a> {
             ResponseOutputItem::WebSearchCall { .. }
             | ResponseOutputItem::CodeInterpreterCall { .. }
             | ResponseOutputItem::FileSearchCall { .. }
+            | ResponseOutputItem::ImageGenerationCall { .. }
+            | ResponseOutputItem::ComputerCall { .. }
+            | ResponseOutputItem::ComputerCallOutput { .. }
             | ResponseOutputItem::Message { .. }
-            | ResponseOutputItem::Reasoning { .. } => true,
+            | ResponseOutputItem::Reasoning { .. }
+            | ResponseOutputItem::Compaction { .. } => true,
         }
     }
 

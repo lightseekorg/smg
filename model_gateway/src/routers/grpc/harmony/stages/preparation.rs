@@ -174,10 +174,15 @@ impl HarmonyPreparationStage {
         // Step 1: Extract function tools with schemas from ResponseTools
         let mut function_tools = extract_tools_from_response_tools(request.tools.as_deref());
 
+        let chat_tool_choice = request
+            .tool_choice
+            .as_ref()
+            .map(|tc| tc.to_chat_tool_choice());
+
         // Step 2: Filter tools based on tool_choice (AllowedTools or Function)
         // Note: Tool existence is already validated in ResponsesRequest::validate()
         if let Some(filtered) =
-            utils::filter_tools_by_tool_choice(&function_tools, request.tool_choice.as_ref())
+            utils::filter_tools_by_tool_choice(&function_tools, chat_tool_choice.as_ref())
         {
             function_tools = filtered;
         }
@@ -186,7 +191,7 @@ impl HarmonyPreparationStage {
         let tool_constraint = if function_tools.is_empty() {
             None
         } else {
-            Self::generate_tool_call_constraint(&function_tools, request.tool_choice.as_ref())
+            Self::generate_tool_call_constraint(&function_tools, chat_tool_choice.as_ref())
                 .map_err(|e| *e)?
         };
 

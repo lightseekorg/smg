@@ -26,6 +26,7 @@ use tracing::{debug, error, warn};
 use super::pd_types::api_path;
 use crate::{
     config::types::RetryConfig,
+    middleware::TenantRequestMeta,
     observability::{
         events::{self, Event},
         metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -1277,6 +1278,7 @@ impl RouterTrait for PDRouter {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
@@ -1307,6 +1309,7 @@ impl RouterTrait for PDRouter {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -1349,6 +1352,7 @@ impl RouterTrait for PDRouter {
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -1383,6 +1387,7 @@ impl RouterTrait for PDRouter {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {

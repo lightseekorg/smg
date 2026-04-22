@@ -48,6 +48,7 @@ use super::{
     utils::error_type_from_status,
 };
 use crate::{
+    middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
     routers::error,
@@ -509,6 +510,7 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         let start = Instant::now();
         // Clone Arc for metrics (cheap atomic increment) to avoid borrow issues
@@ -526,6 +528,7 @@ impl RequestPipeline {
         );
 
         let mut ctx = RequestContext::for_chat(request, headers, model_id, components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
@@ -601,6 +604,7 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         let start = Instant::now();
         let streaming = request.stream;
@@ -616,6 +620,7 @@ impl RequestPipeline {
         );
 
         let mut ctx = RequestContext::for_generate(request, headers, model_id.clone(), components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
@@ -690,6 +695,7 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         let start = Instant::now();
         let model = request.model.clone();
@@ -705,6 +711,7 @@ impl RequestPipeline {
         );
 
         let mut ctx = RequestContext::for_completion(request, headers, model_id, components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
@@ -779,6 +786,7 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         debug!(
             "execute_embeddings: Starting execution for model: {}",
@@ -797,6 +805,7 @@ impl RequestPipeline {
         );
 
         let mut ctx = RequestContext::for_embedding(request, headers, model_id.clone(), components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
             debug!("execute_embeddings: Executing stage: {}", stage.name());
@@ -879,6 +888,7 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         debug!(
             "execute_classify: Starting execution for model: {}",
@@ -897,6 +907,7 @@ impl RequestPipeline {
         );
 
         let mut ctx = RequestContext::for_classify(request, headers, model_id.clone(), components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
             debug!("execute_classify: Executing stage: {}", stage.name());
@@ -979,6 +990,7 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Response {
         let start = Instant::now();
         let streaming = request.stream.unwrap_or(false);
@@ -994,6 +1006,7 @@ impl RequestPipeline {
         );
 
         let mut ctx = RequestContext::for_messages(request.clone(), headers, model_id, components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for stage in self.stages.iter() {
             match stage.execute(&mut ctx).await {
@@ -1074,8 +1087,10 @@ impl RequestPipeline {
         headers: Option<http::HeaderMap>,
         model_id: String,
         components: Arc<SharedComponents>,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Result<ChatCompletionResponse, Response> {
         let mut ctx = RequestContext::for_chat(request, headers, model_id, components);
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for (idx, stage) in self.stages.iter().enumerate() {
             match stage.execute(&mut ctx).await {
@@ -1154,6 +1169,7 @@ impl RequestPipeline {
         &self,
         request: &openai_protocol::responses::ResponsesRequest,
         harmony_ctx: &ResponsesContext,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Result<harmony::ResponsesIterationResult, Response> {
         // Create RequestContext for this Responses request
         let mut ctx = RequestContext::for_responses(
@@ -1162,6 +1178,7 @@ impl RequestPipeline {
             request.model.clone(), // Model ID from request
             harmony_ctx.components.clone(),
         );
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for (idx, stage) in self.stages.iter().enumerate() {
             match stage.execute(&mut ctx).await {
@@ -1217,6 +1234,7 @@ impl RequestPipeline {
         &self,
         request: &openai_protocol::responses::ResponsesRequest,
         harmony_ctx: &ResponsesContext,
+        tenant_request_meta: Option<TenantRequestMeta>,
     ) -> Result<(ExecutionResult, Option<LoadGuards>), Response> {
         // Create RequestContext for this Responses request
         let mut ctx = RequestContext::for_responses(
@@ -1225,6 +1243,7 @@ impl RequestPipeline {
             request.model.clone(),
             harmony_ctx.components.clone(),
         );
+        ctx.input.tenant_request_meta = tenant_request_meta;
 
         for (idx, stage) in self.stages.iter().enumerate() {
             match stage.execute(&mut ctx).await {

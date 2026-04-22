@@ -41,6 +41,7 @@ use tracing::{debug, info, warn};
 use crate::{
     app_context::AppContext,
     config::RoutingMode,
+    middleware::TenantRequestMeta,
     routers::{
         common::header_utils::apply_provider_headers,
         factory::{router_ids, RouterId},
@@ -510,13 +511,16 @@ impl RouterTrait for RouterManager {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_generate(headers, body, model_id).await
+            router
+                .route_generate(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -529,13 +533,16 @@ impl RouterTrait for RouterManager {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_chat(headers, body, model_id).await
+            router
+                .route_chat(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -548,13 +555,16 @@ impl RouterTrait for RouterManager {
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_completion(headers, body, model_id).await
+            router
+                .route_completion(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -567,13 +577,16 @@ impl RouterTrait for RouterManager {
     async fn route_messages(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_messages(headers, body, model_id).await
+            router
+                .route_messages(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -586,13 +599,16 @@ impl RouterTrait for RouterManager {
     async fn route_responses(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_responses(headers, body, model_id).await
+            router
+                .route_responses(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -605,6 +621,7 @@ impl RouterTrait for RouterManager {
     async fn route_interactions(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &InteractionsRequest,
         model_id: Option<&str>,
     ) -> Response {
@@ -613,7 +630,7 @@ impl RouterTrait for RouterManager {
 
         if let Some(router) = router {
             router
-                .route_interactions(headers, body, selected_model)
+                .route_interactions(headers, tenant_meta, body, selected_model)
                 .await
         } else {
             (
@@ -640,13 +657,16 @@ impl RouterTrait for RouterManager {
     async fn route_embeddings(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_embeddings(headers, body, model_id).await
+            router
+                .route_embeddings(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -659,13 +679,16 @@ impl RouterTrait for RouterManager {
     async fn route_classify(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_classify(headers, body, model_id).await
+            router
+                .route_classify(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -678,6 +701,7 @@ impl RouterTrait for RouterManager {
     async fn route_audio_transcriptions(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &TranscriptionRequest,
         audio: AudioFile,
         model_id: &str,
@@ -686,7 +710,7 @@ impl RouterTrait for RouterManager {
 
         if let Some(router) = router {
             router
-                .route_audio_transcriptions(headers, body, audio, model_id)
+                .route_audio_transcriptions(headers, tenant_meta, body, audio, model_id)
                 .await
         } else {
             (
@@ -700,13 +724,16 @@ impl RouterTrait for RouterManager {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_rerank(headers, body, model_id).await
+            router
+                .route_rerank(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,

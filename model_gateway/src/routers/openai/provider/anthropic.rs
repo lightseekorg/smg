@@ -1,0 +1,10 @@
+use super::Provider;
+use crate::worker::ProviderType;
+
+pub struct AnthropicProvider;
+
+impl Provider for AnthropicProvider {
+    fn provider_type(&self) -> ProviderType {
+        ProviderType::Anthropic
+    }
+}

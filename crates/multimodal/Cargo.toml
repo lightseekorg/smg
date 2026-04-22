@@ -38,7 +38,7 @@ blake3.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-npyz = { version = "0.8", features = ["npz"] }
+npyz = { version = "0.9", features = ["npz"] }
 tempfile = "3.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 

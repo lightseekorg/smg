@@ -179,6 +179,9 @@ impl ResponseTransformer {
                 queries,
                 sources,
             },
+            // Populated only when the caller asks for `web_search_call.results`
+            // via include[]; transformer leaves it unset so default omits the field.
+            results: None,
         }
     }
 
@@ -692,9 +695,15 @@ mod tests {
         );
 
         match transformed {
-            ResponseOutputItem::WebSearchCall { id, status, action } => {
+            ResponseOutputItem::WebSearchCall {
+                id,
+                status,
+                action,
+                results,
+            } => {
                 assert_eq!(id, "ws_req-123");
                 assert_eq!(status, WebSearchCallStatus::Completed);
+                assert!(results.is_none());
                 match action {
                     WebSearchAction::Search {
                         query,

@@ -180,9 +180,12 @@ pub fn build_stored_response(
     stored.model = get_string(response_json, "model").or_else(|| Some(original_body.model.clone()));
 
     stored.safety_identifier.clone_from(&original_body.user);
-    stored
-        .conversation_id
-        .clone_from(&original_body.conversation);
+    // `StoredResponse.conversation_id` is `Option<String>`; flatten the
+    // request's `Option<ConversationRef>` union down to its underlying id.
+    stored.conversation_id = original_body
+        .conversation
+        .as_ref()
+        .map(|c| c.as_id().to_string());
 
     stored.previous_response_id = get_string(response_json, "previous_response_id")
         .map(|s| ResponseId::from(s.as_str()))
@@ -436,8 +439,8 @@ async fn persist_conversation_items_inner(
         .map_err(|e| format!("Failed to store response: {e}"))?;
 
     // Check if conversation is provided and validate it exists
-    let conv_id_opt = if let Some(id) = &original_body.conversation {
-        let conv_id = ConversationId::from(id.as_str());
+    let conv_id_opt = if let Some(conv_ref) = &original_body.conversation {
+        let conv_id = ConversationId::from(conv_ref.as_id());
         match conversation_storage.get_conversation(&conv_id).await {
             Ok(Some(_)) => Some(conv_id),
             Ok(None) => {
