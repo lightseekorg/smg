@@ -1,5 +1,5 @@
 use openai_protocol::{
-    common::{Function, StringOrArray},
+    common::{ConversationRef, Function, StringOrArray},
     responses::{
         FunctionTool, IncludeField, McpTool, ResponseInput, ResponseInputOutputItem, ResponseTool,
         ResponsesRequest, ResponsesToolChoice, StringOrContentParts, TextConfig, TextFormat,
@@ -23,7 +23,7 @@ fn test_validate_conversation_id_valid() {
 
     for id in valid_ids {
         let request = ResponsesRequest {
-            conversation: Some(id.to_string()),
+            conversation: Some(ConversationRef::Id(id.to_string())),
             input: ResponseInput::Text("test".to_string()),
             ..Default::default()
         };
@@ -33,6 +33,62 @@ fn test_validate_conversation_id_valid() {
             request.validate().err()
         );
     }
+}
+
+/// Object-form `{"conversation": {"id": "conv_abc"}}` must deserialize into
+/// `ConversationRef::Object { .. }` and pass the same validation as the
+/// string-form.
+#[test]
+fn test_validate_conversation_id_object_form_valid() {
+    let v = json!({
+        "input": "test",
+        "model": "gpt-4",
+        "conversation": { "id": "conv_abc" },
+    });
+    let request: ResponsesRequest =
+        serde_json::from_value(v).expect("object-form conversation should deserialize");
+    assert!(
+        matches!(
+            request.conversation,
+            Some(ConversationRef::Object { ref id }) if id == "conv_abc"
+        ),
+        "Expected ConversationRef::Object variant, got {:?}",
+        request.conversation
+    );
+    assert!(
+        request.validate().is_ok(),
+        "Valid object-form conversation should pass validation, got: {:?}",
+        request.validate().err()
+    );
+}
+
+/// Object-form with an empty id must fail validation with the same
+/// `invalid_conversation_id` error code used for the string-form.
+#[test]
+fn test_validate_conversation_id_object_form_empty_invalid() {
+    let v = json!({
+        "input": "test",
+        "model": "gpt-4",
+        "conversation": { "id": "" },
+    });
+    let request: ResponsesRequest =
+        serde_json::from_value(v).expect("object-form conversation should deserialize");
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "Object-form conversation with empty id should fail validation"
+    );
+    let errors = result.unwrap_err();
+    let field_errors = errors.field_errors();
+    let conversation_errors = field_errors
+        .get("conversation")
+        .expect("Expected error for 'conversation' field");
+    let code = conversation_errors.first().map(|e| e.code.as_ref());
+    assert_eq!(
+        code,
+        Some("invalid_conversation_id"),
+        "Expected 'invalid_conversation_id' error code, got: {code:?}"
+    );
 }
 
 /// Test that invalid conversation IDs fail validation
@@ -72,7 +128,7 @@ fn test_validate_conversation_id_invalid() {
 
     for id in invalid_ids {
         let request = ResponsesRequest {
-            conversation: Some(id.to_string()),
+            conversation: Some(ConversationRef::Id(id.to_string())),
             input: ResponseInput::Text("test".to_string()),
             ..Default::default()
         };
@@ -133,7 +189,7 @@ fn test_validate_conversation_id_none() {
 fn test_validate_conversation_id_error_message_format() {
     let invalid_id = "conv_.test-conv-streaming";
     let request = ResponsesRequest {
-        conversation: Some(invalid_id.to_string()),
+        conversation: Some(ConversationRef::Id(invalid_id.to_string())),
         input: ResponseInput::Text("test".to_string()),
         ..Default::default()
     };
@@ -171,7 +227,7 @@ fn test_validate_conversation_id_error_message_format() {
 fn test_validate_conversation_id_missing_prefix() {
     let invalid_id = "test-conv-streaming";
     let request = ResponsesRequest {
-        conversation: Some(invalid_id.to_string()),
+        conversation: Some(ConversationRef::Id(invalid_id.to_string())),
         input: ResponseInput::Text("test".to_string()),
         ..Default::default()
     };
@@ -933,7 +989,7 @@ fn test_validate_conversation_previous_response_mutual_exclusion() {
     // Valid: only conversation
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        conversation: Some("conv_123".to_string()),
+        conversation: Some(ConversationRef::Id("conv_123".to_string())),
         previous_response_id: None,
         ..Default::default()
     };
@@ -957,7 +1013,7 @@ fn test_validate_conversation_previous_response_mutual_exclusion() {
     // Invalid: both conversation and previous_response_id
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        conversation: Some("conv_123".to_string()),
+        conversation: Some(ConversationRef::Id("conv_123".to_string())),
         previous_response_id: Some("resp_123".to_string()),
         ..Default::default()
     };

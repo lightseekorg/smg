@@ -27,6 +27,13 @@ impl Provider for XAIProvider {
 }
 
 impl XAIProvider {
+    /// Rewrite Responses API input items to the shape xAI accepts today.
+    ///
+    /// The only content-part normalization xAI requires is `output_text ->
+    /// input_text` on historical messages replayed from `previous_response_id`
+    /// chains. Every other content variant (`input_text`, `input_image`,
+    /// `input_file`, `refusal`) is passed through verbatim so that file and
+    /// image inputs reach the upstream provider unchanged.
     fn transform_responses_input(obj: &mut serde_json::Map<String, Value>) {
         let Some(input_arr) = obj.get_mut("input").and_then(Value::as_array_mut) else {
             return;

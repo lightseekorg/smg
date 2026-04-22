@@ -9,8 +9,8 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, Detail, Function,
-        FunctionChoice, GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo,
+        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, ConversationRef, Detail,
+        Function, FunctionChoice, GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo,
         ResponsePrompt, StreamOptions, StringOrArray, ToolChoice as ChatToolChoice,
         ToolChoiceValue as ChatToolChoiceValue, ToolReference, UsageInfo,
     },
@@ -174,13 +174,6 @@ impl<'de> Deserialize<'de> for ResponsesFunctionToolChoice {
 /// whose `type` does not belong to that variant. Without the tag pinning,
 /// the `#[serde(untagged)]` enum would accept any object shape that
 /// happened to fit the field set of an earlier variant.
-///
-/// This type deliberately does NOT live in `common.rs`: Chat Completions
-/// has its own `ToolChoice` with a different `Function` wire shape
-/// (nested `{"function": {"name": ...}}`) and does not accept the
-/// `Types` / `Mcp` / `Custom` / `ApplyPatch` / `Shell` variants at all.
-/// Sharing one enum across both APIs would silently accept spec-invalid
-/// payloads on `/v1/chat/completions`.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesToolChoice {
@@ -198,14 +191,10 @@ pub enum ResponsesToolChoice {
 
     /// `{"type": "function", "name": "..."}` — Responses spec flat shape.
     ///
-    /// Accepts both the spec-canonical flat wire shape and the legacy
-    /// Chat-style nested shape (`{"type": "function", "function": {"name": "..."}}`)
-    /// on deserialize to preserve backward compatibility with smg clients
-    /// written against the pre-split shared `ToolChoice` type. Always
-    /// serializes as the canonical flat shape per the OpenAI Responses spec
-    /// — Postel's law: liberal on input, conservative on output.
-    ///
-    /// The nested legacy shape is gated behind a custom `Deserialize` impl on
+    /// Also accepts the legacy Chat-style nested shape
+    /// (`{"type": "function", "function": {"name": "..."}}`) on deserialize;
+    /// always serializes as the canonical flat shape. The nested legacy shape
+    /// is gated behind a custom `Deserialize` impl on
     /// `ResponsesFunctionToolChoice`; the untagged outer enum still pins the
     /// `"type": "function"` discriminator via `FunctionToolChoiceTag` so
     /// payloads without that tag cannot reach this variant.
@@ -349,6 +338,15 @@ pub enum ResponseTool {
     #[serde(rename = "web_search_preview")]
     WebSearchPreview(WebSearchPreviewTool),
 
+    /// Built-in non-preview hosted web search tool.
+    ///
+    /// Spec: `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
+    /// search_context_size?: "low"|"medium"|"high", user_location? }`. Distinct from
+    /// `web_search_preview` — non-preview adds `filters.allowed_domains` and constrains
+    /// `search_context_size` to a typed enum.
+    #[serde(rename = "web_search", alias = "web_search_2025_08_26")]
+    WebSearch(WebSearchTool),
+
     /// Built-in tool.
     #[serde(rename = "code_interpreter")]
     CodeInterpreter(CodeInterpreterTool),
@@ -360,6 +358,13 @@ pub enum ResponseTool {
     /// Built-in file search tool over vector stores.
     #[serde(rename = "file_search")]
     FileSearch(FileSearchTool),
+
+    /// Built-in image generation tool. Spec:
+    /// `{ type: "image_generation", action?, background?, input_fidelity?,
+    ///    input_image_mask?, model?, moderation?, output_compression?,
+    ///    output_format?, partial_images?, quality?, size? }`.
+    #[serde(rename = "image_generation")]
+    ImageGeneration(ImageGenerationTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -484,6 +489,67 @@ pub struct WebSearchPreviewTool {
     pub user_location: Option<Value>,
 }
 
+/// Non-preview hosted web search tool configuration.
+///
+/// Spec: `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
+/// search_context_size?: "low"|"medium"|"high", user_location? }`.
+///
+/// Distinct from `WebSearchPreviewTool`: adds `filters.allowed_domains` (domain
+/// allowlist) and pins `search_context_size` to the spec-listed enum.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchTool {
+    /// Optional domain allowlist applied to candidate sources.
+    pub filters: Option<WebSearchFilters>,
+    /// Search context budget. Spec enum: `"low" | "medium" | "high"`.
+    pub search_context_size: Option<WebSearchContextSize>,
+    /// Approximate user location used to bias results.
+    pub user_location: Option<WebSearchUserLocation>,
+}
+
+/// Filters for the non-preview `web_search` tool.
+///
+/// Spec: `filters? { allowed_domains? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchFilters {
+    /// Optional list of domains to restrict search results to.
+    pub allowed_domains: Option<Vec<String>>,
+}
+
+/// Search context budget for the non-preview `web_search` tool.
+///
+/// Spec: `search_context_size?: "low" | "medium" | "high"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchContextSize {
+    Low,
+    Medium,
+    High,
+}
+
+/// Approximate user location for the non-preview `web_search` tool.
+///
+/// Spec: `user_location: { city?, country?: ISO2, region?, timezone?: IANA, type?: "approximate" }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchUserLocation {
+    /// City name.
+    pub city: Option<String>,
+    /// ISO-3166-1 alpha-2 country code (e.g. `"US"`).
+    pub country: Option<String>,
+    /// Region / state / province name.
+    pub region: Option<String>,
+    /// IANA timezone identifier (e.g. `"America/Los_Angeles"`).
+    pub timezone: Option<String>,
+    /// Discriminator. Spec only enumerates `"approximate"`.
+    #[serde(rename = "type")]
+    pub location_type: Option<String>,
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -497,6 +563,66 @@ pub struct CodeInterpreterTool {
 #[serde(deny_unknown_fields)]
 pub struct ResponseToolEnvironment {
     pub skills: Option<Vec<ResponsesSkillEntry>>,
+}
+
+/// Configuration payload for the `image_generation` built-in tool.
+///
+/// Spec: `{ type: "image_generation", action?, background?, input_fidelity?,
+/// input_image_mask?, model?, moderation?, output_compression?, output_format?,
+/// partial_images?, quality?, size? }`. All inner fields are optional; the
+/// model picks defaults documented in the spec.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageGenerationTool {
+    /// `"generate" | "edit" | "auto"` (default `auto`). Free-form string here so
+    /// future actions added by OpenAI deserialize without a wire break.
+    pub action: Option<String>,
+    /// `"transparent" | "opaque" | "auto"` (default `auto`).
+    pub background: Option<String>,
+    /// `"high" | "low"` — gpt-image-1 / gpt-image-1.5 only (not 1-mini).
+    pub input_fidelity: Option<String>,
+    /// Reference image used by `edit` action; mask either by uploaded file or URL.
+    pub input_image_mask: Option<ImageInputMask>,
+    /// `string | "gpt-image-1" | "gpt-image-1-mini" | "gpt-image-1.5"` — kept as
+    /// `String` so unknown model identifiers passed through unchanged.
+    pub model: Option<String>,
+    /// `"auto" | "low"`.
+    pub moderation: Option<String>,
+    /// Output compression level. Spec default `100` when omitted; we keep
+    /// `Option` so an unset field round-trips as absent (not `null`, via
+    /// `#[serde_with::skip_serializing_none]`) rather than forcing 100.
+    pub output_compression: Option<u32>,
+    /// `"png" | "webp" | "jpeg"`.
+    pub output_format: Option<String>,
+    /// `0..3` — number of partial images to stream.
+    pub partial_images: Option<u32>,
+    /// `"low" | "medium" | "high" | "auto"`.
+    pub quality: Option<String>,
+    /// `"1024x1024" | "1024x1536" | "1536x1024" | "auto"`.
+    pub size: Option<String>,
+}
+
+/// Mask reference for image-generation `edit` calls. Spec: `{ file_id?, image_url? }`.
+/// Reuses the same upload conventions as `InputImage`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageInputMask {
+    pub file_id: Option<String>,
+    pub image_url: Option<String>,
+}
+
+/// Status values for an `image_generation_call` output item.
+///
+/// Spec: `"in_progress" | "completed" | "generating" | "failed"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerationCallStatus {
+    InProgress,
+    Completed,
+    Generating,
+    Failed,
 }
 
 /// `require_approval` values.
@@ -661,13 +787,40 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// `type: "image_generation_call"` — round-trip form for an image generated
+    /// in a prior turn. Spec (OpenAI Responses API, multi-turn image-edit
+    /// flow): clients may resubmit only `{ type, id }` to reference a prior
+    /// generation by identifier, so `result` and `status` are accepted as
+    /// absent on the input side. The full shape is
+    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`. The
+    /// server-side `ResponseOutputItem::ImageGenerationCall` variant remains
+    /// strict because the gateway always populates those fields on emit.
+    #[serde(rename = "image_generation_call")]
+    ImageGenerationCall {
+        id: String,
+        /// Base64-encoded image bytes. Omitted on id-only references.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        /// Prompt text the mainline model rewrote before dispatching the
+        /// image-generation call. Preserved so downstream turns/storage do
+        /// not drop it on replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revised_prompt: Option<String>,
+        /// Generation status. Omitted on id-only references.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ImageGenerationCallStatus>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
         role: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Spec: `EasyInputMessage.type` is `optional "message"`. Constrained
+        /// to a single-value tag enum so payloads with an unknown `type`
+        /// (e.g. `"input_file"`, `"totally_made_up"`) do not silently land
+        /// in this untagged catch-all variant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
-        r#type: Option<String>,
+        r#type: Option<SimpleInputMessageTypeTag>,
         /// Optional phase label (spec: EasyInputMessage.phase).
         ///
         /// Preserved through conversation storage so gpt-5.3-codex+ does not
@@ -675,6 +828,16 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<MessagePhase>,
     },
+}
+
+/// Single-value tag enum pinning `EasyInputMessage.type` to the spec's only
+/// permitted value, `"message"`. Used to keep [`ResponseInputOutputItem::SimpleInputMessage`]
+/// — which is the `#[serde(untagged)]` fallback in the outer `type`-tagged enum
+/// — from silently swallowing payloads whose `type` discriminator is unknown.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SimpleInputMessageTypeTag {
+    Message,
 }
 
 /// Detail level for [`ResponseContentPart::InputFile`]. Spec restricts this
@@ -779,8 +942,6 @@ pub enum ResponseReasoningContent {
 /// Tagged content element carried in `Reasoning.summary`.
 ///
 /// OpenAI spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
-/// Replaces the prior `Vec<String>` wire-type that broke bidirectional
-/// interoperability with spec-compliant clients.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -869,6 +1030,12 @@ pub enum ResponseOutputItem {
         id: String,
         status: WebSearchCallStatus,
         action: WebSearchAction,
+        /// Search hits surfaced when callers request `web_search_call.results`
+        /// via the top-level `include[]` array. Mirrors the `file_search_call.results`
+        /// shape — array of typed entries when populated, omitted otherwise so the
+        /// default wire shape (`{id, action, status, type}`) stays spec-byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<WebSearchResult>>,
     },
     #[serde(rename = "code_interpreter_call")]
     CodeInterpreterCall {
@@ -884,6 +1051,21 @@ pub enum ResponseOutputItem {
         status: FileSearchCallStatus,
         queries: Vec<String>,
         results: Option<Vec<FileSearchResult>>,
+    },
+    /// `type: "image_generation_call"` — output item carrying a base64 image
+    /// produced by the `image_generation` built-in tool. Spec:
+    /// `{ id, result: base64 string, revised_prompt?, status, type }`.
+    #[serde(rename = "image_generation_call")]
+    ImageGenerationCall {
+        id: String,
+        /// Base64-encoded image bytes.
+        result: String,
+        /// Prompt text the mainline model rewrote before dispatching the
+        /// image-generation call. Preserved so downstream turns/storage do
+        /// not drop it on replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revised_prompt: Option<String>,
+        status: ImageGenerationCallStatus,
     },
 }
 
@@ -928,6 +1110,25 @@ pub struct WebSearchSource {
     #[serde(rename = "type")]
     pub source_type: String,
     pub url: String,
+}
+
+/// A single search result attached to a `WebSearchCall` when the caller
+/// requested `web_search_call.results` via the top-level `include[]` array.
+///
+/// Optional fields mirror the `FileSearchResult` shape — only `url` is
+/// guaranteed; titles, snippets, and scores ride along when the upstream
+/// search backend supplies them.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct WebSearchResult {
+    /// Canonical URL of the result.
+    pub url: String,
+    /// Page or document title, when surfaced by the search backend.
+    pub title: Option<String>,
+    /// Short text snippet excerpted from the result.
+    pub snippet: Option<String>,
+    /// Relevance score in `[0, 1]`, when the backend supplies one.
+    pub score: Option<f32>,
 }
 
 /// Status for code interpreter tool calls.
@@ -1226,10 +1427,15 @@ pub struct ResponsesRequest {
     /// Model to use
     pub model: String,
 
-    /// Optional conversation id to persist input/output as items
+    /// Optional conversation reference to persist input/output as items.
+    ///
+    /// Spec: `conversation` accepts either a bare ID string or
+    /// `ResponseConversationParam { id }`. Both wire shapes deserialize into
+    /// [`ConversationRef`]; downstream code reads the id via
+    /// [`ConversationRef::as_id`].
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_conversation_id"))]
-    pub conversation: Option<String>,
+    pub conversation: Option<ConversationRef>,
 
     /// Whether to enable parallel tool calls
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1529,7 +1735,8 @@ impl GenerationRequest for ResponsesRequest {
                         ResponseInputOutputItem::FunctionToolCall { .. }
                         | ResponseInputOutputItem::FunctionCallOutput { .. }
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
-                        | ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+                        | ResponseInputOutputItem::McpApprovalResponse { .. }
+                        | ResponseInputOutputItem::ImageGenerationCall { .. } => {}
                     }
                 }
 
@@ -1539,8 +1746,15 @@ impl GenerationRequest for ResponsesRequest {
     }
 }
 
-/// Validate conversation ID format
-pub fn validate_conversation_id(conv_id: &str) -> Result<(), ValidationError> {
+/// Validate the conversation reference's ID format.
+///
+/// The validator crate auto-unwraps `Option<ConversationRef>` for the
+/// `#[validate(custom(...))]` attribute, so this function only runs when
+/// the field is present. Both wire shapes (bare string or `{ id }` object)
+/// are validated against the same rule by extracting the underlying id via
+/// [`ConversationRef::as_id`].
+pub fn validate_conversation_id(conv: &ConversationRef) -> Result<(), ValidationError> {
+    let conv_id = conv.as_id();
     if !conv_id.starts_with("conv_") {
         let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
@@ -1794,6 +2008,7 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::FunctionToolCall { .. } => {}
         ResponseInputOutputItem::McpApprovalRequest { .. } => {}
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+        ResponseInputOutputItem::ImageGenerationCall { .. } => {}
     }
     Ok(())
 }
@@ -2414,6 +2629,90 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // T3: non-preview web_search tool + WebSearchCall.results
+    // ------------------------------------------------------------------
+
+    /// Spec fixture (openai-responses-api-spec.md §tools line 439):
+    /// `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
+    /// search_context_size?: "low"|"medium"|"high", user_location? }`. Covers the
+    /// canonical tag, the versioned alias, and full-field nested shape.
+    #[test]
+    fn test_web_search_tool_round_trip() {
+        let payload = json!({
+            "type": "web_search",
+            "filters": {"allowed_domains": ["example.com", "rust-lang.org"]},
+            "search_context_size": "high",
+            "user_location": {
+                "type": "approximate",
+                "city": "San Francisco",
+                "country": "US",
+                "region": "California",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+        let tool: ResponseTool =
+            serde_json::from_value(payload.clone()).expect("web_search tool should deserialize");
+        assert!(matches!(tool, ResponseTool::WebSearch(_)));
+        assert_eq!(
+            serde_json::to_value(&tool).expect("web_search tool should serialize"),
+            payload
+        );
+
+        // Versioned alias deserializes into the same variant (canonical serialization re-tested above).
+        let alias: ResponseTool = serde_json::from_value(json!({"type": "web_search_2025_08_26"}))
+            .expect("web_search_2025_08_26 alias should deserialize");
+        assert!(matches!(alias, ResponseTool::WebSearch(_)));
+    }
+
+    /// Acceptance: `web_search_call` output item carries an optional typed
+    /// `results` field populated when callers request `web_search_call.results`
+    /// via the top-level `include[]` array. When absent, the default wire shape
+    /// `{id, action, status, type}` must stay spec-byte-identical.
+    #[test]
+    fn test_web_search_call_results_round_trip() {
+        let with_results = json!({
+            "type": "web_search_call",
+            "id": "ws_abc",
+            "status": "completed",
+            "action": {"type": "search", "query": "rust", "queries": ["rust"]},
+            "results": [
+                {"url": "https://tokio.rs", "title": "Tokio", "snippet": "rt", "score": 0.5},
+                {"url": "https://async.rs"}
+            ]
+        });
+        let item: ResponseOutputItem = serde_json::from_value(with_results.clone())
+            .expect("web_search_call with results should deserialize");
+        let ResponseOutputItem::WebSearchCall { results, .. } = &item else {
+            panic!("expected WebSearchCall");
+        };
+        let results = results.as_ref().expect("results present");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].score, Some(0.5));
+        assert!(results[1].title.is_none());
+        assert_eq!(
+            serde_json::to_value(&item).expect("web_search_call should serialize"),
+            with_results
+        );
+
+        // Absent results: deserializes to None and re-serializes without the key.
+        let no_results = json!({
+            "type": "web_search_call",
+            "id": "ws_no",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+        let bare: ResponseOutputItem = serde_json::from_value(no_results.clone())
+            .expect("web_search_call without results should deserialize");
+        let ResponseOutputItem::WebSearchCall { results, .. } = &bare else {
+            panic!("expected WebSearchCall");
+        };
+        assert!(results.is_none());
+        let serialized = serde_json::to_value(&bare).expect("web_search_call should serialize");
+        assert_eq!(serialized, no_results);
+        assert!(serialized.get("results").is_none());
+    }
+
+    // ------------------------------------------------------------------
     // P2: new top-level ResponsesRequest fields
     // ------------------------------------------------------------------
 
@@ -2695,6 +2994,84 @@ mod tests {
             msg.contains("totally_made_up") || msg.contains("unknown variant"),
             "error should mention the unknown variant, got: {msg}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // P5: ResponseInputOutputItem fail-fast on unknown `type` discriminator
+    //
+    // `ResponseInputOutputItem` is `#[serde(tag = "type")]` with a single
+    // `#[serde(untagged)] SimpleInputMessage` fallback. Before P5, that
+    // fallback accepted any `{role, content, type: "<anything>"}` payload
+    // because `type` was `Option<String>`. The spec (EasyInputMessage.type)
+    // constrains `type` to absent or `"message"`, so P5 replaces the loose
+    // `Option<String>` with `Option<SimpleInputMessageTypeTag>` — unknown
+    // discriminators must now return a deserialize error (→ 400).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn input_item_unknown_type_fails_fast() {
+        // Spec-invalid discriminator must NOT silently fall into
+        // SimpleInputMessage. Previously `type: "totally_made_up"` deserialized
+        // cleanly because `r#type` was `Option<String>`.
+        let raw = json!({
+            "type": "totally_made_up",
+            "role": "user",
+            "content": "hello"
+        });
+        let err = serde_json::from_value::<ResponseInputOutputItem>(raw)
+            .expect_err("unknown input-item type must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "deserialize error must carry a message, got empty: {msg}"
+        );
+    }
+
+    #[test]
+    fn simple_input_message_without_type_still_deserializes() {
+        // Per spec, `EasyInputMessage.type` is optional. Omitting it must
+        // continue to route to the untagged SimpleInputMessage variant.
+        let raw = json!({
+            "role": "user",
+            "content": "hello"
+        });
+        let item: ResponseInputOutputItem =
+            serde_json::from_value(raw).expect("missing type must still deserialize");
+        match item {
+            ResponseInputOutputItem::SimpleInputMessage {
+                role,
+                content,
+                r#type,
+                ..
+            } => {
+                assert_eq!(role, "user");
+                assert!(matches!(content, StringOrContentParts::String(ref s) if s == "hello"));
+                assert!(r#type.is_none(), "absent type must deserialize as None");
+            }
+            other => panic!("expected SimpleInputMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simple_input_message_with_type_message_deserializes() {
+        // Per spec, `type: "message"` is the only non-null value permitted on
+        // EasyInputMessage. Round-trip it intact.
+        let raw = json!({
+            "type": "message",
+            "role": "user",
+            "content": "hi"
+        });
+        let item: ResponseInputOutputItem =
+            serde_json::from_value(raw.clone()).expect("`type: message` must deserialize");
+        match &item {
+            ResponseInputOutputItem::SimpleInputMessage { r#type, .. } => {
+                assert_eq!(*r#type, Some(SimpleInputMessageTypeTag::Message));
+            }
+            other => panic!("expected SimpleInputMessage, got {other:?}"),
+        }
+        // Serializes back to the same wire bytes (canonical shape).
+        let roundtripped = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(roundtripped, raw);
     }
 
     // ------------------------------------------------------------------
@@ -3033,5 +3410,251 @@ mod tests {
             ResponsesToolChoice::default(),
             ResponsesToolChoice::Options(ToolChoiceOptions::Auto)
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // T4: image_generation tool + image_generation_call item round-trips
+    // ------------------------------------------------------------------
+
+    /// `ResponseTool::ImageGeneration` — bare `{type}` and full spec payload
+    /// round-trip with every optional field preserved byte-for-byte.
+    #[test]
+    fn image_generation_tool_round_trips_spec_shape() {
+        // Minimal spec shape: just the discriminator, no config.
+        let minimal = json!({"type": "image_generation"});
+        let tool: ResponseTool =
+            serde_json::from_value(minimal.clone()).expect("minimal image_generation deserialize");
+        match &tool {
+            ResponseTool::ImageGeneration(cfg) => {
+                assert!(cfg.action.is_none());
+                assert!(cfg.background.is_none());
+                assert!(cfg.input_fidelity.is_none());
+                assert!(cfg.input_image_mask.is_none());
+                assert!(cfg.model.is_none());
+                assert!(cfg.moderation.is_none());
+                assert!(cfg.output_compression.is_none());
+                assert!(cfg.output_format.is_none());
+                assert!(cfg.partial_images.is_none());
+                assert!(cfg.quality.is_none());
+                assert!(cfg.size.is_none());
+            }
+            other => panic!("expected ImageGeneration, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&tool).expect("serialize"), minimal);
+
+        // Full spec shape: every optional field populated.
+        let full = json!({
+            "type": "image_generation",
+            "action": "edit",
+            "background": "transparent",
+            "input_fidelity": "high",
+            "input_image_mask": {
+                "file_id": "file_abc",
+                "image_url": "https://example.com/mask.png"
+            },
+            "model": "gpt-image-1",
+            "moderation": "low",
+            "output_compression": 80,
+            "output_format": "png",
+            "partial_images": 2,
+            "quality": "high",
+            "size": "1024x1024"
+        });
+        let tool: ResponseTool =
+            serde_json::from_value(full.clone()).expect("full image_generation deserialize");
+        match &tool {
+            ResponseTool::ImageGeneration(cfg) => {
+                assert_eq!(cfg.action.as_deref(), Some("edit"));
+                assert_eq!(cfg.background.as_deref(), Some("transparent"));
+                assert_eq!(cfg.input_fidelity.as_deref(), Some("high"));
+                let mask = cfg.input_image_mask.as_ref().expect("mask present");
+                assert_eq!(mask.file_id.as_deref(), Some("file_abc"));
+                assert_eq!(
+                    mask.image_url.as_deref(),
+                    Some("https://example.com/mask.png")
+                );
+                assert_eq!(cfg.model.as_deref(), Some("gpt-image-1"));
+                assert_eq!(cfg.moderation.as_deref(), Some("low"));
+                assert_eq!(cfg.output_compression, Some(80));
+                assert_eq!(cfg.output_format.as_deref(), Some("png"));
+                assert_eq!(cfg.partial_images, Some(2));
+                assert_eq!(cfg.quality.as_deref(), Some("high"));
+                assert_eq!(cfg.size.as_deref(), Some("1024x1024"));
+            }
+            other => panic!("expected ImageGeneration, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&tool).expect("serialize"), full);
+    }
+
+    /// `ResponseOutputItem::ImageGenerationCall` — `{id, result, status, type}`
+    /// round-trips with every spec-listed status variant. Absent
+    /// `revised_prompt` deserializes to `None` and is omitted on serialize, so
+    /// the default wire shape stays byte-identical to the spec example.
+    #[test]
+    fn image_generation_call_output_item_round_trips_spec_shape() {
+        for (status_json, expected) in [
+            ("in_progress", ImageGenerationCallStatus::InProgress),
+            ("completed", ImageGenerationCallStatus::Completed),
+            ("generating", ImageGenerationCallStatus::Generating),
+            ("failed", ImageGenerationCallStatus::Failed),
+        ] {
+            let payload = json!({
+                "type": "image_generation_call",
+                "id": "ig_1",
+                "result": "aGVsbG8=",
+                "status": status_json,
+            });
+            let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+                .expect("image_generation_call output item deserialize");
+            match &item {
+                ResponseOutputItem::ImageGenerationCall {
+                    id,
+                    result,
+                    revised_prompt,
+                    status,
+                } => {
+                    assert_eq!(id, "ig_1");
+                    assert_eq!(result, "aGVsbG8=");
+                    assert!(revised_prompt.is_none());
+                    assert_eq!(*status, expected);
+                }
+                other => panic!("expected ImageGenerationCall, got {other:?}"),
+            }
+            assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+        }
+    }
+
+    /// `ResponseOutputItem::ImageGenerationCall` preserves `revised_prompt`
+    /// through a full (de)serialization cycle. OpenAI populates this when
+    /// the mainline model rewrites the user prompt before dispatching the
+    /// image-generation call; dropping it here would silently lose prompt
+    /// provenance during storage/replay.
+    #[test]
+    fn image_generation_call_output_item_round_trips_with_revised_prompt() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_1",
+            "result": "aGVsbG8=",
+            "revised_prompt": "A red fox sitting on a rock at sunset.",
+            "status": "completed",
+        });
+        let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+            .expect("image_generation_call output item deserialize");
+        match &item {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_1");
+                assert_eq!(result, "aGVsbG8=");
+                assert_eq!(
+                    revised_prompt.as_deref(),
+                    Some("A red fox sitting on a rock at sunset.")
+                );
+                assert_eq!(*status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+    }
+
+    /// `ResponseInputOutputItem::ImageGenerationCall` mirrors the output-item
+    /// shape so clients can replay a prior-turn image generation through the
+    /// `input` array for stateless round-trips.
+    #[test]
+    fn image_generation_call_input_item_round_trips_spec_shape() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_2",
+            "result": "d29ybGQ=",
+            "status": "completed",
+        });
+        let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+            .expect("image_generation_call input item deserialize");
+        match &item {
+            ResponseInputOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_2");
+                assert_eq!(result.as_deref(), Some("d29ybGQ="));
+                assert!(revised_prompt.is_none());
+                assert_eq!(*status, Some(ImageGenerationCallStatus::Completed));
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+    }
+
+    /// `ResponseInputOutputItem::ImageGenerationCall` accepts the documented
+    /// multi-turn id-only reference form: clients resubmitting
+    /// `{ "type": "image_generation_call", "id": ... }` to continue an
+    /// image-edit conversation must deserialize and round-trip without
+    /// forcing the full `result` / `status` payload. (See OpenAI
+    /// Responses API image-generation tool guide.)
+    #[test]
+    fn image_generation_call_input_item_accepts_id_only_reference() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_3",
+        });
+        let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+            .expect("id-only image_generation_call input item deserialize");
+        match &item {
+            ResponseInputOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_3");
+                assert!(result.is_none());
+                assert!(revised_prompt.is_none());
+                assert!(status.is_none());
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        // Serialized form must stay minimal — no `"result": null` or
+        // `"status": null` leaks through `skip_serializing_if`.
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+    }
+
+    /// `ResponseInputOutputItem::ImageGenerationCall` preserves
+    /// `revised_prompt` on replay — the stateless client path must carry the
+    /// rewritten prompt forward to match what the output variant emitted on
+    /// the originating turn.
+    #[test]
+    fn image_generation_call_input_item_round_trips_with_revised_prompt() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_2",
+            "result": "d29ybGQ=",
+            "revised_prompt": "A cozy cabin in a snowy pine forest at dusk.",
+            "status": "completed",
+        });
+        let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+            .expect("image_generation_call input item deserialize");
+        match &item {
+            ResponseInputOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_2");
+                assert_eq!(result.as_deref(), Some("d29ybGQ="));
+                assert_eq!(
+                    revised_prompt.as_deref(),
+                    Some("A cozy cabin in a snowy pine forest at dusk.")
+                );
+                assert_eq!(*status, Some(ImageGenerationCallStatus::Completed));
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
     }
 }

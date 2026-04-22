@@ -231,8 +231,9 @@ pub(super) async fn load_conversation_history(
     }
 
     // Handle conversation by loading conversation history
-    if let Some(ref conv_id_str) = request.conversation {
-        let conv_id = ConversationId::from(conv_id_str.as_str());
+    if let Some(ref conv_ref) = request.conversation {
+        let conv_id_str = conv_ref.as_id();
+        let conv_id = ConversationId::from(conv_id_str);
 
         // Check if conversation exists - return error if not found
         let conversation = ctx

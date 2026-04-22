@@ -6,6 +6,8 @@ mod openai;
 mod provider_trait;
 mod registry;
 mod sglang;
+#[cfg(test)]
+mod tests;
 mod types;
 mod xai;
 
