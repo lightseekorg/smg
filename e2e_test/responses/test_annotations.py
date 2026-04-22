@@ -12,13 +12,18 @@ and makes no assumption about which backend produced them.
 The tests run against the OpenAI cloud backend (``@pytest.mark.vendor("openai")``)
 because the built-in tools that emit typed annotations (``web_search_preview``,
 ``file_search``, ``code_interpreter``) are hosted upstream. Each annotation
-variant has its own class with both a non-streaming and a streaming case.
-Tests that require extra external setup (uploading a file for file_search)
-create that setup directly against the OpenAI API and clean it up at
-teardown; tests that depend on model-driven output shape (code_interpreter
-producing container_file_citation / file_path) validate the variant
-structurally only if the model actually produced it, otherwise they skip
-with an explanation rather than falsely fail.
+variant has its own test case with both a non-streaming and a streaming
+parametrization.
+
+Guaranteed-annotation tests (``url_citation`` via web_search_preview,
+``file_citation`` via file_search against a controlled vector store indexed
+from a document whose text uniquely answers the prompt) assert the annotation
+is present — a silent skip on these variants would mask exactly the regression
+E5 is meant to catch. Model-driven annotation variants
+(``container_file_citation`` / ``file_path`` from code_interpreter) validate
+the wire shape only when the model actually emitted one, because their
+presence depends on model behavior that is not deterministic enough to gate a
+test suite on.
 """
 
 from __future__ import annotations
@@ -33,6 +38,11 @@ import openai
 import pytest
 
 logger = logging.getLogger(__name__)
+
+# Throttle between successive OpenAI API calls in this file. External APIs
+# rate-limit aggressively on rapid-fire requests; 2s is generous enough for
+# CI runs while staying cheap locally.
+_API_RATE_LIMIT_DELAY = 2
 
 
 # =============================================================================
@@ -146,7 +156,7 @@ class TestUrlCitationAnnotation:
         )
 
     def test_url_citation_non_streaming(self, model, api_client):
-        time.sleep(2)
+        time.sleep(_API_RATE_LIMIT_DELAY)
         resp = self._create_web_search_response(api_client, model, stream=False)
         assert resp.error is None, f"Response error: {resp.error}"
         assert resp.output is not None
@@ -161,7 +171,7 @@ class TestUrlCitationAnnotation:
             _assert_annotation_structurally_valid(ann)
 
     def test_url_citation_streaming(self, model, api_client):
-        time.sleep(2)
+        time.sleep(_API_RATE_LIMIT_DELAY)
         resp = self._create_web_search_response(api_client, model, stream=True)
         final_output = _stream_to_final_output(resp)
 
@@ -196,58 +206,66 @@ def openai_direct_client():
     resulting ID through the gateway when calling ``responses.create`` with the
     ``file_search`` tool. This keeps the smg-under-test path exercised for the
     annotation round-trip while sidestepping a hard dependency on endpoint
-    coverage that is out of scope for E5.
+    coverage that is out of scope for E5. A missing ``OPENAI_API_KEY`` is a hard
+    misconfiguration for ``@pytest.mark.vendor("openai")`` tests — fail loudly
+    rather than silently skipping the only coverage for ``file_citation``.
     """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        pytest.skip("OPENAI_API_KEY not set — cannot create a vector store for file_search")
+        pytest.fail(
+            "OPENAI_API_KEY is required for TestFileCitationAnnotation "
+            "(file_search setup needs direct /v1/files + /v1/vector_stores access)."
+        )
     client = openai.OpenAI(api_key=api_key)
     yield client
 
 
 @pytest.fixture(scope="class")
 def file_search_vector_store(openai_direct_client):
-    """Create + populate a vector store, then tear it down at class scope."""
+    """Create + populate a vector store, then tear it down at class scope.
+
+    Teardown failures are logged with the resource id so a leak (and its
+    associated cost / quota regression) is visible in CI output rather than
+    silently absorbed.
+    """
     client = openai_direct_client
     file_obj = None
     vs = None
     try:
         buf = io.BytesIO(_FILE_SEARCH_DOC.encode("utf-8"))
         buf.name = "project_astra.txt"
-        try:
-            file_obj = client.files.create(file=buf, purpose="assistants")
-        except openai.OpenAIError as exc:
-            pytest.skip(f"Unable to upload file for file_search: {exc}")
-
-        try:
-            vs = client.vector_stores.create(name="smg-e5-annotations-test")
-        except openai.OpenAIError as exc:
-            pytest.skip(f"Unable to create vector store for file_search: {exc}")
-
-        try:
-            client.vector_stores.files.create_and_poll(vector_store_id=vs.id, file_id=file_obj.id)
-        except openai.OpenAIError as exc:
-            pytest.skip(f"Unable to index file into vector store: {exc}")
-
+        file_obj = client.files.create(file=buf, purpose="assistants")
+        vs = client.vector_stores.create(name="smg-e5-annotations-test")
+        client.vector_stores.files.create_and_poll(vector_store_id=vs.id, file_id=file_obj.id)
         yield vs.id
     finally:
         if vs is not None:
             try:
                 client.vector_stores.delete(vector_store_id=vs.id)
-            except openai.OpenAIError:
-                pass
+            except openai.OpenAIError as exc:
+                logger.warning("Leaked vector store %s on teardown: %s", vs.id, exc)
         if file_obj is not None:
             try:
                 client.files.delete(file_id=file_obj.id)
-            except openai.OpenAIError:
-                pass
+            except openai.OpenAIError as exc:
+                logger.warning("Leaked file %s on teardown: %s", file_obj.id, exc)
 
 
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestFileCitationAnnotation:
-    """Verify ``file_citation`` annotations round-trip from the file_search tool."""
+    """Verify ``file_citation`` annotations round-trip from the file_search tool.
+
+    The indexed document mentions the Pulsar-7 reactor core's nominal
+    temperature (842 K) exactly once. The prompt asks for that value and
+    instructs the model to cite the document — under these conditions OpenAI's
+    ``file_search`` tool reliably emits ``file_citation`` annotations for
+    modern models (gpt-4o-mini and newer). Missing citations would indicate a
+    gateway surfacing regression (annotations typed into ``Unknown`` or
+    stripped in the OpenAI-compat router), which is exactly what E5 guards
+    against; treat that as a test failure rather than a skip.
+    """
 
     _PROMPT = (
         "Using the attached project documentation, what is the nominal operating "
@@ -269,7 +287,7 @@ class TestFileCitationAnnotation:
         )
 
     def test_file_citation_non_streaming(self, model, api_client, file_search_vector_store):
-        time.sleep(2)
+        time.sleep(_API_RATE_LIMIT_DELAY)
         resp = self._create_file_search_response(
             api_client, model, file_search_vector_store, stream=False
         )
@@ -278,17 +296,15 @@ class TestFileCitationAnnotation:
 
         annotations = _collect_annotations(resp.output)
         file_citations = [a for a in annotations if getattr(a, "type", None) == "file_citation"]
-        if not file_citations:
-            pytest.skip(
-                "Model did not emit file_citation annotations for this prompt; "
-                "annotation structural check is skipped. "
-                f"Annotations observed: {[getattr(a, 'type', None) for a in annotations]}"
-            )
+        assert file_citations, (
+            "Expected at least one file_citation annotation from file_search; "
+            f"got annotations: {[getattr(a, 'type', None) for a in annotations]}"
+        )
         for ann in file_citations:
             _assert_annotation_structurally_valid(ann)
 
     def test_file_citation_streaming(self, model, api_client, file_search_vector_store):
-        time.sleep(2)
+        time.sleep(_API_RATE_LIMIT_DELAY)
         resp = self._create_file_search_response(
             api_client, model, file_search_vector_store, stream=True
         )
@@ -296,12 +312,10 @@ class TestFileCitationAnnotation:
 
         annotations = _collect_annotations(final_output)
         file_citations = [a for a in annotations if getattr(a, "type", None) == "file_citation"]
-        if not file_citations:
-            pytest.skip(
-                "Model did not emit file_citation annotations for this prompt in "
-                "streaming mode; annotation structural check is skipped. "
-                f"Annotations observed: {[getattr(a, 'type', None) for a in annotations]}"
-            )
+        assert file_citations, (
+            "Expected at least one file_citation annotation in streaming response; "
+            f"got annotations: {[getattr(a, 'type', None) for a in annotations]}"
+        )
         for ann in file_citations:
             _assert_annotation_structurally_valid(ann)
 
@@ -333,29 +347,57 @@ def _create_code_interpreter_response(api_client, model, stream):
     )
 
 
+@pytest.fixture(scope="class")
+def code_interpreter_response_pair(model, api_client):
+    """Run code_interpreter twice (non-stream + stream) and cache both outputs.
+
+    Both the ``container_file_citation`` and the ``file_path`` assertions
+    inspect the same code_interpreter output for different annotation
+    variants, so running the tool four times (2 variants × 2 stream modes)
+    when two invocations suffice would needlessly burn quota. The fixture is
+    class-scoped and returns a
+    ``{"non_streaming": final_output, "streaming": final_output}`` dict of
+    already-resolved output arrays for the four tests in
+    ``TestCodeInterpreterAnnotations`` to share.
+    """
+    time.sleep(_API_RATE_LIMIT_DELAY)
+    try:
+        non_stream_resp = _create_code_interpreter_response(api_client, model, stream=False)
+    except openai.BadRequestError as exc:
+        pytest.skip(f"code_interpreter unavailable on this model: {exc}")
+    assert non_stream_resp.error is None, f"Response error: {non_stream_resp.error}"
+
+    time.sleep(_API_RATE_LIMIT_DELAY)
+    try:
+        stream_resp = _create_code_interpreter_response(api_client, model, stream=True)
+    except openai.BadRequestError as exc:
+        pytest.skip(f"code_interpreter unavailable on this model: {exc}")
+    streaming_output = _stream_to_final_output(stream_resp)
+
+    return {
+        "non_streaming": non_stream_resp.output,
+        "streaming": streaming_output,
+    }
+
+
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
-class TestContainerFileCitationAnnotation:
-    """Verify ``container_file_citation`` annotations from code_interpreter.
+class TestCodeInterpreterAnnotations:
+    """Verify ``container_file_citation`` + ``file_path`` from code_interpreter.
 
-    The container_file_citation variant is produced when the model cites a
-    file that lives inside the code_interpreter container. Whether the model
-    emits one is model-dependent; the tests validate the wire shape when the
-    annotation is present and skip (rather than fail) when it is not, so that
-    regressions in the typed round-trip are caught while not tying the suite
-    to model-prompt sensitivity.
+    Both variants share a single prompt and a single pair of
+    code_interpreter invocations (one non-streaming, one streaming) via the
+    ``code_interpreter_response_pair`` fixture. Whether either variant
+    actually appears is model-dependent — the tests validate the wire shape
+    when the annotation is present and skip (rather than fail) when it is
+    not, so that regressions in the typed round-trip are caught without
+    tying the suite to model-prompt sensitivity.
     """
 
-    def test_container_file_citation_non_streaming(self, model, api_client):
-        time.sleep(2)
-        try:
-            resp = _create_code_interpreter_response(api_client, model, stream=False)
-        except openai.BadRequestError as exc:
-            pytest.skip(f"code_interpreter unavailable on this model: {exc}")
-        assert resp.error is None, f"Response error: {resp.error}"
-
-        annotations = _collect_annotations(resp.output)
+    def test_container_file_citation_non_streaming(self, code_interpreter_response_pair):
+        output = code_interpreter_response_pair["non_streaming"]
+        annotations = _collect_annotations(output)
         container_citations = [
             a for a in annotations if getattr(a, "type", None) == "container_file_citation"
         ]
@@ -367,15 +409,9 @@ class TestContainerFileCitationAnnotation:
         for ann in container_citations:
             _assert_annotation_structurally_valid(ann)
 
-    def test_container_file_citation_streaming(self, model, api_client):
-        time.sleep(2)
-        try:
-            resp = _create_code_interpreter_response(api_client, model, stream=True)
-        except openai.BadRequestError as exc:
-            pytest.skip(f"code_interpreter unavailable on this model: {exc}")
-        final_output = _stream_to_final_output(resp)
-
-        annotations = _collect_annotations(final_output)
+    def test_container_file_citation_streaming(self, code_interpreter_response_pair):
+        output = code_interpreter_response_pair["streaming"]
+        annotations = _collect_annotations(output)
         container_citations = [
             a for a in annotations if getattr(a, "type", None) == "container_file_citation"
         ]
@@ -387,28 +423,9 @@ class TestContainerFileCitationAnnotation:
         for ann in container_citations:
             _assert_annotation_structurally_valid(ann)
 
-
-@pytest.mark.vendor("openai")
-@pytest.mark.gpu(0)
-@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
-class TestFilePathAnnotation:
-    """Verify ``file_path`` annotations round-trip from generated files.
-
-    ``file_path`` is emitted when the model references a generated file by
-    path (e.g., a CSV or image generated during a code_interpreter turn).
-    As with ``container_file_citation``, the presence of the annotation is
-    model-driven; the test validates the wire shape when present.
-    """
-
-    def test_file_path_non_streaming(self, model, api_client):
-        time.sleep(2)
-        try:
-            resp = _create_code_interpreter_response(api_client, model, stream=False)
-        except openai.BadRequestError as exc:
-            pytest.skip(f"code_interpreter unavailable on this model: {exc}")
-        assert resp.error is None, f"Response error: {resp.error}"
-
-        annotations = _collect_annotations(resp.output)
+    def test_file_path_non_streaming(self, code_interpreter_response_pair):
+        output = code_interpreter_response_pair["non_streaming"]
+        annotations = _collect_annotations(output)
         file_paths = [a for a in annotations if getattr(a, "type", None) == "file_path"]
         if not file_paths:
             pytest.skip(
@@ -418,15 +435,9 @@ class TestFilePathAnnotation:
         for ann in file_paths:
             _assert_annotation_structurally_valid(ann)
 
-    def test_file_path_streaming(self, model, api_client):
-        time.sleep(2)
-        try:
-            resp = _create_code_interpreter_response(api_client, model, stream=True)
-        except openai.BadRequestError as exc:
-            pytest.skip(f"code_interpreter unavailable on this model: {exc}")
-        final_output = _stream_to_final_output(resp)
-
-        annotations = _collect_annotations(final_output)
+    def test_file_path_streaming(self, code_interpreter_response_pair):
+        output = code_interpreter_response_pair["streaming"]
+        annotations = _collect_annotations(output)
         file_paths = [a for a in annotations if getattr(a, "type", None) == "file_path"]
         if not file_paths:
             pytest.skip(
