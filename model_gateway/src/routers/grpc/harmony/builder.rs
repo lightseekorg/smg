@@ -736,6 +736,10 @@ impl HarmonyBuilder {
                 );
                 Err("Unsupported input item type".to_string())
             }
+
+            ResponseInputOutputItem::Compaction { .. } => {
+                Err("Unsupported input item type".to_string())
+            }
         }
     }
 

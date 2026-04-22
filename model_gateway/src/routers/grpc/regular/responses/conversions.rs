@@ -157,6 +157,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         );
                         return Err("Unsupported input item type".to_string());
                     }
+                    ResponseInputOutputItem::Compaction { .. } => {
+                        return Err("Unsupported input item type".to_string());
+                    }
                 }
             }
         }

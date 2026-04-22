@@ -560,7 +560,8 @@ impl<'a> McpToolSession<'a> {
             | ResponseOutputItem::FileSearchCall { .. }
             | ResponseOutputItem::ImageGenerationCall { .. }
             | ResponseOutputItem::Message { .. }
-            | ResponseOutputItem::Reasoning { .. } => true,
+            | ResponseOutputItem::Reasoning { .. }
+            | ResponseOutputItem::Compaction { .. } => true,
         }
     }
 

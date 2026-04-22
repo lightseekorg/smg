@@ -1262,3 +1262,68 @@ fn image_generation_call_input_item_round_trips_with_revised_prompt() {
     }
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
+
+#[test]
+fn compaction_output_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "compaction",
+        "id": "cmp_abc123",
+        "encrypted_content": "opaque-base64-blob",
+    });
+    let item: ResponseOutputItem =
+        serde_json::from_value(payload.clone()).expect("compaction output item deserialize");
+    match &item {
+        ResponseOutputItem::Compaction {
+            id,
+            encrypted_content,
+        } => {
+            assert_eq!(id, "cmp_abc123");
+            assert_eq!(encrypted_content, "opaque-base64-blob");
+        }
+        other => panic!("expected Compaction, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn compaction_input_item_round_trips_spec_shape() {
+    let payload = json!({
+        "type": "compaction",
+        "id": "cmp_abc123",
+        "encrypted_content": "opaque-base64-blob",
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("compaction input item deserialize");
+    match &item {
+        ResponseInputOutputItem::Compaction {
+            encrypted_content,
+            id,
+        } => {
+            assert_eq!(encrypted_content, "opaque-base64-blob");
+            assert_eq!(id.as_deref(), Some("cmp_abc123"));
+        }
+        other => panic!("expected Compaction, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn compaction_input_item_accepts_missing_id() {
+    let payload = json!({
+        "type": "compaction",
+        "encrypted_content": "opaque-base64-blob",
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("id-less compaction input item deserialize");
+    match &item {
+        ResponseInputOutputItem::Compaction {
+            encrypted_content,
+            id,
+        } => {
+            assert_eq!(encrypted_content, "opaque-base64-blob");
+            assert!(id.is_none());
+        }
+        other => panic!("expected Compaction, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
