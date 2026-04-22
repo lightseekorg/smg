@@ -185,6 +185,7 @@ sum(rate(smg_http_responses_total{status_code=~"5.."}[5m]))
 ```
 
 **`/v1/responses` Success Rate**
+
 ```promql
 sum(rate(smg_http_responses_total{path="/v1/responses",status_code=~"2.."}[5m]))
 / sum(rate(smg_http_responses_total{path="/v1/responses"}[5m]))
