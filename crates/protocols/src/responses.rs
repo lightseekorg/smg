@@ -729,19 +729,35 @@ pub enum ResponseInputOutputItem {
         reason: Option<String>,
     },
     /// `type: "image_generation_call"` — round-trip form for an image generated
-    /// in a prior turn. Spec:
-    /// `{ id, result: base64 string, revised_prompt?, status, type }`.
+    /// in a prior turn. Spec (OpenAI Responses API, multi-turn image-edit
+    /// flow): clients may resubmit only `{ type, id }` to reference a prior
+    /// generation by identifier, so `result` and `status` are accepted as
+    /// absent on the input side. The full shape is
+    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`.
+    ///
+    /// This mirrors the OpenAI Python SDK 2.8.x
+    /// `response_input_item_param.ImageGenerationCall` TypedDict: while the
+    /// TypedDict types those fields as `Required[Optional[...]]`, the HTTP
+    /// API itself documents the id-only multi-turn reference form (see the
+    /// image-generation tool guide), and `skip_serializing_if` keeps the
+    /// serialized form spec-compatible when a full item is round-tripped.
+    /// The server-side `ResponseOutputItem::ImageGenerationCall` variant
+    /// remains strict because the gateway always populates those fields
+    /// on emit.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
-        /// Base64-encoded image bytes.
-        result: String,
+        /// Base64-encoded image bytes. Omitted on id-only references.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
         /// Prompt text the mainline model rewrote before dispatching the
         /// image-generation call. Preserved so downstream turns/storage do
         /// not drop it on replay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revised_prompt: Option<String>,
-        status: ImageGenerationCallStatus,
+        /// Generation status. Omitted on id-only references.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ImageGenerationCallStatus>,
     },
     #[serde(untagged)]
     SimpleInputMessage {
@@ -3303,12 +3319,45 @@ mod tests {
                 status,
             } => {
                 assert_eq!(id, "ig_2");
-                assert_eq!(result, "d29ybGQ=");
+                assert_eq!(result.as_deref(), Some("d29ybGQ="));
                 assert!(revised_prompt.is_none());
-                assert_eq!(*status, ImageGenerationCallStatus::Completed);
+                assert_eq!(*status, Some(ImageGenerationCallStatus::Completed));
             }
             other => panic!("expected ImageGenerationCall, got {other:?}"),
         }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+    }
+
+    /// `ResponseInputOutputItem::ImageGenerationCall` accepts the documented
+    /// multi-turn id-only reference form: clients resubmitting
+    /// `{ "type": "image_generation_call", "id": ... }` to continue an
+    /// image-edit conversation must deserialize and round-trip without
+    /// forcing the full `result` / `status` payload. (See OpenAI
+    /// Responses API image-generation tool guide.)
+    #[test]
+    fn image_generation_call_input_item_accepts_id_only_reference() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_3",
+        });
+        let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+            .expect("id-only image_generation_call input item deserialize");
+        match &item {
+            ResponseInputOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_3");
+                assert!(result.is_none());
+                assert!(revised_prompt.is_none());
+                assert!(status.is_none());
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        // Serialized form must stay minimal — no `"result": null` or
+        // `"status": null` leaks through `skip_serializing_if`.
         assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
     }
 
@@ -3335,12 +3384,12 @@ mod tests {
                 status,
             } => {
                 assert_eq!(id, "ig_2");
-                assert_eq!(result, "d29ybGQ=");
+                assert_eq!(result.as_deref(), Some("d29ybGQ="));
                 assert_eq!(
                     revised_prompt.as_deref(),
                     Some("A cozy cabin in a snowy pine forest at dusk.")
                 );
-                assert_eq!(*status, ImageGenerationCallStatus::Completed);
+                assert_eq!(*status, Some(ImageGenerationCallStatus::Completed));
             }
             other => panic!("expected ImageGenerationCall, got {other:?}"),
         }
