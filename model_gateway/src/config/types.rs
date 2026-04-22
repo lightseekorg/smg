@@ -47,6 +47,7 @@ pub struct RouterConfig {
     pub storage_context_headers: HashMap<String, String>,
     #[serde(default)]
     pub memory_runtime: MemoryRuntimeConfig,
+    #[serde(default)]
     pub tenant_resolution: TenantResolutionConfig,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
@@ -816,6 +817,11 @@ mod tests {
 
         assert!(deserialized.skills_enabled);
         assert!(deserialized.skills.is_none());
+        assert!(!deserialized.tenant_resolution.trust_tenant_header);
+        assert_eq!(
+            deserialized.tenant_resolution.tenant_header_name,
+            DEFAULT_TENANT_HEADER_NAME
+        );
     }
 
     #[test]
