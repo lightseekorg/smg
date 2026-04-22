@@ -175,6 +175,7 @@ impl ResponseProcessor {
                         &processed_text,
                         &original_request.model,
                         history_tool_calls_count,
+                        original_request.tools.as_deref(),
                     )
                     .await;
             }
@@ -318,6 +319,7 @@ impl ResponseProcessor {
         processed_text: &str,
         model: &str,
         history_tool_calls_count: usize,
+        tools: Option<&[openai_protocol::common::Tool]>,
     ) -> (Option<Vec<ToolCall>>, String) {
         // Get pooled parser for this model
         let pooled_parser = utils::get_tool_parser(
@@ -343,19 +345,23 @@ impl ResponseProcessor {
                     .into_iter()
                     .enumerate()
                     .map(|(index, tc)| {
-                        // Generate ID for this tool call
                         let id = utils::generate_tool_call_id(
                             model,
                             &tc.function.name,
                             index,
                             history_tool_calls_count,
                         );
+                        let arguments = coerce_tool_args_to_schema(
+                            &tc.function.arguments,
+                            &tc.function.name,
+                            tools.unwrap_or(&[]),
+                        );
                         ToolCall {
                             id,
                             tool_type: "function".to_string(),
                             function: FunctionCallResponse {
                                 name: tc.function.name,
-                                arguments: Some(tc.function.arguments),
+                                arguments: Some(arguments),
                             },
                         }
                     })
@@ -661,6 +667,7 @@ impl ResponseProcessor {
                         utils::message_utils::get_history_tool_calls_count_messages(
                             &messages_request,
                         ),
+                        None,
                     )
                     .await;
             }
@@ -864,4 +871,89 @@ impl ResponseProcessor {
             system_fingerprint: dispatch.weight_version.clone(),
         })
     }
+}
+
+/// Coerce tool call argument values to match the types declared in the function
+/// schema. Models sometimes return `546382` (integer) for a `"type": "string"`
+/// parameter, or `null` for `"type": "string"` when the user said "null". This
+/// mirrors the type coercion that production tproxy performs.
+fn coerce_tool_args_to_schema(
+    arguments_json: &str,
+    function_name: &str,
+    tools: &[openai_protocol::common::Tool],
+) -> String {
+    let schema = tools.iter().find_map(|t| {
+        let f = &t.function;
+        if f.name == function_name {
+            Some(&f.parameters)
+        } else {
+            None
+        }
+    });
+    let schema = match schema {
+        Some(s) if s.is_object() => s,
+        _ => return arguments_json.to_string(),
+    };
+
+    let mut args: serde_json::Value = match serde_json::from_str(arguments_json) {
+        Ok(v) => v,
+        Err(_) => return arguments_json.to_string(),
+    };
+
+    let props = match schema.get("properties").and_then(|p| p.as_object()) {
+        Some(p) => p,
+        None => return arguments_json.to_string(),
+    };
+
+    if let Some(obj) = args.as_object_mut() {
+        for (key, prop_schema) in props {
+            let expected_type = prop_schema.get("type").and_then(|t| t.as_str());
+            let val = match obj.get(key) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            let coerced = match expected_type {
+                Some("string") => match &val {
+                    serde_json::Value::Number(n) => Some(serde_json::Value::String(n.to_string())),
+                    serde_json::Value::Bool(b) => Some(serde_json::Value::String(b.to_string())),
+                    serde_json::Value::Null => Some(serde_json::Value::String("null".to_string())),
+                    _ => None,
+                },
+                Some("number") => match &val {
+                    serde_json::Value::String(s) => {
+                        s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(serde_json::Value::Number)
+                    }
+                    _ => None,
+                },
+                Some("integer") => match &val {
+                    serde_json::Value::String(s) => {
+                        s.parse::<i64>().ok().map(|n| serde_json::Value::Number(n.into()))
+                    }
+                    _ => None,
+                },
+                Some("array") => match &val {
+                    serde_json::Value::String(_) | serde_json::Value::Number(_) => {
+                        Some(serde_json::Value::Array(vec![val.clone()]))
+                    }
+                    _ => None,
+                },
+                Some("boolean") => match &val {
+                    serde_json::Value::String(s) => match s.as_str() {
+                        "true" => Some(serde_json::Value::Bool(true)),
+                        "false" => Some(serde_json::Value::Bool(false)),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(new_val) = coerced {
+                obj.insert(key.clone(), new_val);
+            }
+        }
+    }
+
+    serde_json::to_string(&args).unwrap_or_else(|_| arguments_json.to_string())
 }
