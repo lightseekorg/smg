@@ -68,13 +68,16 @@ impl WorkerSyncAdapter {
         })
     }
 
-    /// Spawn the inbound task. Subscribes first (so no event is lost
-    /// during replay), then backfills the registry with any entries
-    /// already sitting in the CRDT — a node that joins after workers
-    /// have already gossiped would otherwise wait for the next
-    /// unrelated write before its routing table is complete. The task
-    /// runs until the namespace's subscriber channel closes (only on
-    /// `MeshKV` drop).
+    /// Start the inbound path. Subscribes first so no live event is
+    /// lost, spawns the recv loop so it can start draining
+    /// immediately, and then backfills from the calling thread — any
+    /// entry already in the CRDT would otherwise have to wait for the
+    /// next unrelated write before the registry saw it. Running the
+    /// backfill outside the spawn keeps the live loop free to drain
+    /// concurrently: `notify` uses `try_send` into a bounded mpsc, so
+    /// a blocked recv while backfill is running could drop updates on
+    /// a busy startup. `on_remote_worker_state` is idempotent on URL,
+    /// so a key seen by both paths only refreshes health.
     pub fn start(self: &Arc<Self>) {
         let this = Arc::clone(self);
         let mut sub = self.workers.subscribe("");
@@ -83,7 +86,6 @@ impl WorkerSyncAdapter {
             reason = "subscription task ends automatically when the mesh KV drops and closes the channel; no handle needed"
         )]
         tokio::spawn(async move {
-            this.backfill_existing();
             while let Some((key, value)) = sub.receiver.recv().await {
                 let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
                     warn!(key, "worker: subscription yielded unexpected key shape");
@@ -106,15 +108,17 @@ impl WorkerSyncAdapter {
             }
             debug!("WorkerSyncAdapter subscription closed");
         });
+        self.backfill_existing();
     }
 
     /// Replay every entry currently in the `worker:` namespace into
-    /// the registry. Safe to run after `subscribe` — the subscription
-    /// loop is idempotent on repeated state (URL-dedupe short-circuits
-    /// to a health refresh), so overlap with a live event is fine.
+    /// the registry. Safe to run alongside the live subscription loop
+    /// — the sink is idempotent on URL (health refresh short-circuit),
+    /// so overlap with a concurrent live event is fine.
     fn backfill_existing(&self) {
         for key in self.workers.keys("") {
             let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
+                warn!(key, "worker: backfill yielded unexpected key shape");
                 continue;
             };
             if let Some(bytes) = self.workers.get(&key) {
