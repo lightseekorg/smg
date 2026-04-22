@@ -61,7 +61,7 @@ def _iter_output_text_parts(output: Iterable) -> Iterable:
 
 def _collect_annotations(output: Iterable) -> list:
     """Flatten annotations from all output_text parts in a response's output."""
-    annotations = []
+    annotations: list = []
     for part in _iter_output_text_parts(output):
         anns = getattr(part, "annotations", None) or []
         annotations.extend(anns)
