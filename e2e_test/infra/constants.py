@@ -25,7 +25,6 @@ class Runtime(StrEnum):
     SGLANG = "sglang"
     VLLM = "vllm"
     TRTLLM = "trtllm"
-    MLX = "mlx"
     OPENAI = "openai"
     XAI = "xai"
     GEMINI = "gemini"
@@ -34,7 +33,7 @@ class Runtime(StrEnum):
 
 # Convenience sets
 LOCAL_MODES = frozenset({ConnectionMode.HTTP, ConnectionMode.GRPC})
-LOCAL_RUNTIMES = frozenset({Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM, Runtime.MLX})
+LOCAL_RUNTIMES = frozenset({Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM})
 CLOUD_RUNTIMES = frozenset({Runtime.OPENAI, Runtime.XAI, Runtime.GEMINI, Runtime.ANTHROPIC})
 
 # Fixture parameter names (used in @pytest.mark.parametrize)
@@ -101,21 +100,11 @@ def is_trtllm() -> bool:
     return get_runtime() == "trtllm"
 
 
-def is_mlx() -> bool:
-    """Check if tests are running with MLX runtime (Apple Silicon only).
-
-    Returns:
-        True if E2E_RUNTIME is "mlx", False otherwise.
-    """
-    return get_runtime() == "mlx"
-
-
 # Runtime display labels
 RUNTIME_LABELS = {
     "sglang": "SGLang",
     "vllm": "vLLM",
     "trtllm": "TensorRT-LLM",
-    "mlx": "MLX",
 }
 
 ENV_SHOW_ROUTER_LOGS = "SHOW_ROUTER_LOGS"

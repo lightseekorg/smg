@@ -178,8 +178,6 @@ class Worker:
                 return self._build_vllm_http_cmd(model_path, tp_size, spec)
         elif self.engine == "trtllm":
             return self._build_trtllm_cmd(model_path, tp_size, spec)
-        elif self.engine == "mlx":
-            return self._build_mlx_cmd(model_path, spec)
         else:
             raise ValueError(f"Unsupported engine: {self.engine}")
 
@@ -259,30 +257,6 @@ class Worker:
             "0.9",
         ]
         extra = spec.get("vllm_args", [])
-        if extra:
-            cmd.extend(extra)
-        return cmd
-
-    def _build_mlx_cmd(self, model_path: str, spec: dict) -> list[str]:
-        """Build MLX gRPC server command (Apple Silicon only).
-
-        MLX backend only supports gRPC mode (no HTTP variant) since the
-        servicer wraps mlx-lm's BatchGenerator behind the MlxEngine proto.
-        """
-        if self.mode != ConnectionMode.GRPC:
-            raise ValueError("MLX backend only supports gRPC mode")
-        cmd = [
-            "python3",
-            "-m",
-            "smg_grpc_servicer.mlx.server",
-            "--model",
-            model_path,
-            "--host",
-            DEFAULT_HOST,
-            "--port",
-            str(self.port),
-        ]
-        extra = spec.get("mlx_args", [])
         if extra:
             cmd.extend(extra)
         return cmd

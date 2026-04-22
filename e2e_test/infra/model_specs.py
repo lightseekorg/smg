@@ -184,16 +184,6 @@ MODEL_SPECS: dict[str, dict] = {
             "--enable-chunked-prefill",
         ],
     },
-    # ── MLX models (Apple Silicon only) ──────────────────────────────────────
-    # Smallest Qwen3 with native tool calling + thinking mode (~400 MB).
-    # Used by CI on macos-latest runners. Qwen3 emits <tool_call> tags
-    # parsed by SMG's --tool-call-parser qwen, and uses <think> tags
-    # parsed by the reasoning parser.
-    "mlx-community/Qwen3-0.6B-4bit": {
-        "model": _resolve_model_path("mlx-community/Qwen3-0.6B-4bit"),
-        "tp": 1,
-        "features": ["chat", "streaming", "function_calling", "reasoning", "thinking"],
-    },
 }
 
 
