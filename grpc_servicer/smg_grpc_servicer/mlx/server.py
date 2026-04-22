@@ -61,6 +61,9 @@ def load_model(args):
                 "merges.txt",
                 "vocab.json",
                 "added_tokens.json",
+                # Chat template sidecars (Gemma 4, Llama 3.1+, newer models).
+                "chat_template.json",
+                "chat_template.jinja",
                 # tiktoken-style tokenizer artifacts — must stay in sync
                 # with MlxEngineServicer._TOKENIZER_FILES / _SUFFIXES.
                 "tiktoken.model",

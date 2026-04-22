@@ -218,6 +218,12 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         "merges.txt",
         "vocab.json",
         "added_tokens.json",
+        # Chat template sidecars (newer HF convention, transformers>=4.43).
+        # Required for models like Gemma 4 whose tokenizer_config.json does
+        # NOT embed chat_template; router-side discover_chat_template_in_dir
+        # relies on these being present in the bundle.
+        "chat_template.json",
+        "chat_template.jinja",
     }
     # Additional extension-based matches for tiktoken-style BPE artifacts
     # (e.g. `cl100k_base.tiktoken`). The router-side Rust tokenizer loader
