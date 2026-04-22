@@ -531,7 +531,8 @@ pub struct ImageGenerationTool {
     /// `"auto" | "low"`.
     pub moderation: Option<String>,
     /// Output compression level. Spec default `100` when omitted; we keep
-    /// `Option` so an unset field round-trips as `null` rather than forcing 100.
+    /// `Option` so an unset field round-trips as absent (not `null`, via
+    /// `#[serde_with::skip_serializing_none]`) rather than forcing 100.
     pub output_compression: Option<u32>,
     /// `"png" | "webp" | "jpeg"`.
     pub output_format: Option<String>,

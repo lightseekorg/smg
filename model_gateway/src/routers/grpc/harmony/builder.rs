@@ -65,6 +65,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     "code_interpreter",
     "container",
     "file_search",
+    "image_generation",
 ];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
