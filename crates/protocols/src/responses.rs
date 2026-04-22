@@ -2489,13 +2489,11 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::Compaction { .. } => {}
         ResponseInputOutputItem::ComputerCall { .. } => {}
         ResponseInputOutputItem::ComputerCallOutput { .. } => {}
-        ResponseInputOutputItem::CustomToolCall { input, .. } => {
-            if input.is_empty() {
-                let mut e = ValidationError::new("custom_tool_call_input_empty");
-                e.message = Some("Custom tool call input cannot be empty".into());
-                return Err(e);
-            }
-        }
+        // CustomToolCall is model-generated and echoed back on multi-turn
+        // replay; matches the FunctionToolCall arm above with no content
+        // validation so a parameterless custom tool with empty input can
+        // round-trip cleanly.
+        ResponseInputOutputItem::CustomToolCall { .. } => {}
         ResponseInputOutputItem::CustomToolCallOutput { output, .. } => match output {
             CustomToolCallOutputContent::Text(s) if s.is_empty() => {
                 let mut e = ValidationError::new("custom_tool_call_output_empty");
