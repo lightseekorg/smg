@@ -28,6 +28,7 @@ The ``type``-discrimination invariants exercised here live in:
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 import pytest
@@ -41,15 +42,22 @@ def _post_responses(gateway, body: dict, timeout: float = 30.0) -> httpx.Respons
     We need full control over the wire payload (invalid ``type`` strings,
     empty discriminators, etc.), which the OpenAI SDK's typed client will
     not emit, so all four cases drop to raw ``httpx``.
+
+    Forwards ``OPENAI_API_KEY`` when present so the accept-path tests
+    (``!= 400``) cannot be satisfied vacuously by a ``401`` from an
+    earlier auth middleware — if the gateway ever reorders auth in front
+    of body parsing, we want the parser itself to run, not a header
+    check. The 400 cases short-circuit inside ``ValidatedJson`` before
+    auth so the key value is irrelevant for them.
     """
+    api_key = os.environ.get("OPENAI_API_KEY", "sk-not-used")
     return httpx.post(
         f"{gateway.base_url}/v1/responses",
         json=body,
-        # A dummy bearer keeps the request well-formed; validation happens
-        # in ValidatedJson before any auth/upstream call so the key value
-        # is irrelevant for the 400 cases. For the accept-cases (2 and 3)
-        # the setup_backend fixture ensures OPENAI_API_KEY is present.
-        headers={"Authorization": "Bearer not-used", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
         timeout=timeout,
     )
 
@@ -106,12 +114,15 @@ class TestResponsesInputValidation:
         }
         resp = _post_responses(gw, body)
         err = _assert_validation_400(resp)
-        # Serde's tagged-enum error string includes the rejected tag, so the
-        # message should mention "input_video". If a future refactor
-        # abstracts the error behind a generic "invalid content part" string
-        # that omits the tag, this assertion will guide the fix.
+        # Serde's tagged-enum error string includes the rejected tag. We
+        # require it verbatim: a broader `or "invalid" in message`
+        # fallback would match the canonical `invalid_request_error`
+        # envelope itself and pass for any unrelated 400, defeating the
+        # purpose of this assertion. If a future refactor abstracts the
+        # error behind a generic "invalid content part" string that
+        # omits the tag, a failing test is the desired signal.
         message = err["error"]["message"].lower()
-        assert "input_video" in message or "invalid" in message, (
+        assert "input_video" in message, (
             f"expected error to reference the rejected type, got message={message!r}"
         )
 
