@@ -30,6 +30,7 @@ use smg::{
         factory::router_ids, openai::OpenAIRouter, router_manager::RouterManager, RouterFactory,
         RouterTrait,
     },
+    tenant::{RouteRequestMeta, TenantKey},
     worker::{BasicWorkerBuilder, RuntimeType, Worker, WorkerType},
 };
 use smg_data_connector::{ResponseId, StoredResponse};
@@ -95,6 +96,10 @@ fn create_minimal_completion_request() -> CompletionRequest {
         sampling_seed: None,
         other: serde_json::Map::new(),
     }
+}
+
+fn test_tenant_meta() -> smg::middleware::TenantRequestMeta {
+    RouteRequestMeta::new(TenantKey::from("test-tenant"))
 }
 
 /// Test basic OpenAI router creation and configuration
@@ -234,8 +239,9 @@ async fn test_openai_router_responses_with_mock() {
         ..Default::default()
     };
 
+    let tenant_meta = test_tenant_meta();
     let response1 = router
-        .route_responses(None, &request1, &request1.model)
+        .route_responses(None, &tenant_meta, &request1, &request1.model)
         .await;
     assert_eq!(response1.status(), StatusCode::OK);
     let body1_bytes = axum::body::to_bytes(response1.into_body(), usize::MAX)
@@ -253,8 +259,9 @@ async fn test_openai_router_responses_with_mock() {
         ..Default::default()
     };
 
+    let tenant_meta = test_tenant_meta();
     let response2 = router
-        .route_responses(None, &request2, &request2.model)
+        .route_responses(None, &tenant_meta, &request2, &request2.model)
         .await;
     assert_eq!(response2.status(), StatusCode::OK);
     let body2_bytes = axum::body::to_bytes(response2.into_body(), usize::MAX)
@@ -501,7 +508,10 @@ async fn test_openai_router_responses_streaming_with_mock() {
         ..Default::default()
     };
 
-    let response = router.route_responses(None, &request, &request.model).await;
+    let tenant_meta = test_tenant_meta();
+    let response = router
+        .route_responses(None, &tenant_meta, &request, &request.model)
+        .await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let headers = response.headers();
@@ -639,14 +649,26 @@ async fn test_unsupported_endpoints() {
         rid: None,
     };
 
+    let tenant_meta = test_tenant_meta();
     let response = router
-        .route_generate(None, &generate_request, &generate_request.model)
+        .route_generate(
+            None,
+            &tenant_meta,
+            &generate_request,
+            &generate_request.model,
+        )
         .await;
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
 
     let completion_request = create_minimal_completion_request();
+    let tenant_meta = test_tenant_meta();
     let response = router
-        .route_completion(None, &completion_request, &completion_request.model)
+        .route_completion(
+            None,
+            &tenant_meta,
+            &completion_request,
+            &completion_request.model,
+        )
         .await;
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
 }
@@ -672,8 +694,9 @@ async fn test_openai_router_chat_completion_with_mock() {
     chat_request.temperature = Some(0.7);
 
     // Route the request
+    let tenant_meta = test_tenant_meta();
     let response = router
-        .route_chat(None, &chat_request, &chat_request.model)
+        .route_chat(None, &tenant_meta, &chat_request, &chat_request.model)
         .await;
 
     // Should get a successful response from mock server
@@ -716,8 +739,14 @@ async fn test_openai_e2e_with_server() {
                     let chat_request: ChatCompletionRequest =
                         serde_json::from_str(&body_str).unwrap();
 
+                    let tenant_meta = test_tenant_meta();
                     router
-                        .route_chat(Some(&parts.headers), &chat_request, &chat_request.model)
+                        .route_chat(
+                            Some(&parts.headers),
+                            &tenant_meta,
+                            &chat_request,
+                            &chat_request.model,
+                        )
                         .await
                 }
             }
@@ -777,8 +806,9 @@ async fn test_openai_router_chat_streaming_with_mock() {
     });
     let chat_request: ChatCompletionRequest = serde_json::from_value(val).unwrap();
 
+    let tenant_meta = test_tenant_meta();
     let response = router
-        .route_chat(None, &chat_request, &chat_request.model)
+        .route_chat(None, &tenant_meta, &chat_request, &chat_request.model)
         .await;
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -812,8 +842,9 @@ async fn test_openai_router_circuit_breaker() {
 
     // First few requests should fail and record failures
     for _ in 0..3 {
+        let tenant_meta = test_tenant_meta();
         let response = router
-            .route_chat(None, &chat_request, &chat_request.model)
+            .route_chat(None, &tenant_meta, &chat_request, &chat_request.model)
             .await;
         // Should get either an error or circuit breaker response
         assert!(

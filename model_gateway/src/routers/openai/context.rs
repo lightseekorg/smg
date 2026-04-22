@@ -12,7 +12,10 @@ use smg_data_connector::{
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
-use crate::{config::RouterConfig, memory::MemoryExecutionContext, middleware, worker::Worker};
+use crate::{
+    config::RouterConfig, memory::MemoryExecutionContext, middleware,
+    middleware::TenantRequestMeta, worker::Worker,
+};
 
 pub struct RequestContext {
     pub input: RequestInput,
@@ -20,6 +23,8 @@ pub struct RequestContext {
     pub state: ProcessingState,
     pub storage_request_context: Option<StorageRequestContext>,
     pub memory_execution_context: MemoryExecutionContext,
+    /// Explicit tenant identity resolved at the HTTP boundary.
+    pub tenant_request_meta: Option<TenantRequestMeta>,
 }
 
 pub struct RequestInput {
@@ -154,6 +159,7 @@ impl RequestContext {
             state: ProcessingState::default(),
             storage_request_context: None,
             memory_execution_context,
+            tenant_request_meta: None,
         }
     }
 
@@ -175,6 +181,7 @@ impl RequestContext {
             storage_request_context: None,
             // Memory execution is currently scoped to Responses flows.
             memory_execution_context: MemoryExecutionContext::default(),
+            tenant_request_meta: None,
         }
     }
 }

@@ -26,6 +26,8 @@ use openai_protocol::{
     transcription::TranscriptionRequest,
 };
 
+use crate::middleware::TenantRequestMeta;
+
 pub mod anthropic;
 pub mod common;
 pub mod conversations;
@@ -100,6 +102,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_generate(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &GenerateRequest,
         _model_id: &str,
     ) -> Response {
@@ -114,6 +117,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_chat(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &ChatCompletionRequest,
         _model_id: &str,
     ) -> Response {
@@ -128,6 +132,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_completion(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &CompletionRequest,
         _model_id: &str,
     ) -> Response {
@@ -142,6 +147,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_responses(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &ResponsesRequest,
         _model_id: &str,
     ) -> Response {
@@ -165,6 +171,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_embeddings(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &EmbeddingRequest,
         _model_id: &str,
     ) -> Response {
@@ -175,6 +182,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_classify(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &ClassifyRequest,
         _model_id: &str,
     ) -> Response {
@@ -190,6 +198,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_audio_transcriptions(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &TranscriptionRequest,
         _audio: AudioFile,
         _model_id: &str,
@@ -205,6 +214,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_rerank(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &RerankRequest,
         _model_id: &str,
     ) -> Response {
@@ -215,6 +225,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_messages(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &CreateMessageRequest,
         _model_id: &str,
     ) -> Response {
@@ -229,6 +240,7 @@ pub trait RouterTrait: Send + Sync + Debug {
     async fn route_interactions(
         &self,
         _headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         _body: &InteractionsRequest,
         _model_id: Option<&str>,
     ) -> Response {

@@ -104,6 +104,7 @@ pub(super) async fn execute_without_mcp(
             params.headers,
             params.model_id,
             ctx.components.clone(),
+            Some(params.tenant_request_meta),
         )
         .await?; // Preserve the Response error as-is
 
@@ -190,6 +191,7 @@ pub(super) async fn execute_tool_loop(
                 params.headers.clone(),
                 params.model_id.clone(),
                 ctx.components.clone(),
+                Some(params.tenant_request_meta.clone()),
             )
             .await?;
 

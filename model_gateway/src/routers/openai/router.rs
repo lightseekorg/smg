@@ -23,6 +23,7 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
+    middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
@@ -145,6 +146,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -160,12 +162,13 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             shared_components: &self.shared_components,
             retry_config,
         };
-        chat::route_chat(&deps, headers, body, model_id).await
+        chat::route_chat(&deps, headers, tenant_meta, body, model_id).await
     }
 
     async fn route_responses(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
@@ -174,7 +177,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             provider_registry: &self.provider_registry,
             responses_components: &self.responses_components,
         };
-        responses_route::route_responses(&deps, headers, body, model_id).await
+        responses_route::route_responses(&deps, headers, tenant_meta, body, model_id).await
     }
 
     async fn route_realtime_session(

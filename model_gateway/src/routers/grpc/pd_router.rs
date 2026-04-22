@@ -14,6 +14,7 @@ use super::{
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
+    middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
@@ -110,6 +111,7 @@ impl GrpcPDRouter {
     async fn route_generate_impl(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
@@ -123,6 +125,7 @@ impl GrpcPDRouter {
         let headers_cloned = headers.cloned();
         let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
+        let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.pipeline;
 
         // Use per-model retry config if set by a worker, otherwise fall back to router default.
@@ -138,9 +141,10 @@ impl GrpcPDRouter {
                 let headers = headers_cloned.clone();
                 let model_id = model_id_cloned.clone();
                 let components = Arc::clone(&components);
+                let tenant_meta = tenant_meta_cloned.clone();
                 async move {
                     pipeline
-                        .execute_generate(request, headers, model_id, components)
+                        .execute_generate(request, headers, model_id, components, Some(tenant_meta))
                         .await
                 }
             },
@@ -174,6 +178,7 @@ impl GrpcPDRouter {
     async fn route_messages_impl(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
@@ -187,6 +192,7 @@ impl GrpcPDRouter {
         let headers_cloned = headers.cloned();
         let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
+        let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.messages_pipeline;
 
         // Use per-model retry config if set by a worker, otherwise fall back to router default.
@@ -202,9 +208,10 @@ impl GrpcPDRouter {
                 let headers = headers_cloned.clone();
                 let model_id = model_id_cloned.clone();
                 let components = Arc::clone(&components);
+                let tenant_meta = tenant_meta_cloned.clone();
                 async move {
                     pipeline
-                        .execute_messages(request, headers, model_id, components)
+                        .execute_messages(request, headers, model_id, components, Some(tenant_meta))
                         .await
                 }
             },
@@ -238,6 +245,7 @@ impl GrpcPDRouter {
     async fn route_completion_impl(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -250,6 +258,7 @@ impl GrpcPDRouter {
         let headers_cloned = headers.cloned();
         let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
+        let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.completion_pipeline;
 
         RetryExecutor::execute_response_with_retry(
@@ -259,9 +268,16 @@ impl GrpcPDRouter {
                 let headers = headers_cloned.clone();
                 let model_id = model_id_cloned.clone();
                 let components = Arc::clone(&components);
+                let tenant_meta = tenant_meta_cloned.clone();
                 async move {
                     pipeline
-                        .execute_completion(request, headers, model_id, components)
+                        .execute_completion(
+                            request,
+                            headers,
+                            model_id,
+                            components,
+                            Some(tenant_meta),
+                        )
                         .await
                 }
             },
@@ -295,6 +311,7 @@ impl GrpcPDRouter {
     async fn route_chat_impl(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -308,6 +325,7 @@ impl GrpcPDRouter {
         let headers_cloned = headers.cloned();
         let model_id_cloned = model_id.to_string();
         let components = self.shared_components.clone();
+        let tenant_meta_cloned = tenant_meta.clone();
         let pipeline = &self.pipeline;
 
         // Use per-model retry config if set by a worker, otherwise fall back to router default.
@@ -323,9 +341,10 @@ impl GrpcPDRouter {
                 let headers = headers_cloned.clone();
                 let model_id = model_id_cloned.clone();
                 let components = Arc::clone(&components);
+                let tenant_meta = tenant_meta_cloned.clone();
                 async move {
                     pipeline
-                        .execute_chat(request, headers, model_id, components)
+                        .execute_chat(request, headers, model_id, components, Some(tenant_meta))
                         .await
                 }
             },
@@ -388,37 +407,45 @@ impl RouterTrait for GrpcPDRouter {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
-        self.route_generate_impl(headers, body, model_id).await
+        self.route_generate_impl(headers, tenant_meta, body, model_id)
+            .await
     }
 
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
-        self.route_chat_impl(headers, body, model_id).await
+        self.route_chat_impl(headers, tenant_meta, body, model_id)
+            .await
     }
 
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
-        self.route_completion_impl(headers, body, model_id).await
+        self.route_completion_impl(headers, tenant_meta, body, model_id)
+            .await
     }
 
     async fn route_messages(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        self.route_messages_impl(headers, body, model_id).await
+        self.route_messages_impl(headers, tenant_meta, body, model_id)
+            .await
     }
 
     fn router_type(&self) -> &'static str {

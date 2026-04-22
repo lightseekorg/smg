@@ -7,8 +7,8 @@ use std::{
 };
 
 use axum::{
-    extract::{multipart::MultipartError, Multipart, Path, Query, Request, State},
-    http::StatusCode,
+    extract::{multipart::MultipartError, Extension, Multipart, Path, Query, Request, State},
+    http::{header::InvalidHeaderName, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -182,118 +182,134 @@ async fn get_model_info(State(state): State<Arc<AppState>>, req: Request) -> Res
 async fn generate(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<GenerateRequest>,
 ) -> Response {
     state
         .router
-        .route_generate(Some(&headers), &body, &body.model)
+        .route_generate(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_chat_completions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
     state
         .router
-        .route_chat(Some(&headers), &body, &body.model)
+        .route_chat(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_completions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     state
         .router
-        .route_completion(Some(&headers), &body, &body.model)
+        .route_completion(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn rerank(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<RerankRequest>,
 ) -> Response {
     state
         .router
-        .route_rerank(Some(&headers), &body, &body.model)
+        .route_rerank(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_rerank(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
     let rerank_body: RerankRequest = body.into();
     state
         .router
-        .route_rerank(Some(&headers), &rerank_body, &rerank_body.model)
+        .route_rerank(
+            Some(&headers),
+            &tenant_meta,
+            &rerank_body,
+            &rerank_body.model,
+        )
         .await
 }
 
 async fn v1_responses(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
     state
         .router
-        .route_responses(Some(&headers), &body, &body.model)
+        .route_responses(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_interactions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<InteractionsRequest>,
 ) -> Response {
     let model_id = body.model.as_deref().or(body.agent.as_deref());
     state
         .router
-        .route_interactions(Some(&headers), &body, model_id)
+        .route_interactions(Some(&headers), &tenant_meta, &body, model_id)
         .await
 }
 
 async fn v1_embeddings(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<EmbeddingRequest>,
 ) -> Response {
     state
         .router
-        .route_embeddings(Some(&headers), &body, &body.model)
+        .route_embeddings(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_messages(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<CreateMessageRequest>,
 ) -> Response {
     state
         .router
-        .route_messages(Some(&headers), &body, &body.model)
+        .route_messages(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_classify(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<ClassifyRequest>,
 ) -> Response {
     state
         .router
-        .route_classify(Some(&headers), &body, &body.model)
+        .route_classify(Some(&headers), &tenant_meta, &body, &body.model)
         .await
 }
 
 async fn v1_audio_transcriptions(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     mut multipart: Multipart,
 ) -> Response {
     let mut file_bytes: Option<bytes::Bytes> = None;
@@ -423,7 +439,7 @@ async fn v1_audio_transcriptions(
 
     state
         .router
-        .route_audio_transcriptions(Some(&headers), &req, audio, &req.model)
+        .route_audio_transcriptions(Some(&headers), &tenant_meta, &req, audio, &req.model)
         .await
 }
 
@@ -804,7 +820,7 @@ pub fn build_app(
     max_payload_size: usize,
     request_id_headers: Vec<String>,
     cors_allowed_origins: Vec<String>,
-) -> Router {
+) -> Result<Router, InvalidHeaderName> {
     // Pending (upgrade not completed): 30s TTL
     // Disconnected: 60 min TTL
     app_state.context.realtime_registry.start_reaper(
@@ -812,6 +828,9 @@ pub fn build_app(
         Duration::from_secs(30),
         Duration::from_secs(60),
     );
+
+    let tenant_resolution_state =
+        middleware::TenantResolutionState::new(&app_state.context.router_config)?;
 
     let protected_routes = Router::new()
         .route("/v1/responses", post(v1_responses))
@@ -871,6 +890,10 @@ pub fn build_app(
             middleware::concurrency_limit_middleware,
         ))
         .route_layer(axum::middleware::from_fn_with_state(
+            tenant_resolution_state.clone(),
+            middleware::route_request_meta_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
             auth_config.clone(),
             middleware::auth_middleware,
         ))
@@ -890,6 +913,10 @@ pub fn build_app(
             middleware::concurrency_limit_middleware,
         ))
         .route_layer(axum::middleware::from_fn_with_state(
+            tenant_resolution_state.clone(),
+            middleware::route_request_meta_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
             auth_config.clone(),
             middleware::auth_middleware,
         ));
@@ -904,6 +931,10 @@ pub fn build_app(
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            tenant_resolution_state,
+            middleware::route_request_meta_middleware,
         ))
         .route_layer(axum::middleware::from_fn_with_state(
             auth_config.clone(),
@@ -990,7 +1021,7 @@ pub fn build_app(
             middleware::auth_middleware,
         ));
 
-    Router::new()
+    Ok(Router::new()
         .merge(protected_routes)
         .merge(realtime_routes)
         .merge(multipart_upload_routes)
@@ -1009,7 +1040,7 @@ pub fn build_app(
         .layer(middleware::RequestIdLayer::new(request_id_headers))
         .layer(create_cors_layer(cors_allowed_origins))
         .fallback(sink_handler)
-        .with_state(app_state)
+        .with_state(app_state))
 }
 
 pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -1407,7 +1438,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         config.max_payload_size,
         request_id_headers,
         config.router_config.cors_allowed_origins.clone(),
-    );
+    )?;
 
     // TcpListener::bind accepts &str and handles IPv4/IPv6 via ToSocketAddrs
     let bind_addr = format!("{}:{}", config.host, config.port);
@@ -1470,12 +1501,12 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
         axum_server::bind_rustls(addr, tls_config)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
     } else {
         axum_server::bind(addr)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
     };
 
