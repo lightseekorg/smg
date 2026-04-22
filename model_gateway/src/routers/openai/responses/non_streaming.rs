@@ -39,6 +39,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     } = payload_state;
     let ResponsesPayloadState {
         previous_response_id,
+        upstream_input,
         existing_mcp_list_tools_labels,
     } = ctx.take_responses_payload().unwrap_or_default();
 
@@ -48,6 +49,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
+    let upstream_input = upstream_input.unwrap_or_else(|| original_body.input.clone());
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
@@ -89,6 +91,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             payload,
             ToolLoopExecutionContext {
                 original_body,
+                upstream_input: &upstream_input,
                 existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
                 session: &session,
             },

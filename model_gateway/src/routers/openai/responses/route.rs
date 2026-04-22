@@ -132,10 +132,14 @@ pub(in crate::routers::openai) async fn route_responses(
         super::history::inject_memory_context(&memory_config, &mut request_body);
     }
 
+    let prepared = super::history::prepare_agent_loop_input(&request_body.input);
+    request_body.input = prepared.upstream_input;
+
     request_body.store = Some(false);
     if let ResponseInput::Items(ref mut items) = request_body.input {
         items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
     }
+    let upstream_input = request_body.input.clone();
 
     let mut payload = match to_value(&request_body) {
         Ok(v) => v,
@@ -168,8 +172,17 @@ pub(in crate::routers::openai) async fn route_responses(
         return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
     }
 
+    // `ctx.responses_request()` must stay as the caller's request so
+    // persistence stores only this turn's input and metadata patching keeps the
+    // original conversation / previous_response_id semantics. The normalized
+    // upstream transcript is carried separately in `ResponsesPayloadState` for
+    // the tool loop's resume payload assembly.
+    let mut context_body = body.clone();
+    context_body.model = model_id.to_string();
+    context_body.previous_response_id = loaded_history.previous_response_id.clone();
+
     let mut ctx = RequestContext::for_responses(
-        Arc::new(body.clone()),
+        Arc::new(context_body),
         headers.cloned(),
         Some(model_id.to_string()),
         ComponentRefs::Responses(Arc::clone(deps.responses_components)),
@@ -188,7 +201,8 @@ pub(in crate::routers::openai) async fn route_responses(
     });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
-        existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
+        upstream_input: Some(upstream_input),
+        existing_mcp_list_tools_labels: prepared.existing_mcp_list_tools_labels,
     });
 
     let response = if ctx.is_streaming() {

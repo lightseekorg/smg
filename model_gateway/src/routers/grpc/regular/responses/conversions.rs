@@ -144,7 +144,16 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                     }
                     ResponseInputOutputItem::McpApprovalResponse { .. }
                     | ResponseInputOutputItem::McpApprovalRequest { .. }
-                    | ResponseInputOutputItem::ComputerCall { .. }
+                    | ResponseInputOutputItem::McpListTools { .. }
+                    | ResponseInputOutputItem::McpCall { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Skipping replayed MCP trace item during chat conversion"
+                        );
+                        continue;
+                    }
+
+                    ResponseInputOutputItem::ComputerCall { .. }
                     | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                         warn!(
                             function = "responses_to_chat",
@@ -547,5 +556,64 @@ mod tests {
         let chat_req = responses_to_chat(&req).unwrap();
         assert!(!chat_req.stream);
         assert!(chat_req.stream_options.is_none());
+    }
+
+    #[test]
+    fn test_replayed_mcp_trace_items_are_skipped() {
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![
+                ResponseInputOutputItem::Message {
+                    id: "msg_user".to_string(),
+                    role: "user".to_string(),
+                    content: vec![ResponseContentPart::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    status: None,
+                    phase: None,
+                },
+                ResponseInputOutputItem::McpApprovalRequest {
+                    id: "mcpr_1".to_string(),
+                    server_label: "mock".to_string(),
+                    name: "brave_web_search".to_string(),
+                    arguments: "{\"query\":\"hello\"}".to_string(),
+                },
+                ResponseInputOutputItem::McpApprovalResponse {
+                    id: Some("mcprr_1".to_string()),
+                    approval_request_id: "mcpr_1".to_string(),
+                    approve: true,
+                    reason: None,
+                },
+                ResponseInputOutputItem::McpListTools {
+                    id: "mcp_list_1".to_string(),
+                    server_label: "mock".to_string(),
+                    tools: vec![],
+                },
+                ResponseInputOutputItem::McpCall {
+                    id: "mcp_1".to_string(),
+                    server_label: "mock".to_string(),
+                    name: "brave_web_search".to_string(),
+                    arguments: "{\"query\":\"hello\"}".to_string(),
+                    output: "{\"result\":\"world\"}".to_string(),
+                    status: "completed".to_string(),
+                    approval_request_id: None,
+                    error: None,
+                },
+                ResponseInputOutputItem::Message {
+                    id: "msg_assistant".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![ResponseContentPart::OutputText {
+                        text: "done".to_string(),
+                        annotations: vec![],
+                        logprobs: None,
+                    }],
+                    status: None,
+                    phase: None,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).expect("replayed MCP trace items are skipped");
+        assert_eq!(chat_req.messages.len(), 2);
     }
 }

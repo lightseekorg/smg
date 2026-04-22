@@ -1549,6 +1549,31 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// Client-stitched MCP tool inventory item. Echoes the output-side
+    /// `mcp_list_tools` shape so a prior assistant turn can be replayed as
+    /// input.
+    #[serde(rename = "mcp_list_tools")]
+    McpListTools {
+        id: String,
+        server_label: String,
+        tools: Vec<McpToolInfo>,
+    },
+    /// Client-stitched completed MCP tool call. Echoes the output-side
+    /// `mcp_call` shape so a prior tool execution can be replayed as input
+    /// without re-executing the tool.
+    #[serde(rename = "mcp_call")]
+    McpCall {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+        output: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        approval_request_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// `type: "image_generation_call"` — round-trip form for an image generated
     /// in a prior turn. Spec (OpenAI Responses API, multi-turn image-edit
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
@@ -2944,6 +2969,8 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::FunctionCallOutput { .. }
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. }
+                        | ResponseInputOutputItem::McpListTools { .. }
+                        | ResponseInputOutputItem::McpCall { .. }
                         | ResponseInputOutputItem::ImageGenerationCall { .. }
                         | ResponseInputOutputItem::Compaction { .. }
                         | ResponseInputOutputItem::ComputerCall { .. }
@@ -3228,6 +3255,8 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::FunctionToolCall { .. } => {}
         ResponseInputOutputItem::McpApprovalRequest { .. } => {}
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+        ResponseInputOutputItem::McpListTools { .. } => {}
+        ResponseInputOutputItem::McpCall { .. } => {}
         ResponseInputOutputItem::ImageGenerationCall { .. } => {}
         ResponseInputOutputItem::Compaction { .. } => {}
         ResponseInputOutputItem::ComputerCall { .. } => {}
