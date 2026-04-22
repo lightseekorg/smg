@@ -209,7 +209,6 @@ def hf_reference_embeddings(request):
 
 
 @pytest.mark.engine("sglang", "vllm")
-@pytest.mark.skip_for_runtime("sglang", reason="sglang embedding output diverges from HF reference")
 @pytest.mark.gpu(1)
 @pytest.mark.model("intfloat/e5-mistral-7b-instruct")
 @pytest.mark.e2e
