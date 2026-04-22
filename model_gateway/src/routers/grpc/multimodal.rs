@@ -1083,11 +1083,7 @@ mod tests {
         // a local dir without preprocessor_config.json must still load and
         // cache an entry using PreProcessorConfig::default().
         let tmp = TempDir::new().unwrap();
-        fs::write(
-            tmp.path().join("config.json"),
-            r#"{"model_type":"llama"}"#,
-        )
-        .unwrap();
+        fs::write(tmp.path().join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
         let source = tmp.path().to_string_lossy().into_owned();
 
         let reg = MultimodalConfigRegistry::new();
@@ -1141,5 +1137,4 @@ mod tests {
             .expect("preloaded entry must be returned without touching source");
         assert!(Arc::ptr_eq(&got, &cfg));
     }
-
 }
