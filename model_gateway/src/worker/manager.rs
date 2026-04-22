@@ -823,8 +823,7 @@ impl WorkerManager {
             .collect();
 
         if !http_workers.is_empty() {
-            let responses =
-                fan_out(&http_workers, client, "metrics", reqwest::Method::GET).await;
+            let responses = fan_out(&http_workers, client, "metrics", reqwest::Method::GET).await;
             for resp in responses {
                 if let Ok(r) = resp.result {
                     if r.status().is_success() {
@@ -852,10 +851,7 @@ impl WorkerManager {
                     Ok(r) if r.status().is_success() => {
                         if let Ok(text) = r.text().await {
                             metric_packs.push(MetricPack {
-                                labels: vec![(
-                                    "worker_addr".into(),
-                                    worker.url().to_string(),
-                                )],
+                                labels: vec![("worker_addr".into(), worker.url().to_string())],
                                 metrics_text: text,
                             });
                         }
