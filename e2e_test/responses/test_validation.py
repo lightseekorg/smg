@@ -63,14 +63,20 @@ def _post_responses(gateway, body: dict, timeout: float = 30.0) -> httpx.Respons
 
 
 def _assert_validation_400(resp: httpx.Response) -> dict:
-    """Assert the gateway returned a 400 with the canonical error envelope.
+    """Assert the gateway returned a 400 with the canonical parser envelope.
+
+    Pins the full shape emitted by ``ValidatedJson``'s ``JsonDataError``
+    branch (``crates/protocols/src/validated.rs:74-84``): status 400,
+    ``error.type == "invalid_request_error"``, and
+    ``error.code == "json_parse_error"``. The ``code`` assertion is what
+    distinguishes a parser-level rejection from the validator-level
+    rejection emitted at validated.rs:91-103 (which uses ``code: 400`` as
+    an integer) or any upstream/auth 400 that happens to share the
+    envelope prefix.
 
     Returns the parsed JSON body so individual tests can make per-case
     assertions about the error message contents.
     """
-    # The gateway's ValidatedJson extractor always returns 400 on serde
-    # errors (validated.rs:74-84); 422 would indicate a framework switch
-    # and should be flagged.
     assert resp.status_code == 400, f"expected HTTP 400, got {resp.status_code}: body={resp.text!r}"
     body = resp.json()
     assert isinstance(body, dict), f"expected JSON object, got {body!r}"
@@ -79,9 +85,36 @@ def _assert_validation_400(resp: httpx.Response) -> dict:
     assert err.get("type") == "invalid_request_error", (
         f"expected invalid_request_error, got {err!r}"
     )
+    assert err.get("code") == "json_parse_error", (
+        f"expected code=json_parse_error (parser branch), got {err!r}"
+    )
     message = err.get("message", "")
     assert isinstance(message, str) and message, f"expected non-empty message, got {err!r}"
     return body
+
+
+def _is_validation_400(resp: httpx.Response) -> bool:
+    """Return True iff the response is the gateway's parser-level 400.
+
+    The accept-path tests need to reject the specific envelope emitted by
+    ``ValidatedJson`` on a deserialize failure, not every HTTP 400. A
+    plain ``status_code != 400`` check would let a downstream 400 (e.g.
+    upstream tool-validation, or a 401/5xx from auth) vacuously satisfy
+    the assertion even though the parser's accept path was never
+    exercised.
+    """
+    if resp.status_code != 400:
+        return False
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return False
+    return err.get("code") == "json_parse_error"
 
 
 @pytest.mark.vendor("openai")
@@ -165,10 +198,14 @@ class TestResponsesInputValidation:
             "max_output_tokens": 16,
         }
         resp = _post_responses(gw, body)
-        # The critical invariant: the gateway does NOT return 400 for the
-        # extra field. A 400 here would signal that deny_unknown_fields was
-        # added and this test's docstring needs to be inverted.
-        assert resp.status_code != 400, (
+        # The critical invariant is narrow: the gateway's *parser* must not
+        # emit its json_parse_error envelope for the extra field. A plain
+        # `status_code != 400` check would let an unrelated downstream 400
+        # (e.g. auth, upstream validation) vacuously satisfy the assertion,
+        # so we target the parser-specific envelope via _is_validation_400.
+        # If deny_unknown_fields is ever added, this flips intentionally and
+        # the docstring above needs to be inverted.
+        assert not _is_validation_400(resp), (
             f"extra field on input_file unexpectedly rejected by body parser: "
             f"status={resp.status_code} body={resp.text!r}"
         )
@@ -199,7 +236,11 @@ class TestResponsesInputValidation:
             "max_output_tokens": 16,
         }
         resp = _post_responses(gw, body)
-        assert resp.status_code != 400, (
+        # As in the extra-field test, we target the parser-specific envelope
+        # rather than any 400: upstream or auth 4xx responses are allowed,
+        # but the gateway's own json_parse_error path must stay silent on
+        # an arbitrary role string today.
+        assert not _is_validation_400(resp), (
             f"role='martian' unexpectedly rejected by body parser: "
             f"status={resp.status_code} body={resp.text!r} — if this is "
             f"intentional, update the test to expect 400 and cite the "
