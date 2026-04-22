@@ -63,7 +63,7 @@ use crate::{
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
         router_manager::RouterManager,
-        tokenize, AudioFile, RouterTrait,
+        skills, tokenize, AudioFile, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -789,6 +789,18 @@ async fn v1_tokenizers_remove(
     tokenize::remove_tokenizer(&state.context, &tokenizer_id).await
 }
 
+async fn v1_skills_create(State(state): State<Arc<AppState>>, multipart: Multipart) -> Response {
+    skills::create_skill(State(state), multipart).await
+}
+
+async fn v1_skills_create_version(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    multipart: Multipart,
+) -> Response {
+    skills::create_skill_version(State(state), Path(skill_id), multipart).await
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -952,7 +964,7 @@ pub fn build_app(
         .route("/get_server_info", get(get_server_info));
 
     // Build admin routes with control plane auth if configured, otherwise use simple API key auth
-    let admin_routes = Router::new()
+    let mut admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
         .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
@@ -973,6 +985,23 @@ pub fn build_app(
             "/v1/tokenizers/{tokenizer_id}/status",
             get(v1_tokenizers_status),
         );
+
+    if app_state.context.router_config.skills_enabled
+        && app_state
+            .context
+            .router_config
+            .skills
+            .as_ref()
+            .is_some_and(|skills_config| skills_config.admin.enabled)
+        && app_state.context.skill_service.is_some()
+    {
+        admin_routes = admin_routes
+            .route("/v1/skills", post(v1_skills_create))
+            .route(
+                "/v1/skills/{skill_id}/versions",
+                post(v1_skills_create_version),
+            );
+    }
 
     // Build worker routes
     let worker_routes = Router::new()
