@@ -68,8 +68,13 @@ impl WorkerSyncAdapter {
         })
     }
 
-    /// Spawn the inbound task. It runs until the namespace's
-    /// subscriber channel closes (only on `MeshKV` drop).
+    /// Spawn the inbound task. Subscribes first (so no event is lost
+    /// during replay), then backfills the registry with any entries
+    /// already sitting in the CRDT — a node that joins after workers
+    /// have already gossiped would otherwise wait for the next
+    /// unrelated write before its routing table is complete. The task
+    /// runs until the namespace's subscriber channel closes (only on
+    /// `MeshKV` drop).
     pub fn start(self: &Arc<Self>) {
         let this = Arc::clone(self);
         let mut sub = self.workers.subscribe("");
@@ -78,13 +83,21 @@ impl WorkerSyncAdapter {
             reason = "subscription task ends automatically when the mesh KV drops and closes the channel; no handle needed"
         )]
         tokio::spawn(async move {
+            this.backfill_existing();
             while let Some((key, value)) = sub.receiver.recv().await {
                 let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
                     warn!(key, "worker: subscription yielded unexpected key shape");
                     continue;
                 };
                 match value {
-                    Some(fragments) => this.apply_incoming(worker_id, &fragments),
+                    Some(fragments) => {
+                        let total = fragments.iter().map(Bytes::len).sum();
+                        let mut bytes = Vec::with_capacity(total);
+                        for frag in fragments {
+                            bytes.extend_from_slice(&frag);
+                        }
+                        this.apply_incoming(worker_id, &bytes);
+                    }
                     None => debug!(
                         worker_id,
                         "remote worker tombstone (no-op pending registry remove-by-mesh hook)"
@@ -95,17 +108,23 @@ impl WorkerSyncAdapter {
         });
     }
 
-    fn apply_incoming(&self, worker_id: &str, fragments: &[Bytes]) {
-        // CRDT `put` publishes a single fragment today. The
-        // subscription API is shared with stream namespaces that can
-        // deliver chunked payloads, so concatenate defensively; the
-        // fast path is a single cheap Bytes copy.
-        let total = fragments.iter().map(Bytes::len).sum();
-        let mut bytes = Vec::with_capacity(total);
-        for frag in fragments {
-            bytes.extend_from_slice(frag);
+    /// Replay every entry currently in the `worker:` namespace into
+    /// the registry. Safe to run after `subscribe` — the subscription
+    /// loop is idempotent on repeated state (URL-dedupe short-circuits
+    /// to a health refresh), so overlap with a live event is fine.
+    fn backfill_existing(&self) {
+        for key in self.workers.keys("") {
+            let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if let Some(bytes) = self.workers.get(&key) {
+                self.apply_incoming(worker_id, &bytes);
+            }
         }
-        match bincode::deserialize::<WorkerState>(&bytes) {
+    }
+
+    fn apply_incoming(&self, worker_id: &str, bytes: &[u8]) {
+        match bincode::deserialize::<WorkerState>(bytes) {
             Ok(state) => self.worker_registry.on_remote_worker_state(&state),
             Err(err) => warn!(worker_id, %err, "failed to decode WorkerState"),
         }
@@ -239,6 +258,34 @@ mod tests {
             sleep(Duration::from_millis(10)).await;
         }
         panic!("subscription task aborted after a bad payload");
+    }
+
+    #[tokio::test]
+    async fn start_backfills_preexisting_entries() {
+        // Rolling-restart scenario: the `worker:` namespace already
+        // contains gossiped state before `start` runs. The adapter
+        // must backfill the registry on spawn, not wait for the next
+        // live event.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+
+        let seeded = sample_state("w-seeded", "http://seeded:8080");
+        ns.put(
+            "worker:w-seeded",
+            bincode::serialize(&seeded).expect("state serializes"),
+        );
+
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns, registry.clone());
+        adapter.start();
+
+        for _ in 0..20 {
+            if registry.get_by_url("http://seeded:8080").is_some() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("registry did not see the pre-existing worker");
     }
 
     #[tokio::test]
