@@ -100,8 +100,11 @@ pub(super) fn patch_response_with_request_metadata(
     // Attach conversation id for client response. Unwrap via `as_id()` so we
     // emit a flat `{ "id": "conv_..." }` object regardless of whether the
     // original request used the string or object variant of `ConversationRef`.
-    if let Some(conv_id) = &original_body.conversation {
-        obj.insert("conversation".to_string(), json!({ "id": conv_id.as_id() }));
+    if let Some(conv_ref) = &original_body.conversation {
+        obj.insert(
+            "conversation".to_string(),
+            json!({ "id": conv_ref.as_id() }),
+        );
     }
 }
 
@@ -177,8 +180,11 @@ pub(super) fn rewrite_streaming_block(
     // Attach conversation id. Unwrap via `as_id()` so the SSE payload emits a
     // flat `{ "id": "conv_..." }` even when the original request used the
     // object form of `ConversationRef`.
-    if let Some(conv_id) = &original_body.conversation {
-        response_obj.insert("conversation".to_string(), json!({ "id": conv_id.as_id() }));
+    if let Some(conv_ref) = &original_body.conversation {
+        response_obj.insert(
+            "conversation".to_string(),
+            json!({ "id": conv_ref.as_id() }),
+        );
         changed = true;
     }
 

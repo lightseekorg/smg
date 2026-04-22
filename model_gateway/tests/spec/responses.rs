@@ -35,6 +35,62 @@ fn test_validate_conversation_id_valid() {
     }
 }
 
+/// Object-form `{"conversation": {"id": "conv_abc"}}` must deserialize into
+/// `ConversationRef::Object { .. }` and pass the same validation as the
+/// string-form.
+#[test]
+fn test_validate_conversation_id_object_form_valid() {
+    let v = json!({
+        "input": "test",
+        "model": "gpt-4",
+        "conversation": { "id": "conv_abc" },
+    });
+    let request: ResponsesRequest =
+        serde_json::from_value(v).expect("object-form conversation should deserialize");
+    assert!(
+        matches!(
+            request.conversation,
+            Some(ConversationRef::Object { ref id }) if id == "conv_abc"
+        ),
+        "Expected ConversationRef::Object variant, got {:?}",
+        request.conversation
+    );
+    assert!(
+        request.validate().is_ok(),
+        "Valid object-form conversation should pass validation, got: {:?}",
+        request.validate().err()
+    );
+}
+
+/// Object-form with an empty id must fail validation with the same
+/// `invalid_conversation_id` error code used for the string-form.
+#[test]
+fn test_validate_conversation_id_object_form_empty_invalid() {
+    let v = json!({
+        "input": "test",
+        "model": "gpt-4",
+        "conversation": { "id": "" },
+    });
+    let request: ResponsesRequest =
+        serde_json::from_value(v).expect("object-form conversation should deserialize");
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "Object-form conversation with empty id should fail validation"
+    );
+    let errors = result.unwrap_err();
+    let field_errors = errors.field_errors();
+    let conversation_errors = field_errors
+        .get("conversation")
+        .expect("Expected error for 'conversation' field");
+    let code = conversation_errors.first().map(|e| e.code.as_ref());
+    assert_eq!(
+        code,
+        Some("invalid_conversation_id"),
+        "Expected 'invalid_conversation_id' error code, got: {code:?}"
+    );
+}
+
 /// Test that invalid conversation IDs fail validation
 #[test]
 fn test_validate_conversation_id_invalid() {
