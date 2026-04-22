@@ -174,6 +174,12 @@ impl<'de> Deserialize<'de> for ResponsesFunctionToolChoice {
 /// whose `type` does not belong to that variant. Without the tag pinning,
 /// the `#[serde(untagged)]` enum would accept any object shape that
 /// happened to fit the field set of an earlier variant.
+///
+/// NOTE: kept separate from `common::ToolChoice`. Chat Completions uses
+/// a different `Function` wire shape (nested `{"function": {"name": ...}}`)
+/// and does not accept the `Types` / `Mcp` / `Custom` / `ApplyPatch` /
+/// `Shell` variants; sharing one enum would let `/v1/chat/completions`
+/// silently accept spec-invalid payloads.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesToolChoice {
