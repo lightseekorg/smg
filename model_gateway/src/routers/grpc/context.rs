@@ -26,7 +26,10 @@ use super::{
     multimodal::MultimodalComponents,
     proto_wrapper::{ProtoEmbedComplete, ProtoRequest, ProtoStream},
 };
-use crate::worker::{RuntimeType, Worker, WorkerLoadGuard};
+use crate::{
+    middleware::TenantRequestMeta,
+    worker::{RuntimeType, Worker, WorkerLoadGuard},
+};
 
 /// Main request processing context
 ///
@@ -44,6 +47,7 @@ pub(crate) struct RequestInput {
     pub request_type: RequestType,
     pub headers: Option<HeaderMap>,
     pub model_id: String,
+    pub tenant_request_meta: Option<TenantRequestMeta>,
 }
 
 /// Request type variants
@@ -291,6 +295,7 @@ impl RequestContext {
                 request_type: RequestType::Chat(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),
@@ -309,6 +314,7 @@ impl RequestContext {
                 request_type: RequestType::Generate(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),
@@ -327,6 +333,7 @@ impl RequestContext {
                 request_type: RequestType::Completion(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),
@@ -345,6 +352,7 @@ impl RequestContext {
                 request_type: RequestType::Responses(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),
@@ -363,6 +371,7 @@ impl RequestContext {
                 request_type: RequestType::Embedding(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),
@@ -381,6 +390,7 @@ impl RequestContext {
                 request_type: RequestType::Classify(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),
@@ -399,6 +409,7 @@ impl RequestContext {
                 request_type: RequestType::Messages(request),
                 headers,
                 model_id,
+                tenant_request_meta: None,
             },
             components,
             state: ProcessingState::default(),

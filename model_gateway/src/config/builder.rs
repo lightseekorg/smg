@@ -362,6 +362,16 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn trust_tenant_header(mut self, trust: bool) -> Self {
+        self.config.tenant_resolution.trust_tenant_header = trust;
+        self
+    }
+
+    pub fn tenant_header_name<S: Into<String>>(mut self, header_name: S) -> Self {
+        self.config.tenant_resolution.tenant_header_name = header_name.into();
+        self
+    }
+
     // ==================== IGW Mode ====================
 
     pub fn enable_igw(mut self) -> Self {
@@ -555,6 +565,13 @@ impl RouterConfigBuilder {
         headers: Option<HashMap<String, String>>,
     ) -> Self {
         self.config.storage_context_headers = headers.unwrap_or_default();
+        self
+    }
+
+    pub fn maybe_tenant_header_name(mut self, header_name: Option<impl Into<String>>) -> Self {
+        if let Some(header_name) = header_name {
+            self.config.tenant_resolution.tenant_header_name = header_name.into();
+        }
         self
     }
 

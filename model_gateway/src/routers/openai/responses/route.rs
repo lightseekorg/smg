@@ -22,6 +22,7 @@ use super::{
     handle_non_streaming_response, handle_streaming_response,
 };
 use crate::{
+    middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         common::{
@@ -44,6 +45,7 @@ pub(in crate::routers::openai) struct ResponsesRouterContext<'a> {
 pub(in crate::routers::openai) async fn route_responses(
     deps: &ResponsesRouterContext<'_>,
     headers: Option<&HeaderMap>,
+    tenant_meta: &TenantRequestMeta,
     body: &ResponsesRequest,
     model_id: &str,
 ) -> Response {
@@ -173,6 +175,7 @@ pub(in crate::routers::openai) async fn route_responses(
         ComponentRefs::Responses(Arc::clone(deps.responses_components)),
     );
     ctx.storage_request_context = smg_data_connector::current_request_context();
+    ctx.tenant_request_meta = Some(tenant_meta.clone());
 
     ctx.state.worker = Some(WorkerSelection {
         worker: Arc::clone(&worker),

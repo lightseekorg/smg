@@ -1,3 +1,5 @@
+use axum::http::HeaderName;
+
 use super::*;
 
 /// Configuration validator
@@ -9,6 +11,7 @@ impl ConfigValidator {
         Self::validate_policy(&config.policy)?;
         Self::validate_server_settings(config)?;
         Self::validate_storage_context_headers(config)?;
+        Self::validate_tenant_resolution(config)?;
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
         }
@@ -166,6 +169,23 @@ impl ConfigValidator {
                 });
             }
         }
+
+        Ok(())
+    }
+
+    fn validate_tenant_resolution(config: &RouterConfig) -> ConfigResult<()> {
+        let header_name = config.tenant_resolution.tenant_header_name.trim();
+        if header_name.is_empty() {
+            return Err(ConfigError::ValidationFailed {
+                reason: "tenant_resolution.tenant_header_name must not be empty".to_string(),
+            });
+        }
+
+        HeaderName::try_from(header_name).map_err(|e| ConfigError::ValidationFailed {
+            reason: format!(
+                "tenant_resolution.tenant_header_name must be a valid HTTP header name: {e}"
+            ),
+        })?;
 
         Ok(())
     }

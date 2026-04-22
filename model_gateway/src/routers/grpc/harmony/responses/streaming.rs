@@ -16,6 +16,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
+    middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
@@ -40,6 +41,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses_stream(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    tenant_request_meta: TenantRequestMeta,
 ) -> Response {
     // Load previous conversation history if previous_response_id is set
     let current_request = match load_previous_messages(ctx, request.clone()).await {
@@ -95,13 +97,22 @@ pub(crate) async fn serve_harmony_responses_stream(
                 ctx,
                 current_request,
                 &request,
+                tenant_request_meta.clone(),
                 mcp_servers,
                 &mut emitter,
                 &tx,
             )
             .await;
         } else {
-            execute_without_mcp_streaming(ctx, &current_request, &request, &mut emitter, &tx).await;
+            execute_without_mcp_streaming(
+                ctx,
+                &current_request,
+                &request,
+                tenant_request_meta,
+                &mut emitter,
+                &tx,
+            )
+            .await;
         }
     });
 
@@ -121,6 +132,7 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
+    tenant_request_meta: TenantRequestMeta,
     mcp_servers: Vec<McpServerBinding>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
@@ -195,7 +207,11 @@ async fn execute_mcp_tool_loop_streaming(
         // Execute pipeline and get stream + load guards
         let (execution_result, _load_guards) = match ctx
             .pipeline
-            .execute_harmony_responses_streaming(&current_request, ctx)
+            .execute_harmony_responses_streaming(
+                &current_request,
+                ctx,
+                Some(tenant_request_meta.clone()),
+            )
             .await
         {
             Ok(result) => result,
@@ -394,6 +410,7 @@ async fn execute_without_mcp_streaming(
     ctx: &ResponsesContext,
     current_request: &ResponsesRequest,
     original_request: &ResponsesRequest,
+    tenant_request_meta: TenantRequestMeta,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -402,7 +419,7 @@ async fn execute_without_mcp_streaming(
     // Execute pipeline and get stream + load guards
     let (execution_result, _load_guards) = match ctx
         .pipeline
-        .execute_harmony_responses_streaming(current_request, ctx)
+        .execute_harmony_responses_streaming(current_request, ctx, Some(tenant_request_meta))
         .await
     {
         Ok(result) => result,

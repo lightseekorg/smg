@@ -20,6 +20,7 @@ use super::{
 };
 use crate::{
     config::types::RetryConfig,
+    middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         common::{
@@ -44,6 +45,7 @@ pub(super) struct ChatRouterContext<'a> {
 pub(super) async fn route_chat(
     deps: &ChatRouterContext<'_>,
     headers: Option<&HeaderMap>,
+    tenant_meta: &TenantRequestMeta,
     body: &ChatCompletionRequest,
     model_id: &str,
 ) -> Response {
@@ -124,6 +126,7 @@ pub(super) async fn route_chat(
         Some(model_id.to_string()),
         ComponentRefs::Shared(Arc::clone(deps.shared_components)),
     );
+    ctx.tenant_request_meta = Some(tenant_meta.clone());
 
     ctx.state.worker = Some(WorkerSelection {
         worker: Arc::clone(&worker),

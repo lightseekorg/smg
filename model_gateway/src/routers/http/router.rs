@@ -30,6 +30,7 @@ use tracing::error;
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
+    middleware::TenantRequestMeta,
     observability::{
         events::{self, Event},
         metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -1105,6 +1106,7 @@ impl RouterTrait for Router {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
@@ -1115,6 +1117,7 @@ impl RouterTrait for Router {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -1125,6 +1128,7 @@ impl RouterTrait for Router {
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
@@ -1135,6 +1139,7 @@ impl RouterTrait for Router {
     async fn route_responses(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
@@ -1150,6 +1155,7 @@ impl RouterTrait for Router {
     async fn route_embeddings(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
@@ -1160,6 +1166,7 @@ impl RouterTrait for Router {
     async fn route_classify(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
@@ -1170,6 +1177,7 @@ impl RouterTrait for Router {
     async fn route_audio_transcriptions(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &TranscriptionRequest,
         audio: AudioFile,
         model_id: &str,
@@ -1187,6 +1195,7 @@ impl RouterTrait for Router {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {

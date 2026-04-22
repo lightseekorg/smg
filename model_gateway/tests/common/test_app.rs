@@ -121,6 +121,10 @@ pub fn create_test_app(
     let auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper assumes router config is already validated"
+    )]
     build_app(
         app_state,
         auth_config,
@@ -129,6 +133,7 @@ pub fn create_test_app(
         request_id_headers,
         router_config.cors_allowed_origins.clone(),
     )
+    .expect("valid tenant resolution config")
 }
 
 /// Create a test Axum application with an existing AppContext
@@ -161,6 +166,10 @@ pub fn create_test_app_with_context(
     let auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper assumes router config is already validated"
+    )]
     build_app(
         app_state,
         auth_config,
@@ -169,6 +178,7 @@ pub fn create_test_app_with_context(
         request_id_headers,
         router_config.cors_allowed_origins.clone(),
     )
+    .expect("valid tenant resolution config")
 }
 
 /// Create a minimal test AppContext for unit tests
