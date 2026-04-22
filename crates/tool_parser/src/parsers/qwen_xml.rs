@@ -128,29 +128,69 @@ fn html_unescape(s: &str) -> String {
     result
 }
 
-/// Parse a raw parameter value, similar to Python's _safe_val
-///
-/// 1. Decode HTML entities
-/// 2. Try to parse as JSON (numbers, booleans, null, objects, arrays)
-/// 3. Fall back to string if JSON parsing fails
-fn safe_val(raw: &str) -> Value {
-    let unescaped = html_unescape(raw.trim());
+/// Look up a parameter's JSON Schema `"type"` from the tools list.
+fn lookup_param_type<'a>(func_name: &str, param_name: &str, tools: &'a [Tool]) -> Option<&'a str> {
+    tools.iter()
+        .find(|t| t.function.name == func_name)
+        .and_then(|t| t.function.parameters.get("properties"))
+        .and_then(|props| props.get(param_name))
+        .and_then(|prop| prop.get("type"))
+        .and_then(|t| t.as_str())
+}
 
-    // Try JSON parsing first
-    if let Ok(v) = serde_json::from_str::<Value>(&unescaped) {
-        return v;
+/// Schema-aware parameter value conversion (matches sglang `_convert_param_value`).
+fn safe_val_typed(raw: &str, func_name: &str, param_name: &str, tools: &[Tool]) -> Value {
+    let val = html_unescape(raw.trim());
+    match lookup_param_type(func_name, param_name, tools) {
+        Some(ty) => convert_by_schema_type(&val, ty),
+        None => safe_val_untyped(&val),
     }
+}
 
-    // Handle Python-style literals (True, False, None)
-    match unescaped.as_str() {
-        "True" => return Value::Bool(true),
-        "False" => return Value::Bool(false),
-        "None" => return Value::Null,
-        _ => {}
+fn convert_by_schema_type(val: &str, schema_type: &str) -> Value {
+    match schema_type {
+        "string" | "str" | "enum" => Value::String(val.to_string()),
+        t if t.starts_with("int") || t.starts_with("uint") => {
+            if val.eq_ignore_ascii_case("null") { return Value::Null; }
+            val.parse::<i64>().map(|n| Value::Number(n.into()))
+                .unwrap_or_else(|_| Value::String(val.to_string()))
+        }
+        t if t.starts_with("num") || t.starts_with("float") => {
+            if val.eq_ignore_ascii_case("null") { return Value::Null; }
+            match val.parse::<f64>() {
+                Ok(f) if f.fract() == 0.0 && !val.contains('.') => Value::Number((f as i64).into()),
+                Ok(f) => serde_json::Number::from_f64(f)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| Value::String(val.to_string())),
+                Err(_) => Value::String(val.to_string()),
+            }
+        }
+        "boolean" | "bool" => {
+            if val.eq_ignore_ascii_case("null") { return Value::Null; }
+            Value::Bool(val.eq_ignore_ascii_case("true"))
+        }
+        "object" | "array" => {
+            if val.eq_ignore_ascii_case("null") { return Value::Null; }
+            serde_json::from_str::<Value>(val)
+                .unwrap_or_else(|_| Value::String(val.to_string()))
+        }
+        _ => safe_val_untyped(val),
     }
+}
 
-    // Fall back to string
-    Value::String(unescaped)
+/// Fallback without schema: keep scalars as strings, only parse JSON objects/arrays.
+fn safe_val_untyped(val: &str) -> Value {
+    if val.starts_with('{') || val.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<Value>(val) {
+            return v;
+        }
+    }
+    match val {
+        "True" => Value::Bool(true),
+        "False" => Value::Bool(false),
+        "None" => Value::Null,
+        _ => Value::String(val.to_string()),
+    }
 }
 
 impl QwenXmlParser {
@@ -188,7 +228,7 @@ impl QwenXmlParser {
     }
 
     /// Parse XML format tool call: <function=name><parameter=key>value</parameter></function>
-    fn parse_xml_format(&self, content: &str) -> ParserResult<Option<ToolCall>> {
+    fn parse_xml_format(&self, content: &str, tools: &[Tool]) -> ParserResult<Option<ToolCall>> {
         let function_captures = self
             .xml_function_pattern
             .captures(content)
@@ -211,7 +251,7 @@ impl QwenXmlParser {
             if let (Some(key_match), Some(value_match)) = (cap.get(1), cap.get(2)) {
                 let key = key_match.as_str().trim().to_string();
                 let value = value_match.as_str();
-                let json_value = safe_val(value);
+                let json_value = safe_val_typed(value, &function_name, &key, tools);
                 parameters.insert(key, json_value);
             }
         }
@@ -229,7 +269,7 @@ impl QwenXmlParser {
 
     /// Parse and stream complete parameters from buffer
     /// Returns tool call items to emit (similar to Python's _parse_and_stream_parameters)
-    fn parse_and_stream_parameters(&mut self) -> Vec<ToolCallItem> {
+    fn parse_and_stream_parameters(&mut self, tools: &[Tool]) -> Vec<ToolCallItem> {
         let mut calls: Vec<ToolCallItem> = vec![];
 
         // Find all complete parameter patterns in buffer
@@ -238,7 +278,7 @@ impl QwenXmlParser {
             if let (Some(key_match), Some(value_match)) = (cap.get(1), cap.get(2)) {
                 let key = key_match.as_str().trim().to_string();
                 let value = value_match.as_str();
-                let json_value = safe_val(value);
+                let json_value = safe_val_typed(value, &self.current_function_name, &key, tools);
                 new_params.insert(key, json_value);
             }
         }
@@ -323,26 +363,30 @@ impl Default for QwenXmlParser {
 #[async_trait]
 impl ToolParser for QwenXmlParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-        // Check if text contains Qwen XML format
+        self.parse_complete_with_tools(text, &[]).await
+    }
+
+    async fn parse_complete_with_tools(
+        &self,
+        text: &str,
+        tools: &[Tool],
+    ) -> ParserResult<(String, Vec<ToolCall>)> {
         if !self.has_tool_markers(text) {
             return Ok((text.to_string(), vec![]));
         }
 
-        // Find where the first tool call begins
-        // Safe: has_tool_markers() already confirmed the marker exists
         let idx = text
             .find(self.tool_call_start_token)
             .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
-        // Extract tool calls
-        let mut tools = Vec::new();
+        let mut parsed_tools = Vec::new();
         for captures in self.extractor.captures_iter(text) {
             if let Some(content_str) = captures.get(1) {
                 let content = content_str.as_str().trim();
 
-                match self.parse_xml_format(content) {
-                    Ok(Some(tool)) => tools.push(tool),
+                match self.parse_xml_format(content, tools) {
+                    Ok(Some(tool)) => parsed_tools.push(tool),
                     Ok(None) => continue,
                     Err(e) => {
                         tracing::warn!("Failed to parse XML tool call: {:?}", e);
@@ -352,12 +396,11 @@ impl ToolParser for QwenXmlParser {
             }
         }
 
-        // If no tools were successfully parsed despite having markers, return entire text
-        if tools.is_empty() {
+        if parsed_tools.is_empty() {
             return Ok((text.to_string(), vec![]));
         }
 
-        Ok((normal_text, tools))
+        Ok((normal_text, parsed_tools))
     }
 
     async fn parse_incremental(
@@ -459,7 +502,7 @@ impl ToolParser for QwenXmlParser {
 
             // Parse parameters (only complete ones)
             if self.current_tool_name_sent {
-                let param_calls = self.parse_and_stream_parameters();
+                let param_calls = self.parse_and_stream_parameters(tools);
                 calls.extend(param_calls);
 
                 // Check if tool call is complete
@@ -562,42 +605,61 @@ mod tests {
     }
 
     #[test]
-    fn test_safe_val_json() {
-        assert_eq!(safe_val("42"), Value::Number(42.into()));
-        assert_eq!(safe_val("1.5"), serde_json::json!(1.5));
-        assert_eq!(safe_val("true"), Value::Bool(true));
-        assert_eq!(safe_val("false"), Value::Bool(false));
-        assert_eq!(safe_val("null"), Value::Null);
-        assert_eq!(
-            safe_val(r#"{"key": "value"}"#),
-            serde_json::json!({"key": "value"})
-        );
-        assert_eq!(safe_val(r"[1, 2, 3]"), serde_json::json!([1, 2, 3]));
+    fn test_safe_val_untyped() {
+        assert_eq!(safe_val_untyped("42"), Value::String("42".into()));
+        assert_eq!(safe_val_untyped("null"), Value::String("null".into()));
+        assert_eq!(safe_val_untyped("true"), Value::String("true".into()));
+        assert_eq!(safe_val_untyped("True"), Value::Bool(true));
+        assert_eq!(safe_val_untyped("False"), Value::Bool(false));
+        assert_eq!(safe_val_untyped("None"), Value::Null);
+        assert_eq!(safe_val_untyped(r#"{"k":"v"}"#), serde_json::json!({"k":"v"}));
+        assert_eq!(safe_val_untyped("[1,2]"), serde_json::json!([1,2]));
     }
 
     #[test]
-    fn test_safe_val_python_literals() {
-        assert_eq!(safe_val("True"), Value::Bool(true));
-        assert_eq!(safe_val("False"), Value::Bool(false));
-        assert_eq!(safe_val("None"), Value::Null);
+    fn test_convert_by_schema_type() {
+        assert_eq!(convert_by_schema_type("42", "string"), Value::String("42".into()));
+        assert_eq!(convert_by_schema_type("null", "string"), Value::String("null".into()));
+        assert_eq!(convert_by_schema_type("42", "integer"), Value::Number(42.into()));
+        assert_eq!(convert_by_schema_type("null", "integer"), Value::Null);
+        assert_eq!(convert_by_schema_type("42", "number"), Value::Number(42.into()));
+        assert_eq!(convert_by_schema_type("1.5", "number"), serde_json::json!(1.5));
+        assert_eq!(convert_by_schema_type("true", "boolean"), Value::Bool(true));
+        assert_eq!(convert_by_schema_type("false", "boolean"), Value::Bool(false));
     }
 
     #[test]
-    fn test_safe_val_string_fallback() {
-        assert_eq!(
-            safe_val("hello world"),
-            Value::String("hello world".to_string())
-        );
-        assert_eq!(safe_val("  spaces  "), Value::String("spaces".to_string()));
+    fn test_safe_val_typed_with_schema() {
+        let tools = vec![openai_protocol::common::Tool {
+            tool_type: "function".into(),
+            function: openai_protocol::common::Function {
+                name: "f".into(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "s": {"type": "string"},
+                        "n": {"type": "integer"},
+                        "x": {"type": "number"},
+                        "b": {"type": "boolean"}
+                    }
+                }),
+                strict: None,
+            },
+        }];
+        assert_eq!(safe_val_typed("546382", "f", "s", &tools), Value::String("546382".into()));
+        assert_eq!(safe_val_typed("null", "f", "s", &tools), Value::String("null".into()));
+        assert_eq!(safe_val_typed("25", "f", "n", &tools), Value::Number(25.into()));
+        assert_eq!(safe_val_typed("3.14", "f", "x", &tools), serde_json::json!(3.14));
+        assert_eq!(safe_val_typed("true", "f", "b", &tools), Value::Bool(true));
+        assert_eq!(safe_val_typed("42", "unknown", "y", &tools), Value::String("42".into()));
     }
 
     #[test]
     fn test_safe_val_html_entities() {
-        assert_eq!(safe_val("&lt;div&gt;"), Value::String("<div>".to_string()));
-        assert_eq!(
-            safe_val("Tom &amp; Jerry"),
-            Value::String("Tom & Jerry".to_string())
-        );
+        let tools: Vec<openai_protocol::common::Tool> = vec![];
+        assert_eq!(safe_val_typed("&lt;div&gt;", "f", "p", &tools), Value::String("<div>".into()));
+        assert_eq!(safe_val_typed("Tom &amp; Jerry", "f", "p", &tools), Value::String("Tom & Jerry".into()));
     }
 
     fn weather_tool() -> openai_protocol::common::Tool {
