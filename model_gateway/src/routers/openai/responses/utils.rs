@@ -209,8 +209,9 @@ pub(super) fn insert_optional_value<T: Serialize>(
 
 /// Convert a single ResponseTool back to its original JSON representation.
 ///
-/// Handles MCP tools (with server metadata), web_search_preview, and code_interpreter.
-/// Returns None for function tools and other types that don't need restoration.
+/// Handles MCP tools (with server metadata), web_search, web_search_preview,
+/// file_search, and code_interpreter. Returns None for function tools and other
+/// types that don't need restoration.
 pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
     match tool {
         ResponseTool::Mcp(mcp) => {
@@ -233,6 +234,7 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
             Some(Value::Object(m))
         }
         ResponseTool::WebSearchPreview(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::WebSearch(_) => serde_json::to_value(tool).ok(),
         ResponseTool::CodeInterpreter(_) => serde_json::to_value(tool).ok(),
         ResponseTool::FileSearch(_) => serde_json::to_value(tool).ok(),
         ResponseTool::Function(_) => None,

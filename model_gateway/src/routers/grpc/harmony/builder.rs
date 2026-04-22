@@ -429,6 +429,7 @@ impl HarmonyBuilder {
                         .map(|tool| match tool {
                             ResponseTool::Function(_) => "function",
                             ResponseTool::WebSearchPreview(_) => "web_search_preview",
+                            ResponseTool::WebSearch(_) => "web_search",
                             ResponseTool::CodeInterpreter(_) => "code_interpreter",
                             ResponseTool::Mcp(_) => "mcp",
                             ResponseTool::FileSearch(_) => "file_search",

@@ -349,6 +349,15 @@ pub enum ResponseTool {
     #[serde(rename = "web_search_preview")]
     WebSearchPreview(WebSearchPreviewTool),
 
+    /// Built-in non-preview hosted web search tool.
+    ///
+    /// Spec: `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
+    /// search_context_size?: "low"|"medium"|"high", user_location? }`. Distinct from
+    /// `web_search_preview` — non-preview adds `filters.allowed_domains` and constrains
+    /// `search_context_size` to a typed enum.
+    #[serde(rename = "web_search", alias = "web_search_2025_08_26")]
+    WebSearch(WebSearchTool),
+
     /// Built-in tool.
     #[serde(rename = "code_interpreter")]
     CodeInterpreter(CodeInterpreterTool),
@@ -482,6 +491,67 @@ pub struct McpTool {
 pub struct WebSearchPreviewTool {
     pub search_context_size: Option<String>,
     pub user_location: Option<Value>,
+}
+
+/// Non-preview hosted web search tool configuration.
+///
+/// Spec: `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
+/// search_context_size?: "low"|"medium"|"high", user_location? }`.
+///
+/// Distinct from `WebSearchPreviewTool`: adds `filters.allowed_domains` (domain
+/// allowlist) and pins `search_context_size` to the spec-listed enum.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchTool {
+    /// Optional domain allowlist applied to candidate sources.
+    pub filters: Option<WebSearchFilters>,
+    /// Search context budget. Spec enum: `"low" | "medium" | "high"`.
+    pub search_context_size: Option<WebSearchContextSize>,
+    /// Approximate user location used to bias results.
+    pub user_location: Option<WebSearchUserLocation>,
+}
+
+/// Filters for the non-preview `web_search` tool.
+///
+/// Spec: `filters? { allowed_domains? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchFilters {
+    /// Optional list of domains to restrict search results to.
+    pub allowed_domains: Option<Vec<String>>,
+}
+
+/// Search context budget for the non-preview `web_search` tool.
+///
+/// Spec: `search_context_size?: "low" | "medium" | "high"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchContextSize {
+    Low,
+    Medium,
+    High,
+}
+
+/// Approximate user location for the non-preview `web_search` tool.
+///
+/// Spec: `user_location: { city?, country?: ISO2, region?, timezone?: IANA, type?: "approximate" }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchUserLocation {
+    /// City name.
+    pub city: Option<String>,
+    /// ISO-3166-1 alpha-2 country code (e.g. `"US"`).
+    pub country: Option<String>,
+    /// Region / state / province name.
+    pub region: Option<String>,
+    /// IANA timezone identifier (e.g. `"America/Los_Angeles"`).
+    pub timezone: Option<String>,
+    /// Discriminator. Spec only enumerates `"approximate"`.
+    #[serde(rename = "type")]
+    pub location_type: Option<String>,
 }
 
 #[serde_with::skip_serializing_none]
@@ -869,6 +939,12 @@ pub enum ResponseOutputItem {
         id: String,
         status: WebSearchCallStatus,
         action: WebSearchAction,
+        /// Search hits surfaced when callers request `web_search_call.results`
+        /// via the top-level `include[]` array. Mirrors the `file_search_call.results`
+        /// shape — array of typed entries when populated, omitted otherwise so the
+        /// default wire shape (`{id, action, status, type}`) stays spec-byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<WebSearchResult>>,
     },
     #[serde(rename = "code_interpreter_call")]
     CodeInterpreterCall {
@@ -928,6 +1004,25 @@ pub struct WebSearchSource {
     #[serde(rename = "type")]
     pub source_type: String,
     pub url: String,
+}
+
+/// A single search result attached to a `WebSearchCall` when the caller
+/// requested `web_search_call.results` via the top-level `include[]` array.
+///
+/// Optional fields mirror the `FileSearchResult` shape — only `url` is
+/// guaranteed; titles, snippets, and scores ride along when the upstream
+/// search backend supplies them.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct WebSearchResult {
+    /// Canonical URL of the result.
+    pub url: String,
+    /// Page or document title, when surfaced by the search backend.
+    pub title: Option<String>,
+    /// Short text snippet excerpted from the result.
+    pub snippet: Option<String>,
+    /// Relevance score in `[0, 1]`, when the backend supplies one.
+    pub score: Option<f32>,
 }
 
 /// Status for code interpreter tool calls.
@@ -2411,6 +2506,90 @@ mod tests {
 
         let serialized = serde_json::to_value(&tool).expect("file_search tool should serialize");
         assert_eq!(serialized, payload);
+    }
+
+    // ------------------------------------------------------------------
+    // T3: non-preview web_search tool + WebSearchCall.results
+    // ------------------------------------------------------------------
+
+    /// Spec fixture (openai-responses-api-spec.md §tools line 439):
+    /// `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
+    /// search_context_size?: "low"|"medium"|"high", user_location? }`. Covers the
+    /// canonical tag, the versioned alias, and full-field nested shape.
+    #[test]
+    fn test_web_search_tool_round_trip() {
+        let payload = json!({
+            "type": "web_search",
+            "filters": {"allowed_domains": ["example.com", "rust-lang.org"]},
+            "search_context_size": "high",
+            "user_location": {
+                "type": "approximate",
+                "city": "San Francisco",
+                "country": "US",
+                "region": "California",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+        let tool: ResponseTool =
+            serde_json::from_value(payload.clone()).expect("web_search tool should deserialize");
+        assert!(matches!(tool, ResponseTool::WebSearch(_)));
+        assert_eq!(
+            serde_json::to_value(&tool).expect("web_search tool should serialize"),
+            payload
+        );
+
+        // Versioned alias deserializes into the same variant (canonical serialization re-tested above).
+        let alias: ResponseTool = serde_json::from_value(json!({"type": "web_search_2025_08_26"}))
+            .expect("web_search_2025_08_26 alias should deserialize");
+        assert!(matches!(alias, ResponseTool::WebSearch(_)));
+    }
+
+    /// Acceptance: `web_search_call` output item carries an optional typed
+    /// `results` field populated when callers request `web_search_call.results`
+    /// via the top-level `include[]` array. When absent, the default wire shape
+    /// `{id, action, status, type}` must stay spec-byte-identical.
+    #[test]
+    fn test_web_search_call_results_round_trip() {
+        let with_results = json!({
+            "type": "web_search_call",
+            "id": "ws_abc",
+            "status": "completed",
+            "action": {"type": "search", "query": "rust", "queries": ["rust"]},
+            "results": [
+                {"url": "https://tokio.rs", "title": "Tokio", "snippet": "rt", "score": 0.5},
+                {"url": "https://async.rs"}
+            ]
+        });
+        let item: ResponseOutputItem = serde_json::from_value(with_results.clone())
+            .expect("web_search_call with results should deserialize");
+        let ResponseOutputItem::WebSearchCall { results, .. } = &item else {
+            panic!("expected WebSearchCall");
+        };
+        let results = results.as_ref().expect("results present");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].score, Some(0.5));
+        assert!(results[1].title.is_none());
+        assert_eq!(
+            serde_json::to_value(&item).expect("web_search_call should serialize"),
+            with_results
+        );
+
+        // Absent results: deserializes to None and re-serializes without the key.
+        let no_results = json!({
+            "type": "web_search_call",
+            "id": "ws_no",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+        let bare: ResponseOutputItem = serde_json::from_value(no_results.clone())
+            .expect("web_search_call without results should deserialize");
+        let ResponseOutputItem::WebSearchCall { results, .. } = &bare else {
+            panic!("expected WebSearchCall");
+        };
+        assert!(results.is_none());
+        let serialized = serde_json::to_value(&bare).expect("web_search_call should serialize");
+        assert_eq!(serialized, no_results);
+        assert!(serialized.get("results").is_none());
     }
 
     // ------------------------------------------------------------------
