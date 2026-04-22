@@ -17,6 +17,9 @@ from concurrent import futures
 import grpc
 from grpc_health.v1 import health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
+from huggingface_hub import snapshot_download
+from mlx_lm import load
+from mlx_lm.generate import BatchGenerator
 from smg_grpc_proto import mlx_engine_pb2, mlx_engine_pb2_grpc
 
 from smg_grpc_servicer.mlx.health_servicer import MlxHealthServicer
@@ -42,13 +45,9 @@ def parse_args():
 
 def load_model(args):
     """Load model and tokenizer via mlx-lm."""
-    from mlx_lm import load
-
     logger.info("Loading model: %s", args.model)
     model, tokenizer = load(args.model, adapter_path=args.adapter_path)
     logger.info("Model loaded successfully")
-
-    from huggingface_hub import snapshot_download
 
     model_dir = args.model
     if not os.path.isdir(model_dir):
@@ -107,8 +106,6 @@ async def serve_grpc(args):
     start_time = time.time()
 
     model, tokenizer, model_dir, model_config, eos_token_ids = load_model(args)
-
-    from mlx_lm.generate import BatchGenerator
 
     batch_generator = BatchGenerator(
         model,

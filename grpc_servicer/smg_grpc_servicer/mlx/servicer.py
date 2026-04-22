@@ -19,6 +19,7 @@ import mlx.core as mx
 from mlx_lm.generate import SequenceStateMachine, generation_stream
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from smg_grpc_proto import mlx_engine_pb2, mlx_engine_pb2_grpc
+from smg_grpc_proto.generated import common_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -248,8 +249,6 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
 
     @staticmethod
     def _chunk_tokenizer_zip(zip_bytes, sha256, chunk_size=512 * 1024):
-        from smg_grpc_proto.generated import common_pb2
-
         total = len(zip_bytes)
         offset = 0
         while offset < total:
