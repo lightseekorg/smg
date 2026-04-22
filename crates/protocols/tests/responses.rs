@@ -1455,6 +1455,198 @@ fn test_custom_tool_grammar_format_round_trip() {
 }
 
 #[test]
+fn test_namespace_tool_with_function_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools L475):
+    // `Namespace { description, name, tools: array of Function | Custom,
+    // type: "namespace" }`. Inner elements reuse the top-level Function
+    // shape but are restricted by the spec to Function or Custom.
+    let payload = json!({
+        "type": "namespace",
+        "name": "sql",
+        "description": "Tools for interacting with the warehouse",
+        "tools": [
+            {
+                "type": "function",
+                "name": "select",
+                "description": "Run a read-only SELECT",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                },
+                "strict": true
+            }
+        ]
+    });
+
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("namespace tool with function element should deserialize");
+    match &tool {
+        ResponseTool::Namespace {
+            description,
+            name,
+            tools,
+        } => {
+            assert_eq!(name, "sql");
+            assert_eq!(description, "Tools for interacting with the warehouse");
+            assert_eq!(tools.len(), 1);
+            match &tools[0] {
+                NamespaceTool::Function(ft) => {
+                    assert_eq!(ft.function.name, "select");
+                    assert_eq!(ft.function.strict, Some(true));
+                }
+                other @ NamespaceTool::Custom(_) => {
+                    panic!("expected NamespaceTool::Function, got {other:?}")
+                }
+            }
+        }
+        other => panic!("expected ResponseTool::Namespace, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("namespace tool should serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_namespace_tool_with_custom_text_format_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools L471-475): namespace elements
+    // may be Custom tools. `Custom { name, type: "custom", defer_loading?,
+    // description?, format? }` with `format: Text { type: "text" }`.
+    let payload = json!({
+        "type": "namespace",
+        "name": "shell",
+        "description": "User-owned shell helpers",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "raw_cmd",
+                "description": "Emit a free-form shell command",
+                "format": {"type": "text"}
+            }
+        ]
+    });
+
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("namespace tool with custom/text element should deserialize");
+    match &tool {
+        ResponseTool::Namespace { tools, .. } => {
+            assert_eq!(tools.len(), 1);
+            match &tools[0] {
+                NamespaceTool::Custom(c) => {
+                    assert_eq!(c.name, "raw_cmd");
+                    assert!(matches!(c.format, Some(CustomToolInputFormat::Text)));
+                }
+                other @ NamespaceTool::Function(_) => {
+                    panic!("expected NamespaceTool::Custom, got {other:?}")
+                }
+            }
+        }
+        other => panic!("expected ResponseTool::Namespace, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("namespace tool should serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_namespace_tool_with_custom_grammar_format_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools L472-475): namespace elements
+    // may be Custom tools whose `format: Grammar { definition, syntax: "lark"
+    // | "regex", type: "grammar" }` constrains free-form input at decode time.
+    for syntax in ["lark", "regex"] {
+        let payload = json!({
+            "type": "namespace",
+            "name": "parse",
+            "description": "Grammar-constrained parsers",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "expr_parser",
+                    "format": {
+                        "type": "grammar",
+                        "definition": "start: NUMBER",
+                        "syntax": syntax
+                    }
+                }
+            ]
+        });
+
+        let tool: ResponseTool = serde_json::from_value(payload.clone())
+            .expect("namespace tool with custom/grammar element should deserialize");
+        match &tool {
+            ResponseTool::Namespace { tools, .. } => match &tools[0] {
+                NamespaceTool::Custom(c) => match &c.format {
+                    Some(CustomToolInputFormat::Grammar(g)) => {
+                        assert_eq!(g.definition, "start: NUMBER");
+                        let expected = if syntax == "lark" {
+                            CustomToolGrammarSyntax::Lark
+                        } else {
+                            CustomToolGrammarSyntax::Regex
+                        };
+                        assert_eq!(g.syntax, expected);
+                    }
+                    other => panic!("expected Grammar format, got {other:?}"),
+                },
+                other @ NamespaceTool::Function(_) => {
+                    panic!("expected NamespaceTool::Custom, got {other:?}")
+                }
+            },
+            other => panic!("expected ResponseTool::Namespace, got {other:?}"),
+        }
+
+        let serialized = serde_json::to_value(&tool).expect("namespace tool should serialize");
+        assert_eq!(serialized, payload);
+    }
+}
+
+#[test]
+fn test_namespace_tool_mixed_elements_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools L475): a single namespace may
+    // mix Function and Custom elements in any order.
+    let payload = json!({
+        "type": "namespace",
+        "name": "fs",
+        "description": "Filesystem helpers",
+        "tools": [
+            {
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a file by path",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                },
+                "strict": true
+            },
+            {
+                "type": "custom",
+                "name": "write_file",
+                "description": "Write a file by free-form payload"
+            }
+        ]
+    });
+
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("namespace tool with mixed elements should deserialize");
+    match &tool {
+        ResponseTool::Namespace { tools, .. } => {
+            assert_eq!(tools.len(), 2);
+            assert!(
+                matches!(&tools[0], NamespaceTool::Function(ft) if ft.function.name == "read_file")
+            );
+            assert!(matches!(&tools[1], NamespaceTool::Custom(c) if c.name == "write_file"));
+        }
+        other => panic!("expected ResponseTool::Namespace, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("namespace tool should serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
 fn computer_call_input_item_round_trips_spec_shape() {
     let payload = json!({
         "type": "computer_call",
