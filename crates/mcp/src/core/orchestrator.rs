@@ -1524,7 +1524,29 @@ impl McpOrchestrator {
         tenant_ctx: TenantContext,
         approval_mode: ApprovalMode,
     ) -> McpRequestContext<'a> {
-        McpRequestContext::new(self, request_id.into(), tenant_ctx, approval_mode)
+        self.create_request_context_with_headers(
+            request_id,
+            tenant_ctx,
+            approval_mode,
+            HashMap::new(),
+        )
+    }
+
+    /// Create a per-request context for tool execution with forwarded headers.
+    pub fn create_request_context_with_headers<'a>(
+        &'a self,
+        request_id: impl Into<String>,
+        tenant_ctx: TenantContext,
+        approval_mode: ApprovalMode,
+        forwarded_headers: HashMap<String, String>,
+    ) -> McpRequestContext<'a> {
+        McpRequestContext::new(
+            self,
+            request_id.into(),
+            tenant_ctx,
+            approval_mode,
+            forwarded_headers,
+        )
     }
 
     /// Set request context on all static server handlers.
@@ -1884,6 +1906,7 @@ pub struct McpRequestContext<'a> {
     pub request_id: String,
     pub tenant_ctx: TenantContext,
     pub approval_mode: ApprovalMode,
+    pub forwarded_headers: HashMap<String, String>,
     /// Dynamic tools added for this request only.
     dynamic_tools: DashMap<QualifiedToolName, ToolEntry>,
     /// Dynamic server clients for this request.
@@ -1896,12 +1919,14 @@ impl<'a> McpRequestContext<'a> {
         request_id: String,
         tenant_ctx: TenantContext,
         approval_mode: ApprovalMode,
+        forwarded_headers: HashMap<String, String>,
     ) -> Self {
         Self {
             orchestrator,
             request_id,
             tenant_ctx,
             approval_mode,
+            forwarded_headers,
             dynamic_tools: DashMap::new(),
             dynamic_clients: DashMap::new(),
         }
@@ -1913,6 +1938,7 @@ impl<'a> McpRequestContext<'a> {
             &self.request_id,
             self.approval_mode,
             self.tenant_ctx.clone(),
+            self.forwarded_headers.clone(),
         )
     }
 
@@ -2221,6 +2247,7 @@ mod tests {
 
         assert_eq!(ctx.request_id, "req-1");
         assert_eq!(ctx.tenant_ctx.tenant_id.as_str(), "tenant-1");
+        assert!(ctx.forwarded_headers.is_empty());
     }
 
     #[test]
@@ -2235,6 +2262,7 @@ mod tests {
         let handler_ctx = ctx.handler_context();
         assert_eq!(handler_ctx.request_id, "req-1");
         assert_eq!(handler_ctx.approval_mode, ApprovalMode::Interactive);
+        assert!(handler_ctx.forwarded_headers.is_empty());
     }
 
     #[test]

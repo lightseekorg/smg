@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     body::Body,
     extract::Request,
@@ -238,6 +240,28 @@ pub fn extract_auth_header(
         .or_else(|| worker_api_key.and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok()))
 }
 
+/// Extract the subset of request headers that SMG is allowed to preserve for
+/// internal execution paths such as MCP tool calls.
+pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    let Some(headers) = headers else {
+        return HashMap::new();
+    };
+
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            if !should_forward_request_header(name.as_str()) {
+                return None;
+            }
+
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
 #[inline]
 pub fn should_forward_request_header(name: &str) -> bool {
     const REQUEST_ID_PREFIX: &str = "x-request-id-";
@@ -402,6 +426,23 @@ mod tests {
         assert!(!should_forward_request_header("cookie"));
         assert!(!should_forward_request_header("x-custom-header"));
         assert!(!should_forward_request_header("x-api-key"));
+    }
+
+    #[test]
+    fn test_extract_forwardable_request_headers_filters_to_allowlist() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc".parse().unwrap());
+        headers.insert("x-request-id", "req-123".parse().unwrap());
+        headers.insert("x-custom-header", "blocked".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        assert_eq!(
+            forwarded.get("authorization"),
+            Some(&"Bearer abc".to_string())
+        );
+        assert_eq!(forwarded.get("x-request-id"), Some(&"req-123".to_string()));
+        assert!(!forwarded.contains_key("x-custom-header"));
     }
 
     #[test]

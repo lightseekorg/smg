@@ -45,7 +45,9 @@ use crate::{
     observability::metrics::Metrics,
     routers::{
         common::{
-            header_utils::{preserve_response_headers, ApiProvider},
+            header_utils::{
+                extract_forwardable_request_headers, preserve_response_headers, ApiProvider,
+            },
             mcp_utils::DEFAULT_MAX_ITERATIONS,
             persistence_utils::persist_conversation_items,
         },
@@ -683,6 +685,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
+    let forwarded_headers = extract_forwardable_request_headers(headers);
 
     #[expect(
         clippy::disallowed_methods,
@@ -697,10 +700,11 @@ pub(super) fn handle_streaming_with_tool_interception(
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
         let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
-        let session = McpToolSession::new(
+        let session = McpToolSession::new_with_headers(
             &orchestrator_clone,
             mcp_servers.clone(),
             &session_request_id,
+            forwarded_headers.clone(),
         );
         let mut current_payload = payload_clone;
         prepare_mcp_tools_as_functions(&mut current_payload, &session);
