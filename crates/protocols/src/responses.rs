@@ -665,9 +665,13 @@ pub enum ResponseInputOutputItem {
     SimpleInputMessage {
         content: StringOrContentParts,
         role: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Spec: `EasyInputMessage.type` is `optional "message"`. Constrained
+        /// to a single-value tag enum so payloads with an unknown `type`
+        /// (e.g. `"input_file"`, `"totally_made_up"`) do not silently land
+        /// in this untagged catch-all variant — P5 fail-fast contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
-        r#type: Option<String>,
+        r#type: Option<SimpleInputMessageTypeTag>,
         /// Optional phase label (spec: EasyInputMessage.phase).
         ///
         /// Preserved through conversation storage so gpt-5.3-codex+ does not
@@ -675,6 +679,17 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<MessagePhase>,
     },
+}
+
+/// Single-value tag enum pinning `EasyInputMessage.type` to the spec's only
+/// permitted value, `"message"`. Used to keep [`ResponseInputOutputItem::SimpleInputMessage`]
+/// — which is the `#[serde(untagged)]` fallback in the outer `type`-tagged enum
+/// — from silently swallowing payloads whose `type` discriminator is unknown
+/// (P5 fail-fast contract).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SimpleInputMessageTypeTag {
+    Message,
 }
 
 /// Detail level for [`ResponseContentPart::InputFile`]. Spec restricts this
@@ -2695,6 +2710,84 @@ mod tests {
             msg.contains("totally_made_up") || msg.contains("unknown variant"),
             "error should mention the unknown variant, got: {msg}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // P5: ResponseInputOutputItem fail-fast on unknown `type` discriminator
+    //
+    // `ResponseInputOutputItem` is `#[serde(tag = "type")]` with a single
+    // `#[serde(untagged)] SimpleInputMessage` fallback. Before P5, that
+    // fallback accepted any `{role, content, type: "<anything>"}` payload
+    // because `type` was `Option<String>`. The spec (EasyInputMessage.type)
+    // constrains `type` to absent or `"message"`, so P5 replaces the loose
+    // `Option<String>` with `Option<SimpleInputMessageTypeTag>` — unknown
+    // discriminators must now return a deserialize error (→ 400).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn input_item_unknown_type_fails_fast() {
+        // Spec-invalid discriminator must NOT silently fall into
+        // SimpleInputMessage. Previously `type: "totally_made_up"` deserialized
+        // cleanly because `r#type` was `Option<String>`.
+        let raw = json!({
+            "type": "totally_made_up",
+            "role": "user",
+            "content": "hello"
+        });
+        let err = serde_json::from_value::<ResponseInputOutputItem>(raw)
+            .expect_err("unknown input-item type must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "deserialize error must carry a message, got empty: {msg}"
+        );
+    }
+
+    #[test]
+    fn simple_input_message_without_type_still_deserializes() {
+        // Per spec, `EasyInputMessage.type` is optional. Omitting it must
+        // continue to route to the untagged SimpleInputMessage variant.
+        let raw = json!({
+            "role": "user",
+            "content": "hello"
+        });
+        let item: ResponseInputOutputItem =
+            serde_json::from_value(raw).expect("missing type must still deserialize");
+        match item {
+            ResponseInputOutputItem::SimpleInputMessage {
+                role,
+                content,
+                r#type,
+                ..
+            } => {
+                assert_eq!(role, "user");
+                assert!(matches!(content, StringOrContentParts::String(ref s) if s == "hello"));
+                assert!(r#type.is_none(), "absent type must deserialize as None");
+            }
+            other => panic!("expected SimpleInputMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simple_input_message_with_type_message_deserializes() {
+        // Per spec, `type: "message"` is the only non-null value permitted on
+        // EasyInputMessage. Round-trip it intact.
+        let raw = json!({
+            "type": "message",
+            "role": "user",
+            "content": "hi"
+        });
+        let item: ResponseInputOutputItem =
+            serde_json::from_value(raw.clone()).expect("`type: message` must deserialize");
+        match &item {
+            ResponseInputOutputItem::SimpleInputMessage { r#type, .. } => {
+                assert_eq!(*r#type, Some(SimpleInputMessageTypeTag::Message));
+            }
+            other => panic!("expected SimpleInputMessage, got {other:?}"),
+        }
+        // Serializes back to the same wire bytes (canonical shape).
+        let roundtripped = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(roundtripped, raw);
     }
 
     // ------------------------------------------------------------------
