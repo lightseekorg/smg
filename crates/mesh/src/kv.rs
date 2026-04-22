@@ -473,6 +473,14 @@ pub struct MeshKV {
     /// Receiver-side chunk reassembly buffer shared across all inbound
     /// SyncStream connections on this node.
     chunk_assembler: Arc<ChunkAssembler>,
+    /// Auto-registered `config:` CRDT namespace (LastWriterWins).
+    /// Pre-created at `new()` time so every gateway (admin API,
+    /// middleware, adapters) can read and write config without the
+    /// application having to remember to `configure_crdt_prefix`
+    /// explicitly. Also used by the gossip receive path to mirror
+    /// incoming v1 `StoreType::App` entries into `config:{key}` for
+    /// rolling-upgrade compatibility.
+    configs: Arc<CrdtNamespace>,
     /// Server name for this node (used to derive replica_id).
     server_name: String,
     /// Replica ID: hash(server_name) as u64.
@@ -480,19 +488,46 @@ pub struct MeshKV {
 }
 
 impl MeshKV {
-    /// Create a new MeshKV instance.
+    /// Create a new MeshKV instance. Auto-registers the `config:`
+    /// CRDT namespace (LastWriterWins) so gateway readers and the
+    /// gossip receive path can always reach the config store via
+    /// `mesh_kv.configs()` without a separate wiring step.
     pub fn new(server_name: String) -> Self {
         let replica_id = Self::derive_replica_id(&server_name);
+        let store = Arc::new(CrdtOrMap::new());
+        let subscriber_registry = Arc::new(SubscriberRegistry::new());
+        let mut configured_prefixes = HashMap::new();
+        configured_prefixes.insert(
+            "config:".to_string(),
+            StoreMode::Crdt {
+                merge_strategy: MergeStrategy::LastWriterWins,
+            },
+        );
+        let configs = Arc::new(CrdtNamespace {
+            prefix: "config:".to_string(),
+            store: store.clone(),
+            subscriber_registry: subscriber_registry.clone(),
+            merge_strategy: MergeStrategy::LastWriterWins,
+        });
         Self {
-            store: Arc::new(CrdtOrMap::new()),
-            configured_prefixes: RwLock::new(HashMap::new()),
+            store,
+            configured_prefixes: RwLock::new(configured_prefixes),
             stream_namespaces: RwLock::new(Vec::new()),
-            subscriber_registry: Arc::new(SubscriberRegistry::new()),
+            subscriber_registry,
             drain_registry: Arc::new(DrainRegistry::new()),
             chunk_assembler: Arc::new(ChunkAssembler::new()),
+            configs,
             server_name,
             replica_id,
         }
+    }
+
+    /// Shared handle to the auto-registered `config:` CRDT namespace.
+    /// Gateway middleware, admin API, and the gossip receive path use
+    /// this to read and write cluster-wide configuration (rate-limit
+    /// limits, feature flags, etc.) with LastWriterWins merge.
+    pub fn configs(&self) -> Arc<CrdtNamespace> {
+        self.configs.clone()
     }
 
     /// Handle to the node-wide chunk reassembly buffer. Used by the
@@ -655,6 +690,41 @@ mod tests {
         let ns = kv.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
         assert_eq!(ns.prefix(), "worker:");
         assert!(kv.is_prefix_configured("worker:"));
+    }
+
+    #[test]
+    fn test_configs_prefix_auto_registered() {
+        // The `config:` prefix is always registered at construction;
+        // gateway code must not have to call configure_crdt_prefix for
+        // it, and a redundant call would panic per the one-configure-
+        // per-prefix rule.
+        let kv = MeshKV::new("test-node".to_string());
+        assert!(kv.is_prefix_configured("config:"));
+        let configs = kv.configs();
+        assert_eq!(configs.prefix(), "config:");
+    }
+
+    #[test]
+    fn test_configs_put_get_round_trip() {
+        let kv = MeshKV::new("test-node".to_string());
+        let configs = kv.configs();
+        configs.put("config:rate_limit", b"100".to_vec());
+        assert_eq!(
+            configs.get("config:rate_limit"),
+            Some(b"100".to_vec()),
+            "config namespace round-trips through the shared CRDT store"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "already configured")]
+    fn test_configure_config_prefix_twice_panics() {
+        // Application code must not try to reconfigure `config:` — the
+        // auto-registration at MeshKV::new() already owns the slot.
+        // This guards against accidental reconfiguration that would
+        // replace the merge strategy or subscriber capacity.
+        let kv = MeshKV::new("test-node".to_string());
+        kv.configure_crdt_prefix("config:", MergeStrategy::LastWriterWins);
     }
 
     #[test]

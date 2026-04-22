@@ -1015,6 +1015,21 @@ impl Gossip for GossipService {
                                                                         >= app_state.version
                                                                 });
                                                             if !dominated {
+                                                                // Mirror into the v2 `config:` CRDT
+                                                                // namespace so v2-only readers can
+                                                                // reach the same value during a
+                                                                // rolling upgrade, even when the
+                                                                // source is a v1 node still
+                                                                // writing to AppStore.
+                                                                if let Some(ref kv) = mesh_kv {
+                                                                    kv.configs().put(
+                                                                        &format!(
+                                                                            "config:{}",
+                                                                            app_state.key
+                                                                        ),
+                                                                        app_state.value.clone(),
+                                                                    );
+                                                                }
                                                                 if let Err(err) = stores.app.insert(
                                                                     app_state.key.clone(),
                                                                     app_state,
@@ -1305,6 +1320,16 @@ impl Gossip for GossipService {
                                                                     let dominated = stores.app.get(&key)
                                                                         .is_some_and(|existing| existing.version >= app_state.version);
                                                                     if !dominated {
+                                                                        // Mirror into the v2 `config:` CRDT
+                                                                        // namespace so v2-only readers can
+                                                                        // reach values a v1 snapshot sender
+                                                                        // is still populating via AppStore.
+                                                                        if let Some(ref kv) = mesh_kv {
+                                                                            kv.configs().put(
+                                                                                &format!("config:{}", app_state.key),
+                                                                                app_state.value.clone(),
+                                                                            );
+                                                                        }
                                                                         let _ = stores.app.insert(key, app_state);
                                                                     }
                                                                 }
