@@ -11,6 +11,8 @@ use serde_json::{Map, Value};
 
 /// Multipart field carrying the explicit admin target tenant id.
 pub const SKILLS_MULTIPART_TENANT_ID_FIELD: &str = "tenant_id";
+/// Query parameter carrying the explicit admin target tenant id.
+pub const SKILLS_QUERY_TENANT_ID_PARAM: &str = "tenant_id";
 /// Multipart field for zip archive uploads.
 pub const SKILLS_MULTIPART_BUNDLE_FIELD: &str = "bundle";
 /// Alternate multipart field name accepted for zip archive uploads.
@@ -174,6 +176,65 @@ pub struct SkillMutationResponse {
     pub version: SkillVersionResponse,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<SkillWarningResponse>,
+}
+
+/// Query parameters accepted by `GET /v1/skills`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct SkillsListQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Query parameters accepted by `GET /v1/skills/{skill_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct SkillGetQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+}
+
+/// Query parameters accepted by `GET /v1/skills/{skill_id}/versions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct SkillVersionsListQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default)]
+    pub include_deprecated: bool,
+}
+
+/// One page of skill records from `GET /v1/skills`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillsListResponse {
+    pub object: String,
+    pub data: Vec<SkillResponse>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_id: Option<String>,
+}
+
+/// One page of version records from `GET /v1/skills/{skill_id}/versions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillVersionsListResponse {
+    pub object: String,
+    pub data: Vec<SkillVersionResponse>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_id: Option<String>,
 }
 
 /// Standard error envelope for skills CRUD endpoints.

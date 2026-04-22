@@ -1,21 +1,31 @@
 use axum::{
-    extract::{multipart::MultipartError, Multipart, Path, State},
-    http::StatusCode,
+    extract::{multipart::MultipartError, Multipart, Path, Query, State},
+    http::{
+        header::{self, HeaderMap, HeaderValue},
+        StatusCode,
+    },
     response::{IntoResponse, Response},
     Json,
 };
 use openai_protocol::skills::{
-    SkillMutationResponse, SkillResponse, SkillVersionFileResponse, SkillVersionResponse,
-    SkillWarningResponse, SkillsErrorBody, SkillsErrorEnvelope, SKILLS_MULTIPART_BUNDLE_FIELD,
-    SKILLS_MULTIPART_FILES_FIELD, SKILLS_MULTIPART_FILE_FIELD, SKILLS_MULTIPART_TENANT_ID_FIELD,
+    SkillGetQuery, SkillMutationResponse, SkillResponse, SkillVersionFileResponse,
+    SkillVersionResponse, SkillVersionsListQuery, SkillVersionsListResponse, SkillWarningResponse,
+    SkillsErrorBody, SkillsErrorEnvelope, SkillsListQuery, SkillsListResponse,
+    SKILLS_MULTIPART_BUNDLE_FIELD, SKILLS_MULTIPART_FILES_FIELD, SKILLS_MULTIPART_FILE_FIELD,
+    SKILLS_MULTIPART_TENANT_ID_FIELD,
 };
+use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use smg_skills::{
     CreateSkillRequest, CreateSkillVersionRequest, SkillCreateResult, SkillServiceError,
     SkillUpload, UploadedSkillFile,
 };
 
 use crate::{middleware::resolve_admin_target_tenant_key, server::AppState};
+
+const DEFAULT_SKILLS_LIST_LIMIT: usize = 100;
+const MAX_SKILLS_LIST_LIMIT: usize = 100;
 
 #[derive(Debug)]
 struct ParsedSkillUpload {
@@ -66,6 +76,10 @@ impl From<SkillServiceError> for SkillsApiError {
             },
             SkillServiceError::SkillNotFound { .. } => Self::NotFound {
                 code: "skill_not_found",
+                message: error.to_string(),
+            },
+            SkillServiceError::SkillVersionNotFound { .. } => Self::NotFound {
+                code: "skill_version_not_found",
                 message: error.to_string(),
             },
             SkillServiceError::MissingUploadParts => Self::BadRequest {
@@ -132,6 +146,53 @@ pub async fn create_skill_version(
     }
 }
 
+pub async fn list_skills(
+    State(state): State<std::sync::Arc<AppState>>,
+    Query(query): Query<SkillsListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match list_skills_impl(state, query, &headers).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn get_skill(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    Query(query): Query<SkillGetQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match get_skill_impl(state, skill_id, query, &headers).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn list_skill_versions(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    Query(query): Query<SkillVersionsListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match list_skill_versions_impl(state, skill_id, query, &headers).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn get_skill_version(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    Query(query): Query<SkillGetQuery>,
+    headers: HeaderMap,
+) -> Response {
+    match get_skill_version_impl(state, skill_id, version, query, &headers).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
 async fn create_skill_impl(
     state: std::sync::Arc<AppState>,
     multipart: Multipart,
@@ -180,6 +241,367 @@ async fn create_skill_version_impl(
         .await
         .map_err(SkillsApiError::from)?;
     build_mutation_response(result)
+}
+
+async fn list_skills_impl(
+    state: std::sync::Arc<AppState>,
+    query: SkillsListQuery,
+    request_headers: &HeaderMap,
+) -> Result<Response, SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let limit = validate_list_limit(query.limit)?;
+    let mut records = skill_service
+        .list_skills(&tenant_id, query.source.as_deref(), query.name.as_deref())
+        .await
+        .map_err(SkillsApiError::from)?;
+    records.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.skill_id.cmp(&right.skill_id))
+    });
+
+    let etag = build_list_etag(
+        &query,
+        records
+            .iter()
+            .map(|record| (record.skill_id.clone(), record.updated_at.to_rfc3339())),
+    )?;
+    let last_modified = list_last_modified(records.iter().map(|record| record.updated_at));
+    if is_not_modified(request_headers, &etag, last_modified) {
+        return not_modified_response(&etag, last_modified);
+    }
+
+    let page = paginate_records(records, query.after.as_deref(), limit, |record| {
+        record.skill_id.as_str()
+    })?;
+    let body = SkillsListResponse {
+        object: "list".to_string(),
+        first_id: page.items.first().map(|record| record.skill_id.clone()),
+        last_id: page.items.last().map(|record| record.skill_id.clone()),
+        has_more: page.has_more,
+        data: page.items.iter().map(skill_response_from_record).collect(),
+    };
+
+    with_cache_headers(etag, last_modified, Json(body))
+}
+
+async fn get_skill_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    query: SkillGetQuery,
+    request_headers: &HeaderMap,
+) -> Result<Response, SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let record = skill_service
+        .get_skill(&tenant_id, &skill_id)
+        .await
+        .map_err(SkillsApiError::from)?;
+    let response_body = skill_response_from_record(&record);
+    let etag = build_resource_etag(&response_body, false)?;
+    let last_modified = record.updated_at;
+    if is_not_modified(request_headers, &etag, last_modified) {
+        return not_modified_response(&etag, last_modified);
+    }
+
+    with_cache_headers(etag, last_modified, Json(response_body))
+}
+
+async fn list_skill_versions_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    query: SkillVersionsListQuery,
+    request_headers: &HeaderMap,
+) -> Result<Response, SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let limit = validate_list_limit(query.limit)?;
+    let mut versions = skill_service
+        .list_skill_versions(&tenant_id, &skill_id, query.include_deprecated)
+        .await
+        .map_err(SkillsApiError::from)?;
+    versions.sort_by(|left, right| {
+        right
+            .version_number
+            .cmp(&left.version_number)
+            .then_with(|| left.version.cmp(&right.version))
+    });
+
+    let etag = build_list_etag(
+        &query,
+        versions
+            .iter()
+            .map(|record| (record.version.clone(), record.created_at.to_rfc3339())),
+    )?;
+    let last_modified = list_last_modified(versions.iter().map(|record| record.created_at));
+    if is_not_modified(request_headers, &etag, last_modified) {
+        return not_modified_response(&etag, last_modified);
+    }
+
+    let page = paginate_records(versions, query.after.as_deref(), limit, |record| {
+        record.version.as_str()
+    })?;
+    let body = SkillVersionsListResponse {
+        object: "list".to_string(),
+        first_id: page.items.first().map(|record| record.version.clone()),
+        last_id: page.items.last().map(|record| record.version.clone()),
+        has_more: page.has_more,
+        data: page
+            .items
+            .iter()
+            .map(skill_version_response_from_record)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
+    with_cache_headers(etag, last_modified, Json(body))
+}
+
+async fn get_skill_version_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    version: String,
+    query: SkillGetQuery,
+    request_headers: &HeaderMap,
+) -> Result<Response, SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let record = skill_service
+        .get_skill_version(&tenant_id, &skill_id, &version)
+        .await
+        .map_err(SkillsApiError::from)?;
+    let response_body = skill_version_response_from_record(&record)?;
+    let etag = build_resource_etag(&response_body, false)?;
+    let last_modified = record.created_at;
+    if is_not_modified(request_headers, &etag, last_modified) {
+        return not_modified_response(&etag, last_modified);
+    }
+
+    with_cache_headers(etag, last_modified, Json(response_body))
+}
+
+struct Page<T> {
+    items: Vec<T>,
+    has_more: bool,
+}
+
+fn resolve_target_tenant_id(raw_tenant_id: Option<&str>) -> Result<String, SkillsApiError> {
+    let tenant_id = raw_tenant_id.ok_or_else(|| SkillsApiError::BadRequest {
+        code: "missing_target_tenant",
+        message: "target tenant id is required".to_string(),
+    })?;
+    resolve_admin_target_tenant_key(tenant_id)
+        .map(|tenant_key| tenant_key.to_string())
+        .map_err(|error| SkillsApiError::BadRequest {
+            code: "missing_target_tenant",
+            message: error.to_string(),
+        })
+}
+
+fn validate_list_limit(limit: Option<u32>) -> Result<usize, SkillsApiError> {
+    let limit = limit.unwrap_or(DEFAULT_SKILLS_LIST_LIMIT as u32);
+    if limit == 0 || limit as usize > MAX_SKILLS_LIST_LIMIT {
+        return Err(SkillsApiError::BadRequest {
+            code: "invalid_limit",
+            message: format!("limit must be between 1 and {MAX_SKILLS_LIST_LIMIT}"),
+        });
+    }
+    Ok(limit as usize)
+}
+
+fn paginate_records<T, F>(
+    items: Vec<T>,
+    after: Option<&str>,
+    limit: usize,
+    id_of: F,
+) -> Result<Page<T>, SkillsApiError>
+where
+    F: Fn(&T) -> &str,
+{
+    let start = if let Some(after) = after.map(str::trim).filter(|value| !value.is_empty()) {
+        items
+            .iter()
+            .position(|item| id_of(item) == after)
+            .map(|index| index + 1)
+            .ok_or_else(|| SkillsApiError::BadRequest {
+                code: "invalid_after_cursor",
+                message: format!("after cursor '{after}' was not found"),
+            })?
+    } else {
+        0
+    };
+
+    let total = items.len();
+    let items = items
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .collect::<Vec<_>>();
+    Ok(Page {
+        has_more: total > start.saturating_add(limit),
+        items,
+    })
+}
+
+fn list_last_modified<I>(timestamps: I) -> chrono::DateTime<chrono::Utc>
+where
+    I: Iterator<Item = chrono::DateTime<chrono::Utc>>,
+{
+    timestamps
+        .max()
+        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::UNIX_EPOCH))
+}
+
+fn build_list_etag<Q, I>(query: &Q, records: I) -> Result<String, SkillsApiError>
+where
+    Q: Serialize,
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(
+        serde_json::to_vec(query).map_err(|error| SkillsApiError::Internal {
+            code: "skills_internal_error",
+            message: format!("failed to serialize skills query for ETag: {error}"),
+        })?,
+    );
+    for (id, updated_at) in records {
+        hasher.update(id.as_bytes());
+        hasher.update([0]);
+        hasher.update(updated_at.as_bytes());
+        hasher.update([0xff]);
+    }
+    Ok(format!("W/\"{:x}\"", hasher.finalize()))
+}
+
+fn build_resource_etag<T: Serialize>(value: &T, weak: bool) -> Result<String, SkillsApiError> {
+    let digest =
+        Sha256::digest(
+            serde_json::to_vec(value).map_err(|error| SkillsApiError::Internal {
+                code: "skills_internal_error",
+                message: format!("failed to serialize skills response payload: {error}"),
+            })?,
+        );
+    Ok(if weak {
+        format!("W/\"{digest:x}\"")
+    } else {
+        format!("\"{digest:x}\"")
+    })
+}
+
+fn is_not_modified(
+    request_headers: &HeaderMap,
+    etag: &str,
+    last_modified: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if let Some(if_none_match) = request_headers.get(header::IF_NONE_MATCH) {
+        return if_none_match_matches(if_none_match, etag);
+    }
+
+    request_headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_http_date)
+        .is_some_and(|value| {
+            let last_modified = last_modified.timestamp();
+            last_modified <= value.timestamp()
+        })
+}
+
+fn if_none_match_matches(value: &HeaderValue, etag: &str) -> bool {
+    value.to_str().ok().is_some_and(|value| {
+        value.split(',').map(str::trim).any(|candidate| {
+            candidate == "*" || strip_weak_prefix(candidate) == strip_weak_prefix(etag)
+        })
+    })
+}
+
+fn strip_weak_prefix(etag: &str) -> &str {
+    etag.strip_prefix("W/").unwrap_or(etag)
+}
+
+fn parse_http_date(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|value| value.with_timezone(&chrono::Utc))
+}
+
+fn not_modified_response(
+    etag: &str,
+    last_modified: chrono::DateTime<chrono::Utc>,
+) -> Result<Response, SkillsApiError> {
+    Ok((
+        StatusCode::NOT_MODIFIED,
+        cache_headers(etag, last_modified)?,
+    )
+        .into_response())
+}
+
+fn with_cache_headers<T: IntoResponse>(
+    etag: String,
+    last_modified: chrono::DateTime<chrono::Utc>,
+    body: T,
+) -> Result<Response, SkillsApiError> {
+    Ok((cache_headers(&etag, last_modified)?, body).into_response())
+}
+
+fn cache_headers(
+    etag: &str,
+    last_modified: chrono::DateTime<chrono::Utc>,
+) -> Result<HeaderMap, SkillsApiError> {
+    let mut headers = HeaderMap::with_capacity(2);
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(etag).map_err(|error| SkillsApiError::Internal {
+            code: "skills_internal_error",
+            message: format!("failed to build ETag header: {error}"),
+        })?,
+    );
+    headers.insert(
+        header::LAST_MODIFIED,
+        HeaderValue::from_str(
+            &last_modified
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string(),
+        )
+        .map_err(|error| SkillsApiError::Internal {
+            code: "skills_internal_error",
+            message: format!("failed to build Last-Modified header: {error}"),
+        })?,
+    );
+    Ok(headers)
 }
 
 async fn parse_skill_upload(mut multipart: Multipart) -> Result<ParsedSkillUpload, SkillsApiError> {
@@ -326,40 +748,8 @@ fn build_mutation_response(
     value: SkillCreateResult,
 ) -> Result<SkillMutationResponse, SkillsApiError> {
     Ok(SkillMutationResponse {
-        skill: SkillResponse {
-            id: value.skill.skill_id.clone(),
-            name: value.skill.name.clone(),
-            short_description: value.skill.short_description.clone(),
-            description: value.skill.description.clone().unwrap_or_default(),
-            source: value.skill.source.clone(),
-            latest_version: value.skill.latest_version.clone(),
-            default_version: value.skill.default_version.clone(),
-            has_code_files: value.skill.has_code_files,
-            created_at: value.skill.created_at.to_rfc3339(),
-            updated_at: value.skill.updated_at.to_rfc3339(),
-        },
-        version: SkillVersionResponse {
-            skill_id: value.version.skill_id.clone(),
-            version: value.version.version.clone(),
-            version_number: value.version.version_number,
-            name: value.version.name.clone(),
-            short_description: value.version.short_description.clone(),
-            description: value.version.description.clone(),
-            interface: serialize_optional_json(value.version.interface.as_ref())?,
-            dependencies: serialize_optional_json(value.version.dependencies.as_ref())?,
-            policy: serialize_optional_json(value.version.policy.as_ref())?,
-            deprecated: value.version.deprecated,
-            files: value
-                .version
-                .file_manifest
-                .iter()
-                .map(|entry| SkillVersionFileResponse {
-                    path: entry.relative_path.clone(),
-                    size_bytes: entry.size_bytes,
-                })
-                .collect(),
-            created_at: value.version.created_at.to_rfc3339(),
-        },
+        skill: skill_response_from_record(&value.skill),
+        version: skill_version_response_from_record(&value.version)?,
         warnings: value
             .warnings
             .into_iter()
@@ -372,7 +762,48 @@ fn build_mutation_response(
     })
 }
 
-fn serialize_optional_json<T: serde::Serialize>(
+fn skill_response_from_record(record: &smg_skills::SkillRecord) -> SkillResponse {
+    SkillResponse {
+        id: record.skill_id.clone(),
+        name: record.name.clone(),
+        short_description: record.short_description.clone(),
+        description: record.description.clone().unwrap_or_default(),
+        source: record.source.clone(),
+        latest_version: record.latest_version.clone(),
+        default_version: record.default_version.clone(),
+        has_code_files: record.has_code_files,
+        created_at: record.created_at.to_rfc3339(),
+        updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn skill_version_response_from_record(
+    record: &smg_skills::SkillVersionRecord,
+) -> Result<SkillVersionResponse, SkillsApiError> {
+    Ok(SkillVersionResponse {
+        skill_id: record.skill_id.clone(),
+        version: record.version.clone(),
+        version_number: record.version_number,
+        name: record.name.clone(),
+        short_description: record.short_description.clone(),
+        description: record.description.clone(),
+        interface: serialize_optional_json(record.interface.as_ref())?,
+        dependencies: serialize_optional_json(record.dependencies.as_ref())?,
+        policy: serialize_optional_json(record.policy.as_ref())?,
+        deprecated: record.deprecated,
+        files: record
+            .file_manifest
+            .iter()
+            .map(|entry| SkillVersionFileResponse {
+                path: entry.relative_path.clone(),
+                size_bytes: entry.size_bytes,
+            })
+            .collect(),
+        created_at: record.created_at.to_rfc3339(),
+    })
+}
+
+fn serialize_optional_json<T: Serialize>(
     value: Option<&T>,
 ) -> Result<Option<Value>, SkillsApiError> {
     value

@@ -106,6 +106,57 @@ fn build_skill_zip(skill_md: &[u8], extra_files: &[(&str, &[u8])]) -> Vec<u8> {
     writer.finish().expect("finish zip writer").into_inner()
 }
 
+async fn create_skill_via_api(
+    client: &reqwest::Client,
+    base_url: &str,
+    tenant_id: &str,
+    skill_md: &[u8],
+) -> Value {
+    let response = client
+        .post(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .multipart(
+            Form::new().text("tenant_id", tenant_id.to_string()).part(
+                "files[]",
+                Part::bytes(skill_md.to_vec())
+                    .file_name("SKILL.md")
+                    .mime_str("text/markdown")
+                    .expect("valid markdown mime"),
+            ),
+        )
+        .send()
+        .await
+        .expect("send create skill request");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    response.json().await.expect("json response")
+}
+
+async fn create_skill_version_via_api(
+    client: &reqwest::Client,
+    base_url: &str,
+    tenant_id: &str,
+    skill_id: &str,
+    skill_md: &[u8],
+) -> Value {
+    let response = client
+        .post(format!("{base_url}/v1/skills/{skill_id}/versions"))
+        .bearer_auth("test-admin-key")
+        .multipart(
+            Form::new().text("tenant_id", tenant_id.to_string()).part(
+                "files[]",
+                Part::bytes(skill_md.to_vec())
+                    .file_name("SKILL.md")
+                    .mime_str("text/markdown")
+                    .expect("valid markdown mime"),
+            ),
+        )
+        .send()
+        .await
+        .expect("send create skill version request");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    response.json().await.expect("json response")
+}
+
 #[tokio::test]
 async fn create_skill_returns_created_skill_and_version() {
     let blob_dir = tempfile::tempdir().expect("blob tempdir");
@@ -294,6 +345,210 @@ async fn create_skill_version_returns_incremented_version() {
     assert_eq!(
         version_body["version"]["files"].as_array().map(Vec::len),
         Some(2)
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn list_skills_returns_paginated_results_and_supports_if_none_match() {
+    let blob_dir = tempfile::tempdir().expect("blob tempdir");
+    let cache_dir = tempfile::tempdir().expect("cache tempdir");
+    let app = create_skills_test_app(skills_test_config(&blob_dir, &cache_dir, true)).await;
+    let (base_url, server) = spawn_app(app).await;
+    let client = reqwest::Client::new();
+
+    let first_skill = create_skill_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg.",
+    )
+    .await;
+    let second_skill = create_skill_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        b"---\nname: acme:search\ndescription: Search the repo\n---\nUse fd.",
+    )
+    .await;
+
+    let list_response = client
+        .get(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a"), ("limit", "1")])
+        .send()
+        .await
+        .expect("send list skills request");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let etag = list_response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .expect("etag header")
+        .to_str()
+        .expect("etag text")
+        .to_string();
+    assert!(list_response
+        .headers()
+        .contains_key(reqwest::header::LAST_MODIFIED));
+    let list_body: Value = list_response.json().await.expect("json response");
+    assert_eq!(list_body["object"], "list");
+    assert_eq!(list_body["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(list_body["has_more"], true);
+
+    let after = list_body["last_id"]
+        .as_str()
+        .expect("last id on first page")
+        .to_string();
+    let next_page = client
+        .get(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .query(&[
+            ("tenant_id", "tenant-a"),
+            ("limit", "1"),
+            ("after", after.as_str()),
+        ])
+        .send()
+        .await
+        .expect("send second list skills request");
+    assert_eq!(next_page.status(), reqwest::StatusCode::OK);
+    let next_body: Value = next_page.json().await.expect("json response");
+    assert_eq!(next_body["data"].as_array().map(Vec::len), Some(1));
+    let returned_id = next_body["data"][0]["id"].as_str().expect("skill id");
+    assert_ne!(returned_id, after);
+    assert!(
+        returned_id == first_skill["skill"]["id"].as_str().expect("first skill id")
+            || returned_id
+                == second_skill["skill"]["id"]
+                    .as_str()
+                    .expect("second skill id")
+    );
+
+    let not_modified = client
+        .get(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a"), ("limit", "1")])
+        .header(reqwest::header::IF_NONE_MATCH, etag)
+        .send()
+        .await
+        .expect("send conditional list skills request");
+    assert_eq!(not_modified.status(), reqwest::StatusCode::NOT_MODIFIED);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn get_skill_and_version_read_endpoints_require_target_tenant_and_return_cache_headers() {
+    let blob_dir = tempfile::tempdir().expect("blob tempdir");
+    let cache_dir = tempfile::tempdir().expect("cache tempdir");
+    let app = create_skills_test_app(skills_test_config(&blob_dir, &cache_dir, true)).await;
+    let (base_url, server) = spawn_app(app).await;
+    let client = reqwest::Client::new();
+
+    let created = create_skill_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        b"---\nname: acme:map\ndescription: Map the repo\nmetadata:\n  short-description: Map it\n---\nUse rg.",
+    )
+    .await;
+    let skill_id = created["skill"]["id"]
+        .as_str()
+        .expect("skill id")
+        .to_string();
+
+    create_skill_version_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        &skill_id,
+        b"---\nname: acme:map\ndescription: Updated mapping skill\nmetadata:\n  short-description: Map it better\n---\nUse rg --files.",
+    )
+    .await;
+
+    let missing_tenant = client
+        .get(format!("{base_url}/v1/skills/{skill_id}"))
+        .bearer_auth("test-admin-key")
+        .send()
+        .await
+        .expect("send missing tenant get request");
+    assert_eq!(missing_tenant.status(), reqwest::StatusCode::BAD_REQUEST);
+    let missing_body: Value = missing_tenant.json().await.expect("json response");
+    assert_eq!(missing_body["error"]["code"], "missing_target_tenant");
+
+    let get_skill = client
+        .get(format!("{base_url}/v1/skills/{skill_id}"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .send()
+        .await
+        .expect("send get skill request");
+    assert_eq!(get_skill.status(), reqwest::StatusCode::OK);
+    let skill_etag = get_skill
+        .headers()
+        .get(reqwest::header::ETAG)
+        .expect("etag header")
+        .to_str()
+        .expect("etag text")
+        .to_string();
+    let skill_last_modified = get_skill
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .expect("last-modified header")
+        .to_str()
+        .expect("last-modified text")
+        .to_string();
+    assert!(get_skill
+        .headers()
+        .contains_key(reqwest::header::LAST_MODIFIED));
+    let skill_body: Value = get_skill.json().await.expect("json response");
+    assert_eq!(skill_body["id"], skill_id);
+
+    let list_versions = client
+        .get(format!("{base_url}/v1/skills/{skill_id}/versions"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .send()
+        .await
+        .expect("send list versions request");
+    assert_eq!(list_versions.status(), reqwest::StatusCode::OK);
+    let versions_body: Value = list_versions.json().await.expect("json response");
+    assert_eq!(versions_body["object"], "list");
+    assert_eq!(versions_body["data"].as_array().map(Vec::len), Some(2));
+
+    let get_version = client
+        .get(format!("{base_url}/v1/skills/{skill_id}/versions/2"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .send()
+        .await
+        .expect("send get version request");
+    assert_eq!(get_version.status(), reqwest::StatusCode::OK);
+    assert!(get_version.headers().contains_key(reqwest::header::ETAG));
+    let version_body: Value = get_version.json().await.expect("json response");
+    assert_eq!(version_body["version_number"], 2);
+
+    let not_modified = client
+        .get(format!("{base_url}/v1/skills/{skill_id}"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .header(reqwest::header::IF_NONE_MATCH, skill_etag)
+        .send()
+        .await
+        .expect("send conditional get skill request");
+    assert_eq!(not_modified.status(), reqwest::StatusCode::NOT_MODIFIED);
+
+    let not_modified_since = client
+        .get(format!("{base_url}/v1/skills/{skill_id}"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .header(reqwest::header::IF_MODIFIED_SINCE, skill_last_modified)
+        .send()
+        .await
+        .expect("send if-modified-since get skill request");
+    assert_eq!(
+        not_modified_since.status(),
+        reqwest::StatusCode::NOT_MODIFIED
     );
 
     server.abort();

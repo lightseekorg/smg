@@ -104,6 +104,15 @@ pub enum SkillServiceError {
     #[error("skill '{skill_id}' was not found for tenant '{tenant_id}'")]
     SkillNotFound { tenant_id: String, skill_id: String },
 
+    #[error(
+        "skill version '{version}' was not found for skill '{skill_id}' in tenant '{tenant_id}'"
+    )]
+    SkillVersionNotFound {
+        tenant_id: String,
+        skill_id: String,
+        version: String,
+    },
+
     #[error("multipart upload must contain either one zip archive or one or more files[] parts")]
     MissingUploadParts,
 
@@ -207,6 +216,155 @@ impl SkillService {
 
     pub fn blob_store(&self) -> Option<Arc<dyn BlobStore>> {
         self.inner.blob_store.clone()
+    }
+
+    pub async fn get_skill(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+    ) -> Result<SkillRecord, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+
+        metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or(SkillServiceError::SkillNotFound {
+                tenant_id,
+                skill_id,
+            })
+    }
+
+    pub async fn list_skills(
+        &self,
+        tenant_id: &str,
+        source: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<Vec<SkillRecord>, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+
+        let source = source.map(str::trim).filter(|value| !value.is_empty());
+        let name = name.map(str::trim).filter(|value| !value.is_empty());
+
+        let mut records = metadata_store.list_skills(&tenant_id).await?;
+        records.retain(|record| {
+            source.is_none_or(|value| record.source == value)
+                && name.is_none_or(|value| record.name == value)
+        });
+        Ok(records)
+    }
+
+    pub async fn get_skill_version(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+        version_ref: &str,
+    ) -> Result<SkillVersionRecord, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let version_ref = normalize_required_value(
+            version_ref.to_string(),
+            SkillServiceError::SkillVersionNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+                version: version_ref.trim().to_string(),
+            },
+        )?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+
+        let skill = metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+
+        if version_ref == "latest" {
+            if let Some(latest_version) = skill.latest_version {
+                return metadata_store
+                    .get_skill_version(&skill_id, &latest_version)
+                    .await?
+                    .ok_or(SkillServiceError::SkillVersionNotFound {
+                        tenant_id,
+                        skill_id,
+                        version: latest_version,
+                    });
+            }
+        }
+
+        if let Some(record) = metadata_store
+            .get_skill_version(&skill_id, &version_ref)
+            .await?
+        {
+            return Ok(record);
+        }
+
+        if let Ok(version_number) = version_ref.parse::<u32>() {
+            let versions = metadata_store.list_skill_versions(&skill_id).await?;
+            if let Some(record) = versions
+                .into_iter()
+                .find(|record| record.version_number == version_number)
+            {
+                return Ok(record);
+            }
+        }
+
+        Err(SkillServiceError::SkillVersionNotFound {
+            tenant_id,
+            skill_id,
+            version: version_ref,
+        })
+    }
+
+    pub async fn list_skill_versions(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+        include_deprecated: bool,
+    ) -> Result<Vec<SkillVersionRecord>, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+
+        metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+
+        let mut versions = metadata_store.list_skill_versions(&skill_id).await?;
+        if !include_deprecated {
+            versions.retain(|record| !record.deprecated);
+        }
+        Ok(versions)
     }
 
     pub async fn create_skill(
@@ -681,6 +839,105 @@ mod tests {
             next.skill.default_version,
             Some(created.version.version.clone())
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_skills_filters_by_source_and_name() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+        service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:search\ndescription: Search the repo\n---\nUse fd."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+        service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-b".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Tenant B skill\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let tenant_a = service
+            .list_skills("tenant-a", Some("custom"), None)
+            .await?;
+        assert_eq!(tenant_a.len(), 2);
+        assert!(tenant_a.iter().all(|record| record.tenant_id == "tenant-a"));
+
+        let filtered = service
+            .list_skills("tenant-a", Some("custom"), Some("acme:map"))
+            .await?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "acme:map");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_skill_version_resolves_latest_and_integer_version_number() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        let created = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let second = service
+            .create_skill_version(CreateSkillVersionRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Updated mapping skill\n---\nUse rg --files."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let latest = service
+            .get_skill_version("tenant-a", &created.skill.skill_id, "latest")
+            .await?;
+        assert_eq!(latest.version, second.version.version);
+
+        let by_number = service
+            .get_skill_version("tenant-a", &created.skill.skill_id, "2")
+            .await?;
+        assert_eq!(by_number.version, second.version.version);
 
         Ok(())
     }
