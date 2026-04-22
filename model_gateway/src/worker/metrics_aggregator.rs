@@ -10,15 +10,19 @@ pub struct MetricPack {
 type PrometheusExposition = MetricsExposition<PrometheusType, PrometheusValue>;
 type PrometheusFamily = MetricFamily<PrometheusType, PrometheusValue>;
 
+// SAFETY: openmetrics_parser rejects colons in metric names. We encode colons to
+// this placeholder before parsing and decode back after serialization, preserving
+// the original `namespace:metric_name` colon format in the output.
+const COLON_SENTINEL: &str = "__smgcolon48f__";
+
 /// Aggregate Prometheus metrics scraped from multiple sources into a unified one
 pub fn aggregate_metrics(metric_packs: Vec<MetricPack>) -> anyhow::Result<String> {
     let mut expositions = vec![];
     for metric_pack in metric_packs {
         let metrics_text = &metric_pack.metrics_text;
-        // openmetrics_parser doesn't handle colons in metric names; replace with underscores
-        let metrics_text = metrics_text.replace(":", "_");
+        let encoded = metrics_text.replace(':', COLON_SENTINEL);
 
-        let exposition = match openmetrics_parser::prometheus::parse_prometheus(&metrics_text) {
+        let exposition = match openmetrics_parser::prometheus::parse_prometheus(&encoded) {
             Ok(x) => x,
             Err(err) => {
                 warn!(
@@ -33,7 +37,7 @@ pub fn aggregate_metrics(metric_packs: Vec<MetricPack>) -> anyhow::Result<String
     }
 
     let text = try_reduce(expositions.into_iter(), merge_exposition)?
-        .map(|x| format!("{x}"))
+        .map(|x| format!("{x}").replace(COLON_SENTINEL, ":"))
         .unwrap_or_default();
     Ok(text)
 }
@@ -114,4 +118,63 @@ where
     };
 
     Ok(Some(it.try_fold(first, f)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_preserves_colons_in_metric_names() {
+        let input = concat!(
+            "# HELP sglang:num_running_reqs Number of running requests.\n",
+            "# TYPE sglang:num_running_reqs gauge\n",
+            "sglang:num_running_reqs 42\n",
+        );
+        let packs = vec![MetricPack {
+            labels: vec![("worker".into(), "w0".into())],
+            metrics_text: input.into(),
+        }];
+        let output = aggregate_metrics(packs).unwrap();
+        assert!(
+            output.contains("sglang:num_running_reqs"),
+            "colon in metric name was lost: {output}"
+        );
+    }
+
+    #[test]
+    fn aggregate_preserves_colons_in_label_values() {
+        let input = concat!(
+            "# HELP up Target is up.\n",
+            "# TYPE up gauge\n",
+            "up{addr=\"grpc://host:9001\"} 1\n",
+        );
+        let packs = vec![MetricPack {
+            labels: vec![],
+            metrics_text: input.into(),
+        }];
+        let output = aggregate_metrics(packs).unwrap();
+        assert!(
+            output.contains("grpc://host:9001"),
+            "colon in label value was lost: {output}"
+        );
+    }
+
+    #[test]
+    fn aggregate_leaves_colonless_names_unchanged() {
+        let input = concat!(
+            "# HELP smg_http_requests_total Total HTTP requests.\n",
+            "# TYPE smg_http_requests_total counter\n",
+            "smg_http_requests_total 100\n",
+        );
+        let packs = vec![MetricPack {
+            labels: vec![],
+            metrics_text: input.into(),
+        }];
+        let output = aggregate_metrics(packs).unwrap();
+        assert!(
+            output.contains("smg_http_requests_total"),
+            "colonless metric name was mangled: {output}"
+        );
+    }
 }
