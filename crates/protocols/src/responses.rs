@@ -174,13 +174,6 @@ impl<'de> Deserialize<'de> for ResponsesFunctionToolChoice {
 /// whose `type` does not belong to that variant. Without the tag pinning,
 /// the `#[serde(untagged)]` enum would accept any object shape that
 /// happened to fit the field set of an earlier variant.
-///
-/// This type deliberately does NOT live in `common.rs`: Chat Completions
-/// has its own `ToolChoice` with a different `Function` wire shape
-/// (nested `{"function": {"name": ...}}`) and does not accept the
-/// `Types` / `Mcp` / `Custom` / `ApplyPatch` / `Shell` variants at all.
-/// Sharing one enum across both APIs would silently accept spec-invalid
-/// payloads on `/v1/chat/completions`.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesToolChoice {
@@ -198,14 +191,10 @@ pub enum ResponsesToolChoice {
 
     /// `{"type": "function", "name": "..."}` — Responses spec flat shape.
     ///
-    /// Accepts both the spec-canonical flat wire shape and the legacy
-    /// Chat-style nested shape (`{"type": "function", "function": {"name": "..."}}`)
-    /// on deserialize to preserve backward compatibility with smg clients
-    /// written against the pre-split shared `ToolChoice` type. Always
-    /// serializes as the canonical flat shape per the OpenAI Responses spec
-    /// — Postel's law: liberal on input, conservative on output.
-    ///
-    /// The nested legacy shape is gated behind a custom `Deserialize` impl on
+    /// Also accepts the legacy Chat-style nested shape
+    /// (`{"type": "function", "function": {"name": "..."}}`) on deserialize;
+    /// always serializes as the canonical flat shape. The nested legacy shape
+    /// is gated behind a custom `Deserialize` impl on
     /// `ResponsesFunctionToolChoice`; the untagged outer enum still pins the
     /// `"type": "function"` discriminator via `FunctionToolChoiceTag` so
     /// payloads without that tag cannot reach this variant.
@@ -615,7 +604,7 @@ pub struct ImageGenerationTool {
 }
 
 /// Mask reference for image-generation `edit` calls. Spec: `{ file_id?, image_url? }`.
-/// Reuses the same upload conventions as P1 `InputImage`.
+/// Reuses the same upload conventions as `InputImage`.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -803,17 +792,9 @@ pub enum ResponseInputOutputItem {
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
     /// generation by identifier, so `result` and `status` are accepted as
     /// absent on the input side. The full shape is
-    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`.
-    ///
-    /// This mirrors the OpenAI Python SDK 2.8.x
-    /// `response_input_item_param.ImageGenerationCall` TypedDict: while the
-    /// TypedDict types those fields as `Required[Optional[...]]`, the HTTP
-    /// API itself documents the id-only multi-turn reference form (see the
-    /// image-generation tool guide), and `skip_serializing_if` keeps the
-    /// serialized form spec-compatible when a full item is round-tripped.
-    /// The server-side `ResponseOutputItem::ImageGenerationCall` variant
-    /// remains strict because the gateway always populates those fields
-    /// on emit.
+    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`. The
+    /// server-side `ResponseOutputItem::ImageGenerationCall` variant remains
+    /// strict because the gateway always populates those fields on emit.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
@@ -836,7 +817,7 @@ pub enum ResponseInputOutputItem {
         /// Spec: `EasyInputMessage.type` is `optional "message"`. Constrained
         /// to a single-value tag enum so payloads with an unknown `type`
         /// (e.g. `"input_file"`, `"totally_made_up"`) do not silently land
-        /// in this untagged catch-all variant — P5 fail-fast contract.
+        /// in this untagged catch-all variant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
         r#type: Option<SimpleInputMessageTypeTag>,
@@ -852,8 +833,7 @@ pub enum ResponseInputOutputItem {
 /// Single-value tag enum pinning `EasyInputMessage.type` to the spec's only
 /// permitted value, `"message"`. Used to keep [`ResponseInputOutputItem::SimpleInputMessage`]
 /// — which is the `#[serde(untagged)]` fallback in the outer `type`-tagged enum
-/// — from silently swallowing payloads whose `type` discriminator is unknown
-/// (P5 fail-fast contract).
+/// — from silently swallowing payloads whose `type` discriminator is unknown.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SimpleInputMessageTypeTag {
@@ -962,8 +942,6 @@ pub enum ResponseReasoningContent {
 /// Tagged content element carried in `Reasoning.summary`.
 ///
 /// OpenAI spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
-/// Replaces the prior `Vec<String>` wire-type that broke bidirectional
-/// interoperability with spec-compliant clients.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
