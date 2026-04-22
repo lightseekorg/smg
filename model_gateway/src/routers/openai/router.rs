@@ -89,6 +89,7 @@ impl OpenAIRouter {
 
         let shared_components = Arc::new(SharedComponents {
             client: ctx.client.clone(),
+            router_config: Arc::new(ctx.router_config.clone()),
         });
 
         let responses_components = Arc::new(ResponsesComponents {
@@ -97,6 +98,7 @@ impl OpenAIRouter {
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),
+            conversation_memory_writer: ctx.conversation_memory_writer.clone(),
         });
 
         Ok(Self {

@@ -7,11 +7,19 @@ use url::Url;
 
 use crate::{
     config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig},
-    core::{ConversationItemStorage, ConversationStorage, ResponseStorage},
+    core::{
+        ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, ResponseStorage,
+    },
     hooked::{HookedConversationItemStorage, HookedConversationStorage, HookedResponseStorage},
     hooks::StorageHook,
-    memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
-    noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
+    memory::{
+        MemoryConversationItemStorage, MemoryConversationMemoryWriter, MemoryConversationStorage,
+        MemoryResponseStorage,
+    },
+    noop::{
+        NoOpConversationItemStorage, NoOpConversationMemoryWriter, NoOpConversationStorage,
+        NoOpResponseStorage,
+    },
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
     postgres::{
         PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
@@ -22,13 +30,13 @@ use crate::{
     },
 };
 
-/// Type alias for the storage tuple returned by factory functions.
-/// This avoids clippy::type_complexity warnings while keeping Arc explicit.
-pub type StorageTuple = (
-    Arc<dyn ResponseStorage>,
-    Arc<dyn ConversationStorage>,
-    Arc<dyn ConversationItemStorage>,
-);
+/// Complete storage handles returned by the factory, including conversation memory writer.
+pub struct StorageBundle {
+    pub response_storage: Arc<dyn ResponseStorage>,
+    pub conversation_storage: Arc<dyn ConversationStorage>,
+    pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+}
 
 /// Configuration for creating storage backends
 pub struct StorageFactoryConfig<'a> {
@@ -42,33 +50,34 @@ pub struct StorageFactoryConfig<'a> {
     pub hook: Option<Arc<dyn StorageHook>>,
 }
 
-/// Create all three storage backends based on configuration.
-///
-/// # Arguments
-/// * `config` - Storage factory configuration
-///
-/// # Returns
-/// Tuple of (response_storage, conversation_storage, conversation_item_storage)
+/// Returns whether a backend currently provides `ConversationMemoryWriter`.
+pub const fn backend_supports_memory_writer(backend: &HistoryBackend) -> bool {
+    matches!(backend, HistoryBackend::Memory)
+}
+
+/// Create all configured storage handles, including conversation memory writer.
 ///
 /// # Errors
 /// Returns error string if required configuration is missing or initialization fails
-pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, String> {
-    let (resp, conv, items): StorageTuple = match config.backend {
+pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageBundle, String> {
+    let bundle = match config.backend {
         HistoryBackend::Memory => {
             info!("Initializing data connector: Memory");
-            (
-                Arc::new(MemoryResponseStorage::new()),
-                Arc::new(MemoryConversationStorage::new()),
-                Arc::new(MemoryConversationItemStorage::new()),
-            )
+            StorageBundle {
+                response_storage: Arc::new(MemoryResponseStorage::new()),
+                conversation_storage: Arc::new(MemoryConversationStorage::new()),
+                conversation_item_storage: Arc::new(MemoryConversationItemStorage::new()),
+                conversation_memory_writer: Arc::new(MemoryConversationMemoryWriter::new()),
+            }
         }
         HistoryBackend::None => {
             info!("Initializing data connector: None (no persistence)");
-            (
-                Arc::new(NoOpResponseStorage::new()),
-                Arc::new(NoOpConversationStorage::new()),
-                Arc::new(NoOpConversationItemStorage::new()),
-            )
+            StorageBundle {
+                response_storage: Arc::new(NoOpResponseStorage::new()),
+                conversation_storage: Arc::new(NoOpConversationStorage::new()),
+                conversation_item_storage: Arc::new(NoOpConversationItemStorage::new()),
+                conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+            }
         }
         HistoryBackend::Oracle => {
             let oracle_cfg = config
@@ -140,18 +149,28 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
     // Wrap backends in hooked storage when a hook is provided
     if let Some(hook) = config.hook {
         info!("Wrapping storage backends with hook");
-        Ok((
-            Arc::new(HookedResponseStorage::new(resp, hook.clone())),
-            Arc::new(HookedConversationStorage::new(conv, hook.clone())),
-            Arc::new(HookedConversationItemStorage::new(items, hook)),
-        ))
+        Ok(StorageBundle {
+            response_storage: Arc::new(HookedResponseStorage::new(
+                bundle.response_storage,
+                hook.clone(),
+            )),
+            conversation_storage: Arc::new(HookedConversationStorage::new(
+                bundle.conversation_storage,
+                hook.clone(),
+            )),
+            conversation_item_storage: Arc::new(HookedConversationItemStorage::new(
+                bundle.conversation_item_storage,
+                hook,
+            )),
+            conversation_memory_writer: bundle.conversation_memory_writer,
+        })
     } else {
-        Ok((resp, conv, items))
+        Ok(bundle)
     }
 }
 
 /// Create Oracle storage backends with a single shared connection pool.
-fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, String> {
+fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageBundle, String> {
     use crate::oracle::OracleStore;
 
     let store = OracleStore::new(
@@ -163,14 +182,15 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, Stri
         ],
     )?;
 
-    Ok((
-        Arc::new(OracleResponseStorage::new(store.clone())),
-        Arc::new(OracleConversationStorage::new(store.clone())),
-        Arc::new(OracleConversationItemStorage::new(store)),
-    ))
+    Ok(StorageBundle {
+        response_storage: Arc::new(OracleResponseStorage::new(store.clone())),
+        conversation_storage: Arc::new(OracleConversationStorage::new(store.clone())),
+        conversation_item_storage: Arc::new(OracleConversationItemStorage::new(store)),
+        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+    })
 }
 
-async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<StorageTuple, String> {
+async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<StorageBundle, String> {
     let store = PostgresStore::new(postgres_cfg.clone())?;
     let postgres_resp = PostgresResponseStorage::new(store.clone())
         .await
@@ -191,24 +211,26 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
         store.ensure_response_indexes().await?;
     }
 
-    Ok((
-        Arc::new(postgres_resp),
-        Arc::new(postgres_conv),
-        Arc::new(postgres_item),
-    ))
+    Ok(StorageBundle {
+        response_storage: Arc::new(postgres_resp),
+        conversation_storage: Arc::new(postgres_conv),
+        conversation_item_storage: Arc::new(postgres_item),
+        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+    })
 }
 
-fn create_redis_storage(redis_cfg: &RedisConfig) -> Result<StorageTuple, String> {
+fn create_redis_storage(redis_cfg: &RedisConfig) -> Result<StorageBundle, String> {
     let store = RedisStore::new(redis_cfg.clone())?;
     let redis_resp = RedisResponseStorage::new(store.clone());
     let redis_conv = RedisConversationStorage::new(store.clone());
     let redis_item = RedisConversationItemStorage::new(store);
 
-    Ok((
-        Arc::new(redis_resp),
-        Arc::new(redis_conv),
-        Arc::new(redis_item),
-    ))
+    Ok(StorageBundle {
+        response_storage: Arc::new(redis_resp),
+        conversation_storage: Arc::new(redis_conv),
+        conversation_item_storage: Arc::new(redis_item),
+        conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+    })
 }
 
 #[cfg(test)]
@@ -227,7 +249,12 @@ mod tests {
             redis: None,
             hook: None,
         };
-        let (resp, conv, items) = create_storage(config).await.unwrap();
+        let bundle = create_storage(config).await.unwrap();
+        let (resp, conv, items) = (
+            bundle.response_storage,
+            bundle.conversation_storage,
+            bundle.conversation_item_storage,
+        );
 
         // Verify they work end-to-end
         let mut response = StoredResponse::new(None);
@@ -271,7 +298,8 @@ mod tests {
             redis: None,
             hook: None,
         };
-        let (resp, conv, _items) = create_storage(config).await.unwrap();
+        let bundle = create_storage(config).await.unwrap();
+        let (resp, conv) = (bundle.response_storage, bundle.conversation_storage);
 
         // NoOp storage should accept writes but return nothing on reads
         let mut response = StoredResponse::new(None);
@@ -287,40 +315,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_storage_oracle_missing_config() {
-        let config = StorageFactoryConfig {
+        let err = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Oracle,
             oracle: None,
             postgres: None,
             redis: None,
             hook: None,
-        };
-        let err = create_storage(config).await.err().expect("should fail");
+        })
+        .await
+        .err()
+        .expect("should fail");
         assert!(err.contains("oracle configuration is required"));
     }
 
     #[tokio::test]
     async fn test_create_storage_postgres_missing_config() {
-        let config = StorageFactoryConfig {
+        let err = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Postgres,
             oracle: None,
             postgres: None,
             redis: None,
             hook: None,
-        };
-        let err = create_storage(config).await.err().expect("should fail");
+        })
+        .await
+        .err()
+        .expect("should fail");
         assert!(err.contains("Postgres configuration is required"));
     }
 
     #[tokio::test]
     async fn test_create_storage_redis_missing_config() {
-        let config = StorageFactoryConfig {
+        let err = create_storage(StorageFactoryConfig {
             backend: &HistoryBackend::Redis,
             oracle: None,
             postgres: None,
             redis: None,
             hook: None,
-        };
-        let err = create_storage(config).await.err().expect("should fail");
+        })
+        .await
+        .err()
+        .expect("should fail");
         assert!(err.contains("Redis configuration is required"));
     }
 
@@ -367,7 +401,12 @@ mod tests {
             redis: None,
             hook: Some(Arc::new(NoOpHook)),
         };
-        let (resp, conv, items) = create_storage(config).await.unwrap();
+        let bundle = create_storage(config).await.unwrap();
+        let (resp, conv, items) = (
+            bundle.response_storage,
+            bundle.conversation_storage,
+            bundle.conversation_item_storage,
+        );
 
         // Verify hooked storage works end-to-end
         let mut response = StoredResponse::new(None);

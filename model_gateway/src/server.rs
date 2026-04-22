@@ -534,13 +534,18 @@ struct GetItemQuery {
 async fn v1_conversations_create_items(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
+    headers: http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    conversations::create_conversation_items(
+    let memory_execution_context =
+        middleware::build_memory_execution_context(&state.context.router_config, &headers);
+
+    conversations::create_conversation_items_with_headers(
         &state.context.conversation_storage,
         &state.context.conversation_item_storage,
         &conversation_id,
         body,
+        memory_execution_context,
     )
     .await
 }

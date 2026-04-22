@@ -8,8 +8,8 @@ use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_blob_storage::create_blob_store;
 use smg_data_connector::{
-    create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
-    StorageFactoryConfig,
+    backend_supports_memory_writer, create_storage, ConversationItemStorage,
+    ConversationMemoryWriter, ConversationStorage, ResponseStorage, StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
 use smg_skills::SkillService;
@@ -59,6 +59,8 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    /// Writer used for long-term-memory persistence (NoOp when backend does not support writes).
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub worker_monitor: Option<Arc<WorkerMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
@@ -98,6 +100,7 @@ pub struct AppContextBuilder {
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
+    conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
     worker_monitor: Option<Arc<WorkerMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
@@ -151,6 +154,7 @@ impl AppContextBuilder {
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
+            conversation_memory_writer: None,
             worker_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
@@ -232,6 +236,15 @@ impl AppContextBuilder {
         self
     }
 
+    /// Inject conversation memory writer for long-term-memory store operations.
+    pub fn conversation_memory_writer(
+        mut self,
+        conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    ) -> Self {
+        self.conversation_memory_writer = Some(conversation_memory_writer);
+        self
+    }
+
     pub fn worker_monitor(mut self, worker_monitor: Option<Arc<WorkerMonitor>>) -> Self {
         self.worker_monitor = worker_monitor;
         self
@@ -310,6 +323,9 @@ impl AppContextBuilder {
             }
         }
 
+        validate_memory_writer_configuration(&router_config)
+            .map_err(AppContextBuildError::InvalidConfig)?;
+
         let worker_registry = self
             .worker_registry
             .ok_or(AppContextBuildError::MissingField("worker_registry"))?;
@@ -349,6 +365,9 @@ impl AppContextBuilder {
             conversation_item_storage: self.conversation_item_storage.ok_or(
                 AppContextBuildError::MissingField("conversation_item_storage"),
             )?,
+            conversation_memory_writer: self.conversation_memory_writer.ok_or(
+                AppContextBuildError::MissingField("conversation_memory_writer"),
+            )?,
             worker_monitor: self.worker_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
@@ -378,6 +397,10 @@ impl AppContextBuilder {
         webrtc_bind_addr: Option<std::net::IpAddr>,
         webrtc_stun_server: Option<String>,
     ) -> Result<Self, String> {
+        // Fail fast before storage initialization to avoid side effects
+        // (e.g., migrations) for invalid memory_runtime/backend combinations.
+        validate_memory_writer_configuration(&router_config)?;
+
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
@@ -549,12 +572,12 @@ impl AppContextBuilder {
             redis: config.redis.as_ref(),
             hook,
         };
-        let (response_storage, conversation_storage, conversation_item_storage) =
-            create_storage(storage_config).await?;
+        let bundle = create_storage(storage_config).await?;
 
-        self.response_storage = Some(response_storage);
-        self.conversation_storage = Some(conversation_storage);
-        self.conversation_item_storage = Some(conversation_item_storage);
+        self.response_storage = Some(bundle.response_storage);
+        self.conversation_storage = Some(bundle.conversation_storage);
+        self.conversation_item_storage = Some(bundle.conversation_item_storage);
+        self.conversation_memory_writer = Some(bundle.conversation_memory_writer);
 
         Ok(self)
     }
@@ -692,6 +715,25 @@ impl Default for AppContextBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Enforce runtime-aware constraints for conversation memory writer availability.
+fn validate_memory_writer_configuration(config: &RouterConfig) -> Result<(), String> {
+    let backend_supports_memory_writer = backend_supports_memory_writer(&config.history_backend);
+
+    if config.memory_runtime.enabled && !backend_supports_memory_writer {
+        return Err(
+            "memory_runtime.enabled is true but selected storage backend does not support conversation memory writer".to_string(),
+        );
+    }
+
+    if config.memory_runtime.enabled && config.storage_hook_wasm_path.is_some() {
+        return Err(
+            "memory_runtime.enabled cannot be used with storage_hook_wasm_path until conversation memory writer hooks are implemented".to_string(),
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
