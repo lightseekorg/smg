@@ -175,11 +175,12 @@ impl<'de> Deserialize<'de> for ResponsesFunctionToolChoice {
 /// the `#[serde(untagged)]` enum would accept any object shape that
 /// happened to fit the field set of an earlier variant.
 ///
-/// NOTE: kept separate from `common::ToolChoice`. Chat Completions uses
-/// a different `Function` wire shape (nested `{"function": {"name": ...}}`)
-/// and does not accept the `Types` / `Mcp` / `Custom` / `ApplyPatch` /
-/// `Shell` variants; sharing one enum would let `/v1/chat/completions`
-/// silently accept spec-invalid payloads.
+/// This type deliberately does NOT live in `common.rs`: Chat Completions
+/// has its own `ToolChoice` with a different `Function` wire shape
+/// (nested `{"function": {"name": ...}}`) and does not accept the
+/// `Types` / `Mcp` / `Custom` / `ApplyPatch` / `Shell` variants at all.
+/// Sharing one enum across both APIs would silently accept spec-invalid
+/// payloads on `/v1/chat/completions`.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesToolChoice {
@@ -197,10 +198,14 @@ pub enum ResponsesToolChoice {
 
     /// `{"type": "function", "name": "..."}` — Responses spec flat shape.
     ///
-    /// Also accepts the legacy Chat-style nested shape
-    /// (`{"type": "function", "function": {"name": "..."}}`) on deserialize;
-    /// always serializes as the canonical flat shape. The nested legacy shape
-    /// is gated behind a custom `Deserialize` impl on
+    /// Accepts both the spec-canonical flat wire shape and the legacy
+    /// Chat-style nested shape (`{"type": "function", "function": {"name": "..."}}`)
+    /// on deserialize to preserve backward compatibility with smg clients
+    /// written against the pre-split shared `ToolChoice` type. Always
+    /// serializes as the canonical flat shape per the OpenAI Responses spec
+    /// — Postel's law: liberal on input, conservative on output.
+    ///
+    /// The nested legacy shape is gated behind a custom `Deserialize` impl on
     /// `ResponsesFunctionToolChoice`; the untagged outer enum still pins the
     /// `"type": "function"` discriminator via `FunctionToolChoiceTag` so
     /// payloads without that tag cannot reach this variant.
@@ -388,6 +393,16 @@ pub enum ResponseTool {
     /// "windows"|"mac", type: "computer_use_preview" }`.
     #[serde(rename = "computer_use_preview")]
     ComputerUsePreview(ComputerUsePreviewTool),
+
+    /// User-defined custom tool with optional grammar-constrained input.
+    ///
+    /// Spec: `{ name, type: "custom", defer_loading?, description?, format? }`.
+    /// `format` constrains the model's free-form `input` payload — `Text` is
+    /// unconstrained, `Grammar` enforces a Lark or regex production at decode
+    /// time. The model returns a `custom_tool_call` output item carrying the
+    /// raw `input` string back to the client; the client owns execution.
+    #[serde(rename = "custom")]
+    Custom(CustomTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -487,6 +502,140 @@ pub enum FileSearchRanker {
     Auto,
     #[serde(rename = "default-2024-11-15")]
     Default20241115,
+}
+
+/// User-defined custom tool definition.
+///
+/// Spec: `{ name, type: "custom", defer_loading?, description?, format? }`.
+/// The discriminator (`type: "custom"`) is enforced by the parent
+/// [`ResponseTool`] enum; this struct only carries the payload fields so the
+/// `flatten`-style wire shape survives a round-trip.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomTool {
+    /// Stable identifier the model uses to address this tool in
+    /// `custom_tool_call` items.
+    pub name: String,
+    /// Optional human-readable description supplied to the model.
+    pub description: Option<String>,
+    /// When `true`, the tool definition is deferred to a later
+    /// `tool_search`-style fetch instead of being loaded inline.
+    pub defer_loading: Option<bool>,
+    /// Optional input-format constraint — `text` (unconstrained) or
+    /// `grammar` (Lark / regex production).
+    pub format: Option<CustomToolInputFormat>,
+}
+
+/// Input-format constraint applied to a [`CustomTool`].
+///
+/// Spec: `CustomToolInputFormat = Text { type: "text" } |
+/// Grammar { definition, syntax: "lark" | "regex", type: "grammar" }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum CustomToolInputFormat {
+    /// Unconstrained free-form text input.
+    #[serde(rename = "text")]
+    Text,
+    /// Grammar-constrained input. The model's free-form output must match
+    /// `definition` interpreted under `syntax`.
+    #[serde(rename = "grammar")]
+    Grammar(CustomToolGrammar),
+}
+
+/// Grammar payload carried by [`CustomToolInputFormat::Grammar`].
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomToolGrammar {
+    /// Grammar source text. Interpretation depends on `syntax`.
+    pub definition: String,
+    /// `"lark"` or `"regex"` per spec.
+    pub syntax: CustomToolGrammarSyntax,
+}
+
+/// Grammar dialect for [`CustomToolGrammar::syntax`].
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomToolGrammarSyntax {
+    /// Lark grammar (https://lark-parser.readthedocs.io/).
+    Lark,
+    /// Regular expression.
+    Regex,
+}
+
+/// Input-only content part accepted inside a `custom_tool_call_output` array.
+///
+/// Spec (openai-responses-api-spec.md L269): the array form of
+/// `custom_tool_call_output.output` permits only `ResponseInputText |
+/// ResponseInputImage | ResponseInputFile` — assistant-facing shapes such as
+/// `output_text` and `refusal` are explicitly not allowed here. This enum
+/// mirrors the three input variants of [`ResponseContentPart`] with identical
+/// field shapes so spec-compliant payloads round-trip unchanged, while
+/// deserialization of `output_text`/`refusal` fails loudly instead of being
+/// silently coerced.
+///
+/// Other call sites that legitimately carry mixed input/output content parts
+/// continue to use [`ResponseContentPart`] (Postel-of-liberality preserved for
+/// cross-tool reuse).
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+// Variant names intentionally mirror the spec's `input_*` tag set; the shared
+// prefix communicates the input-only restriction that justifies this enum's
+// existence (see type-level docs above).
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names mirror spec `input_*` tags by design"
+)]
+pub enum CustomToolInputContentPart {
+    /// `type: "input_text"` — inline textual input.
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    /// `type: "input_image"` — reference to an image supplied by the client.
+    /// Exactly one of `file_id` / `image_url` is typically set; both may be
+    /// absent when only `detail` is being conveyed.
+    #[serde(rename = "input_image")]
+    InputImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<Detail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+    },
+    /// `type: "input_file"` — reference to an attached file. `file_data` is a
+    /// base64 blob; `file_url` / `file_id` reference external/uploaded files.
+    #[serde(rename = "input_file")]
+    InputFile {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<FileDetail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+}
+
+/// Output payload variant accepted by `custom_tool_call_output`.
+///
+/// Spec: `output: string or array of ResponseInputText | ResponseInputImage |
+/// ResponseInputFile`. The array variant uses the restricted
+/// [`CustomToolInputContentPart`] type so assistant-only shapes
+/// (`output_text`, `refusal`) are rejected at the type boundary rather than
+/// accepted and silently reinterpreted.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum CustomToolCallOutputContent {
+    /// Plain string output.
+    Text(String),
+    /// Array of input-typed content parts (`input_text` / `input_image` /
+    /// `input_file`) per the spec's `output` array shape.
+    Parts(Vec<CustomToolInputContentPart>),
 }
 
 #[serde_with::skip_serializing_none]
@@ -627,7 +776,7 @@ pub struct ImageGenerationTool {
 }
 
 /// Mask reference for image-generation `edit` calls. Spec: `{ file_id?, image_url? }`.
-/// Reuses the same upload conventions as `InputImage`.
+/// Reuses the same upload conventions as P1 `InputImage`.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -973,9 +1122,17 @@ pub enum ResponseInputOutputItem {
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
     /// generation by identifier, so `result` and `status` are accepted as
     /// absent on the input side. The full shape is
-    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`. The
-    /// server-side `ResponseOutputItem::ImageGenerationCall` variant remains
-    /// strict because the gateway always populates those fields on emit.
+    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`.
+    ///
+    /// This mirrors the OpenAI Python SDK 2.8.x
+    /// `response_input_item_param.ImageGenerationCall` TypedDict: while the
+    /// TypedDict types those fields as `Required[Optional[...]]`, the HTTP
+    /// API itself documents the id-only multi-turn reference form (see the
+    /// image-generation tool guide), and `skip_serializing_if` keeps the
+    /// serialized form spec-compatible when a full item is round-tripped.
+    /// The server-side `ResponseOutputItem::ImageGenerationCall` variant
+    /// remains strict because the gateway always populates those fields
+    /// on emit.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
@@ -1045,6 +1202,33 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<ComputerCallStatus>,
     },
+    /// `type: "custom_tool_call"` — assistant's call into a registered
+    /// custom tool. Spec: `{ call_id, input, name, type, id, namespace }`.
+    /// `input` is the model's free-form payload (constrained by the tool's
+    /// `format` if grammar is set); the client owns execution and replies
+    /// with a matching [`Self::CustomToolCallOutput`].
+    #[serde(rename = "custom_tool_call")]
+    CustomToolCall {
+        call_id: String,
+        input: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    /// `type: "custom_tool_call_output"` — client's response to a
+    /// `custom_tool_call`. Spec: `{ call_id, output, type, id }` (no
+    /// `status` field per spec — see Drift Log entry for T8).
+    /// `output` is either a plain string or an array of input-typed content
+    /// parts (`input_text` / `input_image` / `input_file`).
+    #[serde(rename = "custom_tool_call_output")]
+    CustomToolCallOutput {
+        call_id: String,
+        output: CustomToolCallOutputContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -1052,7 +1236,7 @@ pub enum ResponseInputOutputItem {
         /// Spec: `EasyInputMessage.type` is `optional "message"`. Constrained
         /// to a single-value tag enum so payloads with an unknown `type`
         /// (e.g. `"input_file"`, `"totally_made_up"`) do not silently land
-        /// in this untagged catch-all variant.
+        /// in this untagged catch-all variant — P5 fail-fast contract.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
         r#type: Option<SimpleInputMessageTypeTag>,
@@ -1068,7 +1252,8 @@ pub enum ResponseInputOutputItem {
 /// Single-value tag enum pinning `EasyInputMessage.type` to the spec's only
 /// permitted value, `"message"`. Used to keep [`ResponseInputOutputItem::SimpleInputMessage`]
 /// — which is the `#[serde(untagged)]` fallback in the outer `type`-tagged enum
-/// — from silently swallowing payloads whose `type` discriminator is unknown.
+/// — from silently swallowing payloads whose `type` discriminator is unknown
+/// (P5 fail-fast contract).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SimpleInputMessageTypeTag {
@@ -1177,6 +1362,8 @@ pub enum ResponseReasoningContent {
 /// Tagged content element carried in `Reasoning.summary`.
 ///
 /// OpenAI spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
+/// Replaces the prior `Vec<String>` wire-type that broke bidirectional
+/// interoperability with spec-compliant clients.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -2024,7 +2211,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::ImageGenerationCall { .. }
                         | ResponseInputOutputItem::Compaction { .. }
                         | ResponseInputOutputItem::ComputerCall { .. }
-                        | ResponseInputOutputItem::ComputerCallOutput { .. } => {}
+                        | ResponseInputOutputItem::ComputerCallOutput { .. }
+                        | ResponseInputOutputItem::CustomToolCall { .. }
+                        | ResponseInputOutputItem::CustomToolCallOutput { .. } => {}
                     }
                 }
 
@@ -2300,6 +2489,26 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::Compaction { .. } => {}
         ResponseInputOutputItem::ComputerCall { .. } => {}
         ResponseInputOutputItem::ComputerCallOutput { .. } => {}
+        ResponseInputOutputItem::CustomToolCall { input, .. } => {
+            if input.is_empty() {
+                let mut e = ValidationError::new("custom_tool_call_input_empty");
+                e.message = Some("Custom tool call input cannot be empty".into());
+                return Err(e);
+            }
+        }
+        ResponseInputOutputItem::CustomToolCallOutput { output, .. } => match output {
+            CustomToolCallOutputContent::Text(s) if s.is_empty() => {
+                let mut e = ValidationError::new("custom_tool_call_output_empty");
+                e.message = Some("Custom tool call output cannot be empty".into());
+                return Err(e);
+            }
+            CustomToolCallOutputContent::Parts(parts) if parts.is_empty() => {
+                let mut e = ValidationError::new("custom_tool_call_output_empty");
+                e.message = Some("Custom tool call output parts cannot be empty".into());
+                return Err(e);
+            }
+            _ => {}
+        },
     }
     Ok(())
 }

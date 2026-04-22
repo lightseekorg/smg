@@ -1389,6 +1389,72 @@ fn computer_action_variants_round_trip() {
 }
 
 #[test]
+fn test_custom_tool_text_format_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools, L471-474):
+    // `Custom { name, type: "custom", defer_loading?, description?, format? }`
+    // with `format: CustomToolInputFormat = Text { type: "text" }`.
+    let payload = json!({
+        "type": "custom",
+        "name": "run_sql",
+        "description": "Run a SELECT against the analytics warehouse",
+        "defer_loading": false,
+        "format": {"type": "text"}
+    });
+
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("custom tool with text format should deserialize");
+    match &tool {
+        ResponseTool::Custom(c) => {
+            assert_eq!(c.name, "run_sql");
+            assert_eq!(c.defer_loading, Some(false));
+            assert!(matches!(c.format, Some(CustomToolInputFormat::Text)));
+        }
+        other => panic!("expected ResponseTool::Custom, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("custom tool should serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_custom_tool_grammar_format_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools, L472-474):
+    // `Grammar { definition, syntax: "lark" | "regex", type: "grammar" }`.
+    for syntax in ["lark", "regex"] {
+        let payload = json!({
+            "type": "custom",
+            "name": "parse_expr",
+            "format": {
+                "type": "grammar",
+                "definition": "start: NUMBER",
+                "syntax": syntax
+            }
+        });
+
+        let tool: ResponseTool = serde_json::from_value(payload.clone())
+            .expect("custom tool with grammar format should deserialize");
+        match &tool {
+            ResponseTool::Custom(c) => match &c.format {
+                Some(CustomToolInputFormat::Grammar(g)) => {
+                    assert_eq!(g.definition, "start: NUMBER");
+                    let expected = if syntax == "lark" {
+                        CustomToolGrammarSyntax::Lark
+                    } else {
+                        CustomToolGrammarSyntax::Regex
+                    };
+                    assert_eq!(g.syntax, expected);
+                }
+                other => panic!("expected Grammar format, got {other:?}"),
+            },
+            other => panic!("expected ResponseTool::Custom, got {other:?}"),
+        }
+
+        let serialized = serde_json::to_value(&tool).expect("custom tool should serialize");
+        assert_eq!(serialized, payload);
+    }
+}
+
+#[test]
 fn computer_call_input_item_round_trips_spec_shape() {
     let payload = json!({
         "type": "computer_call",
@@ -1491,4 +1557,171 @@ fn computer_safety_check_accepts_optional_code_and_message() {
         other => panic!("expected ComputerCall, got {other:?}"),
     }
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn test_custom_tool_call_input_item_round_trip() {
+    // Spec (openai-responses-api-spec.md L272-273):
+    // `CustomToolCall object { call_id, input, name, type, id, namespace }`
+    // `type: "custom_tool_call"`.
+    let payload = json!({
+        "type": "custom_tool_call",
+        "call_id": "call_abc123",
+        "input": "SELECT count(*) FROM events",
+        "name": "run_sql",
+        "id": "ctc_01",
+        "namespace": "analytics"
+    });
+
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("custom_tool_call should deserialize");
+    match &item {
+        ResponseInputOutputItem::CustomToolCall {
+            call_id,
+            input,
+            name,
+            id,
+            namespace,
+        } => {
+            assert_eq!(call_id, "call_abc123");
+            assert_eq!(input, "SELECT count(*) FROM events");
+            assert_eq!(name, "run_sql");
+            assert_eq!(id.as_deref(), Some("ctc_01"));
+            assert_eq!(namespace.as_deref(), Some("analytics"));
+        }
+        other => panic!("expected CustomToolCall, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_custom_tool_call_output_string_round_trip() {
+    // Spec (openai-responses-api-spec.md L268-270):
+    // `CustomToolCallOutput object { call_id, output, type, id }` where
+    // `output: string or array of ResponseInputText | ResponseInputImage |
+    // ResponseInputFile`. No `status` field per spec.
+    let payload = json!({
+        "type": "custom_tool_call_output",
+        "call_id": "call_abc123",
+        "output": "42",
+        "id": "ctco_01"
+    });
+
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("custom_tool_call_output should deserialize");
+    match &item {
+        ResponseInputOutputItem::CustomToolCallOutput {
+            call_id,
+            output,
+            id,
+        } => {
+            assert_eq!(call_id, "call_abc123");
+            assert_eq!(id.as_deref(), Some("ctco_01"));
+            match output {
+                CustomToolCallOutputContent::Text(s) => assert_eq!(s, "42"),
+                CustomToolCallOutputContent::Parts(_) => panic!("expected Text output"),
+            }
+        }
+        other => panic!("expected CustomToolCallOutput, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_custom_tool_call_output_array_round_trip() {
+    // Spec (openai-responses-api-spec.md L269): array of
+    // ResponseInputText | ResponseInputImage | ResponseInputFile.
+    let payload = json!({
+        "type": "custom_tool_call_output",
+        "call_id": "call_abc123",
+        "output": [
+            {"type": "input_text", "text": "rows returned:"},
+            {"type": "input_file", "filename": "result.csv", "file_id": "file_xyz"}
+        ]
+    });
+
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("array-form custom_tool_call_output should deserialize");
+    match &item {
+        ResponseInputOutputItem::CustomToolCallOutput { output, .. } => match output {
+            CustomToolCallOutputContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(
+                    parts[0],
+                    CustomToolInputContentPart::InputText { .. }
+                ));
+                assert!(matches!(
+                    parts[1],
+                    CustomToolInputContentPart::InputFile { .. }
+                ));
+            }
+            CustomToolCallOutputContent::Text(_) => panic!("expected Parts output"),
+        },
+        other => panic!("expected CustomToolCallOutput, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_custom_tool_call_output_parts_reject_output_text() {
+    // Spec (openai-responses-api-spec.md L269): the `output` array only
+    // accepts input-typed parts. Assistant-facing shapes such as
+    // `output_text` and `refusal` must be rejected at the type boundary
+    // rather than silently coerced.
+    let payload_output_text = json!({
+        "type": "custom_tool_call_output",
+        "call_id": "call_abc123",
+        "output": [
+            {"type": "output_text", "text": "not allowed here", "annotations": []}
+        ]
+    });
+    let err = serde_json::from_value::<ResponseInputOutputItem>(payload_output_text)
+        .expect_err("output_text must not be accepted inside custom_tool_call_output parts");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("output_text") || msg.contains("did not match any variant"),
+        "expected untagged-variant rejection carrying `output_text`, got: {msg}"
+    );
+
+    let payload_refusal = json!({
+        "type": "custom_tool_call_output",
+        "call_id": "call_abc123",
+        "output": [
+            {"type": "refusal", "refusal": "nope"}
+        ]
+    });
+    assert!(
+        serde_json::from_value::<ResponseInputOutputItem>(payload_refusal).is_err(),
+        "refusal must not be accepted inside custom_tool_call_output parts"
+    );
+
+    // Sanity: an input-typed part still deserializes cleanly.
+    let payload_ok = json!({
+        "type": "custom_tool_call_output",
+        "call_id": "call_abc123",
+        "output": [
+            {"type": "input_text", "text": "ok"}
+        ]
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload_ok)
+        .expect("input_text part must still deserialize after the tightening");
+    match &item {
+        ResponseInputOutputItem::CustomToolCallOutput { output, .. } => match output {
+            CustomToolCallOutputContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(
+                    parts[0],
+                    CustomToolInputContentPart::InputText { .. }
+                ));
+            }
+            CustomToolCallOutputContent::Text(_) => panic!("expected Parts output"),
+        },
+        other => panic!("expected CustomToolCallOutput, got {other:?}"),
+    }
 }

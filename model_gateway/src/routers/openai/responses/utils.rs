@@ -251,6 +251,7 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         ResponseTool::Computer | ResponseTool::ComputerUsePreview(_) => {
             serde_json::to_value(tool).ok()
         }
+        ResponseTool::Custom(_) => serde_json::to_value(tool).ok(),
         ResponseTool::Function(_) => None,
     }
 }

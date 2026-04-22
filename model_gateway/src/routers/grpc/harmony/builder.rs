@@ -440,6 +440,7 @@ impl HarmonyBuilder {
                             ResponseTool::ImageGeneration(_) => "image_generation",
                             ResponseTool::Computer => "computer",
                             ResponseTool::ComputerUsePreview(_) => "computer_use_preview",
+                            ResponseTool::Custom(_) => "custom",
                         })
                         .collect()
                 })
@@ -742,6 +743,15 @@ impl HarmonyBuilder {
             }
 
             ResponseInputOutputItem::Compaction { .. } => {
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::CustomToolCall { .. }
+            | ResponseInputOutputItem::CustomToolCallOutput { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "Custom tool item reached Harmony conversion"
+                );
                 Err("Unsupported input item type".to_string())
             }
         }
