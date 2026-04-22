@@ -10,10 +10,12 @@ use openai_protocol::responses::{
 use serde_json::{json, Value};
 use smg_data_connector::{
     with_request_context, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationStorage, NewConversationItem,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, NewConversationItem,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
+
+use crate::memory::{build_enqueue_plan, EnqueueInputs, MemoryExecutionContext};
 
 // ============================================================================
 // Constants
@@ -165,6 +167,110 @@ pub async fn create_and_link_item(
 /// Extract a string field from JSON, returning owned String
 fn get_string(json: &Value, key: &str) -> Option<String> {
     json.get(key).and_then(|v| v.as_str()).map(String::from)
+}
+
+fn push_trimmed(text: &str, out: &mut Vec<String>) {
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+}
+
+fn collect_text_fragments(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => push_trimmed(text, out),
+        Value::Array(values) => {
+            for item in values {
+                collect_text_fragments(item, out);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                push_trimmed(text, out);
+            }
+            if let Some(content) = map.get("content") {
+                collect_text_fragments(content, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn join_text_fragments(fragments: Vec<String>) -> Option<String> {
+    if fragments.is_empty() {
+        None
+    } else {
+        Some(fragments.join("\n"))
+    }
+}
+
+pub(crate) fn extract_role_message_text_from_items(items: &[Value], role: &str) -> Option<String> {
+    let mut fragments = Vec::new();
+
+    for item in items {
+        if item.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        if item.get("role").and_then(Value::as_str) != Some(role) {
+            continue;
+        }
+        if let Some(content) = item.get("content") {
+            collect_text_fragments(content, &mut fragments);
+        }
+    }
+
+    join_text_fragments(fragments)
+}
+
+fn extract_turn_text_for_enqueue(
+    input_items: &[Value],
+    output_items: &[Value],
+) -> (Option<String>, Option<String>) {
+    (
+        extract_role_message_text_from_items(input_items, "user"),
+        extract_role_message_text_from_items(output_items, "assistant"),
+    )
+}
+
+async fn enqueue_conversation_memories(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: Option<ResponseId>,
+    input_items: &[Value],
+    output_items: &[Value],
+) {
+    let (user_text, assistant_text) = extract_turn_text_for_enqueue(input_items, output_items);
+    let plan = match build_enqueue_plan(EnqueueInputs {
+        now: Utc::now(),
+        memory_execution_context: memory_execution_context.clone(),
+        conversation_id: conversation_id.clone(),
+        response_id,
+        user_text,
+        assistant_text,
+    }) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return,
+        Err(reason) => {
+            warn!(
+                conversation_id = %conversation_id.0,
+                ?reason,
+                "Skipping conversation memory enqueue due to missing durable memory config"
+            );
+            return;
+        }
+    };
+
+    for row in plan.rows {
+        if let Err(err) = conversation_memory_writer.create_memory(row).await {
+            warn!(
+                conversation_id = %conversation_id.0,
+                error = %err,
+                "Failed to enqueue conversation memory row"
+            );
+            return;
+        }
+    }
 }
 
 /// Build a StoredResponse from response JSON and original request
@@ -378,10 +484,16 @@ async fn link_items_to_conversation(
 /// 2. Extracts output items from the response
 /// 3. Stores ALL items in response storage (always)
 /// 4. If conversation provided, also links items to conversation
+#[expect(
+    clippy::too_many_arguments,
+    reason = "persists response, conversation links, and optional memory enqueue in one transactional flow"
+)]
 pub async fn persist_conversation_items(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -390,6 +502,8 @@ pub async fn persist_conversation_items(
         conversation_storage,
         item_storage,
         response_storage,
+        conversation_memory_writer,
+        memory_execution_context,
         response_json,
         original_body,
     );
@@ -403,6 +517,8 @@ async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
 ) -> Result<(), String> {
@@ -463,6 +579,15 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
+        enqueue_conversation_memories(
+            &conversation_memory_writer,
+            &memory_execution_context,
+            &conv_id,
+            Some(response_id.clone()),
+            &input_items,
+            &output_items,
+        )
+        .await;
         info!(
             conversation_id = %conv_id.0,
             response_id = %response_id.0,

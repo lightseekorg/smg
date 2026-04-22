@@ -563,6 +563,7 @@ async fn v1_conversations_create_items(
     conversations::create_conversation_items_with_headers(
         &state.context.conversation_storage,
         &state.context.conversation_item_storage,
+        &state.context.conversation_memory_writer,
         &conversation_id,
         body,
         memory_execution_context,

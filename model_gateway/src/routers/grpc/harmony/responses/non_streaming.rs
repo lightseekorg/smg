@@ -25,6 +25,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
 use crate::{
+    memory::MemoryExecutionContext,
     middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
@@ -83,6 +84,8 @@ pub(crate) async fn serve_harmony_responses(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
+        ctx.conversation_memory_writer.clone(),
+        MemoryExecutionContext::default(),
         &response,
         &original_request,
         ctx.request_context.clone(),

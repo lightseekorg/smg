@@ -9,13 +9,14 @@ use openai_protocol::{
 };
 use serde_json::to_value;
 use smg_data_connector::{
-    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
-    ResponseStorage,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    RequestContext as StorageRequestContext, ResponseStorage,
 };
 use smg_mcp::{McpOrchestrator, McpServerBinding};
 use tracing::{debug, error, warn};
 
 use crate::{
+    memory::MemoryExecutionContext,
     routers::{
         common::{
             mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
@@ -137,10 +138,16 @@ pub(crate) fn extract_tools_from_response_tools(
 ///
 /// Common helper function to avoid duplication across sync and streaming paths
 /// in both harmony and regular responses implementations.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "grpc responses persistence threads through storage handles, memory wiring, and request context"
+)]
 pub(crate) async fn persist_response_if_needed(
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response: &ResponsesResponse,
     original_request: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -154,6 +161,8 @@ pub(crate) async fn persist_response_if_needed(
             conversation_storage,
             conversation_item_storage,
             response_storage,
+            conversation_memory_writer,
+            memory_execution_context,
             &response_json,
             original_request,
             request_context,

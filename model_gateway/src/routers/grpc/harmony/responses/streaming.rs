@@ -16,6 +16,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
+    memory::MemoryExecutionContext,
     middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
@@ -376,6 +377,8 @@ async fn execute_mcp_tool_loop_streaming(
                     ctx.conversation_storage.clone(),
                     ctx.conversation_item_storage.clone(),
                     ctx.response_storage.clone(),
+                    ctx.conversation_memory_writer.clone(),
+                    MemoryExecutionContext::default(),
                     &final_response,
                     original_request,
                     ctx.request_context.clone(),
@@ -464,6 +467,8 @@ async fn execute_without_mcp_streaming(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
+        ctx.conversation_memory_writer.clone(),
+        MemoryExecutionContext::default(),
         &final_response,
         original_request,
         ctx.request_context.clone(),

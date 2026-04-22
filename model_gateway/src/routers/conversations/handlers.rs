@@ -11,11 +11,15 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use smg_data_connector::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
-    ConversationStorage, ListParams, NewConversation, NewConversationItem, SortOrder,
+    ConversationMemoryWriter, ConversationStorage, ListParams, NewConversation,
+    NewConversationItem, NoOpConversationMemoryWriter, SortOrder,
 };
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::{memory::MemoryExecutionContext, routers::common::persistence_utils::item_to_json};
+use crate::{
+    memory::{build_enqueue_plan, EnqueueInputs, MemoryExecutionContext},
+    routers::common::persistence_utils::{extract_role_message_text_from_items, item_to_json},
+};
 
 // ============================================================================
 // Constants
@@ -306,9 +310,12 @@ pub async fn create_conversation_items(
     conv_id: &str,
     body: Value,
 ) -> Response {
+    let memory_writer: Arc<dyn ConversationMemoryWriter> =
+        Arc::new(NoOpConversationMemoryWriter::new());
     create_conversation_items_with_headers(
         conversation_storage,
         item_storage,
+        &memory_writer,
         conv_id,
         body,
         MemoryExecutionContext::default(),
@@ -319,6 +326,7 @@ pub async fn create_conversation_items(
 pub async fn create_conversation_items_with_headers(
     conversation_storage: &Arc<dyn ConversationStorage>,
     item_storage: &Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
     conv_id: &str,
     body: Value,
     memory_execution_context: MemoryExecutionContext,
@@ -374,6 +382,13 @@ pub async fn create_conversation_items_with_headers(
     if let Err(e) = item_storage.link_items(&conversation_id, &link_pairs).await {
         return internal_error(format!("Failed to link items to conversation: {e}"));
     }
+    enqueue_conversation_memory_rows(
+        conversation_memory_writer,
+        &memory_execution_context,
+        &conversation_id,
+        &created_items,
+    )
+    .await;
 
     let mut response = json!({
         "object": "list",
@@ -392,6 +407,47 @@ pub async fn create_conversation_items_with_headers(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+async fn enqueue_conversation_memory_rows(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    created_items: &[Value],
+) {
+    let user_text = extract_role_message_text_from_items(created_items, "user");
+    let assistant_text = extract_role_message_text_from_items(created_items, "assistant");
+
+    let plan = match build_enqueue_plan(EnqueueInputs {
+        now: Utc::now(),
+        memory_execution_context: memory_execution_context.clone(),
+        conversation_id: conversation_id.clone(),
+        response_id: None,
+        user_text,
+        assistant_text,
+    }) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return,
+        Err(reason) => {
+            warn!(
+                conversation_id = %conversation_id.0,
+                ?reason,
+                "Skipping conversation-memory enqueue for conversation item ingestion"
+            );
+            return;
+        }
+    };
+
+    for row in plan.rows {
+        if let Err(err) = conversation_memory_writer.create_memory(row).await {
+            warn!(
+                conversation_id = %conversation_id.0,
+                error = %err,
+                "Failed to enqueue conversation memory row from conversation item ingestion"
+            );
+            return;
+        }
+    }
+}
+
 /// Process a single item for creation. Returns (json, item_id, warning).
 /// Linking is deferred to the caller for batch operation.
 async fn process_item(
@@ -399,7 +455,6 @@ async fn process_item(
     conversation_id: &ConversationId,
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
-    // TODO(memory): wire into ingestion flow; see issue #1149.
     _memory_execution_context: &MemoryExecutionContext,
 ) -> Result<(Value, ConversationItemId, Option<String>), Response> {
     let item_type = item_val
