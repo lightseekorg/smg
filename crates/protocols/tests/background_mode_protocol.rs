@@ -169,6 +169,23 @@ fn copy_from_request_propagates_background_and_conversation() {
 }
 
 #[test]
+fn copy_from_request_accepts_conversation_object_form() {
+    // P6: `conversation` accepts the spec's object form
+    // `{ id: string }` (ResponseConversationParam). The ResponsesResponse
+    // builder flattens either wire shape down to the underlying id.
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": "hello",
+        "conversation": { "id": "conv_obj" },
+    }))
+    .expect("deserialize object form");
+    let resp = ResponsesResponse::builder("resp_xyz", "gpt-5.4")
+        .copy_from_request(&request)
+        .build();
+    assert_eq!(resp.conversation.as_deref(), Some("conv_obj"));
+}
+
+#[test]
 fn is_incomplete_helper() {
     let resp = ResponsesResponse::builder("resp_xyz", "gpt-5.4")
         .status(ResponseStatus::Incomplete)

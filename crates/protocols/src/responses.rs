@@ -9,10 +9,11 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, Detail, Function,
-        FunctionChoice, GenerationRequest, PromptCacheRetention, PromptTokenUsageInfo,
-        ResponsePrompt, StreamOptions, StringOrArray, ToolChoice as ChatToolChoice,
-        ToolChoiceValue as ChatToolChoiceValue, ToolReference, UsageInfo,
+        default_true, validate_stop, ChatLogProbs, ContextManagementEntry, ConversationRef,
+        Detail, Function, FunctionChoice, GenerationRequest, PromptCacheRetention,
+        PromptTokenUsageInfo, ResponsePrompt, StreamOptions, StringOrArray,
+        ToolChoice as ChatToolChoice, ToolChoiceValue as ChatToolChoiceValue, ToolReference,
+        UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
@@ -1226,10 +1227,15 @@ pub struct ResponsesRequest {
     /// Model to use
     pub model: String,
 
-    /// Optional conversation id to persist input/output as items
+    /// Optional conversation reference to persist input/output as items.
+    ///
+    /// Spec: `conversation` accepts either a bare ID string or
+    /// `ResponseConversationParam { id }`. Both wire shapes deserialize into
+    /// [`ConversationRef`]; downstream code reads the id via
+    /// [`ConversationRef::as_id`].
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_conversation_id"))]
-    pub conversation: Option<String>,
+    pub conversation: Option<ConversationRef>,
 
     /// Whether to enable parallel tool calls
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1539,8 +1545,15 @@ impl GenerationRequest for ResponsesRequest {
     }
 }
 
-/// Validate conversation ID format
-pub fn validate_conversation_id(conv_id: &str) -> Result<(), ValidationError> {
+/// Validate the conversation reference's ID format.
+///
+/// The validator crate auto-unwraps `Option<ConversationRef>` for the
+/// `#[validate(custom(...))]` attribute, so this function only runs when
+/// the field is present. Both wire shapes (bare string or `{ id }` object)
+/// are validated against the same rule by extracting the underlying id via
+/// [`ConversationRef::as_id`].
+pub fn validate_conversation_id(conv: &ConversationRef) -> Result<(), ValidationError> {
+    let conv_id = conv.as_id();
     if !conv_id.starts_with("conv_") {
         let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(

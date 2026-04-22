@@ -87,8 +87,10 @@ pub(in crate::routers::openai) async fn route_responses(
     };
 
     // Validate mutual exclusivity of conversation and previous_response_id
-    // Treat empty strings as unset to match other metadata paths
-    let conversation = body.conversation.as_ref().filter(|s| !s.is_empty());
+    // Treat empty strings as unset to match other metadata paths. The
+    // `conversation` field is a `Option<ConversationRef>` union (bare string
+    // or `{ id }` object); `ConversationRef::is_empty` covers both shapes.
+    let conversation = body.conversation.as_ref().filter(|c| !c.is_empty());
     let has_previous_response = body
         .previous_response_id
         .as_ref()
@@ -114,7 +116,7 @@ pub(in crate::routers::openai) async fn route_responses(
 
     let loaded_history = match super::history::load_input_history(
         deps.responses_components,
-        conversation.map(String::as_str),
+        conversation.map(|c| c.as_id()),
         &mut request_body,
         model,
     )
