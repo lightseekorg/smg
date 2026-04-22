@@ -348,18 +348,23 @@ def _create_code_interpreter_response(api_client, model, stream):
 
 
 @pytest.fixture(scope="class")
-def code_interpreter_response_pair(model, api_client):
+def code_interpreter_response_pair(setup_backend):
     """Run code_interpreter twice (non-stream + stream) and cache both outputs.
 
     Both the ``container_file_citation`` and the ``file_path`` assertions
     inspect the same code_interpreter output for different annotation
     variants, so running the tool four times (2 variants × 2 stream modes)
     when two invocations suffice would needlessly burn quota. The fixture is
-    class-scoped and returns a
+    class-scoped and pulls ``api_client`` / ``model`` out of
+    ``setup_backend`` (also class-scoped) rather than via the shared
+    function-scoped fixtures so that scope resolution is consistent with the
+    class-scoped request. Returns a
     ``{"non_streaming": final_output, "streaming": final_output}`` dict of
     already-resolved output arrays for the four tests in
     ``TestCodeInterpreterAnnotations`` to share.
     """
+    _, model, api_client, _ = setup_backend
+
     time.sleep(_API_RATE_LIMIT_DELAY)
     try:
         non_stream_resp = _create_code_interpreter_response(api_client, model, stream=False)
