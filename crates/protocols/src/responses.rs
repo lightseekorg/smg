@@ -729,12 +729,18 @@ pub enum ResponseInputOutputItem {
         reason: Option<String>,
     },
     /// `type: "image_generation_call"` — round-trip form for an image generated
-    /// in a prior turn. Spec: `{ id, result: base64 string, status, type }`.
+    /// in a prior turn. Spec:
+    /// `{ id, result: base64 string, revised_prompt?, status, type }`.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
         /// Base64-encoded image bytes.
         result: String,
+        /// Prompt text the mainline model rewrote before dispatching the
+        /// image-generation call. Preserved so downstream turns/storage do
+        /// not drop it on replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revised_prompt: Option<String>,
         status: ImageGenerationCallStatus,
     },
     #[serde(untagged)]
@@ -963,12 +969,17 @@ pub enum ResponseOutputItem {
     },
     /// `type: "image_generation_call"` — output item carrying a base64 image
     /// produced by the `image_generation` built-in tool. Spec:
-    /// `{ id, result: base64 string, status, type }`.
+    /// `{ id, result: base64 string, revised_prompt?, status, type }`.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
         /// Base64-encoded image bytes.
         result: String,
+        /// Prompt text the mainline model rewrote before dispatching the
+        /// image-generation call. Preserved so downstream turns/storage do
+        /// not drop it on replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revised_prompt: Option<String>,
         status: ImageGenerationCallStatus,
     },
 }
@@ -3198,7 +3209,9 @@ mod tests {
     }
 
     /// `ResponseOutputItem::ImageGenerationCall` — `{id, result, status, type}`
-    /// round-trips with every spec-listed status variant.
+    /// round-trips with every spec-listed status variant. Absent
+    /// `revised_prompt` deserializes to `None` and is omitted on serialize, so
+    /// the default wire shape stays byte-identical to the spec example.
     #[test]
     fn image_generation_call_output_item_round_trips_spec_shape() {
         for (status_json, expected) in [
@@ -3216,15 +3229,57 @@ mod tests {
             let item: ResponseOutputItem = serde_json::from_value(payload.clone())
                 .expect("image_generation_call output item deserialize");
             match &item {
-                ResponseOutputItem::ImageGenerationCall { id, result, status } => {
+                ResponseOutputItem::ImageGenerationCall {
+                    id,
+                    result,
+                    revised_prompt,
+                    status,
+                } => {
                     assert_eq!(id, "ig_1");
                     assert_eq!(result, "aGVsbG8=");
+                    assert!(revised_prompt.is_none());
                     assert_eq!(*status, expected);
                 }
                 other => panic!("expected ImageGenerationCall, got {other:?}"),
             }
             assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
         }
+    }
+
+    /// `ResponseOutputItem::ImageGenerationCall` preserves `revised_prompt`
+    /// through a full (de)serialization cycle. OpenAI populates this when
+    /// the mainline model rewrites the user prompt before dispatching the
+    /// image-generation call; dropping it here would silently lose prompt
+    /// provenance during storage/replay.
+    #[test]
+    fn image_generation_call_output_item_round_trips_with_revised_prompt() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_1",
+            "result": "aGVsbG8=",
+            "revised_prompt": "A red fox sitting on a rock at sunset.",
+            "status": "completed",
+        });
+        let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+            .expect("image_generation_call output item deserialize");
+        match &item {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_1");
+                assert_eq!(result, "aGVsbG8=");
+                assert_eq!(
+                    revised_prompt.as_deref(),
+                    Some("A red fox sitting on a rock at sunset.")
+                );
+                assert_eq!(*status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
     }
 
     /// `ResponseInputOutputItem::ImageGenerationCall` mirrors the output-item
@@ -3241,9 +3296,50 @@ mod tests {
         let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
             .expect("image_generation_call input item deserialize");
         match &item {
-            ResponseInputOutputItem::ImageGenerationCall { id, result, status } => {
+            ResponseInputOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
                 assert_eq!(id, "ig_2");
                 assert_eq!(result, "d29ybGQ=");
+                assert!(revised_prompt.is_none());
+                assert_eq!(*status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("expected ImageGenerationCall, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+    }
+
+    /// `ResponseInputOutputItem::ImageGenerationCall` preserves
+    /// `revised_prompt` on replay — the stateless client path must carry the
+    /// rewritten prompt forward to match what the output variant emitted on
+    /// the originating turn.
+    #[test]
+    fn image_generation_call_input_item_round_trips_with_revised_prompt() {
+        let payload = json!({
+            "type": "image_generation_call",
+            "id": "ig_2",
+            "result": "d29ybGQ=",
+            "revised_prompt": "A cozy cabin in a snowy pine forest at dusk.",
+            "status": "completed",
+        });
+        let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+            .expect("image_generation_call input item deserialize");
+        match &item {
+            ResponseInputOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_2");
+                assert_eq!(result, "d29ybGQ=");
+                assert_eq!(
+                    revised_prompt.as_deref(),
+                    Some("A cozy cabin in a snowy pine forest at dusk.")
+                );
                 assert_eq!(*status, ImageGenerationCallStatus::Completed);
             }
             other => panic!("expected ImageGenerationCall, got {other:?}"),
