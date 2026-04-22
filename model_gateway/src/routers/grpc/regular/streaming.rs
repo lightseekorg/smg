@@ -465,16 +465,12 @@ impl StreamingProcessor {
                 ProtoResponseVariant::Complete(complete) => {
                     let index = complete.index();
 
-                    // Flush any remaining text held back by the stop_decoder.
-                    // These trailing bytes (e.g. `}` that closes JSON args, or
-                    // the final `<invoke>...</invoke></minimax:tool_call>`
-                    // block) must be fed into the tool parser when one is
-                    // active — otherwise fc-dash sees truncated arguments or
-                    // missing tool calls. See analysis of HTTP vs gRPC fc-dash
-                    // diff for details.
+                    // Drain Complete.output_ids + flush held bytes, then route
+                    // through the reasoning/tool parsers (same as Chunk path).
                     if let Some(decoder) = stop_decoders.get_mut(&index) {
-                        if let SequenceDecoderOutput::Text(mut flushed_text) = decoder.flush() {
-                            if !flushed_text.is_empty() {
+                        let mut flushed_text =
+                            Self::drain_final_tokens(decoder, complete.output_ids());
+                        if !flushed_text.is_empty() {
                                 let stream_buffer = stream_buffers.entry(index).or_default();
                                 stream_buffer.push_str(&flushed_text);
 
@@ -589,7 +585,6 @@ impl StreamingProcessor {
                                             "Failed to send flushed content".to_string()
                                         })?;
                                 }
-                            }
                         }
                     }
 
@@ -1325,6 +1320,21 @@ impl StreamingProcessor {
             }
         }
         (chunk_text, false)
+    }
+
+    /// Drain `GenerateComplete.output_ids` through the stop decoder and
+    /// flush held bytes. SGLang puts the final scheduler step's tokens in
+    /// Complete, not in a preceding Chunk — streaming paths must process
+    /// them like the non-streaming path or trailing bytes get dropped.
+    fn drain_final_tokens(
+        stop_decoder: &mut StopSequenceDecoder,
+        token_ids: &[u32],
+    ) -> String {
+        let (mut text, _stopped) = Self::process_chunk_tokens(stop_decoder, token_ids);
+        if let SequenceDecoderOutput::Text(held) = stop_decoder.flush() {
+            text.push_str(&held);
+        }
+        text
     }
 
     /// Helper: Process reasoning content in streaming mode
@@ -2205,10 +2215,12 @@ impl StreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
-                    // Route flushed stop-decoder text through the tool parser
-                    // when active, otherwise emit as text.
-                    if let SequenceDecoderOutput::Text(flushed_text) = stop_decoder.flush() {
-                        if !flushed_text.is_empty() {
+                    // Drain Complete.output_ids + flush; route through tool
+                    // parser when active, otherwise emit as text.
+                    let flushed_text =
+                        Self::drain_final_tokens(&mut stop_decoder, complete.output_ids());
+                    if !flushed_text.is_empty() {
+                        {
                             if let Some(ref mut parser) = streaming_tool_parser {
                                 match parser.parse_incremental(&flushed_text, &chat_tools).await {
                                     Ok(StreamingParseResult {
@@ -2839,8 +2851,9 @@ impl StreamingProcessor {
                     }
 
                     if let Some(decoder) = stop_decoders.get_mut(&index) {
-                        if let SequenceDecoderOutput::Text(text) = decoder.flush() {
-                            if !text.is_empty() {
+                        let text = Self::drain_final_tokens(decoder, complete.output_ids());
+                        if !text.is_empty() {
+                            {
                                 let stream_resp = CompletionStreamResponse {
                                     id: request_id.clone(),
                                     object: "text_completion".to_string(),

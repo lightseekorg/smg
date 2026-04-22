@@ -747,24 +747,28 @@ impl ToolParser for MinimaxM2Parser {
                 let parameter_calls = self.parse_and_stream_parameters(&buffer_copy, tools);
                 calls.extend(parameter_calls);
 
-                // Check if tool call is complete (</invoke> found)
+                // Tool call complete on </invoke>
                 if let Some(invoke_end) = self.buffer.find(self.invoke_end_token) {
-                    // Add closing brace to complete the JSON object
+                    // Emit any unbalanced closing braces. Must count (not
+                    // check `ends_with('}')`) — a nested-object param value
+                    // contributes its own trailing `}` even when the outer
+                    // object is still unclosed.
                     let tool_id = self.current_tool_id as usize;
-                    if tool_id < self.streamed_args_for_tool.len() {
+                    if tool_id < self.streamed_args_for_tool.len()
+                        && !self.streamed_args_for_tool[tool_id].is_empty()
+                    {
                         let current_streamed = &self.streamed_args_for_tool[tool_id];
-                        if !current_streamed.is_empty() && !current_streamed.ends_with('}') {
-                            // Count opening and closing braces to check if JSON is complete
-                            let open_braces = current_streamed.matches('{').count();
-                            let close_braces = current_streamed.matches('}').count();
-                            if open_braces > close_braces {
-                                calls.push(ToolCallItem {
-                                    tool_index: tool_id,
-                                    name: None,
-                                    parameters: "}".to_string(),
-                                });
-                                self.streamed_args_for_tool[tool_id].push('}');
-                            }
+                        let open_braces = current_streamed.matches('{').count();
+                        let close_braces = current_streamed.matches('}').count();
+                        if open_braces > close_braces {
+                            let missing = open_braces - close_braces;
+                            let closing: String = "}".repeat(missing);
+                            calls.push(ToolCallItem {
+                                tool_index: tool_id,
+                                name: None,
+                                parameters: closing.clone(),
+                            });
+                            self.streamed_args_for_tool[tool_id].push_str(&closing);
                         }
                     }
 
