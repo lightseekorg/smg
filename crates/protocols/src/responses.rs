@@ -1203,10 +1203,13 @@ pub enum ResponseInputOutputItem {
         status: Option<ComputerCallStatus>,
     },
     /// `type: "custom_tool_call"` — assistant's call into a registered
-    /// custom tool. Spec: `{ call_id, input, name, type, id, namespace }`.
-    /// `input` is the model's free-form payload (constrained by the tool's
-    /// `format` if grammar is set); the client owns execution and replies
-    /// with a matching [`Self::CustomToolCallOutput`].
+    /// custom tool. Spec: `{ call_id, input, name, type, id?, namespace? }`.
+    /// `id` / `namespace` are modelled as `Option<String>` so newly-minted
+    /// client-side calls can omit them; they are populated on items
+    /// round-tripped from a previous response. `input` is the model's
+    /// free-form payload (constrained by the tool's `format` if grammar is
+    /// set); the client owns execution and replies with a matching
+    /// [`Self::CustomToolCallOutput`].
     #[serde(rename = "custom_tool_call")]
     CustomToolCall {
         call_id: String,
@@ -1218,8 +1221,9 @@ pub enum ResponseInputOutputItem {
         namespace: Option<String>,
     },
     /// `type: "custom_tool_call_output"` — client's response to a
-    /// `custom_tool_call`. Spec: `{ call_id, output, type, id }` (no
-    /// `status` field per spec — see Drift Log entry for T8).
+    /// `custom_tool_call`. Spec: `{ call_id, output, type, id? }` (no
+    /// `status` field per spec — see Drift Log entry for T8). `id` is
+    /// `Option<String>` for the same reason as `CustomToolCall.id` above.
     /// `output` is either a plain string or an array of input-typed content
     /// parts (`input_text` / `input_image` / `input_file`).
     #[serde(rename = "custom_tool_call_output")]
