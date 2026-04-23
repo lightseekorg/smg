@@ -181,6 +181,7 @@ pub struct SkillMutationResponse {
 
 /// JSON body accepted by `PATCH /v1/skills/{skill_id}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SkillPatchRequest {
     pub default_version: SkillVersionRef,
 }
@@ -189,6 +190,7 @@ impl Normalizable for SkillPatchRequest {}
 
 /// JSON body accepted by `PATCH /v1/skills/{skill_id}/versions/{version}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SkillVersionPatchRequest {
     pub deprecated: bool,
 }

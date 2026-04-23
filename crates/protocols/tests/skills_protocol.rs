@@ -274,6 +274,18 @@ fn skill_version_patch_request_round_trips() {
 }
 
 #[test]
+fn skill_patch_request_rejects_unknown_fields() {
+    let raw = r#"{"default_version":2,"extra":true}"#;
+    assert!(serde_json::from_str::<SkillPatchRequest>(raw).is_err());
+}
+
+#[test]
+fn skill_version_patch_request_rejects_unknown_fields() {
+    let raw = r#"{"deprecated":true,"extra":"nope"}"#;
+    assert!(serde_json::from_str::<SkillVersionPatchRequest>(raw).is_err());
+}
+
+#[test]
 fn skills_error_envelope_round_trips() {
     let raw = json!({
         "error": {

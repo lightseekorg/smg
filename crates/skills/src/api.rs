@@ -466,6 +466,21 @@ impl SkillService {
                 skill_id: skill_id.clone(),
             })?;
         let existing_versions = metadata_store.list_skill_versions(&skill_id).await?;
+        let existing_default_projection = existing_skill
+            .default_version
+            .as_ref()
+            .map(|default_version| {
+                existing_versions
+                    .iter()
+                    .find(|record| record.version == *default_version)
+                    .cloned()
+                    .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+                        tenant_id: tenant_id.clone(),
+                        skill_id: skill_id.clone(),
+                        version: default_version.clone(),
+                    })
+            })
+            .transpose()?;
 
         let (bundle, media_types) = normalize_upload_bundle(request.upload)?;
         let parsed_bundle = parse_bundle_contents(&bundle)?;
@@ -511,24 +526,8 @@ impl SkillService {
         if updated_skill.default_version.is_none() {
             updated_skill.default_version = Some(version.clone());
         }
-        let default_version = updated_skill.default_version.clone().ok_or_else(|| {
-            SkillServiceError::MissingDefaultVersion {
-                tenant_id: tenant_id.clone(),
-                skill_id: skill_id.clone(),
-            }
-        })?;
-        let default_projection = if default_version == version {
-            version_record.clone()
-        } else {
-            metadata_store
-                .get_skill_version(&skill_id, &default_version)
-                .await?
-                .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
-                    tenant_id: tenant_id.clone(),
-                    skill_id: skill_id.clone(),
-                    version: default_version.clone(),
-                })?
-        };
+        let default_projection =
+            existing_default_projection.unwrap_or_else(|| version_record.clone());
         apply_skill_projection_from_version(&mut updated_skill, &default_projection);
         updated_skill.updated_at = now;
 
@@ -623,12 +622,16 @@ impl SkillService {
         let mut version =
             resolve_skill_version_record(&*metadata_store, &tenant_id, &skill_id, &version_ref)
                 .await?;
+        let original_version = version.clone();
 
         version.deprecated = request.deprecated;
         metadata_store.put_skill_version(version.clone()).await?;
 
         skill.updated_at = Utc::now();
-        metadata_store.put_skill(skill).await?;
+        if let Err(error) = metadata_store.put_skill(skill).await {
+            let _ = metadata_store.put_skill_version(original_version).await;
+            return Err(error.into());
+        }
 
         Ok(version)
     }
@@ -698,20 +701,21 @@ impl SkillService {
                 component: "blob_store",
             })?;
 
-        let mut skill = metadata_store
+        let original_skill = metadata_store
             .get_skill(&tenant_id, &skill_id)
             .await?
             .ok_or_else(|| SkillServiceError::SkillNotFound {
                 tenant_id: tenant_id.clone(),
                 skill_id: skill_id.clone(),
             })?;
+        let mut updated_skill = original_skill.clone();
         let version =
             resolve_skill_version_record(&*metadata_store, &tenant_id, &skill_id, &version_ref)
                 .await?;
         let versions = metadata_store.list_skill_versions(&skill_id).await?;
 
         if versions.len() > 1
-            && skill
+            && original_skill
                 .default_version
                 .as_deref()
                 .is_some_and(|default_version| default_version == version.version)
@@ -723,33 +727,32 @@ impl SkillService {
             });
         }
 
-        metadata_store
-            .delete_skill_version(&skill.skill_id, &version.version)
-            .await?;
-        cleanup_blobs(&*blob_store, &version.file_manifest).await;
-
         if versions.len() == 1 {
             metadata_store
-                .delete_skill(&skill.tenant_id, &skill.skill_id)
+                .delete_skill(&original_skill.tenant_id, &original_skill.skill_id)
                 .await?;
+            cleanup_blobs(&*blob_store, &version.file_manifest).await;
             return Ok(DeletedSkillVersionResult {
                 deleted_skill: true,
             });
         }
 
-        let remaining_versions = metadata_store.list_skill_versions(&skill.skill_id).await?;
+        let remaining_versions = versions
+            .into_iter()
+            .filter(|record| record.version != version.version)
+            .collect::<Vec<_>>();
         let latest_version = latest_skill_version(&remaining_versions).ok_or_else(|| {
             SkillServiceError::SkillVersionNotFound {
-                tenant_id: skill.tenant_id.clone(),
-                skill_id: skill.skill_id.clone(),
+                tenant_id: original_skill.tenant_id.clone(),
+                skill_id: original_skill.skill_id.clone(),
                 version: "latest".to_string(),
             }
         })?;
-        skill.latest_version = Some(latest_version.version.clone());
-        let default_version = skill.default_version.clone().ok_or_else(|| {
+        updated_skill.latest_version = Some(latest_version.version.clone());
+        let default_version = updated_skill.default_version.clone().ok_or_else(|| {
             SkillServiceError::MissingDefaultVersion {
-                tenant_id: skill.tenant_id.clone(),
-                skill_id: skill.skill_id.clone(),
+                tenant_id: original_skill.tenant_id.clone(),
+                skill_id: original_skill.skill_id.clone(),
             }
         })?;
         let default_projection = remaining_versions
@@ -757,13 +760,21 @@ impl SkillService {
             .find(|record| record.version == default_version)
             .cloned()
             .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
-                tenant_id: skill.tenant_id.clone(),
-                skill_id: skill.skill_id.clone(),
+                tenant_id: original_skill.tenant_id.clone(),
+                skill_id: original_skill.skill_id.clone(),
                 version: default_version,
             })?;
-        apply_skill_projection_from_version(&mut skill, &default_projection);
-        skill.updated_at = Utc::now();
-        metadata_store.put_skill(skill).await?;
+        apply_skill_projection_from_version(&mut updated_skill, &default_projection);
+        updated_skill.updated_at = Utc::now();
+        metadata_store.put_skill(updated_skill).await?;
+        if let Err(error) = metadata_store
+            .delete_skill_version(&original_skill.skill_id, &version.version)
+            .await
+        {
+            let _ = metadata_store.put_skill(original_skill).await;
+            return Err(error.into());
+        }
+        cleanup_blobs(&*blob_store, &version.file_manifest).await;
 
         Ok(DeletedSkillVersionResult {
             deleted_skill: false,

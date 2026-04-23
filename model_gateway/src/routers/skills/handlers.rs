@@ -126,7 +126,7 @@ impl From<SkillServiceError> for SkillsApiError {
                 code: "skills_internal_error",
                 message: error.to_string(),
             },
-            SkillServiceError::MissingDefaultVersion { .. } => Self::Conflict {
+            SkillServiceError::MissingDefaultVersion { .. } => Self::Internal {
                 code: "default_version_missing",
                 message: error.to_string(),
             },
