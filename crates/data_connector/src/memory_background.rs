@@ -22,7 +22,7 @@ use crate::{
         QueuedResponse, ResumeEventBatch, StoredCancelResult, StoredStreamEvent,
     },
     context::RequestContext,
-    core::{ResponseId, ResponseStorage, StoredResponse},
+    core::{ResponseId, StoredResponse},
     memory::MemoryResponseStorage,
 };
 
@@ -136,11 +136,22 @@ struct State {
 /// In-memory background repository.
 ///
 /// `response_storage` must point at the same `MemoryResponseStorage` that
-/// serves `AppContext.response_storage`, so that background-mode writes
+/// serves `AppContext.response_storage`, so background-mode writes
 /// (enqueue / finalize / cancel / delete) are visible to the normal
 /// `GET /v1/responses/{id}` and `DELETE /v1/responses/{id}` paths. The
 /// durable Postgres / Oracle backends keep these in a single SQL table;
-/// the memory analogue mirrors writes into `MemoryResponseStorage`.
+/// the memory analogue mirrors writes into `MemoryResponseStorage` using
+/// the sync `upsert_response_sync` / `delete_response_sync` paths, held
+/// under the same `state` write lock so two state transitions cannot
+/// interleave their mirror writes.
+///
+/// Hook integration: the sync mirror bypasses `HookedResponseStorage`.
+/// That wrapper only interposes on the async `ResponseStorage` trait
+/// methods, and routing background writes through it would cost us the
+/// atomicity above. The memory backend is intended for dev / CI /
+/// single-node; production deployments that need storage-hook interception
+/// of background writes should use `postgres` or `oracle`, which will
+/// handle hooks inside their own transactional write path.
 #[derive(Clone)]
 pub struct MemoryBackgroundRepository {
     state: Arc<RwLock<State>>,
@@ -171,60 +182,50 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
     ) -> BackgroundRepositoryResult<QueuedResponse> {
         let now = Utc::now();
         let response_id = req.response_id.clone();
+        let mut state = self.state.write();
 
-        let (stored, queue_depth) = {
-            let mut state = self.state.write();
+        if state.entries.contains_key(&req.response_id) {
+            return Err(BackgroundRepositoryError::InvalidTransition(format!(
+                "response {} already exists",
+                req.response_id
+            )));
+        }
 
-            if state.entries.contains_key(&req.response_id) {
-                return Err(BackgroundRepositoryError::InvalidTransition(format!(
-                    "response {} already exists",
-                    req.response_id
-                )));
-            }
-
-            let entry = Entry {
-                status: InternalStatus::Queued,
-                request_json: req.request_json,
-                input: req.input,
-                raw_response: req.raw_response,
-                stream_enabled: req.stream_enabled,
-                model: req.model,
-                conversation_id: req.conversation_id,
-                previous_response_id: req.previous_response_id,
-                safety_identifier: req.safety_identifier,
-                priority: req.priority,
-                retry_attempt: 0,
-                worker_id: None,
-                lease_expires_at: None,
-                next_attempt_at: now,
-                created_at: now,
-                cancel_requested: false,
-                request_context,
-                stream_events: Vec::new(),
-                next_stream_sequence: 0,
-                started_at: None,
-                completed_at: None,
-            };
-            let stored = entry.to_stored_response(&response_id);
-            state.entries.insert(response_id.clone(), entry);
-
-            let queue_depth = state
-                .entries
-                .values()
-                .filter(|e| e.status == InternalStatus::Queued)
-                .count() as u64;
-            (stored, queue_depth)
+        let entry = Entry {
+            status: InternalStatus::Queued,
+            request_json: req.request_json,
+            input: req.input,
+            raw_response: req.raw_response,
+            stream_enabled: req.stream_enabled,
+            model: req.model,
+            conversation_id: req.conversation_id,
+            previous_response_id: req.previous_response_id,
+            safety_identifier: req.safety_identifier,
+            priority: req.priority,
+            retry_attempt: 0,
+            worker_id: None,
+            lease_expires_at: None,
+            next_attempt_at: now,
+            created_at: now,
+            cancel_requested: false,
+            request_context,
+            stream_events: Vec::new(),
+            next_stream_sequence: 0,
+            started_at: None,
+            completed_at: None,
         };
+        let stored = entry.to_stored_response(&response_id);
+        state.entries.insert(response_id.clone(), entry);
+        // Sync mirror under the same lock keeps the two stores atomic w.r.t
+        // concurrent finalize / delete, and removes the need to roll back
+        // on mirror failure (this path is infallible).
+        self.response_storage.upsert_response_sync(stored);
 
-        // Mirror into MemoryResponseStorage so GET /v1/responses/{id} sees
-        // the queued payload. Durable backends put both rows in one SQL
-        // table; memory needs an explicit write.
-        self.response_storage
-            .store_response(stored)
-            .await
-            .map_err(|e| {
-                BackgroundRepositoryError::Backend(format!("mirror to response storage: {e}"))
-            })?;
+        let queue_depth = state
+            .entries
+            .values()
+            .filter(|e| e.status == InternalStatus::Queued)
+            .count() as u64;
 
         Ok(QueuedResponse {
             response_id,
@@ -268,9 +269,15 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             // Cancel-before-claim: flip straight to Cancelled and keep
             // scanning rather than hand a worker a job it must not execute
             // or let the worker loop sleep while other runnable rows exist.
+            // Mirror the terminal payload into shared response storage so
+            // `GET /v1/responses/{id}` doesn't stay stuck on the previous
+            // in-progress payload.
             if entry.cancel_requested {
                 entry.status = InternalStatus::Cancelled;
                 entry.completed_at = Some(now);
+                overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+                let stored = entry.to_stored_response(&id);
+                self.response_storage.upsert_response_sync(stored);
                 continue;
             }
 
@@ -330,48 +337,35 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         response_id: &ResponseId,
     ) -> BackgroundRepositoryResult<StoredCancelResult> {
         let now = Utc::now();
-        let (result, mirror) = {
-            let mut state = self.state.write();
-            let Some(entry) = state.entries.get_mut(response_id) else {
-                return Ok(StoredCancelResult::NotFound);
-            };
-
-            if entry.status.is_terminal() {
-                return Ok(StoredCancelResult::AlreadyTerminal);
-            }
-
-            match entry.status {
-                InternalStatus::Queued => {
-                    entry.status = InternalStatus::Cancelled;
-                    entry.completed_at = Some(now);
-                    entry.worker_id = None;
-                    entry.lease_expires_at = None;
-                    overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
-                    (
-                        StoredCancelResult::QueuedCancelled,
-                        Some(entry.to_stored_response(response_id)),
-                    )
-                }
-                InternalStatus::InProgress => {
-                    entry.cancel_requested = true;
-                    (StoredCancelResult::CancelRequested, None)
-                }
-                InternalStatus::Completed
-                | InternalStatus::Incomplete
-                | InternalStatus::Failed
-                | InternalStatus::Cancelled => (StoredCancelResult::AlreadyTerminal, None),
-            }
+        let mut state = self.state.write();
+        let Some(entry) = state.entries.get_mut(response_id) else {
+            return Ok(StoredCancelResult::NotFound);
         };
 
-        if let Some(stored) = mirror {
-            self.response_storage
-                .store_response(stored)
-                .await
-                .map_err(|e| {
-                    BackgroundRepositoryError::Backend(format!("mirror to response storage: {e}"))
-                })?;
+        if entry.status.is_terminal() {
+            return Ok(StoredCancelResult::AlreadyTerminal);
         }
-        Ok(result)
+
+        match entry.status {
+            InternalStatus::Queued => {
+                entry.status = InternalStatus::Cancelled;
+                entry.completed_at = Some(now);
+                entry.worker_id = None;
+                entry.lease_expires_at = None;
+                overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+                let stored = entry.to_stored_response(response_id);
+                self.response_storage.upsert_response_sync(stored);
+                Ok(StoredCancelResult::QueuedCancelled)
+            }
+            InternalStatus::InProgress => {
+                entry.cancel_requested = true;
+                Ok(StoredCancelResult::CancelRequested)
+            }
+            InternalStatus::Completed
+            | InternalStatus::Incomplete
+            | InternalStatus::Failed
+            | InternalStatus::Cancelled => Ok(StoredCancelResult::AlreadyTerminal),
+        }
     }
 
     async fn append_stream_event(
@@ -432,70 +426,58 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         update: FinalizeRequest,
         now: DateTime<Utc>,
     ) -> BackgroundRepositoryResult<FinalizeResult> {
-        let (result, mirror) = {
-            let mut state = self.state.write();
-            let entry = state
-                .entries
-                .get_mut(&update.response_id)
-                .ok_or_else(|| BackgroundRepositoryError::NotFound(update.response_id.clone()))?;
+        let mut state = self.state.write();
+        let entry = state
+            .entries
+            .get_mut(&update.response_id)
+            .ok_or_else(|| BackgroundRepositoryError::NotFound(update.response_id.clone()))?;
 
-            if let Some(prior) = entry.status.to_finalize() {
-                return Ok(FinalizeResult {
-                    response_id: update.response_id,
-                    final_status: prior,
-                    cancel_won: false,
-                });
-            }
+        if let Some(prior) = entry.status.to_finalize() {
+            return Ok(FinalizeResult {
+                response_id: update.response_id,
+                final_status: prior,
+                cancel_won: false,
+            });
+        }
 
-            // Lease fence: reject when either the caller isn't the lease holder
-            // or the lease has already expired at `now`. The latter stops a stale
-            // worker from committing terminal state after its window, even if
-            // the sweeper hasn't run yet.
-            let lease_still_valid = entry.lease_expires_at.is_some_and(|exp| exp > now);
-            if entry.worker_id.as_deref() != Some(update.worker_id.as_str()) || !lease_still_valid {
-                return Err(BackgroundRepositoryError::LeaseNotHeld {
-                    response_id: update.response_id.clone(),
-                    worker_id: update.worker_id,
-                });
-            }
+        // Lease fence: reject when either the caller isn't the lease holder
+        // or the lease has already expired at `now`. The latter stops a stale
+        // worker from committing terminal state after its window, even if
+        // the sweeper hasn't run yet.
+        let lease_still_valid = entry.lease_expires_at.is_some_and(|exp| exp > now);
+        if entry.worker_id.as_deref() != Some(update.worker_id.as_str()) || !lease_still_valid {
+            return Err(BackgroundRepositoryError::LeaseNotHeld {
+                response_id: update.response_id.clone(),
+                worker_id: update.worker_id,
+            });
+        }
 
-            let (final_status, cancel_won) = if entry.cancel_requested {
-                (FinalizeStatus::Cancelled, true)
-            } else {
-                (update.status, false)
-            };
-
-            entry.status = InternalStatus::from_finalize(final_status);
-            entry.raw_response = update.raw_response;
-            // When cancel wins, overwrite the status field in the worker-supplied
-            // payload so `GET /v1/responses/{id}` doesn't return a payload that
-            // claims "completed" while the row is terminal-cancelled.
-            if cancel_won {
-                overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
-            }
-            entry.completed_at = Some(update.completed_at);
-            entry.worker_id = None;
-            entry.lease_expires_at = None;
-
-            let stored = entry.to_stored_response(&update.response_id);
-            (
-                FinalizeResult {
-                    response_id: update.response_id.clone(),
-                    final_status,
-                    cancel_won,
-                },
-                stored,
-            )
+        let (final_status, cancel_won) = if entry.cancel_requested {
+            (FinalizeStatus::Cancelled, true)
+        } else {
+            (update.status, false)
         };
 
-        self.response_storage
-            .store_response(mirror)
-            .await
-            .map_err(|e| {
-                BackgroundRepositoryError::Backend(format!("mirror to response storage: {e}"))
-            })?;
+        entry.status = InternalStatus::from_finalize(final_status);
+        entry.raw_response = update.raw_response;
+        // When cancel wins, overwrite the status field in the worker-supplied
+        // payload so `GET /v1/responses/{id}` doesn't return a payload that
+        // claims "completed" while the row is terminal-cancelled.
+        if cancel_won {
+            overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+        }
+        entry.completed_at = Some(update.completed_at);
+        entry.worker_id = None;
+        entry.lease_expires_at = None;
 
-        Ok(result)
+        let stored = entry.to_stored_response(&update.response_id);
+        self.response_storage.upsert_response_sync(stored);
+
+        Ok(FinalizeResult {
+            response_id: update.response_id,
+            final_status,
+            cancel_won,
+        })
     }
 
     async fn requeue_expired(&self, now: DateTime<Utc>) -> BackgroundRepositoryResult<u64> {
@@ -532,28 +514,17 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         &self,
         response_id: &ResponseId,
     ) -> BackgroundRepositoryResult<DeleteResult> {
-        {
-            let mut state = self.state.write();
-            let Some(entry) = state.entries.get(response_id) else {
-                return Ok(DeleteResult::NotFound);
-            };
+        let mut state = self.state.write();
+        let Some(entry) = state.entries.get(response_id) else {
+            return Ok(DeleteResult::NotFound);
+        };
 
-            if entry.status == InternalStatus::InProgress {
-                return Ok(DeleteResult::InProgress);
-            }
-
-            state.entries.remove(response_id);
+        if entry.status == InternalStatus::InProgress {
+            return Ok(DeleteResult::InProgress);
         }
 
-        self.response_storage
-            .delete_response(response_id)
-            .await
-            .map_err(|e| {
-                BackgroundRepositoryError::Backend(format!(
-                    "mirror delete to response storage: {e}"
-                ))
-            })?;
-
+        state.entries.remove(response_id);
+        self.response_storage.delete_response_sync(response_id);
         Ok(DeleteResult::Deleted)
     }
 }
@@ -563,6 +534,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::core::ResponseStorage;
 
     fn enqueue_req(id: &str) -> EnqueueRequest {
         EnqueueRequest::new(
@@ -645,6 +617,53 @@ mod tests {
                 .is_none(),
             "delete must mirror into response storage"
         );
+    }
+
+    #[tokio::test]
+    async fn claim_next_cancel_fast_path_mirrors_cancelled_payload() {
+        // Path: in-progress row has cancel_requested, lease expires +
+        // requeue_expired puts it back to Queued with the flag preserved,
+        // next claim lands on it and flips to Cancelled. The shared
+        // response storage must see the cancelled payload (otherwise
+        // GET /v1/responses/{id} stays stuck on the in-progress state).
+        let rs = Arc::new(MemoryResponseStorage::new());
+        let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::CancelRequested
+        );
+        assert_eq!(
+            repo.requeue_expired(claim_time + chrono::Duration::seconds(120))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Next claim hits the cancel-before-claim fast path → Cancelled.
+        let claim = repo
+            .claim_next(
+                "w2",
+                claim_time + chrono::Duration::seconds(130),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert!(claim.is_none(), "cancelled row must not be claimed");
+
+        let stored = rs
+            .get_response(&ResponseId::from("r1"))
+            .await
+            .unwrap()
+            .expect("cancel fast path must mirror");
+        assert_eq!(stored.raw_response["status"], "cancelled");
     }
 
     #[tokio::test]
