@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use smg_skills::TenantAliasStore;
+use tracing::error;
 
 use crate::{
     config::{RouterConfig, TenantResolutionConfig},
@@ -125,9 +126,10 @@ pub async fn route_request_meta_middleware(
     let request_meta = match resolve_route_request_meta(&state, &request).await {
         Ok(request_meta) => request_meta,
         Err(error) => {
+            error!(error = %error, "failed to resolve tenant metadata");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to resolve tenant metadata: {error}"),
+                "failed to resolve tenant metadata",
             )
                 .into_response();
         }
@@ -150,6 +152,7 @@ pub async fn ordinary_tenant_resolution_middleware(
 mod tests {
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use axum::{
         body::Body,
         extract::connect_info::ConnectInfo,
@@ -159,7 +162,10 @@ mod tests {
         routing::get,
         Router,
     };
-    use smg_skills::{InMemorySkillStore, TenantAliasRecord, TenantAliasStore};
+    use smg_skills::{
+        InMemorySkillStore, SkillsStoreError, SkillsStoreResult, TenantAliasRecord,
+        TenantAliasStore,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -168,6 +174,31 @@ mod tests {
         middleware::TenantRequestMeta,
         tenant::DEFAULT_TENANT_HEADER_NAME,
     };
+
+    #[derive(Debug)]
+    struct FailingTenantAliasStore;
+
+    #[async_trait]
+    impl TenantAliasStore for FailingTenantAliasStore {
+        async fn put_tenant_alias(&self, _record: TenantAliasRecord) -> SkillsStoreResult<()> {
+            Err(SkillsStoreError::Storage("put not supported".to_string()))
+        }
+
+        async fn get_tenant_alias(
+            &self,
+            _alias_tenant_id: &str,
+        ) -> SkillsStoreResult<Option<TenantAliasRecord>> {
+            Err(SkillsStoreError::Storage(
+                "oracle backend connection details".to_string(),
+            ))
+        }
+
+        async fn delete_tenant_alias(&self, _alias_tenant_id: &str) -> SkillsStoreResult<bool> {
+            Err(SkillsStoreError::Storage(
+                "delete not supported".to_string(),
+            ))
+        }
+    }
 
     fn resolution_state() -> TenantResolutionState {
         TenantResolutionState::new(&RouterConfig::new(
@@ -323,5 +354,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "auth:tenant-a");
+    }
+
+    #[tokio::test]
+    async fn middleware_hides_tenant_alias_lookup_errors_from_clients() {
+        async fn handler() -> impl IntoResponse {
+            StatusCode::OK
+        }
+
+        let app = Router::new()
+            .route("/", get(handler))
+            .route_layer(from_fn_with_state(
+                resolution_state().with_tenant_alias_store(Some(Arc::new(FailingTenantAliasStore))),
+                route_request_meta_middleware,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .extension(DataPlaneCaller::new(TenantKey::from("auth:tenant-a")))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "failed to resolve tenant metadata"
+        );
     }
 }
