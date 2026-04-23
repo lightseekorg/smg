@@ -356,17 +356,29 @@ impl<'a> McpToolSession<'a> {
                 continue;
             }
 
-            // T11 forced-cascade: the legacy `allowed_tools: Vec<String>` wire shape
-            // is now `McpAllowedTools` (untagged union of `List(Vec<String>)` or
-            // `Filter(McpToolFilter { read_only?, tool_names? })`). Preserve prior
-            // semantics: only the name-list forms constrain which bindings inherit
-            // the approval mode; the `read_only`-only filter form (new in T11) is
-            // treated as "no name constraint" to avoid changing behavior on legacy
-            // payloads.
+            // T11: the legacy `allowed_tools: Vec<String>` wire shape is now
+            // `McpAllowedTools` (untagged union of `List(Vec<String>)` or
+            // `Filter(McpToolFilter { read_only?, tool_names? })`). Project
+            // union variants back into the flat name-list scoping used here:
+            //   * `None`, or `Filter { None, None }` → no name constraint
+            //     (all bindings for this server inherit the approval mode).
+            //   * `List(names)` / `Filter { tool_names: Some(v), .. }` →
+            //     constrain by explicit names.
+            //   * `Filter { tool_names: None, read_only: Some(_) }` →
+            //     fail-closed empty slice: `readOnlyHint`-based filtering is
+            //     unimplemented, so narrow to nothing rather than silently
+            //     broaden approval-mode application to all of the server's
+            //     bindings when the caller explicitly asked to restrict.
             let allowed_tool_names: Option<&[String]> =
                 mcp_tool.allowed_tools.as_ref().and_then(|at| match at {
                     McpAllowedTools::List(names) => Some(names.as_slice()),
-                    McpAllowedTools::Filter(filter) => filter.tool_names.as_deref(),
+                    McpAllowedTools::Filter(filter) => {
+                        match (filter.tool_names.as_deref(), filter.read_only) {
+                            (Some(names), _) => Some(names),
+                            (None, Some(_)) => Some(&[] as &[String]),
+                            (None, None) => None,
+                        }
+                    }
                 });
             for binding in self.exposed_name_map.values_mut() {
                 if binding.server_label != mcp_tool.server_label {

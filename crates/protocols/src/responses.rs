@@ -3460,6 +3460,21 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                 );
                 return Err(e);
             }
+
+            // T11 spec contract (openai-responses-api-spec.md L441, L445): one
+            // of `server_url` or `connector_id` is required, and the two are
+            // mutually exclusive. Reject payloads that set both so downstream
+            // target resolution is unambiguous.
+            if mcp.server_url.is_some() && mcp.connector_id.is_some() {
+                let mut e = ValidationError::new("mcp_tool_conflicting_targets");
+                e.message = Some(
+                    format!(
+                        "MCP tool with server_label '{raw_label}' sets both 'server_url' and 'connector_id'; exactly one is required."
+                    )
+                    .into(),
+                );
+                return Err(e);
+            }
         }
     }
     Ok(())

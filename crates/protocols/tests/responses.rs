@@ -8,6 +8,7 @@ use openai_protocol::{
     responses::*,
 };
 use serde_json::json;
+use validator::Validate;
 
 #[test]
 fn summary_text_content_round_trips_spec_shape() {
@@ -2869,7 +2870,7 @@ fn shell_call_output_validation_accepts_empty_output_for_replay() {
     }))
     .expect("request with empty shell_call_output.output should deserialize");
     assert!(
-        validator::Validate::validate(&request).is_ok(),
+        Validate::validate(&request).is_ok(),
         "empty shell_call_output.output must remain valid for lossless replay"
     );
 }
@@ -3702,6 +3703,31 @@ fn test_mcp_tool_legacy_payload_still_deserializes() {
     assert!(serialized.get("allowed_tools").is_none());
     assert!(serialized.get("connector_id").is_none());
     assert!(serialized.get("defer_loading").is_none());
+}
+
+/// Spec contract (openai-responses-api-spec.md L445): `server_url` XOR
+/// `connector_id` is required. A payload that sets both MUST be rejected by
+/// validation so downstream target resolution is unambiguous.
+#[test]
+fn test_validate_tools_mcp_server_url_and_connector_id_conflict() {
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": "hi",
+        "tools": [{
+            "type": "mcp",
+            "server_label": "deepwiki",
+            "server_url": "https://mcp.deepwiki.example",
+            "connector_id": "connector_dropbox",
+        }],
+    }))
+    .expect("deserialize");
+    let err = request
+        .validate()
+        .expect_err("server_url + connector_id must fail validation");
+    assert!(
+        format!("{err:?}").contains("mcp_tool_conflicting_targets"),
+        "expected mcp_tool_conflicting_targets, got: {err:?}"
+    );
 }
 
 /// Input-item `mcp_call` minimal payload (required-only) round-trips cleanly.
