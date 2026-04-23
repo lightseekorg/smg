@@ -10,7 +10,8 @@ use openai_protocol::responses::{
 use serde_json::{json, Value};
 use smg_data_connector::{
     with_request_context, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, NewConversationItem,
+    ConversationItemStorage, ConversationMemoryStatus, ConversationMemoryType,
+    ConversationMemoryWriter, ConversationStorage, NewConversationItem, NewConversationMemory,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
@@ -38,6 +39,18 @@ pub const ITEM_TYPE_FIELDS: &[(&str, &[&str])] = &[
     ("function_call", &["call_id", "name", "arguments", "output"]),
     ("function_call_output", &["call_id", "output"]),
 ];
+
+const ITEM_KEY_TYPE: &str = "type";
+const ITEM_TYPE_MESSAGE: &str = "message";
+const ITEM_KEY_ROLE: &str = "role";
+const ROLE_USER: &str = "user";
+
+const STMO_FIRST_TURN: usize = 4;
+const STMO_TURN_INTERVAL: usize = 3;
+
+const STMO_CFG_KEY_CONDENSER_MODEL: &str = "condenser_model";
+const STMO_CFG_KEY_LAST_INDEX: &str = "last_index";
+const STMO_CFG_KEY_TARGET_ITEM_END: &str = "target_item_end";
 
 // ============================================================================
 // JSON Serialization
@@ -413,8 +426,8 @@ async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
-    _conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
-    _memory_execution_context: MemoryExecutionContext,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
 ) -> Result<(), String> {
@@ -475,6 +488,15 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
+        enqueue_stmo_if_needed(
+            &conversation_memory_writer,
+            &memory_execution_context,
+            &conv_id,
+            &response_id,
+            &input_items,
+            &output_items,
+        )
+        .await;
         info!(
             conversation_id = %conv_id.0,
             response_id = %response_id.0,
@@ -492,4 +514,241 @@ async fn persist_conversation_items_inner(
     }
 
     Ok(())
+}
+
+/// Counts user-message turns from a heterogeneous list of input items.
+///
+/// A turn is counted only when an item has:
+/// - `type == ITEM_TYPE_MESSAGE`
+/// - `role == ROLE_USER`
+///
+/// Malformed objects, missing fields, non-string fields, and non-object JSON values are
+/// handled safely by `get(...).and_then(Value::as_str)` and are treated as non-matching
+/// items (i.e., they do not contribute to the count).
+fn count_user_turns_in_input_items(items: &[Value]) -> usize {
+    items
+        .iter()
+        .filter(|item| {
+            item.get(ITEM_KEY_TYPE).and_then(Value::as_str) == Some(ITEM_TYPE_MESSAGE)
+                && item.get(ITEM_KEY_ROLE).and_then(Value::as_str) == Some(ROLE_USER)
+        })
+        .count()
+}
+
+/// Returns true when STMO should be enqueued for the current user-turn count.
+///
+/// Trigger pattern: first at turn 4, then every 3 turns after that (4, 7, 10, 13, ...).
+fn should_enqueue_stmo_for_current_turn(user_turns: usize) -> bool {
+    user_turns >= STMO_FIRST_TURN && (user_turns - 1).is_multiple_of(STMO_TURN_INTERVAL)
+}
+
+/// Enqueues an STMO job when the current request is eligible.
+///
+/// Eligibility gates:
+/// - STM is enabled in `memory_execution_context`
+/// - current user turn count (from `input_items`) is on an STMO trigger boundary
+/// - `stm_condenser_model_id` is present
+///
+/// On success, this creates a `NewConversationMemory` row with type `Stmo`, status `Ready`,
+/// and a minimal `memory_config` payload (`condenser_model`, `last_index`, `target_item_end`).
+///
+/// This function is best-effort: enqueue failures are logged and swallowed.
+async fn enqueue_stmo_if_needed(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: &ResponseId,
+    input_items: &[Value],
+    output_items: &[Value],
+) {
+    if !memory_execution_context.stm_enabled {
+        return;
+    }
+
+    // Turn counting intentionally uses `input_items`, which is expected to include
+    // accumulated conversation input at this stage of the responses pipeline.
+    let user_turns = count_user_turns_in_input_items(input_items);
+    if !should_enqueue_stmo_for_current_turn(user_turns) {
+        return;
+    }
+
+    let Some(condenser_model) = memory_execution_context.stm_condenser_model_id.as_deref() else {
+        warn!(
+            conversation_id = %conversation_id.0,
+            response_id = %response_id.0,
+            "STM enabled but condenser model id is missing; skipping STMO enqueue"
+        );
+        return;
+    };
+
+    let target_item_end = input_items.len() + output_items.len();
+    // STMO worker config semantics:
+    // - `last_index`: latest observed user-turn count at enqueue time.
+    // - `target_item_end`: exclusive end index for items included in this run.
+    let job_config = json!({
+        STMO_CFG_KEY_CONDENSER_MODEL: condenser_model,
+        STMO_CFG_KEY_LAST_INDEX: user_turns,
+        STMO_CFG_KEY_TARGET_ITEM_END: target_item_end,
+    })
+    .to_string();
+
+    let row = NewConversationMemory {
+        conversation_id: conversation_id.clone(),
+        conversation_version: None,
+        response_id: Some(response_id.clone()),
+        memory_type: ConversationMemoryType::Stmo,
+        status: ConversationMemoryStatus::Ready,
+        attempt: 0,
+        owner_id: None,
+        next_run_at: Utc::now(),
+        lease_until: None,
+        content: None,
+        memory_config: Some(job_config),
+        scope_id: None,
+        error_msg: None,
+    };
+
+    if let Err(err) = conversation_memory_writer.create_memory(row).await {
+        warn!(
+            conversation_id = %conversation_id.0,
+            response_id = %response_id.0,
+            error = %err,
+            "Failed to enqueue STMO job (best-effort; request flow continues)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::Value;
+    use smg_data_connector::{ConversationMemoryId, ConversationMemoryResult};
+
+    use super::*;
+
+    struct RecordingConversationMemoryWriter {
+        rows: Mutex<Vec<NewConversationMemory>>,
+    }
+
+    impl RecordingConversationMemoryWriter {
+        fn new() -> Self {
+            Self {
+                rows: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConversationMemoryWriter for RecordingConversationMemoryWriter {
+        async fn create_memory(
+            &self,
+            input: NewConversationMemory,
+        ) -> ConversationMemoryResult<ConversationMemoryId> {
+            self.rows.lock().expect("rows mutex poisoned").push(input);
+            Ok(ConversationMemoryId::from("mem_test"))
+        }
+    }
+
+    fn user_message_item() -> Value {
+        json!({
+            ITEM_KEY_TYPE: ITEM_TYPE_MESSAGE,
+            ITEM_KEY_ROLE: ROLE_USER,
+        })
+    }
+
+    #[test]
+    fn stmo_turn_boundary_matches_expected_sequence() {
+        let cases = [
+            (1, false),
+            (2, false),
+            (3, false),
+            (4, true),
+            (5, false),
+            (6, false),
+            (7, true),
+            (8, false),
+            (9, false),
+            (10, true),
+            (11, false),
+            (12, false),
+            (13, true),
+        ];
+
+        for (turn, expected) in cases {
+            assert_eq!(
+                should_enqueue_stmo_for_current_turn(turn),
+                expected,
+                "turn={turn}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_stmo_if_needed_enqueues_expected_row_on_boundary() {
+        let writer = Arc::new(RecordingConversationMemoryWriter::new());
+        let writer_dyn: Arc<dyn ConversationMemoryWriter> = writer.clone();
+
+        let memory_execution_context = MemoryExecutionContext {
+            stm_enabled: true,
+            stm_condenser_model_id: Some("condense-1".to_string()),
+            ..MemoryExecutionContext::default()
+        };
+
+        let input_items = vec![
+            user_message_item(),
+            user_message_item(),
+            user_message_item(),
+            user_message_item(),
+        ];
+        let output_items =
+            vec![json!({ ITEM_KEY_TYPE: ITEM_TYPE_MESSAGE, ITEM_KEY_ROLE: "assistant" })];
+        let conversation_id = ConversationId::from("conv_test");
+        let response_id = ResponseId::from("resp_test");
+
+        enqueue_stmo_if_needed(
+            &writer_dyn,
+            &memory_execution_context,
+            &conversation_id,
+            &response_id,
+            &input_items,
+            &output_items,
+        )
+        .await;
+
+        let rows = writer.rows.lock().expect("rows mutex poisoned");
+        assert_eq!(rows.len(), 1, "should enqueue exactly one STMO row");
+
+        let row = &rows[0];
+        assert_eq!(row.conversation_id, conversation_id);
+        assert_eq!(row.response_id, Some(response_id));
+        assert_eq!(row.memory_type, ConversationMemoryType::Stmo);
+        assert_eq!(row.status, ConversationMemoryStatus::Ready);
+
+        let config = row
+            .memory_config
+            .as_deref()
+            .expect("memory_config should be set");
+        let config_json: Value =
+            serde_json::from_str(config).expect("memory_config must be valid JSON");
+
+        assert_eq!(
+            config_json
+                .get(STMO_CFG_KEY_CONDENSER_MODEL)
+                .and_then(Value::as_str),
+            Some("condense-1")
+        );
+        assert_eq!(
+            config_json
+                .get(STMO_CFG_KEY_LAST_INDEX)
+                .and_then(Value::as_u64),
+            Some(4)
+        );
+        assert_eq!(
+            config_json
+                .get(STMO_CFG_KEY_TARGET_ITEM_END)
+                .and_then(Value::as_u64),
+            Some(5)
+        );
+    }
 }
