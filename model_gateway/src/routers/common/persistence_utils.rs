@@ -187,8 +187,7 @@ fn collect_text_fragments(value: &Value, out: &mut Vec<String>) {
         Value::Object(map) => {
             if let Some(text) = map.get("text").and_then(Value::as_str) {
                 push_trimmed(text, out);
-            }
-            if let Some(content) = map.get("content") {
+            } else if let Some(content) = map.get("content") {
                 collect_text_fragments(content, out);
             }
         }
@@ -232,15 +231,14 @@ fn extract_turn_text_for_enqueue(
     )
 }
 
-async fn enqueue_conversation_memories(
+pub(crate) async fn enqueue_conversation_memory_rows(
     conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
     memory_execution_context: &MemoryExecutionContext,
     conversation_id: &ConversationId,
     response_id: Option<ResponseId>,
-    input_items: &[Value],
-    output_items: &[Value],
+    user_text: Option<String>,
+    assistant_text: Option<String>,
 ) {
-    let (user_text, assistant_text) = extract_turn_text_for_enqueue(input_items, output_items);
     let plan = match build_enqueue_plan(EnqueueInputs {
         now: Utc::now(),
         memory_execution_context: memory_execution_context.clone(),
@@ -255,12 +253,15 @@ async fn enqueue_conversation_memories(
             warn!(
                 conversation_id = %conversation_id.0,
                 ?reason,
-                "Skipping conversation memory enqueue due to missing durable memory config"
+                "Skipping conversation memory enqueue due to invalid durable memory configuration"
             );
             return;
         }
     };
 
+    // Best-effort enqueue: rows are inserted sequentially and we stop on the
+    // first error. This is intentionally non-transactional so an LTM seed row
+    // can still be persisted even if a later on-demand row fails.
     for row in plan.rows {
         if let Err(err) = conversation_memory_writer.create_memory(row).await {
             warn!(
@@ -271,6 +272,26 @@ async fn enqueue_conversation_memories(
             return;
         }
     }
+}
+
+async fn enqueue_conversation_memories_from_items(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: Option<ResponseId>,
+    input_items: &[Value],
+    output_items: &[Value],
+) {
+    let (user_text, assistant_text) = extract_turn_text_for_enqueue(input_items, output_items);
+    enqueue_conversation_memory_rows(
+        conversation_memory_writer,
+        memory_execution_context,
+        conversation_id,
+        response_id,
+        user_text,
+        assistant_text,
+    )
+    .await;
 }
 
 /// Build a StoredResponse from response JSON and original request
@@ -579,7 +600,7 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
-        enqueue_conversation_memories(
+        enqueue_conversation_memories_from_items(
             &conversation_memory_writer,
             &memory_execution_context,
             &conv_id,

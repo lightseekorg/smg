@@ -572,6 +572,17 @@ pub enum ConversationMemoryType {
     Stmo,
 }
 
+impl ConversationMemoryType {
+    /// Canonical storage label used across durable backends.
+    pub const fn storage_label(self) -> &'static str {
+        match self {
+            Self::OnDemand => "ONDEMAND",
+            Self::Ltm => "LTM",
+            Self::Stmo => "STMO",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationMemoryStatus {
     #[serde(rename = "READY")]
@@ -582,6 +593,18 @@ pub enum ConversationMemoryStatus {
     Success,
     #[serde(rename = "FAILED")]
     Failed,
+}
+
+impl ConversationMemoryStatus {
+    /// Canonical storage label used across durable backends.
+    pub const fn storage_label(self) -> &'static str {
+        match self {
+            Self::Ready => "READY",
+            Self::Running => "RUNNING",
+            Self::Success => "SUCCESS",
+            Self::Failed => "FAILED",
+        }
+    }
 }
 
 /// Insert-only payload for creating a new conversation memory row.

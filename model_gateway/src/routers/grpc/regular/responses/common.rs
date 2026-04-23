@@ -22,6 +22,7 @@ use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
 use crate::{
+    memory::MemoryExecutionContext,
     middleware::TenantRequestMeta,
     routers::{
         common::persistence_utils::split_stored_message_content, error,
@@ -48,6 +49,7 @@ pub(super) struct ResponsesCallContext {
     pub headers: Option<http::HeaderMap>,
     pub model_id: String,
     pub response_id: Option<String>,
+    pub memory_execution_context: MemoryExecutionContext,
     pub tenant_request_meta: TenantRequestMeta,
 }
 

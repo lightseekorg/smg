@@ -22,7 +22,6 @@ use super::{
     conversions,
 };
 use crate::{
-    memory::MemoryExecutionContext,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
@@ -46,6 +45,8 @@ pub(super) async fn route_responses_internal(
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
+    let memory_execution_context = params.memory_execution_context.clone();
+
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
 
@@ -69,7 +70,7 @@ pub(super) async fn route_responses_internal(
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
         ctx.conversation_memory_writer.clone(),
-        MemoryExecutionContext::default(),
+        memory_execution_context,
         &responses_response,
         &request,
         ctx.request_context.clone(),

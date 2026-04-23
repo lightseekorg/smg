@@ -24,11 +24,11 @@ use crate::{
     core::{
         make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
         ConversationItemResult, ConversationItemStorage, ConversationItemStorageError,
-        ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStatus,
-        ConversationMemoryStorageError, ConversationMemoryType, ConversationMemoryWriter,
-        ConversationMetadata, ConversationResult, ConversationStorage, ConversationStorageError,
-        ListParams, NewConversation, NewConversationItem, NewConversationMemory, ResponseId,
-        ResponseResult, ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
+        ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStorageError,
+        ConversationMemoryWriter, ConversationMetadata, ConversationResult, ConversationStorage,
+        ConversationStorageError, ListParams, NewConversation, NewConversationItem,
+        NewConversationMemory, ResponseId, ResponseResult, ResponseStorage, ResponseStorageError,
+        SortOrder, StoredResponse,
     },
     postgres_migrations::POSTGRES_HISTORY_MIGRATIONS,
     schema::SchemaConfig,
@@ -827,6 +827,10 @@ pub(super) struct PostgresConversationMemoryWriter {
 }
 
 impl PostgresConversationMemoryWriter {
+    /// Create the writer and ensure the memory table/indexes exist.
+    ///
+    /// This constructor performs `CREATE TABLE IF NOT EXISTS` and index DDL once
+    /// during initialization (caller is expected to build the writer at startup).
     pub async fn new(store: PostgresStore) -> Result<Self, ConversationMemoryStorageError> {
         let s = &store.schema.conversation_memories;
         let table = s.qualified_table(store.schema.owner.as_deref());
@@ -861,6 +865,7 @@ impl PostgresConversationMemoryWriter {
                 col_defs.push(format!("{} {sql_type}", s.col(logical)));
             }
         }
+        col_defs.extend(extra_column_defs(s));
 
         let mut ddl = format!(
             "CREATE TABLE IF NOT EXISTS {table} ({});",
@@ -917,8 +922,8 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
     ) -> ConversationMemoryResult<ConversationMemoryId> {
         let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
         let response_id = input.response_id.as_ref().map(|value| value.0.clone());
-        let memory_type = conversation_memory_type_label(input.memory_type);
-        let status = conversation_memory_status_label(input.status);
+        let memory_type = input.memory_type.storage_label();
+        let status = input.status.storage_label();
 
         let s = &self.store.schema.conversation_memories;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
@@ -970,23 +975,6 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
 
         Ok(id)
-    }
-}
-
-fn conversation_memory_type_label(memory_type: ConversationMemoryType) -> &'static str {
-    match memory_type {
-        ConversationMemoryType::OnDemand => "ONDEMAND",
-        ConversationMemoryType::Ltm => "LTM",
-        ConversationMemoryType::Stmo => "STMO",
-    }
-}
-
-fn conversation_memory_status_label(status: ConversationMemoryStatus) -> &'static str {
-    match status {
-        ConversationMemoryStatus::Ready => "READY",
-        ConversationMemoryStatus::Running => "RUNNING",
-        ConversationMemoryStatus::Success => "SUCCESS",
-        ConversationMemoryStatus::Failed => "FAILED",
     }
 }
 

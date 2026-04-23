@@ -54,6 +54,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    memory_execution_context: MemoryExecutionContext,
     tenant_request_meta: TenantRequestMeta,
 ) -> Result<ResponsesResponse, Response> {
     // Clone request for persistence
@@ -85,7 +86,7 @@ pub(crate) async fn serve_harmony_responses(
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
         ctx.conversation_memory_writer.clone(),
-        MemoryExecutionContext::default(),
+        memory_execution_context,
         &response,
         &original_request,
         ctx.request_context.clone(),
