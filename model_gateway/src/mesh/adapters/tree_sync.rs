@@ -158,7 +158,18 @@ impl TreeSyncAdapter {
     /// by `CacheAwarePolicy` on every local cache event; the batch
     /// is flushed by the drain callback and must not do anything
     /// heavy here.
+    ///
+    /// `delta.node_hash` must not be zero: `GLOBAL_EVICTION_HASH` in
+    /// `smg_mesh::tree_ops` reserves 0 as the "evict everywhere"
+    /// sentinel, and the `hash_node_path` / `hash_token_path`
+    /// producers both remap 0→1 to keep the space disjoint. A zero
+    /// hash here would collide with the sentinel in the apply path
+    /// landing next slice.
     pub fn on_local_insert(&self, model_id: &str, delta: TreeDelta) {
+        debug_assert_ne!(
+            delta.node_hash, 0,
+            "TreeDelta.node_hash must be non-zero (0 is reserved for GLOBAL_EVICTION_HASH)",
+        );
         self.pending_deltas
             .entry(model_id.to_string())
             .or_default()
