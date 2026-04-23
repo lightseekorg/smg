@@ -4,7 +4,8 @@
 //! 1. OracleStore helper and common utilities
 //! 2. OracleConversationStorage
 //! 3. OracleConversationItemStorage
-//! 4. OracleResponseStorage
+//! 4. OracleConversationMemoryWriter
+//! 5. OracleResponseStorage
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -309,17 +310,9 @@ impl OracleConversationStorage {
         // Table and column names are already uppercased by OracleStore::new().
         let table = s.qualified_table(schema.owner.as_deref());
 
-        let exists: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
-                    s.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+        let exists = oracle_table_exists(conn, schema.owner.as_deref(), &s.table)?;
 
-        if exists == 0 {
+        if !exists {
             let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id"))];
             if !s.is_skipped("created_at") {
                 col_defs.push(format!("{} TIMESTAMP WITH TIME ZONE", s.col("created_at")));
@@ -595,17 +588,9 @@ impl OracleConversationItemStorage {
         // Table and column names are already uppercased by OracleStore::new().
         let si_table = si.qualified_table(schema.owner.as_deref());
 
-        let exists_items: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
-                    si.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+        let exists_items = oracle_table_exists(conn, schema.owner.as_deref(), &si.table)?;
 
-        if exists_items == 0 {
+        if !exists_items {
             let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", si.col("id"))];
             let item_core_cols: [(&str, &str); 6] = [
                 ("response_id", "VARCHAR2(64)"),
@@ -632,17 +617,9 @@ impl OracleConversationItemStorage {
         let sl = &schema.conversation_item_links;
         let sl_table = sl.qualified_table(schema.owner.as_deref());
 
-        let exists_links: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
-                    sl.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+        let exists_links = oracle_table_exists(conn, schema.owner.as_deref(), &sl.table)?;
 
-        if exists_links == 0 {
+        if !exists_links {
             let col_cid = sl.col("conversation_id");
             let col_iid = sl.col("item_id");
             let col_added = sl.col("added_at");
@@ -1165,17 +1142,9 @@ impl OracleConversationMemoryWriter {
         let s = &schema.conversation_memories;
         let table = s.qualified_table(schema.owner.as_deref());
 
-        let exists: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
-                    s.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+        let exists = oracle_table_exists(conn, schema.owner.as_deref(), &s.table)?;
 
-        if exists == 0 {
+        if !exists {
             let mut col_defs = vec![format!("{} VARCHAR2(255) PRIMARY KEY", s.col("memory_id"))];
             let core_cols: [(&str, &str); 15] = [
                 ("conversation_id", "VARCHAR2(255) NOT NULL"),
@@ -1219,6 +1188,7 @@ impl OracleConversationMemoryWriter {
             let conv_idx = oracle_index_name(&s.table, "CONV_ID_IDX");
             create_index_if_missing(
                 conn,
+                schema.owner.as_deref(),
                 &s.table,
                 &conv_idx,
                 &format!(
@@ -1231,6 +1201,7 @@ impl OracleConversationMemoryWriter {
             let next_run_idx = oracle_index_name(&s.table, "NEXT_RUN_AT_IDX");
             create_index_if_missing(
                 conn,
+                schema.owner.as_deref(),
                 &s.table,
                 &next_run_idx,
                 &format!(
@@ -1243,6 +1214,7 @@ impl OracleConversationMemoryWriter {
             let status_idx = oracle_index_name(&s.table, "STATUS_IDX");
             create_index_if_missing(
                 conn,
+                schema.owner.as_deref(),
                 &s.table,
                 &status_idx,
                 &format!("CREATE INDEX {status_idx} ON {table} ({})", s.col("status")),
@@ -1252,6 +1224,7 @@ impl OracleConversationMemoryWriter {
             let response_idx = oracle_index_name(&s.table, "RESPONSE_ID_IDX");
             create_index_if_missing(
                 conn,
+                schema.owner.as_deref(),
                 &s.table,
                 &response_idx,
                 &format!(
@@ -1287,8 +1260,7 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
             error_msg,
         } = input;
 
-        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
-        let id_for_insert = id.clone();
+        let id_for_insert = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
         let response_id = response_id.map(|value| value.0);
         let memory_type = memory_type.storage_label();
         let status = status.storage_label();
@@ -1372,17 +1344,9 @@ impl OracleResponseStorage {
         // Table and column names are already uppercased by OracleStore::new().
         let table = s.qualified_table(schema.owner.as_deref());
 
-        let exists: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
-                    s.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+        let exists = oracle_table_exists(conn, schema.owner.as_deref(), &s.table)?;
 
-        if exists == 0 {
+        if !exists {
             let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id"))];
             let core_cols: [(&str, &str); 7] = [
                 ("conversation_id", "VARCHAR2(64)"),
@@ -1412,6 +1376,7 @@ impl OracleResponseStorage {
             let prev_idx = format!("{}_PREV_IDX", s.table);
             create_index_if_missing(
                 conn,
+                schema.owner.as_deref(),
                 &s.table,
                 &prev_idx,
                 &format!("CREATE INDEX {prev_idx} ON {table}({prev})"),
@@ -1423,6 +1388,7 @@ impl OracleResponseStorage {
             let user_idx = format!("{}_USER_IDX", s.table);
             create_index_if_missing(
                 conn,
+                schema.owner.as_deref(),
                 &s.table,
                 &user_idx,
                 &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
@@ -1714,19 +1680,24 @@ impl ResponseStorage for OracleResponseStorage {
 
 fn create_index_if_missing(
     conn: &Connection,
+    owner_upper: Option<&str>,
     table_upper: &str,
     index_name: &str,
     ddl: &str,
 ) -> Result<(), String> {
-    let count: i64 = conn
-        .query_row_as(
-            &format!(
-                "SELECT COUNT(*) FROM user_indexes \
-                 WHERE table_name = '{table_upper}' AND index_name = :1"
-            ),
-            &[&index_name],
-        )
-        .map_err(map_oracle_error)?;
+    let count: i64 = match owner_upper {
+        Some(owner) => conn.query_row_as(
+            "SELECT COUNT(*) FROM all_indexes \
+             WHERE owner = :1 AND table_name = :2 AND index_name = :3",
+            &[&owner, &table_upper, &index_name],
+        ),
+        None => conn.query_row_as(
+            "SELECT COUNT(*) FROM user_indexes \
+             WHERE table_name = :1 AND index_name = :2",
+            &[&table_upper, &index_name],
+        ),
+    }
+    .map_err(map_oracle_error)?;
 
     if count == 0 {
         if let Err(err) = conn.execute(ddl, &[]) {
@@ -1746,14 +1717,90 @@ fn create_index_if_missing(
     Ok(())
 }
 
+fn oracle_table_exists(
+    conn: &Connection,
+    owner_upper: Option<&str>,
+    table_upper: &str,
+) -> Result<bool, String> {
+    let count: i64 = match owner_upper {
+        Some(owner) => conn.query_row_as(
+            "SELECT COUNT(*) FROM all_tables WHERE owner = :1 AND table_name = :2",
+            &[&owner, &table_upper],
+        ),
+        None => conn.query_row_as(
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = :1",
+            &[&table_upper],
+        ),
+    }
+    .map_err(map_oracle_error)?;
+
+    Ok(count > 0)
+}
+
 /// Oracle object names are limited to 30 chars.
 /// Build stable table-scoped names while respecting that limit.
 fn oracle_index_name(table_name: &str, suffix: &str) -> String {
     const MAX_ORACLE_IDENT_LEN: usize = 30;
-    let table = table_name.to_ascii_uppercase();
-    let suffix = suffix.to_ascii_uppercase();
+    const HASH_HEX_LEN: usize = 6;
+    let table = sanitize_oracle_identifier_segment(table_name);
+    let mut suffix = sanitize_oracle_identifier_segment(suffix);
+    if suffix.is_empty() {
+        suffix.push_str("IDX");
+    }
+    let max_suffix_len = MAX_ORACLE_IDENT_LEN.saturating_sub(2); // Keep space for "X_"
+    if suffix.len() > max_suffix_len {
+        suffix = suffix.chars().take(max_suffix_len).collect();
+    }
+
     // Need one "_" between table and suffix.
     let table_budget = MAX_ORACLE_IDENT_LEN.saturating_sub(suffix.len() + 1);
-    let table_part: String = table.chars().take(table_budget).collect();
+    let mut table_part = if table.len() <= table_budget {
+        table.chars().take(table_budget).collect::<String>()
+    } else {
+        let hash = stable_hash_hex_upper(table.as_bytes(), HASH_HEX_LEN);
+        let prefix_budget = table_budget.saturating_sub(hash.len() + 1);
+        let mut prefix: String = table.chars().take(prefix_budget).collect();
+        if prefix.is_empty() {
+            prefix.push('T');
+        }
+        format!("{prefix}_{hash}")
+    };
+    if table_part.is_empty() {
+        table_part.push('T');
+    }
+    if !table_part
+        .as_bytes()
+        .first()
+        .is_some_and(|b| (*b as char).is_ascii_alphabetic())
+    {
+        table_part.replace_range(0..1, "T");
+    }
+
     format!("{table_part}_{suffix}")
+}
+
+fn sanitize_oracle_identifier_segment(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn stable_hash_hex_upper(bytes: &[u8], hex_len: usize) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    let full = format!("{hash:016X}");
+    full.chars().take(hex_len.min(full.len())).collect()
 }

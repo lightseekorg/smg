@@ -994,15 +994,63 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
 /// Keep index names table-scoped and deterministic within that bound.
 fn postgres_index_name(table_name: &str, suffix: &str) -> String {
     const MAX_POSTGRES_IDENT_LEN: usize = 63;
+    const HASH_HEX_LEN: usize = 8;
+
     let table = table_name
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect::<String>()
         .to_ascii_lowercase();
-    let suffix = suffix.to_ascii_lowercase();
+    let mut suffix = suffix
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if suffix.is_empty() {
+        suffix.push_str("idx");
+    }
+    let max_suffix_len = MAX_POSTGRES_IDENT_LEN.saturating_sub(2); // Keep room for "x_"
+    if suffix.len() > max_suffix_len {
+        suffix = suffix.chars().take(max_suffix_len).collect();
+    }
+
     let table_budget = MAX_POSTGRES_IDENT_LEN.saturating_sub(suffix.len() + 1);
-    let table_part: String = table.chars().take(table_budget).collect();
+    let mut table_part = if table.len() <= table_budget {
+        table.chars().take(table_budget).collect::<String>()
+    } else {
+        let hash = stable_hash_hex_lower(table.as_bytes(), HASH_HEX_LEN);
+        let prefix_budget = table_budget.saturating_sub(hash.len() + 1);
+        let mut prefix: String = table.chars().take(prefix_budget).collect();
+        if prefix.is_empty() {
+            prefix.push('t');
+        }
+        format!("{prefix}_{hash}")
+    };
+    if table_part.is_empty() {
+        table_part.push('t');
+    }
+    if !table_part
+        .as_bytes()
+        .first()
+        .is_some_and(|b| (*b as char).is_ascii_alphabetic() || *b == b'_')
+    {
+        table_part.replace_range(0..1, "_");
+    }
+
     format!("{table_part}_{suffix}")
+}
+
+fn stable_hash_hex_lower(bytes: &[u8], hex_len: usize) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    let full = format!("{hash:016x}");
+    full.chars().take(hex_len.min(full.len())).collect()
 }
 
 pub(super) struct PostgresResponseStorage {

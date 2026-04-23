@@ -341,7 +341,7 @@ impl GrpcRouter {
             );
             let harmony_ctx = self
                 .harmony_responses_context
-                .with_request_context(request_context.clone());
+                .with_request_context(request_context);
 
             if body.stream.unwrap_or(false) {
                 serve_harmony_responses_stream(

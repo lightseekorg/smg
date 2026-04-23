@@ -636,14 +636,26 @@ async fn execute_tool_loop_streaming_internal(
                     max_tool_calls,
                     DEFAULT_MAX_ITERATIONS
                 );
+                let incomplete_details = json!({ "reason": "max_tool_calls" });
+                let usage_json = accumulated_response.usage.as_ref().map(|u| {
+                    json!({
+                        "input_tokens": u.prompt_tokens,
+                        "output_tokens": u.completion_tokens,
+                        "total_tokens": u.total_tokens,
+                    })
+                });
                 persist_streaming_response(
                     ctx,
                     &memory_execution_context,
                     &emitter,
                     accumulated_response.usage.clone(),
                     original_request,
+                    Some(incomplete_details.clone()),
                 )
                 .await;
+                let mut event = emitter.emit_completed(usage_json.as_ref());
+                event["response"]["incomplete_details"] = incomplete_details;
+                emitter.send_event(&event, &tx)?;
                 break;
             }
 
@@ -898,6 +910,7 @@ async fn execute_tool_loop_streaming_internal(
                     &emitter,
                     accumulated_response.usage.clone(),
                     original_request,
+                    None,
                 )
                 .await;
                 break;
@@ -942,6 +955,7 @@ async fn execute_tool_loop_streaming_internal(
             &emitter,
             accumulated_response.usage.clone(),
             original_request,
+            None,
         )
         .await;
         let event = emitter.emit_completed(usage_json.as_ref());
@@ -959,8 +973,10 @@ async fn persist_streaming_response(
     emitter: &ResponseStreamEventEmitter,
     usage: Option<Usage>,
     original_request: &ResponsesRequest,
+    incomplete_details: Option<Value>,
 ) {
-    let final_response = emitter.finalize(usage);
+    let mut final_response = emitter.finalize(usage);
+    final_response.incomplete_details = incomplete_details;
     persist_response_if_needed(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),

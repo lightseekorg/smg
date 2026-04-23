@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
-use serde_json::json;
+use serde_json::{json, Value};
 use smg_mcp::{McpServerBinding, McpToolSession};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -301,7 +301,6 @@ async fn execute_mcp_tool_loop_streaming(
                         "input_tokens": usage.prompt_tokens,
                         "output_tokens": usage.completion_tokens,
                         "total_tokens": usage.total_tokens,
-                        "incomplete_details": incomplete_details,
                     });
                     persist_streaming_response(
                         ctx,
@@ -309,9 +308,11 @@ async fn execute_mcp_tool_loop_streaming(
                         emitter,
                         Some(usage.clone()),
                         original_request,
+                        Some(incomplete_details.clone()),
                     )
                     .await;
-                    let event = emitter.emit_completed(Some(&usage_json));
+                    let mut event = emitter.emit_completed(Some(&usage_json));
+                    event["response"]["incomplete_details"] = incomplete_details;
                     emitter.send_event_best_effort(&event, tx);
                     return;
                 }
@@ -357,6 +358,7 @@ async fn execute_mcp_tool_loop_streaming(
                         emitter,
                         Some(usage.clone()),
                         original_request,
+                        None,
                     )
                     .await;
 
@@ -522,8 +524,10 @@ async fn persist_streaming_response(
     emitter: &ResponseStreamEventEmitter,
     usage: Option<openai_protocol::common::Usage>,
     original_request: &ResponsesRequest,
+    incomplete_details: Option<Value>,
 ) {
-    let final_response = emitter.finalize(usage);
+    let mut final_response = emitter.finalize(usage);
+    final_response.incomplete_details = incomplete_details;
     persist_response_if_needed(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),
