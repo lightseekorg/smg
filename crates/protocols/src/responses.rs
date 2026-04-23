@@ -834,17 +834,35 @@ pub struct ContainerDomainSecret {
 /// L512-513): only the resolved `local` / `container_reference` shapes are
 /// echoed back by the model — `container_auto` is a request-side hint that
 /// the platform resolves into one of these two before the call is surfaced.
+/// Spec L513 explicitly types the response-side local arm as
+/// `ResponseLocalEnvironment { type: "local" }` (no `skills` attachment on
+/// the call form) — `skills` is a request-side input on the tool, never
+/// echoed back on the resolved call.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ShellCallEnvironment {
-    /// `type: "local"` — resolved local environment, mirrors the tool-form
-    /// [`LocalShellEnvironment`].
+    /// `type: "local"` — resolved local environment on the response-side
+    /// call form. Per spec L513 this is `ResponseLocalEnvironment { type:
+    /// "local" }`, without the `skills` attachment carried on the
+    /// request-side [`LocalShellEnvironment`].
     #[serde(rename = "local")]
-    Local(LocalShellEnvironment),
+    Local(ResponseLocalShellEnvironment),
     /// `type: "container_reference"` — resolved container binding.
     #[serde(rename = "container_reference")]
     ContainerReference(ContainerReferenceEnvironment),
 }
+
+/// Payload for [`ShellCallEnvironment::Local`].
+///
+/// Spec (openai-responses-api-spec.md §returns L513): response-side local
+/// environment is `ResponseLocalEnvironment { type: "local" }` — the
+/// discriminator is the only field the model echoes back. `skills` is a
+/// request-side attachment on [`LocalShellEnvironment`] (tool form) and is
+/// not part of the response-side envelope; modelling it here would let
+/// unknown request fields leak through the response union unchecked.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseLocalShellEnvironment {}
 
 /// Action payload for [`ResponseInputOutputItem::ShellCall`] /
 /// [`ResponseOutputItem::ShellCall`].

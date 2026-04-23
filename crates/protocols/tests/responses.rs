@@ -2370,7 +2370,7 @@ fn shell_call_output_item_round_trips_on_response_side() {
             assert_eq!(id, "sc_10");
             assert_eq!(call_id, "call_shell_10");
             match environment.as_ref().expect("env present") {
-                ShellCallEnvironment::Local(local) => assert!(local.skills.is_none()),
+                ShellCallEnvironment::Local(_) => {}
                 ShellCallEnvironment::ContainerReference(_) => {
                     panic!("expected Local env, got ContainerReference")
                 }
@@ -2452,5 +2452,29 @@ fn shell_call_environment_rejects_container_auto() {
     assert!(
         serde_json::from_value::<ResponseInputOutputItem>(payload).is_err(),
         "container_auto must be rejected on shell_call.environment"
+    );
+}
+
+#[test]
+fn shell_call_environment_local_rejects_skills_on_response_side() {
+    // Spec (openai-responses-api-spec.md §returns L513): the response-side
+    // `local` environment is `ResponseLocalEnvironment { type: "local" }` —
+    // `skills` is a request-side attachment on the tool's
+    // `LocalShellEnvironment` and is not echoed back on the resolved call.
+    // `deny_unknown_fields` on [`ResponseLocalShellEnvironment`] must reject
+    // a payload that tries to carry `skills` across the boundary so the
+    // request-only field cannot silently round-trip on the response union.
+    let payload = json!({
+        "type": "shell_call",
+        "call_id": "call_shell_4",
+        "action": {"commands": ["ls"]},
+        "environment": {
+            "type": "local",
+            "skills": []
+        }
+    });
+    assert!(
+        serde_json::from_value::<ResponseInputOutputItem>(payload).is_err(),
+        "skills must be rejected on response-side shell_call.environment.local"
     );
 }
