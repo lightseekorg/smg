@@ -229,7 +229,11 @@ impl ToolParser for KimiK2Parser {
             // No tool markers detected - return all buffered content as normal text
             let mut normal_text = std::mem::take(&mut self.buffer);
             // Remove end tokens if present
-            for e_token in ["<|tool_calls_section_end|>", "<|tool_call_end|>", "<|func_end|>"] {
+            for e_token in [
+                "<|tool_calls_section_end|>",
+                "<|tool_call_end|>",
+                "<|func_end|>",
+            ] {
                 normal_text = normal_text.replace(e_token, "");
             }
             return Ok(StreamingParseResult {
@@ -291,7 +295,8 @@ impl ToolParser for KimiK2Parser {
                         };
 
                         // Split by end token before sending
-                        let end_pos = argument_diff.find("<|tool_call_end|>")
+                        let end_pos = argument_diff
+                            .find("<|tool_call_end|>")
                             .or_else(|| argument_diff.find("<|func_end|>"));
                         let parsed_args_diff = if let Some(pos) = end_pos {
                             &argument_diff[..pos]
@@ -314,7 +319,8 @@ impl ToolParser for KimiK2Parser {
                         }
 
                         // Check completeness - split by end token first
-                        let end_pos2 = function_args.find("<|tool_call_end|>")
+                        let end_pos2 = function_args
+                            .find("<|tool_call_end|>")
                             .or_else(|| function_args.find("<|func_end|>"));
                         let parsed_args = if let Some(pos) = end_pos2 {
                             &function_args[..pos]

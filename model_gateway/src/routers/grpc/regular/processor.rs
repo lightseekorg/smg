@@ -175,6 +175,7 @@ impl ResponseProcessor {
                         &processed_text,
                         &original_request.model,
                         history_tool_calls_count,
+                        original_request.tools.as_deref(),
                     )
                     .await;
             }
@@ -255,13 +256,29 @@ impl ResponseProcessor {
                 let mut escape = false;
                 let mut json_end = None;
                 for (i, ch) in processed_text.char_indices() {
-                    if escape { escape = false; continue; }
-                    if ch == '\\' && in_string { escape = true; continue; }
-                    if ch == '"' { in_string = !in_string; continue; }
-                    if in_string { continue; }
-                    if ch == '{' { depth += 1; } else if ch == '}' {
+                    if escape {
+                        escape = false;
+                        continue;
+                    }
+                    if ch == '\\' && in_string {
+                        escape = true;
+                        continue;
+                    }
+                    if ch == '"' {
+                        in_string = !in_string;
+                        continue;
+                    }
+                    if in_string {
+                        continue;
+                    }
+                    if ch == '{' {
+                        depth += 1;
+                    } else if ch == '}' {
                         depth -= 1;
-                        if depth == 0 { json_end = Some(i + 1); break; }
+                        if depth == 0 {
+                            json_end = Some(i + 1);
+                            break;
+                        }
                     }
                 }
                 if let Some(end) = json_end {
@@ -726,6 +743,7 @@ impl ResponseProcessor {
                         utils::message_utils::get_history_tool_calls_count_messages(
                             &messages_request,
                         ),
+                        None,
                     )
                     .await;
             } else if used_json_schema {
@@ -1018,15 +1036,18 @@ fn coerce_tool_args_to_schema(
                     _ => None,
                 },
                 Some("number") => match &val {
-                    serde_json::Value::String(s) => {
-                        s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(serde_json::Value::Number)
-                    }
+                    serde_json::Value::String(s) => s
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number),
                     _ => None,
                 },
                 Some("integer") => match &val {
-                    serde_json::Value::String(s) => {
-                        s.parse::<i64>().ok().map(|n| serde_json::Value::Number(n.into()))
-                    }
+                    serde_json::Value::String(s) => s
+                        .parse::<i64>()
+                        .ok()
+                        .map(|n| serde_json::Value::Number(n.into())),
                     _ => None,
                 },
                 Some("array") => match &val {

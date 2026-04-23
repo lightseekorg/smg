@@ -578,12 +578,20 @@ impl Normalizable for ChatCompletionRequest {
             let kwargs = self.chat_template_kwargs.get_or_insert_with(HashMap::new);
             match thinking {
                 ThinkingConfig::Enabled { .. } => {
-                    kwargs.entry("enable_thinking".to_string()).or_insert(Value::Bool(true));
-                    kwargs.entry("thinking".to_string()).or_insert(Value::Bool(true));
+                    kwargs
+                        .entry("enable_thinking".to_string())
+                        .or_insert(Value::Bool(true));
+                    kwargs
+                        .entry("thinking".to_string())
+                        .or_insert(Value::Bool(true));
                 }
                 ThinkingConfig::Disabled => {
-                    kwargs.entry("enable_thinking".to_string()).or_insert(Value::Bool(false));
-                    kwargs.entry("thinking".to_string()).or_insert(Value::Bool(false));
+                    kwargs
+                        .entry("enable_thinking".to_string())
+                        .or_insert(Value::Bool(false));
+                    kwargs
+                        .entry("thinking".to_string())
+                        .or_insert(Value::Bool(false));
                 }
             }
         }

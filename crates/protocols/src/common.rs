@@ -228,7 +228,10 @@ impl<'de> Deserialize<'de> for ImageUrl {
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<ImageUrl, E> {
-                Ok(ImageUrl { url: v.to_string(), detail: None })
+                Ok(ImageUrl {
+                    url: v.to_string(),
+                    detail: None,
+                })
             }
 
             fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<ImageUrl, M::Error> {
@@ -238,7 +241,9 @@ impl<'de> Deserialize<'de> for ImageUrl {
                     match key.as_str() {
                         "url" => url = Some(map.next_value()?),
                         "detail" => detail = map.next_value()?,
-                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
                     }
                 }
                 Ok(ImageUrl {
