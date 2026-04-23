@@ -548,4 +548,27 @@ mod tests {
         assert!(!chat_req.stream);
         assert!(chat_req.stream_options.is_none());
     }
+
+    #[test]
+    fn test_image_generation_call_input_rejected() {
+        // Regression (R6.4): `image_generation_call` items are server-produced
+        // output (populated via the shared MCP transformer in R6.1) and must
+        // not be round-tripped back into the chat conversion as input.
+        // The regular gRPC path — used by non-Harmony text LLMs that only do
+        // function calling — rejects this variant with the same contract as
+        // sibling hosted-tool items (Computer/Shell/Custom/ApplyPatch).
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::ImageGenerationCall {
+                id: "ig_test".to_string(),
+                result: Some("base64data".to_string()),
+                revised_prompt: Some("a cat".to_string()),
+                status: None,
+            }]),
+            ..Default::default()
+        };
+
+        let result = responses_to_chat(&req);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Unsupported input item type");
+    }
 }
