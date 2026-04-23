@@ -561,6 +561,8 @@ impl<'a> McpToolSession<'a> {
             | ResponseOutputItem::ImageGenerationCall { .. }
             | ResponseOutputItem::ComputerCall { .. }
             | ResponseOutputItem::ComputerCallOutput { .. }
+            | ResponseOutputItem::ShellCall { .. }
+            | ResponseOutputItem::ShellCallOutput { .. }
             | ResponseOutputItem::Message { .. }
             | ResponseOutputItem::Reasoning { .. }
             | ResponseOutputItem::Compaction { .. } => true,

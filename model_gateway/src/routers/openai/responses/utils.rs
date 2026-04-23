@@ -256,6 +256,7 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         // the full {type, name, description, tools} payload round-trips back
         // to the client unchanged (T9).
         ResponseTool::Namespace(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Shell(_) => serde_json::to_value(tool).ok(),
         ResponseTool::Function(_) => None,
     }
 }

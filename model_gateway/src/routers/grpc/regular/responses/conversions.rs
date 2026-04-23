@@ -170,6 +170,14 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         );
                         return Err("Unsupported input item type".to_string());
                     }
+                    ResponseInputOutputItem::ShellCall { .. }
+                    | ResponseInputOutputItem::ShellCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Shell tool item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
                 }
             }
         }
