@@ -116,6 +116,11 @@ BRAVE_MCP_PORT = int(os.environ.get("BRAVE_MCP_PORT") or 8080)
 BRAVE_MCP_HOST = os.environ.get("BRAVE_MCP_HOST") or DEFAULT_HOST
 BRAVE_MCP_URL = f"http://{BRAVE_MCP_HOST}:{BRAVE_MCP_PORT}/mcp"
 
+# In-process mock MCP server (see infra/mock_mcp_server.py). Bound to localhost
+# on an auto-allocated port; host is exposed as a constant so tests and
+# configuration helpers can share a single source of truth.
+MOCK_MCP_HOST = DEFAULT_HOST
+
 # Timeouts (seconds)
 DEFAULT_STARTUP_TIMEOUT = 300
 DEFAULT_ROUTER_TIMEOUT = 60

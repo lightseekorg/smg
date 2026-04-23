@@ -24,6 +24,7 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     LOCAL_RUNTIMES,
     LOG_SEPARATOR_WIDTH,
     MAX_RETRY_ATTEMPTS,
+    MOCK_MCP_HOST,
     PARAM_BACKEND_ROUTER,
     PARAM_MODEL,
     PARAM_SETUP_BACKEND,
@@ -39,6 +40,7 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
 from .gpu_monitor import GPUMonitor
 from .gpu_monitor import should_monitor as should_monitor_gpu
+from .mock_mcp import IMAGE_GENERATION_PNG_BASE64, MockMcpServer, mock_mcp_server
 from .model_specs import (  # Default model paths; Model groups
     CHAT_MODELS,
     DEFAULT_EMBEDDING_MODEL_PATH,
@@ -86,6 +88,7 @@ __all__ = [
     "BRAVE_MCP_HOST",
     "BRAVE_MCP_PORT",
     "BRAVE_MCP_URL",
+    "MOCK_MCP_HOST",
     "DEFAULT_RUNTIME",
     "DEFAULT_STARTUP_TIMEOUT",
     "DEFAULT_ROUTER_TIMEOUT",
@@ -129,6 +132,10 @@ __all__ = [
     "Gateway",
     "WorkerInfo",
     "launch_cloud_gateway",
+    # Mock MCP server (for builtin-tool e2e tests)
+    "MockMcpServer",
+    "mock_mcp_server",
+    "IMAGE_GENERATION_PNG_BASE64",
     # Default model paths
     "DEFAULT_MODEL_PATH",
     "DEFAULT_SMALL_MODEL_PATH",
