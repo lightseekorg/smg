@@ -1206,6 +1206,7 @@ impl OracleConversationMemoryWriter {
                     col_defs.push(format!("{} {sql_type}", s.col(logical)));
                 }
             }
+            col_defs.extend(extra_column_defs(s));
 
             conn.execute(
                 &format!("CREATE TABLE {table} ({})", col_defs.join(", ")),
@@ -1291,6 +1292,8 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
         let memory_type = memory_type.storage_label();
         let status = status.storage_label();
         let schema = self.store.schema.clone();
+        // Capture extra columns before spawn_blocking (task-locals don't propagate)
+        let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
@@ -1322,6 +1325,14 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
                 push_col!("memory_config", &memory_config);
                 push_col!("scope_id", &scope_id);
                 push_col!("error_msg", &error_msg);
+
+                // Append extra columns from hooks or defaults
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(s, &hook_extra);
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
+                    params.push(val);
+                }
 
                 let placeholders = (1..=params.len())
                     .map(|i| format!(":{i}"))

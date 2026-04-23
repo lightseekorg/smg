@@ -954,6 +954,14 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
         push_col!("scope_id", &input.scope_id);
         push_col!("error_msg", &input.error_msg);
 
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
+            params.push(val);
+        }
+
         let placeholders = (1..=params.len())
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()

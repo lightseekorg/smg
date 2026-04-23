@@ -375,8 +375,18 @@ impl GrpcRouter {
                 }
             }
         } else {
+            let regular_ctx = ResponsesContext::new(
+                Arc::new(self.pipeline.clone()),
+                self.shared_components.clone(),
+                self.responses_context.response_storage.clone(),
+                self.responses_context.conversation_storage.clone(),
+                self.responses_context.conversation_item_storage.clone(),
+                self.responses_context.conversation_memory_writer.clone(),
+                self.responses_context.mcp_orchestrator.clone(),
+                smg_data_connector::current_request_context(),
+            );
             responses::route_responses(
-                &self.responses_context,
+                &regular_ctx,
                 Arc::new(body.clone()),
                 headers.cloned(),
                 memory_execution_context,

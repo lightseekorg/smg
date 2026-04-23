@@ -261,7 +261,9 @@ pub(crate) async fn enqueue_conversation_memory_rows(
 
     // Best-effort enqueue: rows are inserted sequentially and we stop on the
     // first error. This is intentionally non-transactional so an LTM seed row
-    // can still be persisted even if a later on-demand row fails.
+    // can still be persisted even if a later on-demand row fails. A persisted
+    // LTM row without a paired on-demand row is therefore a valid state.
+    // Downstream processors must tolerate this asymmetry.
     for row in plan.rows {
         if let Err(err) = conversation_memory_writer.create_memory(row).await {
             warn!(
