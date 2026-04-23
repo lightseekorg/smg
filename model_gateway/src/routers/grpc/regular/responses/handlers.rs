@@ -54,7 +54,8 @@ pub(crate) async fn route_responses(
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
-    // 1. Reject background mode (no longer supported)
+    // BGM-PR-04 replaces this with delegation to routers/common/background/
+    // when ctx.app_context.background_repository is Some.
     let is_background = request.background.unwrap_or(false);
     if is_background {
         return error::bad_request(

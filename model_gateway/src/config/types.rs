@@ -18,6 +18,65 @@ pub struct MemoryRuntimeConfig {
     pub enabled: bool,
 }
 
+/// Background-mode tuning knobs. Availability is gated by backend capability
+/// (whether the active `history_backend` provides a
+/// `BackgroundResponseRepository`), not by a flag here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    pub worker_concurrency: u32,
+    pub max_queue_depth: u32,
+    pub lease_duration_secs: u64,
+    pub max_retries: u32,
+    pub retry_base_delay_secs: u64,
+    pub retry_max_delay_secs: u64,
+    pub sweep_interval_secs: u64,
+    pub poll_interval_ms: u64,
+    pub stream_retention_secs: u64,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            worker_concurrency: 16,
+            max_queue_depth: 10_000,
+            lease_duration_secs: 60,
+            max_retries: 3,
+            retry_base_delay_secs: 2,
+            retry_max_delay_secs: 60,
+            sweep_interval_secs: 30,
+            poll_interval_ms: 500,
+            stream_retention_secs: 15 * 60,
+        }
+    }
+}
+
+impl BackgroundConfig {
+    pub fn lease_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.lease_duration_secs)
+    }
+
+    pub fn retry_base_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.retry_base_delay_secs)
+    }
+
+    pub fn retry_max_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.retry_max_delay_secs)
+    }
+
+    pub fn sweep_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.sweep_interval_secs)
+    }
+
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.poll_interval_ms)
+    }
+
+    pub fn stream_retention(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.stream_retention_secs)
+    }
+}
+
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
@@ -47,6 +106,8 @@ pub struct RouterConfig {
     pub storage_context_headers: HashMap<String, String>,
     #[serde(default)]
     pub memory_runtime: MemoryRuntimeConfig,
+    #[serde(default)]
+    pub background: BackgroundConfig,
     #[serde(default)]
     pub tenant_resolution: TenantResolutionConfig,
     /// Set to -1 to disable rate limiting
@@ -583,6 +644,7 @@ impl Default for RouterConfig {
             request_id_headers: None,
             storage_context_headers: HashMap::new(),
             memory_runtime: MemoryRuntimeConfig::default(),
+            background: BackgroundConfig::default(),
             tenant_resolution: TenantResolutionConfig::default(),
             max_concurrent_requests: -1,
             queue_size: 100,
@@ -719,6 +781,49 @@ mod tests {
         );
         assert!(!config.skills_enabled);
         assert!(config.skills.is_none());
+    }
+
+    #[test]
+    fn test_background_config_defaults_match_design() {
+        let bg = BackgroundConfig::default();
+        assert_eq!(bg.worker_concurrency, 16);
+        assert_eq!(bg.max_queue_depth, 10_000);
+        assert_eq!(bg.lease_duration_secs, 60);
+        assert_eq!(bg.max_retries, 3);
+        assert_eq!(bg.retry_base_delay_secs, 2);
+        assert_eq!(bg.retry_max_delay_secs, 60);
+        assert_eq!(bg.sweep_interval_secs, 30);
+        assert_eq!(bg.poll_interval_ms, 500);
+        assert_eq!(bg.stream_retention_secs, 15 * 60);
+    }
+
+    #[test]
+    fn test_background_config_accessors_convert_units() {
+        let bg = BackgroundConfig::default();
+        assert_eq!(bg.lease_duration(), std::time::Duration::from_secs(60));
+        assert_eq!(bg.poll_interval(), std::time::Duration::from_millis(500));
+        assert_eq!(bg.stream_retention(), std::time::Duration::from_secs(900));
+    }
+
+    #[test]
+    fn test_background_config_yaml_round_trip_with_custom_values() {
+        let yaml = r"
+worker_concurrency: 32
+max_queue_depth: 5000
+lease_duration_secs: 120
+max_retries: 5
+retry_base_delay_secs: 4
+retry_max_delay_secs: 300
+sweep_interval_secs: 10
+poll_interval_ms: 250
+stream_retention_secs: 3600
+";
+        let bg: BackgroundConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(bg.worker_concurrency, 32);
+        assert_eq!(bg.max_queue_depth, 5000);
+        assert_eq!(bg.lease_duration(), std::time::Duration::from_secs(120));
+        assert_eq!(bg.retry_max_delay(), std::time::Duration::from_secs(300));
+        assert_eq!(bg.poll_interval(), std::time::Duration::from_millis(250));
     }
 
     #[test]

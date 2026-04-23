@@ -8,8 +8,9 @@ use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_blob_storage::create_blob_store;
 use smg_data_connector::{
-    backend_supports_memory_writer, create_storage, ConversationItemStorage,
-    ConversationMemoryWriter, ConversationStorage, ResponseStorage, StorageFactoryConfig,
+    backend_supports_memory_writer, create_storage, BackgroundResponseRepository,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, ResponseStorage,
+    StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
 use smg_skills::SkillService;
@@ -61,6 +62,7 @@ pub struct AppContext {
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
     /// Writer used for long-term-memory persistence (NoOp when backend does not support writes).
     pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    pub background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
     pub worker_monitor: Option<Arc<WorkerMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
@@ -101,6 +103,7 @@ pub struct AppContextBuilder {
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
     conversation_memory_writer: Option<Arc<dyn ConversationMemoryWriter>>,
+    background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
     worker_monitor: Option<Arc<WorkerMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
@@ -155,6 +158,7 @@ impl AppContextBuilder {
             conversation_storage: None,
             conversation_item_storage: None,
             conversation_memory_writer: None,
+            background_repository: None,
             worker_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
@@ -368,6 +372,7 @@ impl AppContextBuilder {
             conversation_memory_writer: self.conversation_memory_writer.ok_or(
                 AppContextBuildError::MissingField("conversation_memory_writer"),
             )?,
+            background_repository: self.background_repository,
             worker_monitor: self.worker_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
@@ -578,6 +583,7 @@ impl AppContextBuilder {
         self.conversation_storage = Some(bundle.conversation_storage);
         self.conversation_item_storage = Some(bundle.conversation_item_storage);
         self.conversation_memory_writer = Some(bundle.conversation_memory_writer);
+        self.background_repository = bundle.background_repository;
 
         Ok(self)
     }
