@@ -183,11 +183,16 @@ impl RateLimitSyncAdapter {
         let Some(max_epoch) = shards.iter().map(|s| s.epoch).max() else {
             return 0;
         };
+        // Saturate at i64::MAX instead of wrapping: a signed wrap
+        // would flip the aggregate negative and effectively disable
+        // rate limiting. Realistic cluster totals are nowhere near
+        // overflow, but under-limiting is the failure we must never
+        // accept — capping at i64::MAX keeps the gate closed.
         shards
             .iter()
             .filter(|s| s.epoch == max_epoch)
-            .map(|s| s.count)
-            .sum()
+            .try_fold(0i64, |acc, s| acc.checked_add(s.count))
+            .unwrap_or(i64::MAX)
     }
 }
 
@@ -361,5 +366,20 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let ns = rl_namespace(&mesh);
         let _ = RateLimitSyncAdapter::new(ns, String::new());
+    }
+
+    #[tokio::test]
+    async fn get_aggregate_saturates_on_overflow() {
+        // Overflow is unreachable with realistic counts, but wrapping
+        // a signed sum would flip to negative and disable rate
+        // limiting. The aggregator must cap at i64::MAX instead.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = rl_namespace(&mesh);
+        let adapter = RateLimitSyncAdapter::new(ns.clone(), "node-a".into());
+
+        ns.put("rl:global:node-a", encode_epoch_count(1, i64::MAX).to_vec());
+        ns.put("rl:global:node-b", encode_epoch_count(1, 1).to_vec());
+
+        assert_eq!(adapter.get_aggregate("global"), i64::MAX);
     }
 }
