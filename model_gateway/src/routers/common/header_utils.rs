@@ -19,6 +19,10 @@ pub struct MemoryHeaderView {
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
     pub extraction_model: Option<String>,
+    /// Whether STM condensation was requested by the caller.
+    pub stm_enabled: bool,
+    /// Model to use for STM condensation, if specified by the caller.
+    pub stm_condenser_model_id: Option<String>,
 }
 
 impl MemoryHeaderView {
@@ -51,6 +55,12 @@ impl MemoryHeaderView {
                 .flatten(),
             extraction_model: ltm_enabled
                 .then_some(config.long_term_memory.extraction_model_id)
+                .flatten(),
+            stm_enabled: config.short_term_memory.enabled,
+            stm_condenser_model_id: config
+                .short_term_memory
+                .enabled
+                .then_some(config.short_term_memory.condenser_model_id)
                 .flatten(),
         }
     }

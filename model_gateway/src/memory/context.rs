@@ -48,6 +48,10 @@ pub struct MemoryExecutionContext {
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
     pub extraction_model: Option<String>,
+    /// Whether STM condensation was requested by the caller.
+    pub stm_enabled: bool,
+    /// Model to use for STM condensation, if specified by the caller.
+    pub stm_condenser_model_id: Option<String>,
 }
 
 impl MemoryExecutionContext {
@@ -82,6 +86,8 @@ impl MemoryExecutionContext {
             subject_id: headers.subject_id.clone(),
             embedding_model: headers.embedding_model.clone(),
             extraction_model: headers.extraction_model.clone(),
+            stm_enabled: headers.stm_enabled,
+            stm_condenser_model_id: headers.stm_condenser_model_id.clone(),
         }
     }
 }
