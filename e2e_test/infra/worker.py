@@ -34,7 +34,7 @@ class Worker:
     """A single inference worker process."""
 
     model_id: str
-    engine: str  # "sglang", "vllm", or "trtllm"
+    engine: str  # "sglang", "vllm", "trtllm", or "tokenspeed"
     port: int
     gpu_ids: list[int]
     mode: ConnectionMode = ConnectionMode.HTTP
@@ -178,6 +178,13 @@ class Worker:
                 return self._build_vllm_http_cmd(model_path, tp_size, spec)
         elif self.engine == "trtllm":
             return self._build_trtllm_cmd(model_path, tp_size, spec)
+        elif self.engine == "tokenspeed":
+            if self.mode != ConnectionMode.GRPC:
+                raise ValueError(
+                    "TokenSpeed e2e workers only support gRPC mode; "
+                    "HTTP mode would go through the existing OpenAI frontend."
+                )
+            return self._build_tokenspeed_grpc_cmd(model_path, tp_size, spec)
         else:
             raise ValueError(f"Unsupported engine: {self.engine}")
 
@@ -257,6 +264,33 @@ class Worker:
             "0.9",
         ]
         extra = spec.get("vllm_args", [])
+        if extra:
+            cmd.extend(extra)
+        return cmd
+
+    def _build_tokenspeed_grpc_cmd(self, model_path: str, tp_size: int, spec: dict) -> list[str]:
+        """Build TokenSpeed gRPC server command.
+
+        Launches the SMG-hosted TokenSpeed gRPC server
+        (``smg_grpc_servicer.tokenspeed``) which wraps TokenSpeed's AsyncLLM
+        behind the SGLang proto. Auto-detected as SGLang by the Rust router.
+        """
+        cmd = [
+            "python3",
+            "-m",
+            "smg_grpc_servicer.tokenspeed",
+            "--model-path",
+            model_path,
+            "--host",
+            DEFAULT_HOST,
+            "--port",
+            str(self.port),
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--log-level",
+            "warning",
+        ]
+        extra = spec.get("tokenspeed_args", [])
         if extra:
             cmd.extend(extra)
         return cmd
