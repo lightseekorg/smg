@@ -87,11 +87,16 @@ def _image_generation_mcp_config(mock_mcp_url: str) -> dict:
 
 
 @pytest.fixture(scope="session")
-def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:
+def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # noqa: F811
     """Write the MCP config YAML to a tempfile and yield its path.
 
     Session-scoped so all tests in the module share a single config; the
     gateway re-reads the file at startup so sharing is safe.
+
+    Note: ``# noqa: F811`` silences ruff's "redefinition of unused name"
+    warning. The ``mock_mcp_server`` import above exists solely so pytest
+    discovers the fixture in this module; using the name as a parameter
+    here is exactly the pattern that triggers F811.
     """
     config = _image_generation_mcp_config(mock_mcp_server.url)
     fd, path = tempfile.mkstemp(suffix=".yaml", prefix="mock_mcp_image_gen_")
@@ -112,7 +117,7 @@ def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:
 
 @pytest.fixture(scope="class")
 def gateway_with_mock_mcp(
-    mock_mcp_server: MockMcpServer,
+    mock_mcp_server: MockMcpServer,  # noqa: F811
     mock_mcp_config_file: str,
 ) -> Iterator[tuple]:
     """Launch an OpenAI cloud gateway wired to the mock MCP server.
