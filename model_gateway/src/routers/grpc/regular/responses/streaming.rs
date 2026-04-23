@@ -913,6 +913,15 @@ async fn execute_tool_loop_streaming_internal(
                     None,
                 )
                 .await;
+                let usage_json = accumulated_response.usage.as_ref().map(|u| {
+                    json!({
+                        "input_tokens": u.prompt_tokens,
+                        "output_tokens": u.completion_tokens,
+                        "total_tokens": u.total_tokens
+                    })
+                });
+                let event = emitter.emit_completed(usage_json.as_ref());
+                emitter.send_event(&event, &tx)?;
                 break;
             }
 
@@ -977,6 +986,9 @@ async fn persist_streaming_response(
 ) {
     let mut final_response = emitter.finalize(usage);
     final_response.incomplete_details = incomplete_details;
+    if final_response.incomplete_details.is_some() {
+        final_response.status = ResponseStatus::Incomplete;
+    }
     persist_response_if_needed(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),

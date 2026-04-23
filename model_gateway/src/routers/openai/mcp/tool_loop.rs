@@ -982,8 +982,11 @@ fn build_incomplete_response(
         .as_object_mut()
         .ok_or_else(|| "response not an object".to_string())?;
 
-    // Set status to completed (not failed - partial success)
-    obj.insert("status".to_string(), Value::String("completed".to_string()));
+    // Mark incomplete responses explicitly when tool-loop limits are hit.
+    obj.insert(
+        "status".to_string(),
+        Value::String("incomplete".to_string()),
+    );
 
     obj.insert(
         "incomplete_details".to_string(),

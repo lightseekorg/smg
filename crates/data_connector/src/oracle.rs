@@ -1220,6 +1220,33 @@ impl OracleConversationMemoryWriter {
                 &format!("CREATE INDEX {status_idx} ON {table} ({})", s.col("status")),
             )?;
         }
+        if !s.is_skipped("status") && !s.is_skipped("next_run_at") {
+            let (composite_idx, composite_sql) = if s.is_skipped("owner_id") {
+                let idx = oracle_index_name(&s.table, "STATUS_NEXT_RUN_AT_IDX");
+                let sql = format!(
+                    "CREATE INDEX {idx} ON {table} ({}, {})",
+                    s.col("status"),
+                    s.col("next_run_at")
+                );
+                (idx, sql)
+            } else {
+                let idx = oracle_index_name(&s.table, "OWNER_STATUS_NEXT_RUN_AT_IDX");
+                let sql = format!(
+                    "CREATE INDEX {idx} ON {table} ({}, {}, {})",
+                    s.col("owner_id"),
+                    s.col("status"),
+                    s.col("next_run_at")
+                );
+                (idx, sql)
+            };
+            create_index_if_missing(
+                conn,
+                schema.owner.as_deref(),
+                &s.table,
+                &composite_idx,
+                &composite_sql,
+            )?;
+        }
         if !s.is_skipped("response_id") {
             let response_idx = oracle_index_name(&s.table, "RESPONSE_ID_IDX");
             create_index_if_missing(
@@ -1373,7 +1400,7 @@ impl OracleResponseStorage {
 
         if !s.is_skipped("previous_response_id") {
             let prev = s.col("previous_response_id");
-            let prev_idx = format!("{}_PREV_IDX", s.table);
+            let prev_idx = oracle_index_name(&s.table, "PREV_IDX");
             create_index_if_missing(
                 conn,
                 schema.owner.as_deref(),
@@ -1385,7 +1412,7 @@ impl OracleResponseStorage {
 
         if !s.is_skipped("safety_identifier") {
             let safety = s.col("safety_identifier");
-            let user_idx = format!("{}_USER_IDX", s.table);
+            let user_idx = oracle_index_name(&s.table, "USER_IDX");
             create_index_if_missing(
                 conn,
                 schema.owner.as_deref(),

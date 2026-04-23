@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
-use openai_protocol::responses::ResponsesRequest;
+use openai_protocol::responses::{ResponseStatus, ResponsesRequest};
 use serde_json::{json, Value};
 use smg_mcp::{McpServerBinding, McpToolSession};
 use tokio::sync::mpsc;
@@ -528,6 +528,9 @@ async fn persist_streaming_response(
 ) {
     let mut final_response = emitter.finalize(usage);
     final_response.incomplete_details = incomplete_details;
+    if final_response.incomplete_details.is_some() {
+        final_response.status = ResponseStatus::Incomplete;
+    }
     persist_response_if_needed(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),
