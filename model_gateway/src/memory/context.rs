@@ -86,7 +86,7 @@ impl MemoryExecutionContext {
             subject_id: headers.subject_id.clone(),
             embedding_model: headers.embedding_model.clone(),
             extraction_model: headers.extraction_model.clone(),
-            stm_enabled: headers.stm_enabled,
+            stm_enabled: headers.stm_enabled && runtime.enabled,
             stm_condenser_model_id: headers.stm_condenser_model_id.clone(),
         }
     }
@@ -188,5 +188,17 @@ mod tests {
             Some("text-embedding-3-small")
         );
         assert_eq!(ctx.extraction_model.as_deref(), Some("gpt-4.1-mini"));
+    }
+
+    #[test]
+    fn stm_enabled_gated_off_when_runtime_disabled() {
+        let headers = MemoryHeaderView {
+            stm_enabled: true,
+            ..MemoryHeaderView::default()
+        };
+
+        let ctx = MemoryExecutionContext::from_headers(&headers, &runtime(false));
+
+        assert!(!ctx.stm_enabled);
     }
 }
