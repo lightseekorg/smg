@@ -825,6 +825,33 @@ class TestGetServerInfo:
         assert resp.server_type == "grpc"
         assert resp.max_total_num_tokens == 100000
 
+    @pytest.mark.asyncio
+    async def test_stamps_runtime_marker_in_server_args(
+        self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
+    ):
+        """The gRPC servicer stamps a TokenSpeed-specific marker key into
+        ``server_args`` so the smg gateway's ``DetectBackendStep`` can
+        disambiguate a TokenSpeed worker from a real SGLang worker. The two
+        engines share the SGLang scheduler proto on the wire, so the marker
+        is the only wire-level signal the router has for runtime identity.
+        Keep this test lockstep with the ``TOKENSPEED_RUNTIME_MARKER_KEY``
+        constant in ``detect_backend.rs``.
+        """
+        from smg_grpc_servicer.tokenspeed.servicer import (
+            BACKEND_RUNTIME_MARKER_KEY,
+            BACKEND_RUNTIME_MARKER_VALUE,
+        )
+
+        resp = await servicer.GetServerInfo(
+            sglang_scheduler_pb2.GetServerInfoRequest(), _make_context()
+        )
+        marker = resp.server_args.fields.get(BACKEND_RUNTIME_MARKER_KEY)
+        assert marker is not None, (
+            "server_args must include the TokenSpeed runtime marker; "
+            "DetectBackendStep relies on it to label the worker correctly."
+        )
+        assert marker.string_value == BACKEND_RUNTIME_MARKER_VALUE
+
 
 class TestGetLoads:
     @pytest.mark.asyncio

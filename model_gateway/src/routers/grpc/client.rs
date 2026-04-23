@@ -142,7 +142,12 @@ impl GrpcClient {
         runtime_type: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         match runtime_type {
-            "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
+            // TokenSpeed speaks the SGLang scheduler proto on the wire (its
+            // gRPC servicer reuses sglang_scheduler.proto verbatim). So we
+            // share the SGLang client here — same wire format, same methods.
+            // The enum distinction lives at `RuntimeType::TokenSpeed` so
+            // metrics/logs show the right identity.
+            "sglang" | "tokenspeed" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
             "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmServiceClient::connect(url).await?)),
             "mlx" => Ok(Self::Mlx(MlxEngineClient::connect(url).await?)),

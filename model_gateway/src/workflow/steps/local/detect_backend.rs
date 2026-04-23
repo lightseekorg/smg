@@ -1,13 +1,19 @@
 //! Backend runtime detection step.
 //!
-//! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
+//! Detects the runtime type (sglang, vllm, trtllm, mlx, tokenspeed) for both HTTP
+//! and gRPC workers.
 //! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
-//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
+//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially. If the
+//!   SGLang handshake wins, we follow up with `GetServerInfo` to disambiguate
+//!   a real SGLang scheduler from a TokenSpeed scheduler (they share the wire
+//!   proto) — the TokenSpeed servicer stamps a runtime marker into its
+//!   `server_args` struct that the gateway reads here.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
+use smg_grpc_client::SglangSchedulerClient;
 use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
@@ -19,6 +25,12 @@ use crate::{
         steps::util::{do_grpc_health_check, grpc_base_url, http_base_url},
     },
 };
+
+/// Key the TokenSpeed gRPC servicer stamps into its ``server_args`` struct on
+/// ``GetServerInfo``. Kept in sync with ``BACKEND_RUNTIME_MARKER_KEY`` in
+/// ``grpc_servicer/smg_grpc_servicer/tokenspeed/servicer.py``.
+const TOKENSPEED_RUNTIME_MARKER_KEY: &str = "__ts_backend_runtime__";
+const TOKENSPEED_RUNTIME_MARKER_VALUE: &str = "tokenspeed";
 
 // ─── gRPC backend detection ────────────────────────────────────────────────
 
@@ -39,7 +51,7 @@ async fn detect_grpc_backend(
             .await
             .is_ok()
         {
-            return Ok(hint.to_string());
+            return Ok(maybe_promote_sglang_to_tokenspeed(&grpc_url, timeout_secs, hint).await);
         }
     }
 
@@ -52,13 +64,74 @@ async fn detect_grpc_backend(
             .await
             .is_ok()
         {
-            return Ok((*runtime).to_string());
+            return Ok(maybe_promote_sglang_to_tokenspeed(&grpc_url, timeout_secs, runtime).await);
         }
     }
 
     Err(format!(
         "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, mlx)"
     ))
+}
+
+/// If the SGLang handshake succeeded, follow up with ``GetServerInfo`` and
+/// check for the TokenSpeed runtime marker in ``server_args``. A real SGLang
+/// scheduler never stamps that key, so its presence reliably distinguishes a
+/// TokenSpeed worker that happens to speak the same wire proto. Any probe
+/// failure here falls back to ``"sglang"`` — worst case the worker gets
+/// labeled as SGLang in metrics, generation still works because the two
+/// engines share the proto.
+async fn maybe_promote_sglang_to_tokenspeed(
+    grpc_url: &str,
+    timeout_secs: u64,
+    detected: &str,
+) -> String {
+    if detected != "sglang" {
+        return detected.to_string();
+    }
+
+    let connect_future = SglangSchedulerClient::connect(grpc_url);
+    let client = match tokio::time::timeout(Duration::from_secs(timeout_secs), connect_future).await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            debug!("tokenspeed-promotion: gRPC reconnect to {grpc_url} failed: {e}");
+            return "sglang".to_string();
+        }
+        Err(_) => {
+            debug!("tokenspeed-promotion: gRPC reconnect to {grpc_url} timed out");
+            return "sglang".to_string();
+        }
+    };
+
+    let info_future = client.get_server_info();
+    let info = match tokio::time::timeout(Duration::from_secs(timeout_secs), info_future).await {
+        Ok(Ok(i)) => i,
+        Ok(Err(status)) => {
+            debug!("tokenspeed-promotion: get_server_info on {grpc_url} failed: {status}");
+            return "sglang".to_string();
+        }
+        Err(_) => {
+            debug!("tokenspeed-promotion: get_server_info on {grpc_url} timed out");
+            return "sglang".to_string();
+        }
+    };
+
+    let is_tokenspeed = info
+        .server_args
+        .as_ref()
+        .and_then(|s| s.fields.get(TOKENSPEED_RUNTIME_MARKER_KEY))
+        .and_then(|v| v.kind.as_ref())
+        .is_some_and(|kind| match kind {
+            prost_types::value::Kind::StringValue(s) => s == TOKENSPEED_RUNTIME_MARKER_VALUE,
+            _ => false,
+        });
+
+    if is_tokenspeed {
+        debug!("tokenspeed-promotion: {grpc_url} identified as tokenspeed worker");
+        "tokenspeed".to_string()
+    } else {
+        "sglang".to_string()
+    }
 }
 
 // ─── HTTP backend detection ────────────────────────────────────────────────
