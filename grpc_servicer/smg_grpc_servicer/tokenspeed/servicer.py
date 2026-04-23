@@ -706,6 +706,47 @@ class TokenSpeedSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServi
 
         return out
 
+    def _generated_output_ids(self, output: dict, reason_dict: dict | None) -> list[int]:
+        """Return just the newly-generated tokens from a TokenSpeed output dict.
+
+        TokenSpeed's AsyncLLM has two quirks that the SGLang gRPC proto contract
+        doesn't expect, both of which break the smg gateway's detokenization
+        layer and downstream tool-call parsing:
+
+        1. ``output_ids`` is prefixed with the Llama-3 chat-template assistant
+           header: ``[<|eot_id|>, <|start_header_id|>, "assistant",
+           <|end_header_id|>, "\\n\\n", ...generated..., <stop>]``. The
+           ``skip_special_tokens=True`` detokenization strips the 128xxx
+           control tokens but keeps the word tokens ``"assistant"`` (78191)
+           and ``"\\n\\n"`` (271), so the final text looks like
+           ``assistant\\n\\n{"name": ...}``. The ``llama`` tool parser's
+           ``serde_json::from_str`` can't handle leading non-JSON prefix and
+           silently returns zero tool calls.
+        2. The trailing stop token (e.g. ``<|eom_id|>`` = 128008) is included
+           in ``output_ids``; SGLang excludes it. If the gateway ever runs
+           with ``skip_special_tokens=False`` the stop leaks into the decoded
+           text and breaks JSON parsing for the same reason.
+
+        Slicing the last ``meta_info.completion_tokens`` tokens gives us the
+        bare generated sequence that SGLang's ``token_ids`` would carry, and
+        we then defensively drop any trailing matched stop token. The
+        per-choice ``matched_stop`` fires in a separate proto field, so no
+        information is lost.
+        """
+        raw = list(output.get("output_ids") or [])
+        if not raw:
+            return raw
+        completion = output.get("meta_info", {}).get("completion_tokens")
+        if isinstance(completion, int) and 0 < completion <= len(raw):
+            token_ids = raw[-completion:]
+        else:
+            token_ids = raw
+        if reason_dict and reason_dict.get("type") == "stop":
+            matched = reason_dict.get("matched")
+            if isinstance(matched, int) and token_ids and token_ids[-1] == matched:
+                token_ids = token_ids[:-1]
+        return token_ids
+
     def _chunk_response(
         self,
         rid: str,
@@ -714,7 +755,7 @@ class TokenSpeedSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServi
         choice_index: int = 0,
     ) -> sglang_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
-        token_ids = output.get("output_ids") or []
+        token_ids = self._generated_output_ids(output, reason_dict)
         return sglang_scheduler_pb2.GenerateResponse(
             request_id=rid,
             chunk=sglang_scheduler_pb2.GenerateStreamChunk(
@@ -734,7 +775,7 @@ class TokenSpeedSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServi
         choice_index: int = 0,
     ) -> sglang_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
-        token_ids = output.get("output_ids") or []
+        token_ids = self._generated_output_ids(output, reason_dict)
 
         finish_reason = "stop"
         matched_kwargs: dict[str, Any] = {}

@@ -421,6 +421,14 @@ class TestGenerate:
     async def test_non_streaming_emits_complete(
         self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
     ):
+        # TokenSpeed's AsyncLLM includes the trailing matched-stop token in
+        # ``output_ids`` (and prepends chat-template header tokens — modeled in
+        # ``test_strips_chat_template_prefix`` below). The servicer normalizes
+        # these out before the proto goes to the smg gateway so the tool
+        # parsers see the same tokens they would from the SGLang path. Here we
+        # check the matched-stop trim: ``raw=[10,11,12]`` with ``matched=12``
+        # should arrive as ``[10,11]`` on the wire, and the matched id still
+        # rides in the ``matched_token_id`` field.
         fake_engine.outputs = [
             {
                 "text": "hi",
@@ -442,12 +450,73 @@ class TestGenerate:
         assert frame.request_id == "rid-1"
         assert frame.HasField("complete")
         complete = frame.complete
-        assert list(complete.output_ids) == [10, 11, 12]
+        assert list(complete.output_ids) == [10, 11]
         assert complete.finish_reason == "stop"
         assert complete.matched_token_id == 12
         assert complete.prompt_tokens == 4
+        # Meta's completion_tokens passes through unchanged — matches SGLang's
+        # ``meta_info.get("completion_tokens")`` convention — even though the
+        # on-the-wire ``output_ids`` drops the stop token.
         assert complete.completion_tokens == 3
         ctx.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_strips_chat_template_prefix(
+        self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
+    ):
+        """Reproducer for the bug where ``assistant\\n\\n`` leaked into the
+        decoded text and broke the ``llama`` tool-call parser.
+
+        Real-world capture on Llama-3.2-1B-Instruct with a function-calling
+        prompt — ``output_ids`` was 27 tokens: 5 chat-template header tokens
+        (``<|eot_id|>, <|start_header_id|>, "assistant", <|end_header_id|>,
+        "\\n\\n"``) + 21 generated JSON tokens + 1 ``<|eom_id|>`` stop. With
+        ``skip_special_tokens=True`` only the 128xxx control tokens get
+        stripped at detokenization time, so the word token ``"assistant"``
+        (78191) and ``"\\n\\n"`` (271) leaked into the text and flipped
+        ``serde_json::from_str`` from succeeding on clean JSON to failing on
+        ``assistant\\n\\n{...}``.
+
+        The servicer now slices to the last ``completion_tokens`` tokens so
+        downstream detokenization only sees the actual generated content.
+        """
+        fake_engine.outputs = [
+            {
+                "text": '{"name": "add", "parameters": {"a": 3, "b": 5}}',
+                # Shape observed in the wild: [<|eot|>, <|start|>, "assistant",
+                # <|end|>, "\n\n", ...21 json tokens, <|eom|>] = 27 tokens.
+                # ``completion_tokens`` in TokenSpeed's meta covers the content
+                # *plus* the stop token, so 21 + 1 = 22.
+                "output_ids": [
+                    128009,
+                    128006,
+                    78191,
+                    128007,
+                    271,
+                    *range(9000, 9021),
+                    128008,
+                ],
+                "meta_info": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 22,
+                    "cached_tokens": 0,
+                    "finish_reason": FINISH_MATCHED_TOKEN(matched=128008),
+                },
+            }
+        ]
+        ctx = _make_context()
+        req = _make_generate_request(stream=False)
+
+        frames = [frame async for frame in servicer.Generate(req, ctx)]
+        complete = frames[0].complete
+        # Header tokens dropped via the ``raw[-completion_tokens:]`` slice;
+        # trailing stop token dropped because ``matched == token_ids[-1]``.
+        assert list(complete.output_ids) == list(range(9000, 9021))
+        assert complete.matched_token_id == 128008
+        # meta_info.completion_tokens passes through; only ``output_ids`` is
+        # normalized. Keeps the tokenspeed servicer's wire contract aligned
+        # with the SGLang reference.
+        assert complete.completion_tokens == 22
 
     @pytest.mark.asyncio
     async def test_streaming_emits_chunks_then_complete(
@@ -480,6 +549,9 @@ class TestGenerate:
 
         frames = [frame async for frame in servicer.Generate(req, ctx)]
         # Expect: 2 chunks + 1 complete (emitted alongside the final chunk).
+        # ``completion_tokens`` here (3) exceeds this chunk's delta length (2),
+        # so the slice falls back to the raw delta. Length-finish has no
+        # matched stop to strip either, so token_ids pass through.
         assert len(frames) == 3
         assert frames[0].HasField("chunk")
         assert list(frames[0].chunk.token_ids) == [10]
