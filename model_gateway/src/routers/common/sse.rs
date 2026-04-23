@@ -8,8 +8,13 @@
 //!   `serde_json::to_writer`, eliminating intermediate `String` allocations.
 //!
 //! - [`SseDecoder`]: Consumes incoming SSE byte streams from upstream workers.
-//!   Uses cursor tracking to avoid per-frame memmove. Returns owned [`SseFrame`]
-//!   values so callers can hold frames freely across decode calls.
+//!   Uses cursor tracking to avoid per-frame memmove. `next_frame` / `flush`
+//!   return `SseFrame<'static>` (owned) so callers can hold frames across
+//!   subsequent decode calls. [`parse_block`] returns a borrowed frame since
+//!   the caller already owns the input string — no allocation for single-line
+//!   data, which is the common case.
+
+use std::borrow::Cow;
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -84,38 +89,14 @@ impl Default for SseEncoder {
 }
 
 /// Errors that can occur during SSE encoding.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SseEncodeError {
     /// The event type contains newline characters, which would break SSE framing.
+    #[error("event_type must not contain newline characters")]
     InvalidEventType,
     /// JSON serialization failed.
-    Json(serde_json::Error),
-}
-
-impl std::fmt::Display for SseEncodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SseEncodeError::InvalidEventType => {
-                write!(f, "event_type must not contain newline characters")
-            }
-            SseEncodeError::Json(e) => write!(f, "JSON serialization error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SseEncodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            SseEncodeError::Json(e) => Some(e),
-            SseEncodeError::InvalidEventType => None,
-        }
-    }
-}
-
-impl From<serde_json::Error> for SseEncodeError {
-    fn from(e: serde_json::Error) -> Self {
-        SseEncodeError::Json(e)
-    }
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 // ============================================================================
@@ -129,24 +110,27 @@ const DEFAULT_MAX_BUFFER_SIZE: usize = 1024 * 1024; // 1 MB
 ///
 /// - Defers UTF-8 validation to complete frames (handles multi-byte splits)
 /// - Uses cursor tracking to avoid per-frame memmove
-/// - Returns owned `SseFrame` values — callers can hold frames across
-///   `next_frame()` / `compact()` calls without lifetime concerns
+/// - `next_frame` / `flush` return `SseFrame<'static>` — callers can hold
+///   frames across subsequent `next_frame()` / `compact()` calls without
+///   lifetime concerns
 pub struct SseDecoder {
     buf: Vec<u8>,
     consumed: usize,
     max_size: usize,
 }
 
-/// A parsed SSE frame with owned data.
+/// A parsed SSE frame. Fields are `Cow` so the same type can represent both
+/// a zero-copy view into borrowed input ([`parse_block`]) and fully-owned
+/// data released from the decoder buffer ([`SseDecoder::next_frame`]).
 #[derive(Debug)]
-pub struct SseFrame {
+pub struct SseFrame<'a> {
     /// The `event:` field value, if present.
-    pub event_type: Option<String>,
+    pub event_type: Option<Cow<'a, str>>,
     /// The `data:` field value.
-    pub data: String,
+    pub data: Cow<'a, str>,
 }
 
-impl SseFrame {
+impl<'a> SseFrame<'a> {
     /// Deserialize the data as JSON. Called on-demand (lazy deserialization).
     pub fn decode_data<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_str(&self.data)
@@ -154,41 +138,31 @@ impl SseFrame {
 
     /// Check for `[DONE]` sentinel.
     pub fn is_done(&self) -> bool {
-        self.data == "[DONE]"
+        self.data.as_ref() == "[DONE]"
+    }
+
+    /// Convert into an owned frame with `'static` lifetime
+    pub fn into_owned(self) -> SseFrame<'static> {
+        SseFrame {
+            event_type: self.event_type.map(|c| Cow::Owned(c.into_owned())),
+            data: Cow::Owned(self.data.into_owned()),
+        }
     }
 }
 
 /// Errors that can occur during SSE decoding.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SseDecodeError {
     /// Buffer exceeded the configured maximum size.
+    #[error("SSE buffer overflow")]
     BufferOverflow,
     /// A complete frame contained invalid UTF-8.
-    InvalidUtf8(std::str::Utf8Error),
+    #[error("invalid UTF-8 in SSE frame: {0}")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
     /// `flush()` called while complete frames remain in the buffer.
     /// Drain `next_frame()` to `None` before calling `flush()`.
+    #[error("flush() called with complete frames still in the buffer")]
     IncompleteFlush,
-}
-
-impl std::fmt::Display for SseDecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SseDecodeError::BufferOverflow => write!(f, "SSE buffer overflow"),
-            SseDecodeError::InvalidUtf8(e) => write!(f, "invalid UTF-8 in SSE frame: {e}"),
-            SseDecodeError::IncompleteFlush => {
-                write!(f, "flush() called with complete frames still in the buffer")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SseDecodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            SseDecodeError::InvalidUtf8(e) => Some(e),
-            SseDecodeError::BufferOverflow | SseDecodeError::IncompleteFlush => None,
-        }
-    }
 }
 
 impl SseDecoder {
@@ -222,8 +196,9 @@ impl SseDecoder {
 
     /// Yield the next complete SSE frame.
     ///
-    /// Returns owned frames. Call in a loop until `None`, then call `compact()`.
-    pub fn next_frame(&mut self) -> Option<Result<SseFrame, SseDecodeError>> {
+    /// Returns owned frames (`SseFrame<'static>`). Call in a loop until
+    /// `None`, then call `compact()`.
+    pub fn next_frame(&mut self) -> Option<Result<SseFrame<'static>, SseDecodeError>> {
         loop {
             let remaining = &self.buf[self.consumed..];
             let (pos, delim_len) = find_frame_boundary(remaining)?;
@@ -237,8 +212,9 @@ impl SseDecoder {
                 }
             };
 
+            let owned = parse_frame(frame_str).map(SseFrame::into_owned);
             self.consumed += pos + delim_len;
-            if let Some(frame) = parse_frame(frame_str) {
+            if let Some(frame) = owned {
                 return Some(Ok(frame));
             }
             // Control-only block (comment, event-only, id/retry) — skip it
@@ -259,7 +235,7 @@ impl SseDecoder {
     /// Returns `Err(SseDecodeError::IncompleteFlush)` if complete frames remain
     /// in the buffer. Callers must drain `next_frame()` to `None` before calling
     /// this method.
-    pub fn flush(&mut self) -> Option<Result<SseFrame, SseDecodeError>> {
+    pub fn flush(&mut self) -> Option<Result<SseFrame<'static>, SseDecodeError>> {
         if find_frame_boundary(&self.buf[self.consumed..]).is_some() {
             return Some(Err(SseDecodeError::IncompleteFlush));
         }
@@ -280,8 +256,9 @@ impl SseDecoder {
             self.consumed = self.buf.len();
             return None;
         }
+        let owned = parse_frame(frame_str.trim_end_matches(['\r', '\n'])).map(SseFrame::into_owned);
         self.consumed = self.buf.len();
-        parse_frame(frame_str.trim_end_matches(['\r', '\n'])).map(Ok)
+        owned.map(Ok)
     }
 
     /// Unconsumed byte count (for DoS monitoring).
@@ -304,7 +281,11 @@ impl Default for SseDecoder {
 ///
 /// Use this when you already have a complete SSE block as a string (e.g. from
 /// an accumulator or rewrite path) and don't need the full [`SseDecoder`] machinery.
-pub fn parse_block(block: &str) -> Option<SseFrame> {
+///
+/// Returns a frame borrowing from the input — zero allocation for single-line
+/// `data:` (the common case). Multi-line `data:` joins into an owned `String`
+/// per spec.
+pub fn parse_block(block: &str) -> Option<SseFrame<'_>> {
     parse_frame(block.trim_end_matches(['\r', '\n']))
 }
 
@@ -400,15 +381,15 @@ fn split_sse_lines(s: &str) -> impl Iterator<Item = &str> {
 
 /// Parse a complete SSE frame into event type and data.
 ///
-/// Returns an owned `SseFrame`. Allocation is deferred until the first
-/// `data:` line is encountered, so comment-only and control blocks are skipped
-/// without heap allocation.
+/// Returns an `SseFrame` borrowing from `frame`. Single-line `data:` (the
+/// common case) stays as `Cow::Borrowed` — zero allocation. Multi-line
+/// `data:` joins into `Cow::Owned` per spec.
 ///
 /// Per the SSE spec, each line is split at the first colon to determine
 /// the field name and value. A single leading space after the colon is stripped.
-fn parse_frame(frame: &str) -> Option<SseFrame> {
+fn parse_frame(frame: &str) -> Option<SseFrame<'_>> {
     let mut event_type: Option<&str> = None;
-    let mut data: Option<String> = None;
+    let mut data: Option<Cow<'_, str>> = None;
 
     for line in split_sse_lines(frame) {
         if line.is_empty() || line.starts_with(':') {
@@ -422,14 +403,21 @@ fn parse_frame(frame: &str) -> Option<SseFrame> {
         };
 
         match field {
-            "data" => {
-                let is_first = data.is_none();
-                let buf = data.get_or_insert_with(|| String::with_capacity(frame.len()));
-                if !is_first {
-                    buf.push('\n');
+            "data" => match data.take() {
+                None => data = Some(Cow::Borrowed(value)),
+                Some(Cow::Borrowed(first)) => {
+                    let mut joined = String::with_capacity(frame.len());
+                    joined.push_str(first);
+                    joined.push('\n');
+                    joined.push_str(value);
+                    data = Some(Cow::Owned(joined));
                 }
-                buf.push_str(value);
-            }
+                Some(Cow::Owned(mut joined)) => {
+                    joined.push('\n');
+                    joined.push_str(value);
+                    data = Some(Cow::Owned(joined));
+                }
+            },
             "event" => {
                 event_type = Some(value);
             }
@@ -439,11 +427,9 @@ fn parse_frame(frame: &str) -> Option<SseFrame> {
 
     // Per SSE spec: blocks without data lines (comments, event-only, id/retry)
     // should be silently skipped, not surfaced as empty frames.
-    let data = data?;
-
     Some(SseFrame {
-        event_type: event_type.map(|s| s.to_owned()),
-        data,
+        event_type: event_type.map(Cow::Borrowed),
+        data: data?,
     })
 }
 
