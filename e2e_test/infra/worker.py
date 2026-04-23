@@ -289,6 +289,14 @@ class Worker:
             str(tp_size),
             "--log-level",
             "warning",
+            # Mirrors what trtllm does and what sglang/vllm do implicitly:
+            # the smg gateway translates ``tool_choice=required`` and
+            # ``tool_choice={function}`` into a json_schema constraint on the
+            # sampling-params proto. TokenSpeed honors that constraint only
+            # when a grammar backend is configured — its default is ``None``,
+            # which silently drops the constraint and lets the model free-run.
+            "--grammar-backend",
+            "xgrammar",
         ]
         extra = spec.get("tokenspeed_args", [])
         if extra:
