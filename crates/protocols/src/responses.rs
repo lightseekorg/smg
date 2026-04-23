@@ -1581,11 +1581,14 @@ pub enum ResponseInputOutputItem {
     /// `type: "shell_call"` — assistant's call into the containerized
     /// [`ResponseTool::Shell`] tool.
     ///
-    /// Spec (openai-responses-api-spec.md §ShellCall, L228-231):
-    /// `{ action, call_id, type, id, environment, status }`. `id` is
-    /// `Option<String>` so newly-minted client-side calls can omit it;
-    /// the model populates it on items round-tripped from a previous
-    /// response.
+    /// Spec (openai-responses-api-spec.md §ShellCall, L228-231) +
+    /// OpenAI SDK v2.8.1 `ResponseFunctionShellToolCall`:
+    /// `{ action, call_id, type, id, environment, status, created_by? }`.
+    /// `id` is `Option<String>` so newly-minted client-side calls can omit
+    /// it; the model populates it on items round-tripped from a previous
+    /// response. `created_by` carries provenance metadata the SDK types
+    /// as `Optional[str]` — present when the item was emitted by the
+    /// platform, absent on client-authored calls.
     #[serde(rename = "shell_call")]
     ShellCall {
         action: ShellCallAction,
@@ -1599,14 +1602,21 @@ pub enum ResponseInputOutputItem {
         environment: Option<ShellCallEnvironment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<ShellCallStatus>,
+        /// Provenance tag mirroring the SDK's `created_by: Optional[str]`
+        /// on `ResponseFunctionShellToolCall`. Dropped at serialize time
+        /// when absent so client-authored calls do not carry a null
+        /// placeholder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
     },
     /// `type: "shell_call_output"` — client's reply to a `shell_call`.
     ///
-    /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238):
-    /// `{ call_id, output, type, id, max_output_length, status }`.
-    /// `id` and `max_output_length` are modelled as `Option` so
-    /// newly-minted client replies can omit them; the server populates
-    /// both on items round-tripped from a previous response.
+    /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238) +
+    /// OpenAI SDK v2.8.1 `ResponseFunctionShellToolCallOutput`:
+    /// `{ call_id, output, type, id, max_output_length?, status, created_by? }`.
+    /// `id`, `max_output_length`, and `created_by` are modelled as
+    /// `Option` per the SDK's `Optional[...]` typing; the server populates
+    /// them on items round-tripped from a previous response.
     #[serde(rename = "shell_call_output")]
     ShellCallOutput {
         call_id: String,
@@ -1617,6 +1627,10 @@ pub enum ResponseInputOutputItem {
         max_output_length: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<ShellCallStatus>,
+        /// Provenance tag mirroring the SDK's `created_by: Optional[str]`
+        /// on `ResponseFunctionShellToolCallOutput`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
     },
     #[serde(untagged)]
     SimpleInputMessage {
@@ -1931,19 +1945,19 @@ pub enum ResponseOutputItem {
     /// `type: "shell_call"` — output-side mirror of the input variant.
     ///
     /// Spec (openai-responses-api-spec.md §ShellCall, L228-231 and §returns
-    /// L512-513): emitted when the model issues a containerized shell
-    /// action. The environment echoed back is restricted to `local` /
+    /// L512-513) + OpenAI SDK v2.8.1 `ResponseFunctionShellToolCall`:
+    /// emitted when the model issues a containerized shell action. The
+    /// environment echoed back is restricted to `local` /
     /// `container_reference` via [`ResponseShellCallEnvironment`], which
     /// narrows the input-side [`ShellCallEnvironment`] by dropping the
     /// `skills` attachment on the `local` arm — per spec L513 the response
     /// form uses `ResponseLocalEnvironment { type: "local" }` only.
     ///
-    /// `id` and `status` are required on the output wire — the server
-    /// always populates both when emitting the call, mirroring the
-    /// `ComputerCall` treatment above. Keeping them required at the type
-    /// boundary makes the SDK's non-`Optional` TypedDict contract explicit
-    /// and keeps response-side consumers from having to unwrap fields the
-    /// platform is contractually obligated to emit.
+    /// `id` and `status` are required on the output wire — the SDK types
+    /// them as non-`Optional` on `ResponseFunctionShellToolCall`, mirroring
+    /// the `ComputerCall` treatment above. `created_by` is the SDK's
+    /// `Optional[str]` provenance tag, populated when the platform stamps
+    /// the item.
     #[serde(rename = "shell_call")]
     ShellCall {
         id: String,
@@ -1952,24 +1966,34 @@ pub enum ResponseOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<ResponseShellCallEnvironment>,
         status: ShellCallStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
     },
     /// `type: "shell_call_output"` — output-side mirror of the input
     /// variant.
     ///
-    /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238).
+    /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238) +
+    /// OpenAI SDK v2.8.1 `ResponseFunctionShellToolCallOutput`:
+    /// `{ call_id, output, type, id, max_output_length?, status, created_by? }`.
     /// Emitted when the platform surfaces captured stdout/stderr plus an
     /// [`ShellOutcome`] for a prior shell call.
     ///
-    /// `id`, `max_output_length`, and `status` are required on the output
-    /// wire per spec L233 (`{ call_id, output, type, id, max_output_length,
-    /// status }`) — the server always populates all three on emit.
+    /// `id` and `status` are required per the SDK's non-`Optional` typing.
+    /// `max_output_length` is `Optional[int]` in the SDK (the platform may
+    /// emit shell outputs when the originating `shell_call.action` did not
+    /// specify a cap) and `created_by` is `Optional[str]` — both dropped at
+    /// serialize time when absent so downstream consumers do not see null
+    /// placeholders.
     #[serde(rename = "shell_call_output")]
     ShellCallOutput {
         id: String,
         call_id: String,
         output: Vec<ShellOutputChunk>,
-        max_output_length: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_output_length: Option<u64>,
         status: ShellCallStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
     },
 }
 

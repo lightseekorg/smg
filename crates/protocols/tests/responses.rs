@@ -2233,6 +2233,7 @@ fn shell_call_input_item_round_trips_spec_shape() {
             id,
             environment,
             status,
+            created_by,
         } => {
             assert_eq!(call_id, "call_shell_1");
             assert_eq!(id.as_deref(), Some("sc_01"));
@@ -2244,6 +2245,7 @@ fn shell_call_input_item_round_trips_spec_shape() {
                 ShellCallEnvironment::ContainerReference(_)
             ));
             assert_eq!(*status, Some(ShellCallStatus::InProgress));
+            assert!(created_by.is_none());
         }
         other => panic!("expected ShellCall, got {other:?}"),
     }
@@ -2270,6 +2272,7 @@ fn shell_call_minimal_shape_round_trips() {
             id,
             environment,
             status,
+            created_by,
         } => {
             assert_eq!(call_id, "call_shell_2");
             assert!(id.is_none());
@@ -2278,6 +2281,7 @@ fn shell_call_minimal_shape_round_trips() {
             assert_eq!(action.commands, vec!["ls"]);
             assert!(action.max_output_length.is_none());
             assert!(action.timeout_ms.is_none());
+            assert!(created_by.is_none());
         }
         other => panic!("expected ShellCall, got {other:?}"),
     }
@@ -2320,6 +2324,7 @@ fn shell_call_output_input_item_round_trips_spec_shape() {
             id,
             max_output_length,
             status,
+            created_by,
         } => {
             assert_eq!(call_id, "call_shell_1");
             assert_eq!(id.as_deref(), Some("sco_01"));
@@ -2336,6 +2341,7 @@ fn shell_call_output_input_item_round_trips_spec_shape() {
             assert!(matches!(output[1].outcome, ShellOutcome::Timeout));
             assert_eq!(output[1].stderr, "killed\n");
             assert!(output[1].created_by.is_none());
+            assert!(created_by.is_none());
         }
         other => panic!("expected ShellCallOutput, got {other:?}"),
     }
@@ -2461,16 +2467,103 @@ fn shell_call_output_response_side_round_trip() {
             output,
             status,
             max_output_length,
+            created_by,
         } => {
             assert_eq!(id, "sco_10");
             assert_eq!(call_id, "call_shell_10");
             assert_eq!(*status, ShellCallStatus::Incomplete);
-            assert_eq!(*max_output_length, 65536);
+            assert_eq!(*max_output_length, Some(65536));
             assert_eq!(output.len(), 1);
             match &output[0].outcome {
                 ShellOutcome::Exit(e) => assert_eq!(e.exit_code, 2),
                 ShellOutcome::Timeout => panic!("expected Exit outcome, got Timeout"),
             }
+            assert!(created_by.is_none());
+        }
+        other => panic!("expected ResponseOutputItem::ShellCallOutput, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn shell_call_with_created_by_round_trip() {
+    // OpenAI SDK v2.8.1 `ResponseFunctionShellToolCall` carries an optional
+    // `created_by: Optional[str]` provenance tag (see
+    // `response_function_shell_tool_call.py`). Items returned by the
+    // platform populate it; client-authored calls omit it. This fixture
+    // locks both the deserialize-with-value and serialize-preserves-value
+    // paths on the input side.
+    let payload = json!({
+        "type": "shell_call",
+        "id": "sc_cb",
+        "call_id": "call_shell_cb",
+        "action": {"commands": ["ls"]},
+        "status": "completed",
+        "created_by": "user_abc"
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("shell_call w/ created_by should deserialize");
+    match &item {
+        ResponseInputOutputItem::ShellCall { created_by, .. } => {
+            assert_eq!(created_by.as_deref(), Some("user_abc"));
+        }
+        other => panic!("expected ShellCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn shell_call_output_with_created_by_round_trip() {
+    // OpenAI SDK v2.8.1 `ResponseFunctionShellToolCallOutput` carries an
+    // optional `created_by: Optional[str]` (see
+    // `response_function_shell_tool_call_output.py`). Mirror of the
+    // `shell_call_with_created_by_round_trip` fixture for the
+    // `shell_call_output` variant — different SDK type, same
+    // `Optional[str]` contract.
+    let payload = json!({
+        "type": "shell_call_output",
+        "id": "sco_cb",
+        "call_id": "call_shell_cb",
+        "output": [],
+        "status": "completed",
+        "created_by": "platform"
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("shell_call_output w/ created_by should deserialize");
+    match &item {
+        ResponseInputOutputItem::ShellCallOutput { created_by, .. } => {
+            assert_eq!(created_by.as_deref(), Some("platform"));
+        }
+        other => panic!("expected ShellCallOutput, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn shell_call_output_without_max_output_length_round_trips_on_response_side() {
+    // OpenAI SDK v2.8.1 `ResponseFunctionShellToolCallOutput.max_output_length`
+    // is typed `Optional[int]`, so the platform may emit `shell_call_output`
+    // items where the originating `shell_call.action.max_output_length` was
+    // not set. This fixture proves the response-side union deserializes the
+    // SDK-optional shape without requiring `max_output_length` to be
+    // present on the wire.
+    let payload = json!({
+        "type": "shell_call_output",
+        "id": "sco_no_max",
+        "call_id": "call_shell_no_max",
+        "output": [],
+        "status": "completed"
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("response-side shell_call_output w/o max_output_length should deserialize");
+    match &item {
+        ResponseOutputItem::ShellCallOutput {
+            max_output_length,
+            created_by,
+            ..
+        } => {
+            assert!(max_output_length.is_none());
+            assert!(created_by.is_none());
         }
         other => panic!("expected ResponseOutputItem::ShellCallOutput, got {other:?}"),
     }
