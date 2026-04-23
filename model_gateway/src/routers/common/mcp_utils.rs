@@ -300,7 +300,8 @@ mod tests {
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, McpTool, ResponseTool, WebSearchPreviewTool,
+            CodeInterpreterTool, FileSearchTool, FunctionTool, ImageGenerationTool, McpTool,
+            ResponseTool, WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -528,6 +529,128 @@ mod tests {
             code_routing.response_format,
             ResponseFormat::CodeInterpreterCall
         );
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_with_image_generation_server() {
+        let mut image_tools = HashMap::new();
+        image_tools.insert(
+            "generate_image".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::ImageGenerationCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "image-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9997/image".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(image_tools),
+                builtin_type: Some(BuiltinToolType::ImageGeneration),
+                builtin_tool_name: Some("generate_image".to_string()),
+                internal: false,
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+
+        let tools = vec![ResponseTool::ImageGeneration(ImageGenerationTool::default())];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::ImageGeneration);
+        assert_eq!(routing[0].server_name, "image-server");
+        assert_eq!(routing[0].tool_name, "generate_image");
+        assert_eq!(
+            routing[0].response_format,
+            ResponseFormat::ImageGenerationCall
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_with_file_search_server() {
+        let mut file_tools = HashMap::new();
+        file_tools.insert(
+            "file_search".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::FileSearchCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "file-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9996/files".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(file_tools),
+                builtin_type: Some(BuiltinToolType::FileSearch),
+                builtin_tool_name: Some("file_search".to_string()),
+                internal: false,
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+
+        // `FileSearchTool` requires `vector_store_ids`, so no Default impl.
+        let tools = vec![ResponseTool::FileSearch(FileSearchTool {
+            vector_store_ids: vec!["vs_abc".to_string()],
+            filters: None,
+            max_num_results: None,
+            ranking_options: None,
+        })];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::FileSearch);
+        assert_eq!(routing[0].server_name, "file-server");
+        assert_eq!(routing[0].tool_name, "file_search");
+        assert_eq!(routing[0].response_format, ResponseFormat::FileSearchCall);
+    }
+
+    #[test]
+    fn test_extract_builtin_types_includes_image_generation_and_file_search() {
+        let tools = vec![
+            ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
+            ResponseTool::CodeInterpreter(CodeInterpreterTool::default()),
+            ResponseTool::ImageGeneration(ImageGenerationTool::default()),
+            ResponseTool::FileSearch(FileSearchTool {
+                vector_store_ids: vec!["vs_abc".to_string()],
+                filters: None,
+                max_num_results: None,
+                ranking_options: None,
+            }),
+        ];
+
+        let types = extract_builtin_types(&tools);
+        assert!(types.contains(&BuiltinToolType::WebSearchPreview));
+        assert!(types.contains(&BuiltinToolType::CodeInterpreter));
+        assert!(types.contains(&BuiltinToolType::ImageGeneration));
+        assert!(types.contains(&BuiltinToolType::FileSearch));
     }
 
     // =========================================================================

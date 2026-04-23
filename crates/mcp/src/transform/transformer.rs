@@ -493,8 +493,10 @@ struct ImageGenerationPayload {
 /// 3. `{"result": "...", "revised_prompt": "..."}` — top-level object
 ///    (non-MCP adapters that return raw image payloads).
 ///
-/// Anything else returns an empty payload; the caller then emits a `Failed`
-/// status rather than inventing data.
+/// Anything else returns an empty payload. The caller
+/// (`to_image_generation_call`) still emits a `Completed` status in that case
+/// — matching the existing builtin-transformer contract — with an empty
+/// `result` string plus a `warn!` log as the failure signal.
 fn extract_image_generation_payload(result: &Value) -> ImageGenerationPayload {
     // Shape 3: bare object.
     if let Some(obj) = result.as_object() {
