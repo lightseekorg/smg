@@ -3118,6 +3118,65 @@ fn test_apply_patch_call_output_response_item_round_trip() {
 }
 
 #[test]
+fn test_apply_patch_operation_rejects_unknown_fields() {
+    // P5 fail-fast contract: extra fields on an operation variant must be
+    // rejected rather than silently dropped. `deny_unknown_fields` on the
+    // `ApplyPatchOperation` enum enforces this per-variant.
+    //
+    // Regression for CodeRabbit feedback on PR #1339: a `delete_file`
+    // operation carrying a stray `diff` key would otherwise deserialize
+    // successfully and lose the foreign field, masking client bugs that
+    // send the wrong operation shape.
+    let stray_diff_on_delete = json!({
+        "type": "delete_file",
+        "path": "src/obsolete.rs",
+        "diff": "should not be accepted",
+    });
+    assert!(
+        serde_json::from_value::<ApplyPatchOperation>(stray_diff_on_delete).is_err(),
+        "delete_file must reject a stray `diff` field per deny_unknown_fields"
+    );
+
+    // A stray foreign key on a variant that does carry `diff` / `path` must
+    // also be rejected — deny_unknown_fields is not relaxed for the
+    // create_file / update_file shapes.
+    let foreign_key_on_create = json!({
+        "type": "create_file",
+        "diff": "+ hi\n",
+        "path": "src/new.rs",
+        "not_a_field": "nope",
+    });
+    assert!(
+        serde_json::from_value::<ApplyPatchOperation>(foreign_key_on_create).is_err(),
+        "create_file must reject foreign keys per deny_unknown_fields"
+    );
+
+    let foreign_key_on_update = json!({
+        "type": "update_file",
+        "diff": "@@ -1 +1 @@\n-a\n+b\n",
+        "path": "src/main.rs",
+        "mode": "force",
+    });
+    assert!(
+        serde_json::from_value::<ApplyPatchOperation>(foreign_key_on_update).is_err(),
+        "update_file must reject foreign keys per deny_unknown_fields"
+    );
+
+    // Sanity: the spec-canonical shapes still deserialize cleanly after
+    // the tightening.
+    for payload in [
+        json!({"type": "create_file", "diff": "+ hi\n", "path": "src/new.rs"}),
+        json!({"type": "delete_file", "path": "src/old.rs"}),
+        json!({"type": "update_file", "diff": "@@ -1 +1 @@\n-a\n+b\n", "path": "src/main.rs"}),
+    ] {
+        assert!(
+            serde_json::from_value::<ApplyPatchOperation>(payload.clone()).is_ok(),
+            "spec-canonical shape must still deserialize: {payload}"
+        );
+    }
+}
+
+#[test]
 fn test_apply_patch_tool_choice_round_trip() {
     // Spec (openai-responses-api-spec.md §tool_choice L424):
     // `ToolChoiceApplyPatch { type: "apply_patch" }`. Pairs with the

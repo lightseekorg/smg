@@ -1005,8 +1005,13 @@ pub struct ShellExit {
 /// `UpdateFile { diff, path, type: "update_file" }`. `DeleteFile` carries no
 /// diff because the whole file is removed; the other two carry a unified
 /// diff payload describing the edit.
+///
+/// `deny_unknown_fields` is applied so variants fail fast on foreign keys —
+/// e.g. `{"type":"delete_file","path":"x","diff":"..."}` is rejected rather
+/// than silently dropping the stray `diff`, matching the P5 fail-fast
+/// contract applied elsewhere on protocol-surface structs.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 // Variant names intentionally mirror the spec's `*_file` tag set; the shared
 // `File` postfix tracks the spec verbatim and keeps the type discriminator
