@@ -108,10 +108,21 @@ impl TreeSyncAdapter {
     /// loop runs until the namespace's subscriber channel closes
     /// (only on `MeshKV` drop).
     pub fn start(self: &Arc<Self>) {
-        let drain_owner = Arc::clone(self);
-        let handle = self
-            .tenant_deltas
-            .register_drain(Box::new(move || drain_owner.drain_pending_deltas()));
+        // Capture a `Weak` ref so the drain closure doesn't keep the
+        // adapter alive. A strong `Arc` here would cycle:
+        // `TreeSyncAdapter → DrainHandle → DrainRegistry → drain
+        // closure → TreeSyncAdapter`, and `DrainHandle::drop` would
+        // never fire, leaking the drain registration. The upgrade
+        // check returns an empty batch if the adapter has already
+        // been dropped — the drain is a no-op until the mesh tears
+        // the `DrainHandle` down on its own `Drop`.
+        let drain_owner = Arc::downgrade(self);
+        let handle = self.tenant_deltas.register_drain(Box::new(move || {
+            drain_owner
+                .upgrade()
+                .map(|this| this.drain_pending_deltas())
+                .unwrap_or_default()
+        }));
         assert!(
             self.drain_handle.set(handle).is_ok(),
             "TreeSyncAdapter::start called more than once",
@@ -342,6 +353,35 @@ mod tests {
             round.drain_entries.iter().map(|(k, _)| k.clone()).collect();
         assert!(keys.contains("td:model-1"));
         assert!(keys.contains("td:model-2"));
+    }
+
+    #[tokio::test]
+    async fn drain_closure_uses_weak_reference() {
+        // Dropping the only strong `Arc` to the adapter must actually
+        // drop it. If the drain closure held `Arc<Self>`, the cycle
+        // through the DrainRegistry would keep the adapter alive
+        // until MeshKV drop. Verify via a `Weak::upgrade` check.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = td_namespace(&mesh);
+        let adapter = TreeSyncAdapter::new(ns, "node-a".into());
+        adapter.start();
+
+        let weak = Arc::downgrade(&adapter);
+        drop(adapter);
+        assert!(
+            weak.upgrade().is_none(),
+            "drain closure must not strongly hold the adapter",
+        );
+
+        // The drain is now a no-op. Collecting a round should not
+        // panic and should not yield any entries from this prefix.
+        let round = mesh.collect_round_batch();
+        let td_entries: Vec<_> = round
+            .drain_entries
+            .iter()
+            .filter(|(k, _)| k.starts_with("td:"))
+            .collect();
+        assert!(td_entries.is_empty());
     }
 
     #[tokio::test]
