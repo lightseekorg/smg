@@ -31,7 +31,10 @@ mod tree_ops;
 mod tests;
 
 // Re-export commonly used types
-pub use crdt_kv::{CrdtOrMap, OperationLog};
+pub use crdt_kv::{
+    decode as decode_epoch_count, encode as encode_epoch_count, merge as merge_epoch_max_wins,
+    CrdtOrMap, EpochCount, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
+};
 // v2 API
 pub use kv::{
     CrdtNamespace, DrainHandle, MergeStrategy, MeshKV, StreamConfig, StreamDrainFn,

@@ -1270,6 +1270,7 @@ mod tests {
             conversation_memory_writer: Arc::new(
                 smg_data_connector::NoOpConversationMemoryWriter::new(),
             ),
+            background_repository: None,
             worker_monitor: None,
             configured_reasoning_parser: None,
             configured_tool_parser: None,

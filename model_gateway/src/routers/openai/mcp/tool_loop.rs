@@ -14,8 +14,8 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
-        OutputItemEvent, WebSearchCallEvent,
+        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
+        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
     responses::{generate_id, ResponseInput, ResponsesRequest},
 };
@@ -502,6 +502,12 @@ fn send_tool_call_intermediate_event(
         ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
         ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
         ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+        // `generating` is the intermediate event for image_generation_call, on
+        // par with `searching` for web/file search and `interpreting` for code.
+        // `partial_image` events are emitted inline by the underlying tool when
+        // it streams preview chunks; the tool_loop path only emits the coarse
+        // in_progress → generating → completed sequence.
+        ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 
@@ -522,7 +528,8 @@ fn send_tool_call_intermediate_event(
 }
 
 /// Send tool call completion events after tool execution.
-/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
+/// Handles mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// and image_generation_call items.
 /// Returns false if client disconnected.
 fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -544,6 +551,7 @@ fn send_tool_call_completion_events(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::COMPLETED,
         _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
     };
 
@@ -589,6 +597,10 @@ fn stable_streaming_tool_item_id(
         ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
         ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
         ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
+        // `ig_` prefix mirrors the shared transformer's output item id
+        // (`to_image_generation_call`) and the 2-letter convention used by
+        // the other hosted tool formats.
+        ResponseFormat::ImageGenerationCall => normalize_tool_item_id_with_prefix(source_id, "ig_"),
     }
 }
 
@@ -609,7 +621,8 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
         ResponseFormat::Passthrough => item_id.to_string(),
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
-        | ResponseFormat::FileSearchCall => item_id
+        | ResponseFormat::FileSearchCall
+        | ResponseFormat::ImageGenerationCall => item_id
             .strip_prefix("fc_")
             .or_else(|| item_id.strip_prefix("call_"))
             .unwrap_or(item_id)
@@ -710,6 +723,23 @@ fn visible_mcp_list_tools_items(
         .collect()
 }
 
+fn is_intercepted_mcp_placeholder(
+    item: &Value,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) -> bool {
+    let item_type = item.get("type").and_then(|value| value.as_str());
+    if !item_type.is_some_and(is_function_call_type) {
+        return false;
+    }
+
+    let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
+        return false;
+    };
+
+    session.should_intercept_function_call(name, user_function_names)
+}
+
 pub(crate) fn remove_intercepted_mcp_function_calls_from_output(
     response: &mut Value,
     session: &McpToolSession<'_>,
@@ -722,18 +752,7 @@ pub(crate) fn remove_intercepted_mcp_function_calls_from_output(
         return;
     };
 
-    output_array.retain(|item| {
-        let item_type = item.get("type").and_then(|value| value.as_str());
-        if !item_type.is_some_and(is_function_call_type) {
-            return true;
-        }
-
-        let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
-            return true;
-        };
-
-        !session.should_intercept_function_call(name, user_function_names)
-    });
+    output_array.retain(|item| !is_intercepted_mcp_placeholder(item, session, user_function_names));
 }
 
 /// Inject MCP metadata into a streaming response
@@ -832,16 +851,7 @@ fn retained_output_items(
                 return false;
             }
 
-            let item_type = item.get("type").and_then(|value| value.as_str());
-            if !item_type.is_some_and(is_function_call_type) {
-                return true;
-            }
-
-            let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
-                return true;
-            };
-
-            !session.should_intercept_function_call(name, user_function_names)
+            !is_intercepted_mcp_placeholder(item, session, user_function_names)
         })
         .cloned()
         .collect()
@@ -1195,18 +1205,8 @@ fn build_incomplete_response(
 
         // Drop intercepted function_call placeholders that were converted into
         // mcp_call incomplete items above to avoid duplicate tool entries.
-        output_array.retain(|item| {
-            let item_type = item.get("type").and_then(|value| value.as_str());
-            if !item_type.is_some_and(is_function_call_type) {
-                return true;
-            }
-
-            let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
-                return true;
-            };
-
-            !session.should_intercept_function_call(name, &user_function_names)
-        });
+        output_array
+            .retain(|item| !is_intercepted_mcp_placeholder(item, session, &user_function_names));
 
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
@@ -1257,6 +1257,7 @@ fn streaming_output_item_type(response_format: &ResponseFormat) -> &'static str 
         ResponseFormat::WebSearchCall => ItemType::WEB_SEARCH_CALL,
         ResponseFormat::CodeInterpreterCall => ItemType::CODE_INTERPRETER_CALL,
         ResponseFormat::FileSearchCall => ItemType::FILE_SEARCH_CALL,
+        ResponseFormat::ImageGenerationCall => ItemType::IMAGE_GENERATION_CALL,
     }
 }
 
@@ -1300,7 +1301,8 @@ fn build_mcp_approval_request_item(
 /// Build a transformed output item using ResponseTransformer
 ///
 /// Converts the output using the tool's response_format to the correctly-typed
-/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call).
+/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// image_generation_call).
 /// Returns the result as a JSON Value for SSE event streaming.
 fn build_transformed_mcp_call_item(
     output: &Value,
@@ -1743,5 +1745,102 @@ mod tests {
         let output = r#"[{"type":"text","text":"{\"openai_response\":null}"}]"#;
         let extracted = extract_openai_response_output_items(output);
         assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn mcp_list_tools_dedupe_key_ignores_tool_order() {
+        let first = json!([
+            {
+                "name": "alpha",
+                "description": "a",
+                "input_schema": {"type": "object", "properties": {}}
+            },
+            {
+                "name": "beta",
+                "input_schema": {"properties": {}, "type": "object"},
+                "description": "b"
+            }
+        ]);
+        let second = json!([
+            {
+                "description": "b",
+                "name": "beta",
+                "input_schema": {"type": "object", "properties": {}}
+            },
+            {
+                "input_schema": {"type": "object", "properties": {}},
+                "description": "a",
+                "name": "alpha"
+            }
+        ]);
+
+        assert_eq!(
+            mcp_list_tools_dedupe_key("server", &first),
+            mcp_list_tools_dedupe_key("server", &second)
+        );
+    }
+
+    #[test]
+    fn mcp_list_tools_dedupe_key_ignores_object_key_order() {
+        let first = json!([
+            {
+                "name": "alpha",
+                "description": "a",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"}
+                    }
+                }
+            }
+        ]);
+        let second = json!([
+            {
+                "input_schema": {
+                    "properties": {
+                        "limit": {"type": "integer"},
+                        "query": {"type": "string"}
+                    },
+                    "type": "object"
+                },
+                "description": "a",
+                "name": "alpha"
+            }
+        ]);
+
+        assert_eq!(
+            mcp_list_tools_dedupe_key("server", &first),
+            mcp_list_tools_dedupe_key("server", &second)
+        );
+    }
+
+    #[test]
+    fn mcp_list_tools_dedupe_key_handles_tools_without_name_field() {
+        let first = json!([
+            {
+                "description": "unnamed-first",
+                "input_schema": {"type": "object", "properties": {"a": {"type": "string"}}}
+            },
+            {
+                "description": "unnamed-second",
+                "input_schema": {"type": "object", "properties": {"b": {"type": "string"}}}
+            }
+        ]);
+        let second = json!([
+            {
+                "input_schema": {"properties": {"b": {"type": "string"}}, "type": "object"},
+                "description": "unnamed-second"
+            },
+            {
+                "input_schema": {"properties": {"a": {"type": "string"}}, "type": "object"},
+                "description": "unnamed-first"
+            }
+        ]);
+
+        assert_eq!(
+            mcp_list_tools_dedupe_key("server", &first),
+            mcp_list_tools_dedupe_key("server", &second)
+        );
     }
 }

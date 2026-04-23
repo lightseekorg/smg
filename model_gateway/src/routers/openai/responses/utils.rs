@@ -248,7 +248,19 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         ResponseTool::CodeInterpreter(_) => serde_json::to_value(tool).ok(),
         ResponseTool::FileSearch(_) => serde_json::to_value(tool).ok(),
         ResponseTool::ImageGeneration(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Computer | ResponseTool::ComputerUsePreview(_) => {
+            serde_json::to_value(tool).ok()
+        }
+        ResponseTool::Custom(_) => serde_json::to_value(tool).ok(),
+        // Namespace groups Function/Custom elements; serialize through serde so
+        // the full {type, name, description, tools} payload round-trips back
+        // to the client unchanged (T9).
+        ResponseTool::Namespace(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Shell(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::ApplyPatch => serde_json::to_value(tool).ok(),
         ResponseTool::Function(_) => None,
+        // T5 schema-only: forced-cascade arm, no behavior.
+        ResponseTool::LocalShell => serde_json::to_value(tool).ok(),
     }
 }
 

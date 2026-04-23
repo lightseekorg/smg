@@ -6,6 +6,7 @@ use tracing::info;
 use url::Url;
 
 use crate::{
+    background::BackgroundResponseRepository,
     config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig},
     core::{
         ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, ResponseStorage,
@@ -16,6 +17,7 @@ use crate::{
         MemoryConversationItemStorage, MemoryConversationMemoryWriter, MemoryConversationStorage,
         MemoryResponseStorage,
     },
+    memory_background::MemoryBackgroundRepository,
     noop::{
         NoOpConversationItemStorage, NoOpConversationMemoryWriter, NoOpConversationStorage,
         NoOpResponseStorage,
@@ -36,6 +38,7 @@ pub struct StorageBundle {
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
     pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    pub background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
 }
 
 /// Configuration for creating storage backends
@@ -68,6 +71,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
                 conversation_storage: Arc::new(MemoryConversationStorage::new()),
                 conversation_item_storage: Arc::new(MemoryConversationItemStorage::new()),
                 conversation_memory_writer: Arc::new(MemoryConversationMemoryWriter::new()),
+                background_repository: Some(Arc::new(MemoryBackgroundRepository::new())),
             }
         }
         HistoryBackend::None => {
@@ -77,6 +81,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
                 conversation_storage: Arc::new(NoOpConversationStorage::new()),
                 conversation_item_storage: Arc::new(NoOpConversationItemStorage::new()),
                 conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+                background_repository: None,
             }
         }
         HistoryBackend::Oracle => {
@@ -146,7 +151,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
         }
     };
 
-    // Wrap backends in hooked storage when a hook is provided
+    // Wrap backends in hooked storage when a hook is provided.
     if let Some(hook) = config.hook {
         info!("Wrapping storage backends with hook");
         Ok(StorageBundle {
@@ -163,6 +168,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
                 hook,
             )),
             conversation_memory_writer: bundle.conversation_memory_writer,
+            background_repository: bundle.background_repository,
         })
     } else {
         Ok(bundle)
@@ -187,6 +193,7 @@ fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageBundle, Str
         conversation_storage: Arc::new(OracleConversationStorage::new(store.clone())),
         conversation_item_storage: Arc::new(OracleConversationItemStorage::new(store)),
         conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+        background_repository: None,
     })
 }
 
@@ -216,6 +223,7 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
         conversation_storage: Arc::new(postgres_conv),
         conversation_item_storage: Arc::new(postgres_item),
         conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+        background_repository: None,
     })
 }
 
@@ -230,6 +238,7 @@ fn create_redis_storage(redis_cfg: &RedisConfig) -> Result<StorageBundle, String
         conversation_storage: Arc::new(redis_conv),
         conversation_item_storage: Arc::new(redis_item),
         conversation_memory_writer: Arc::new(NoOpConversationMemoryWriter::new()),
+        background_repository: None,
     })
 }
 

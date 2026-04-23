@@ -4,4 +4,4 @@
 
 pub mod adapters;
 
-pub use adapters::WorkerSyncAdapter;
+pub use adapters::{RateLimitSyncAdapter, TreeDelta, TreeKind, TreeSyncAdapter, WorkerSyncAdapter};

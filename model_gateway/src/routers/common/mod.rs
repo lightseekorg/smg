@@ -17,7 +17,9 @@
 //!   used by every router for transport-level retries. Has zero
 //!   coupling to the `Worker` trait — it lived in `worker/` for
 //!   historical reasons before this extraction.
+//! - [`background`] — background-mode response scaffolding.
 
+pub mod background;
 pub mod header_utils;
 pub mod mcp_utils;
 pub mod persistence_utils;

@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     extract::{multipart::MultipartError, Extension, Multipart, Path, Query, Request, State},
-    http::{header::InvalidHeaderName, StatusCode},
+    http::{header::InvalidHeaderName, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -29,6 +29,10 @@ use openai_protocol::{
     },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::ResponsesRequest,
+    skills::{
+        SkillGetQuery, SkillPatchRequest, SkillVersionPatchRequest, SkillVersionsListQuery,
+        SkillsListQuery,
+    },
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     transcription::TranscriptionRequest,
     validated::ValidatedJson,
@@ -63,7 +67,7 @@ use crate::{
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
         router_manager::RouterManager,
-        tokenize, AudioFile, RouterTrait,
+        skills, tokenize, AudioFile, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -181,7 +185,7 @@ async fn get_model_info(State(state): State<Arc<AppState>>, req: Request) -> Res
 
 async fn generate(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<GenerateRequest>,
 ) -> Response {
@@ -193,7 +197,7 @@ async fn generate(
 
 async fn v1_chat_completions(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
@@ -205,7 +209,7 @@ async fn v1_chat_completions(
 
 async fn v1_completions(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
@@ -217,7 +221,7 @@ async fn v1_completions(
 
 async fn rerank(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<RerankRequest>,
 ) -> Response {
@@ -229,7 +233,7 @@ async fn rerank(
 
 async fn v1_rerank(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
@@ -247,7 +251,7 @@ async fn v1_rerank(
 
 async fn v1_responses(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
@@ -259,7 +263,7 @@ async fn v1_responses(
 
 async fn v1_interactions(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<InteractionsRequest>,
 ) -> Response {
@@ -272,7 +276,7 @@ async fn v1_interactions(
 
 async fn v1_embeddings(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<EmbeddingRequest>,
 ) -> Response {
@@ -284,7 +288,7 @@ async fn v1_embeddings(
 
 async fn v1_messages(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<CreateMessageRequest>,
 ) -> Response {
@@ -296,7 +300,7 @@ async fn v1_messages(
 
 async fn v1_classify(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<ClassifyRequest>,
 ) -> Response {
@@ -308,7 +312,7 @@ async fn v1_classify(
 
 async fn v1_audio_transcriptions(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     mut multipart: Multipart,
 ) -> Response {
@@ -461,7 +465,7 @@ async fn v1_responses_get(
 async fn v1_responses_cancel(
     State(state): State<Arc<AppState>>,
     Path(response_id): Path<String>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
 ) -> Response {
     state
         .router
@@ -550,7 +554,7 @@ struct GetItemQuery {
 async fn v1_conversations_create_items(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let memory_execution_context =
@@ -625,7 +629,7 @@ async fn v1_realtime_ws(
 
 async fn v1_realtime_session(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<RealtimeSessionCreateRequest>,
 ) -> Response {
     state
@@ -636,7 +640,7 @@ async fn v1_realtime_session(
 
 async fn v1_realtime_client_secret(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<RealtimeClientSecretCreateRequest>,
 ) -> Response {
     state
@@ -647,7 +651,7 @@ async fn v1_realtime_client_secret(
 
 async fn v1_realtime_transcription_session(
     State(state): State<Arc<AppState>>,
-    headers: http::HeaderMap,
+    headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<RealtimeTranscriptionSessionCreateRequest>,
 ) -> Response {
     state
@@ -789,6 +793,87 @@ async fn v1_tokenizers_remove(
     tokenize::remove_tokenizer(&state.context, &tokenizer_id).await
 }
 
+async fn v1_skills_create(State(state): State<Arc<AppState>>, multipart: Multipart) -> Response {
+    skills::create_skill(State(state), multipart).await
+}
+
+async fn v1_skills_list(
+    State(state): State<Arc<AppState>>,
+    query: Query<SkillsListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    skills::list_skills(State(state), query, headers).await
+}
+
+async fn v1_skills_get(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    query: Query<SkillGetQuery>,
+    headers: HeaderMap,
+) -> Response {
+    skills::get_skill(State(state), Path(skill_id), query, headers).await
+}
+
+async fn v1_skills_patch(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    query: Query<SkillGetQuery>,
+    ValidatedJson(body): ValidatedJson<SkillPatchRequest>,
+) -> Response {
+    skills::patch_skill(State(state), Path(skill_id), query, Json(body)).await
+}
+
+async fn v1_skills_create_version(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    multipart: Multipart,
+) -> Response {
+    skills::create_skill_version(State(state), Path(skill_id), multipart).await
+}
+
+async fn v1_skills_list_versions(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    query: Query<SkillVersionsListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    skills::list_skill_versions(State(state), Path(skill_id), query, headers).await
+}
+
+async fn v1_skills_get_version(
+    State(state): State<Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    query: Query<SkillGetQuery>,
+    headers: HeaderMap,
+) -> Response {
+    skills::get_skill_version(State(state), Path((skill_id, version)), query, headers).await
+}
+
+async fn v1_skills_patch_version(
+    State(state): State<Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    query: Query<SkillGetQuery>,
+    ValidatedJson(body): ValidatedJson<SkillVersionPatchRequest>,
+) -> Response {
+    skills::patch_skill_version(State(state), Path((skill_id, version)), query, Json(body)).await
+}
+
+async fn v1_skills_delete(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    query: Query<SkillGetQuery>,
+) -> Response {
+    skills::delete_skill(State(state), Path(skill_id), query).await
+}
+
+async fn v1_skills_delete_version(
+    State(state): State<Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    query: Query<SkillGetQuery>,
+) -> Response {
+    skills::delete_skill_version(State(state), Path((skill_id, version)), query).await
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -830,7 +915,14 @@ pub fn build_app(
     );
 
     let tenant_resolution_state =
-        middleware::TenantResolutionState::new(&app_state.context.router_config)?;
+        middleware::TenantResolutionState::new(&app_state.context.router_config)?
+            .with_tenant_alias_store(
+                app_state
+                    .context
+                    .skill_service
+                    .as_ref()
+                    .and_then(|skill_service| skill_service.tenant_alias_store()),
+            );
 
     let protected_routes = Router::new()
         .route("/v1/responses", post(v1_responses))
@@ -952,7 +1044,7 @@ pub fn build_app(
         .route("/get_server_info", get(get_server_info));
 
     // Build admin routes with control plane auth if configured, otherwise use simple API key auth
-    let admin_routes = Router::new()
+    let mut admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
         .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
@@ -973,6 +1065,35 @@ pub fn build_app(
             "/v1/tokenizers/{tokenizer_id}/status",
             get(v1_tokenizers_status),
         );
+
+    if app_state.context.router_config.skills_enabled
+        && app_state
+            .context
+            .router_config
+            .skills
+            .as_ref()
+            .is_some_and(|skills_config| skills_config.admin.enabled)
+        && app_state.context.skill_service.is_some()
+    {
+        admin_routes = admin_routes
+            .route("/v1/skills", post(v1_skills_create).get(v1_skills_list))
+            .route(
+                "/v1/skills/{skill_id}",
+                get(v1_skills_get)
+                    .patch(v1_skills_patch)
+                    .delete(v1_skills_delete),
+            )
+            .route(
+                "/v1/skills/{skill_id}/versions",
+                post(v1_skills_create_version).get(v1_skills_list_versions),
+            )
+            .route(
+                "/v1/skills/{skill_id}/versions/{version}",
+                get(v1_skills_get_version)
+                    .patch(v1_skills_patch_version)
+                    .delete(v1_skills_delete_version),
+            );
+    }
 
     // Build worker routes
     let worker_routes = Router::new()
@@ -1574,7 +1695,13 @@ fn create_cors_layer(allowed_origins: Vec<String>) -> tower_http::cors::CorsLaye
 
         tower_http::cors::CorsLayer::new()
             .allow_origin(origins)
-            .allow_methods([http::Method::GET, http::Method::POST, http::Method::OPTIONS])
+            .allow_methods([
+                http::Method::GET,
+                http::Method::POST,
+                http::Method::PATCH,
+                http::Method::DELETE,
+                http::Method::OPTIONS,
+            ])
             .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
             .expose_headers([http::header::HeaderName::from_static("x-request-id")])
     };

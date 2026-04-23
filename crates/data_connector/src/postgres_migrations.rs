@@ -3,67 +3,84 @@
 //! Each migration is a function that generates Postgres DDL from [`SchemaConfig`],
 //! so it respects custom table/column names. `IF NOT EXISTS` / `IF EXISTS`
 //! clauses ensure idempotency.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::{schema::SchemaConfig, versioning::Migration};
 
+const POSTGRES_V1: Migration = Migration {
+    version: 1,
+    description: "Add safety_identifier column to responses",
+    up: pg_v1_up,
+};
+const POSTGRES_V2: Migration = Migration {
+    version: 2,
+    description: "Remove legacy user_id column from responses",
+    up: pg_v2_up,
+};
+const POSTGRES_V3: Migration = Migration {
+    version: 3,
+    description: "Drop redundant output, metadata, instructions, tool_calls columns from responses",
+    up: pg_v3_up,
+};
+const POSTGRES_V4: Migration = Migration {
+    version: 4,
+    description: "Create skills table",
+    up: pg_v4_up,
+};
+const POSTGRES_V5: Migration = Migration {
+    version: 5,
+    description: "Create skill_versions table",
+    up: pg_v5_up,
+};
+const POSTGRES_V6: Migration = Migration {
+    version: 6,
+    description: "Create tenant_aliases table",
+    up: pg_v6_up,
+};
+const POSTGRES_V7: Migration = Migration {
+    version: 7,
+    description: "Create bundle_tokens table",
+    up: pg_v7_up,
+};
+const POSTGRES_V8: Migration = Migration {
+    version: 8,
+    description: "Create continuation_cookies table",
+    up: pg_v8_up,
+};
+const POSTGRES_V9: Migration = Migration {
+    version: 9,
+    description: "Extend responses with background-mode columns",
+    up: pg_v9_up,
+};
+const POSTGRES_V10: Migration = Migration {
+    version: 10,
+    description: "Create background_queue table",
+    up: pg_v10_up,
+};
+const POSTGRES_V11: Migration = Migration {
+    version: 11,
+    description: "Create response_stream_chunks table",
+    up: pg_v11_up,
+};
+
+/// Core history-backend migrations required by the SQL response/conversation
+/// storage path during normal gateway startup.
+pub(crate) static POSTGRES_HISTORY_MIGRATIONS: [Migration; 3] =
+    [POSTGRES_V1, POSTGRES_V2, POSTGRES_V3];
+
 /// Postgres migration list. Append new migrations here.
 pub(crate) static POSTGRES_MIGRATIONS: [Migration; 11] = [
-    Migration {
-        version: 1,
-        description: "Add safety_identifier column to responses",
-        up: pg_v1_up,
-    },
-    Migration {
-        version: 2,
-        description: "Remove legacy user_id column from responses",
-        up: pg_v2_up,
-    },
-    Migration {
-        version: 3,
-        description:
-            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
-        up: pg_v3_up,
-    },
-    Migration {
-        version: 4,
-        description: "Create skills table",
-        up: pg_v4_up,
-    },
-    Migration {
-        version: 5,
-        description: "Create skill_versions table",
-        up: pg_v5_up,
-    },
-    Migration {
-        version: 6,
-        description: "Create tenant_aliases table",
-        up: pg_v6_up,
-    },
-    Migration {
-        version: 7,
-        description: "Create bundle_tokens table",
-        up: pg_v7_up,
-    },
-    Migration {
-        version: 8,
-        description: "Create continuation_cookies table",
-        up: pg_v8_up,
-    },
-    Migration {
-        version: 9,
-        description: "Extend responses with background-mode columns",
-        up: pg_v9_up,
-    },
-    Migration {
-        version: 10,
-        description: "Create background_queue table",
-        up: pg_v10_up,
-    },
-    Migration {
-        version: 11,
-        description: "Create response_stream_chunks table",
-        up: pg_v11_up,
-    },
+    POSTGRES_V1,
+    POSTGRES_V2,
+    POSTGRES_V3,
+    POSTGRES_V4,
+    POSTGRES_V5,
+    POSTGRES_V6,
+    POSTGRES_V7,
+    POSTGRES_V8,
+    POSTGRES_V9,
+    POSTGRES_V10,
+    POSTGRES_V11,
 ];
 
 fn pg_v1_up(schema: &SchemaConfig) -> Vec<String> {
@@ -393,6 +410,15 @@ fn pg_v11_up(schema: &SchemaConfig) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::schema::TableConfig;
+
+    #[test]
+    fn postgres_history_migrations_cover_only_core_history_schema() {
+        let versions: Vec<u32> = POSTGRES_HISTORY_MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3]);
+    }
 
     #[test]
     fn postgres_migrations_are_sequential() {

@@ -175,11 +175,12 @@ impl<'de> Deserialize<'de> for ResponsesFunctionToolChoice {
 /// the `#[serde(untagged)]` enum would accept any object shape that
 /// happened to fit the field set of an earlier variant.
 ///
-/// NOTE: kept separate from `common::ToolChoice`. Chat Completions uses
-/// a different `Function` wire shape (nested `{"function": {"name": ...}}`)
-/// and does not accept the `Types` / `Mcp` / `Custom` / `ApplyPatch` /
-/// `Shell` variants; sharing one enum would let `/v1/chat/completions`
-/// silently accept spec-invalid payloads.
+/// This type deliberately does NOT live in `common.rs`: Chat Completions
+/// has its own `ToolChoice` with a different `Function` wire shape
+/// (nested `{"function": {"name": ...}}`) and does not accept the
+/// `Types` / `Mcp` / `Custom` / `ApplyPatch` / `Shell` variants at all.
+/// Sharing one enum across both APIs would silently accept spec-invalid
+/// payloads on `/v1/chat/completions`.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesToolChoice {
@@ -197,10 +198,14 @@ pub enum ResponsesToolChoice {
 
     /// `{"type": "function", "name": "..."}` — Responses spec flat shape.
     ///
-    /// Also accepts the legacy Chat-style nested shape
-    /// (`{"type": "function", "function": {"name": "..."}}`) on deserialize;
-    /// always serializes as the canonical flat shape. The nested legacy shape
-    /// is gated behind a custom `Deserialize` impl on
+    /// Accepts both the spec-canonical flat wire shape and the legacy
+    /// Chat-style nested shape (`{"type": "function", "function": {"name": "..."}}`)
+    /// on deserialize to preserve backward compatibility with smg clients
+    /// written against the pre-split shared `ToolChoice` type. Always
+    /// serializes as the canonical flat shape per the OpenAI Responses spec
+    /// — Postel's law: liberal on input, conservative on output.
+    ///
+    /// The nested legacy shape is gated behind a custom `Deserialize` impl on
     /// `ResponsesFunctionToolChoice`; the untagged outer enum still pins the
     /// `"type": "function"` discriminator via `FunctionToolChoiceTag` so
     /// payloads without that tag cannot reach this variant.
@@ -371,6 +376,120 @@ pub enum ResponseTool {
     ///    output_format?, partial_images?, quality?, size? }`.
     #[serde(rename = "image_generation")]
     ImageGeneration(ImageGenerationTool),
+
+    /// Generic computer tool — `{ type: "computer" }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools): `Computer { type: "computer" }`.
+    /// Carries no payload; the model is told that a computer-control surface is
+    /// available without committing to display dimensions or environment.
+    #[serde(rename = "computer")]
+    Computer,
+
+    /// Computer-use preview tool — `{ type: "computer_use_preview",
+    /// display_height, display_width, environment }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools): `ComputerUsePreview
+    /// { display_height, display_width, environment: "browser"|"ubuntu"|
+    /// "windows"|"mac", type: "computer_use_preview" }`.
+    #[serde(rename = "computer_use_preview")]
+    ComputerUsePreview(ComputerUsePreviewTool),
+
+    /// User-defined custom tool with optional grammar-constrained input.
+    ///
+    /// Spec: `{ name, type: "custom", defer_loading?, description?, format? }`.
+    /// `format` constrains the model's free-form `input` payload — `Text` is
+    /// unconstrained, `Grammar` enforces a Lark or regex production at decode
+    /// time. The model returns a `custom_tool_call` output item carrying the
+    /// raw `input` string back to the client; the client owns execution.
+    #[serde(rename = "custom")]
+    Custom(CustomTool),
+
+    /// Grouping of `Function` / `Custom` tools under a shared namespace.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools L475):
+    /// `Namespace { description, name, tools: array of Function | Custom,
+    /// type: "namespace" }` — inner elements share the top-level shape but
+    /// are restricted to `Function` or `Custom`. Nested namespaces and
+    /// hosted/built-in tools are explicitly not permitted as elements.
+    #[serde(rename = "namespace")]
+    Namespace(NamespaceToolDef),
+
+    /// Containerized `shell` tool. Distinct from `local_shell` — the tool
+    /// definition itself may carry an optional [`ShellEnvironment`]
+    /// (container-auto, local, or existing container reference) that the
+    /// platform resolves into a concrete execution target. Emitted
+    /// `shell_call` items use the narrower call-side unions
+    /// [`ShellCallEnvironment`] (input path) and
+    /// [`ResponseShellCallEnvironment`] (response path), which drop the
+    /// `container_auto` variant and (on the response path) the tool-side
+    /// `skills` attachment.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools, L463-470):
+    /// `Shell { type: "shell", environment? }`.
+    #[serde(rename = "shell")]
+    Shell(ShellTool),
+
+    /// Built-in `apply_patch` tool — `{ type: "apply_patch" }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools, L478): `ApplyPatch
+    /// { type: "apply_patch" }`. Unit variant with no payload — the model is
+    /// simply told the apply_patch surface is available and subsequently emits
+    /// `apply_patch_call` items carrying file-edit operations (see
+    /// [`ResponseInputOutputItem::ApplyPatchCall`]). Pairs with
+    /// [`ResponsesToolChoice::ApplyPatch`] when callers want to force usage.
+    #[serde(rename = "apply_patch")]
+    ApplyPatch,
+
+    /// Built-in host-execute shell tool — `{ type: "local_shell" }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools L462): `LocalShell { type:
+    /// "local_shell" }` — carries no payload. Distinct from `shell` (T6),
+    /// which carries a containerized `environment`. The model emits
+    /// `local_shell_call` output items carrying a `LocalShellExec` action;
+    /// the client executes the command on the host and replies with a
+    /// matching `local_shell_call_output` item.
+    #[serde(rename = "local_shell")]
+    LocalShell,
+}
+
+/// Payload carried by [`ResponseTool::Namespace`].
+///
+/// Using a dedicated struct (rather than inline struct-variant fields) lets
+/// us apply `#[serde(deny_unknown_fields)]`, matching sibling variants like
+/// [`CustomTool`] and [`FunctionTool`] so unrecognized namespace-level keys
+/// are rejected instead of silently swallowed.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NamespaceToolDef {
+    /// Human-readable description surfaced to the model alongside the group.
+    pub description: String,
+    /// Stable identifier the model uses to address the namespace in
+    /// `function_call` / `custom_tool_call` items (via the `namespace` field).
+    pub name: String,
+    /// Tools in this namespace. Spec restricts elements to `Function` or
+    /// `Custom`; the dedicated [`NamespaceTool`] enum prevents nested
+    /// namespaces and hosted-tool leakage that the parent `ResponseTool`
+    /// enum would otherwise allow.
+    pub tools: Vec<NamespaceTool>,
+}
+
+/// Element type accepted inside a [`NamespaceToolDef`]'s `tools` array.
+///
+/// Spec (openai-responses-api-spec.md §tools L475): namespace elements must be
+/// either a `Function` or a `Custom` tool. Using a dedicated enum rather than
+/// `ResponseTool` prevents recursive nesting (`Namespace` inside `Namespace`)
+/// and hosted/built-in tool leakage that the spec forbids.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceTool {
+    /// Function tool — same shape as [`ResponseTool::Function`].
+    #[serde(rename = "function")]
+    Function(FunctionTool),
+
+    /// Custom tool — same shape as [`ResponseTool::Custom`].
+    #[serde(rename = "custom")]
+    Custom(CustomTool),
 }
 
 #[serde_with::skip_serializing_none]
@@ -470,6 +589,485 @@ pub enum FileSearchRanker {
     Auto,
     #[serde(rename = "default-2024-11-15")]
     Default20241115,
+}
+
+/// User-defined custom tool definition.
+///
+/// Spec: `{ name, type: "custom", defer_loading?, description?, format? }`.
+/// The discriminator (`type: "custom"`) is enforced by the parent
+/// [`ResponseTool`] enum; this struct only carries the payload fields so the
+/// `flatten`-style wire shape survives a round-trip.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomTool {
+    /// Stable identifier the model uses to address this tool in
+    /// `custom_tool_call` items.
+    pub name: String,
+    /// Optional human-readable description supplied to the model.
+    pub description: Option<String>,
+    /// When `true`, the tool definition is deferred to a later
+    /// `tool_search`-style fetch instead of being loaded inline.
+    pub defer_loading: Option<bool>,
+    /// Optional input-format constraint — `text` (unconstrained) or
+    /// `grammar` (Lark / regex production).
+    pub format: Option<CustomToolInputFormat>,
+}
+
+/// Input-format constraint applied to a [`CustomTool`].
+///
+/// Spec: `CustomToolInputFormat = Text { type: "text" } |
+/// Grammar { definition, syntax: "lark" | "regex", type: "grammar" }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum CustomToolInputFormat {
+    /// Unconstrained free-form text input.
+    #[serde(rename = "text")]
+    Text,
+    /// Grammar-constrained input. The model's free-form output must match
+    /// `definition` interpreted under `syntax`.
+    #[serde(rename = "grammar")]
+    Grammar(CustomToolGrammar),
+}
+
+/// Grammar payload carried by [`CustomToolInputFormat::Grammar`].
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomToolGrammar {
+    /// Grammar source text. Interpretation depends on `syntax`.
+    pub definition: String,
+    /// `"lark"` or `"regex"` per spec.
+    pub syntax: CustomToolGrammarSyntax,
+}
+
+/// Grammar dialect for [`CustomToolGrammar::syntax`].
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomToolGrammarSyntax {
+    /// Lark grammar (https://lark-parser.readthedocs.io/).
+    Lark,
+    /// Regular expression.
+    Regex,
+}
+
+/// Input-only content part accepted inside a `custom_tool_call_output` array.
+///
+/// Spec (openai-responses-api-spec.md L269): the array form of
+/// `custom_tool_call_output.output` permits only `ResponseInputText |
+/// ResponseInputImage | ResponseInputFile` — assistant-facing shapes such as
+/// `output_text` and `refusal` are explicitly not allowed here. This enum
+/// mirrors the three input variants of [`ResponseContentPart`] with identical
+/// field shapes so spec-compliant payloads round-trip unchanged, while
+/// deserialization of `output_text`/`refusal` fails loudly instead of being
+/// silently coerced.
+///
+/// Other call sites that legitimately carry mixed input/output content parts
+/// continue to use [`ResponseContentPart`] (Postel-of-liberality preserved for
+/// cross-tool reuse).
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+// Variant names intentionally mirror the spec's `input_*` tag set; the shared
+// prefix communicates the input-only restriction that justifies this enum's
+// existence (see type-level docs above).
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names mirror spec `input_*` tags by design"
+)]
+pub enum CustomToolInputContentPart {
+    /// `type: "input_text"` — inline textual input.
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    /// `type: "input_image"` — reference to an image supplied by the client.
+    /// Exactly one of `file_id` / `image_url` is typically set; both may be
+    /// absent when only `detail` is being conveyed.
+    #[serde(rename = "input_image")]
+    InputImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<Detail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+    },
+    /// `type: "input_file"` — reference to an attached file. `file_data` is a
+    /// base64 blob; `file_url` / `file_id` reference external/uploaded files.
+    #[serde(rename = "input_file")]
+    InputFile {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<FileDetail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
+}
+
+/// Output payload variant accepted by `custom_tool_call_output`.
+///
+/// Spec: `output: string or array of ResponseInputText | ResponseInputImage |
+/// ResponseInputFile`. The array variant uses the restricted
+/// [`CustomToolInputContentPart`] type so assistant-only shapes
+/// (`output_text`, `refusal`) are rejected at the type boundary rather than
+/// accepted and silently reinterpreted.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum CustomToolCallOutputContent {
+    /// Plain string output.
+    Text(String),
+    /// Array of input-typed content parts (`input_text` / `input_image` /
+    /// `input_file`) per the spec's `output` array shape.
+    Parts(Vec<CustomToolInputContentPart>),
+}
+
+/// Containerized `shell` tool. Spec
+/// (openai-responses-api-spec.md §tools, L463-470):
+/// `Shell { type: "shell", environment? }`.
+///
+/// The discriminator (`type: "shell"`) is enforced by the parent
+/// [`ResponseTool`] enum; this struct carries only the optional environment
+/// payload so the flatten-style wire shape survives a round-trip.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellTool {
+    /// Optional environment scope for the shell tool. When omitted, the
+    /// model runs commands inside the platform-default environment.
+    pub environment: Option<ShellEnvironment>,
+}
+
+/// Tool-side environment union carried on [`ShellTool::environment`].
+///
+/// Spec (openai-responses-api-spec.md §tools, L464-470):
+/// `environment: ContainerAuto | LocalEnvironment | ContainerReference`.
+///
+/// Distinct from the call-side environment unions
+/// [`ShellCallEnvironment`] (input-side call form, reuses
+/// [`LocalShellEnvironment`] with `skills?`) and
+/// [`ResponseShellCallEnvironment`] (response-side call form, carries the
+/// narrower [`ResponseLocalShellEnvironment`] with no `skills`): the tool
+/// form permits the `container_auto` variant, which asks the platform to
+/// provision a new container; both call forms only carry the resolved
+/// `local` / `container_reference` shape that the model echoes back.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum ShellEnvironment {
+    /// `type: "container_auto"` — spec L465-468. Requests a
+    /// platform-provisioned container with optional `file_ids`,
+    /// `memory_limit`, `network_policy`, and `skills`.
+    #[serde(rename = "container_auto")]
+    ContainerAuto(ContainerAutoEnvironment),
+    /// `type: "local"` — spec L469. Runs in the caller-owned environment,
+    /// optionally carrying a `skills` attachment list
+    /// ([`ResponsesSkillEntry`] already accepts both the typed and opaque
+    /// skill object shapes).
+    #[serde(rename = "local")]
+    Local(LocalShellEnvironment),
+    /// `type: "container_reference"` — spec L470. Pins execution to an
+    /// existing container by id.
+    #[serde(rename = "container_reference")]
+    ContainerReference(ContainerReferenceEnvironment),
+}
+
+/// Payload for [`ShellEnvironment::ContainerAuto`]. All fields are optional
+/// per spec.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerAutoEnvironment {
+    /// Files pre-mounted into the container by id.
+    pub file_ids: Option<Vec<String>>,
+    /// Memory budget. Spec (CodeInterpreter §447): `"1g"|"4g"|"16g"|"64g"`
+    /// — kept `String`-typed here for forward compatibility with future tiers.
+    pub memory_limit: Option<String>,
+    /// Network isolation policy.
+    pub network_policy: Option<ContainerNetworkPolicy>,
+    /// Skill attachments. Reuses [`ResponsesSkillEntry`] — the same union
+    /// the `/v1/responses` tool surfaces accept for CodeInterpreter, which
+    /// covers both typed `skill_reference` / `local` shapes and opaque
+    /// provider-owned objects.
+    pub skills: Option<Vec<ResponsesSkillEntry>>,
+}
+
+/// Payload for [`ShellEnvironment::Local`]. Only `skills` is permitted per
+/// spec.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LocalShellEnvironment {
+    /// Optional skill attachments carried into the local environment.
+    pub skills: Option<Vec<ResponsesSkillEntry>>,
+}
+
+/// Payload for [`ShellEnvironment::ContainerReference`]. Pins the tool to
+/// an existing container id.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerReferenceEnvironment {
+    /// Existing container id.
+    pub container_id: String,
+}
+
+/// Network isolation policy for [`ContainerAutoEnvironment::network_policy`].
+///
+/// Spec (openai-responses-api-spec.md §tools, L448):
+/// `ContainerNetworkPolicyDisabled { type: "disabled" } |
+/// ContainerNetworkPolicyAllowlist { allowed_domains, type: "allowlist",
+/// domain_secrets? }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum ContainerNetworkPolicy {
+    /// `type: "disabled"` — no outbound network access.
+    #[serde(rename = "disabled")]
+    Disabled,
+    /// `type: "allowlist"` — only the listed domains are reachable.
+    #[serde(rename = "allowlist")]
+    Allowlist(ContainerNetworkAllowlist),
+}
+
+/// Payload for [`ContainerNetworkPolicy::Allowlist`].
+///
+/// Spec (openai-responses-api-spec.md §tools, L448-449):
+/// `{ allowed_domains, type: "allowlist", domain_secrets? }` where
+/// `domain_secrets: array of { domain, name, value }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerNetworkAllowlist {
+    /// Outbound-reachable hostnames.
+    pub allowed_domains: Vec<String>,
+    /// Optional per-domain secret bindings.
+    pub domain_secrets: Option<Vec<ContainerDomainSecret>>,
+}
+
+/// Per-domain secret binding carried by
+/// [`ContainerNetworkAllowlist::domain_secrets`].
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerDomainSecret {
+    /// Target domain the secret applies to.
+    pub domain: String,
+    /// Secret identifier / lookup name.
+    pub name: String,
+    /// Secret value.
+    pub value: String,
+}
+
+/// Input-side environment union carried on
+/// [`ResponseInputOutputItem::ShellCall`].
+///
+/// Spec (openai-responses-api-spec.md §ShellCall, L228-230): the input-side
+/// call form carries `environment: optional LocalEnvironment { type: "local",
+/// skills? } | ContainerReference { container_id, type: "container_reference"
+/// }`. `container_auto` is rejected here — it is a request-side *tool*
+/// hint (§tools L465) that the platform resolves into `local` /
+/// `container_reference` before a call is surfaced, not a call-form value.
+///
+/// The tool-side [`LocalShellEnvironment`] is intentionally reused so
+/// spec-compliant replay flows that echo back input call items with their
+/// original `skills` attachment continue to round-trip losslessly.
+/// Response-side emissions use the narrower [`ResponseShellCallEnvironment`]
+/// instead.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum ShellCallEnvironment {
+    /// `type: "local"` — input-side local environment. Spec L230 allows
+    /// `skills?`, so this variant reuses the tool-form
+    /// [`LocalShellEnvironment`] verbatim. Preserves round-trip fidelity
+    /// for clients that replay prior input items carrying skill
+    /// attachments.
+    #[serde(rename = "local")]
+    Local(LocalShellEnvironment),
+    /// `type: "container_reference"` — resolved container binding.
+    #[serde(rename = "container_reference")]
+    ContainerReference(ContainerReferenceEnvironment),
+}
+
+/// Response-side environment union carried on
+/// [`ResponseOutputItem::ShellCall`].
+///
+/// Spec (openai-responses-api-spec.md §returns L512-513): the ShellCall
+/// response form has `environment: ResponseLocalEnvironment { type: "local"
+/// } | ResponseContainerReference { container_id, type: "container_reference"
+/// }`. Unlike the input-side [`ShellCallEnvironment`], the response-side
+/// local arm is `ResponseLocalEnvironment { type: "local" }` with no
+/// `skills` field — skills is a tool/input-side attachment that is not
+/// echoed back on the resolved call.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum ResponseShellCallEnvironment {
+    /// `type: "local"` — resolved local environment on the response-side
+    /// call form. Per spec L513 this is `ResponseLocalEnvironment { type:
+    /// "local" }`, without the `skills` attachment carried on the
+    /// input-side [`ShellCallEnvironment::Local`].
+    #[serde(rename = "local")]
+    Local(ResponseLocalShellEnvironment),
+    /// `type: "container_reference"` — resolved container binding.
+    /// Structurally identical to the input-side variant; reused directly.
+    #[serde(rename = "container_reference")]
+    ContainerReference(ContainerReferenceEnvironment),
+}
+
+/// Payload for [`ResponseShellCallEnvironment::Local`].
+///
+/// Spec (openai-responses-api-spec.md §returns L513): response-side local
+/// environment is `ResponseLocalEnvironment { type: "local" }` — the
+/// discriminator is the only field the model echoes back. `skills` is a
+/// request/input-side attachment on [`LocalShellEnvironment`] and is not
+/// part of the response-side envelope; modelling it here would let
+/// request-only fields leak through the response union unchecked.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseLocalShellEnvironment {}
+
+/// Action payload for [`ResponseInputOutputItem::ShellCall`] /
+/// [`ResponseOutputItem::ShellCall`].
+///
+/// Spec (openai-responses-api-spec.md §ShellCall, L229):
+/// `action: { commands, max_output_length?, timeout_ms? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellCallAction {
+    /// Command line to run inside the environment, as a positional-argv
+    /// array (equivalent to `argv` of `execve`).
+    pub commands: Vec<String>,
+    /// Optional cap on captured stdout / stderr bytes.
+    pub max_output_length: Option<u64>,
+    /// Optional per-command timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
+}
+
+/// Status for [`ResponseInputOutputItem::ShellCall`] /
+/// [`ResponseOutputItem::ShellCall`] and their `*_output` siblings.
+///
+/// Spec (openai-responses-api-spec.md §ShellCall, L221+L238):
+/// `status: "in_progress" | "completed" | "incomplete"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellCallStatus {
+    /// `in_progress` — call is still executing.
+    InProgress,
+    /// `completed` — call finished and `output` chunks are final.
+    Completed,
+    /// `incomplete` — call aborted or never reached completion.
+    Incomplete,
+}
+
+/// One entry of a `shell_call_output.output` array.
+///
+/// Spec (openai-responses-api-spec.md §ShellCallOutput, L234-238):
+/// `{ outcome, stderr, stdout }` plus the optional `created_by` marker
+/// mirroring the same tag on `FunctionCallOutput`/`ComputerCallOutput` for
+/// provenance.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellOutputChunk {
+    /// Call outcome — timeout or numeric exit.
+    pub outcome: ShellOutcome,
+    /// Captured stderr bytes (UTF-8 where possible).
+    pub stderr: String,
+    /// Captured stdout bytes (UTF-8 where possible).
+    pub stdout: String,
+    /// Optional provenance marker — `"system"`, `"user"`, or similar per
+    /// spec. Kept `Option<String>` for forward-compatibility with future
+    /// `created_by` tags.
+    pub created_by: Option<String>,
+}
+
+/// Outcome of a shell call. Spec (openai-responses-api-spec.md
+/// §ShellCallOutput, L235):
+/// `outcome: Timeout { type: "timeout" } | Exit { exit_code, type: "exit" }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum ShellOutcome {
+    /// `type: "timeout"` — the call exceeded `action.timeout_ms` and was
+    /// killed by the environment.
+    #[serde(rename = "timeout")]
+    Timeout,
+    /// `type: "exit"` — the process exited, carrying the numeric exit code.
+    #[serde(rename = "exit")]
+    Exit(ShellExit),
+}
+
+/// Exit payload for [`ShellOutcome::Exit`]. Spec: `{ exit_code, type: "exit" }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellExit {
+    /// Process exit code. Signed to preserve negative error codes on
+    /// platforms that report them.
+    pub exit_code: i32,
+}
+
+/// File-edit operation payload carried by
+/// [`ResponseInputOutputItem::ApplyPatchCall`] /
+/// [`ResponseOutputItem::ApplyPatchCall`].
+///
+/// Spec (openai-responses-api-spec.md §ApplyPatchCall L240-L246): the
+/// `operation` field is a `type`-tagged union of three shapes —
+/// `CreateFile { diff, path, type: "create_file" }`,
+/// `DeleteFile { path, type: "delete_file" }`, and
+/// `UpdateFile { diff, path, type: "update_file" }`. `DeleteFile` carries no
+/// diff because the whole file is removed; the other two carry a unified
+/// diff payload describing the edit.
+///
+/// `deny_unknown_fields` is applied so variants fail fast on foreign keys —
+/// e.g. `{"type":"delete_file","path":"x","diff":"..."}` is rejected rather
+/// than silently dropping the stray `diff`, matching the P5 fail-fast
+/// contract applied elsewhere on protocol-surface structs.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+// Variant names intentionally mirror the spec's `*_file` tag set; the shared
+// `File` postfix tracks the spec verbatim and keeps the type discriminator
+// symmetric with the JSON wire shape.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names mirror spec `create_file` / `delete_file` / `update_file` tags by design"
+)]
+pub enum ApplyPatchOperation {
+    /// `{ type: "create_file", diff, path }` — create a new file whose
+    /// contents are described by `diff`.
+    CreateFile { diff: String, path: String },
+    /// `{ type: "delete_file", path }` — remove an existing file.
+    DeleteFile { path: String },
+    /// `{ type: "update_file", diff, path }` — apply a unified diff to an
+    /// existing file at `path`.
+    UpdateFile { diff: String, path: String },
+}
+
+/// Status for a [`ResponseInputOutputItem::ApplyPatchCall`] /
+/// [`ResponseOutputItem::ApplyPatchCall`] item.
+///
+/// Spec (openai-responses-api-spec.md §ApplyPatchCall L245):
+/// `status: "in_progress" | "completed"`. Distinct from
+/// [`ApplyPatchCallOutputStatus`] which adds `"failed"` for the output item.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPatchCallStatus {
+    InProgress,
+    Completed,
+}
+
+/// Status for a [`ResponseInputOutputItem::ApplyPatchCallOutput`] /
+/// [`ResponseOutputItem::ApplyPatchCallOutput`] item.
+///
+/// Spec (openai-responses-api-spec.md §ApplyPatchCallOutput L249):
+/// `status: "completed" | "failed"`. The output-side status intentionally
+/// drops `"in_progress"` because the output only materialises once the
+/// apply_patch attempt has terminated — either the edit applied cleanly or
+/// it failed — so an in-progress output would be spec-invalid.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPatchCallOutputStatus {
+    Completed,
+    Failed,
 }
 
 #[serde_with::skip_serializing_none]
@@ -610,7 +1208,7 @@ pub struct ImageGenerationTool {
 }
 
 /// Mask reference for image-generation `edit` calls. Spec: `{ file_id?, image_url? }`.
-/// Reuses the same upload conventions as `InputImage`.
+/// Reuses the same upload conventions as P1 `InputImage`.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -660,6 +1258,164 @@ pub struct RequireApprovalRules {
 pub struct RequireApprovalFilter {
     pub tool_names: Option<Vec<String>>,
     pub read_only: Option<bool>,
+}
+
+// ============================================================================
+// Computer Tool (T2)
+// ============================================================================
+
+/// Computer-use preview tool payload.
+///
+/// Spec (openai-responses-api-spec.md §tools): `ComputerUsePreview
+/// { display_height, display_width, environment, type: "computer_use_preview" }`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerUsePreviewTool {
+    /// Height of the simulated display in pixels.
+    pub display_height: u32,
+    /// Width of the simulated display in pixels.
+    pub display_width: u32,
+    /// Operating environment the model should target.
+    pub environment: ComputerEnvironment,
+}
+
+/// Environment selector for [`ComputerUsePreviewTool`].
+///
+/// Spec (openai-responses-api-spec.md §tools): `environment:
+/// "windows"|"mac"|"linux"|"ubuntu"|"browser"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerEnvironment {
+    Windows,
+    Mac,
+    Linux,
+    Ubuntu,
+    Browser,
+}
+
+/// Mouse button used by the `Click` action.
+///
+/// Spec (openai-responses-api-spec.md §ComputerAction): `button:
+/// "left"|"right"|"wheel"|"back"|"forward"`. Only the `Click` action carries a
+/// `button` field; `Scroll` uses `scroll_x`/`scroll_y` offsets.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Wheel,
+    Back,
+    Forward,
+}
+
+/// `(x, y)` coordinate pair used in `Drag.path` and `Move/Click/Scroll` actions.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerCoordinate {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Discriminated union of computer-use actions the model may emit.
+///
+/// Spec (openai-responses-api-spec.md §ComputerAction):
+/// `Click | DoubleClick | Drag | Keypress | Move | Screenshot | Scroll | Type | Wait`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComputerAction {
+    /// `{ type: "click", button, x, y, keys? }`.
+    Click {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "double_click", x, y, keys? }`.
+    DoubleClick {
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "drag", path, keys? }`.
+    Drag {
+        path: Vec<ComputerCoordinate>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "keypress", keys }`.
+    Keypress { keys: Vec<String> },
+    /// `{ type: "move", x, y, keys? }`.
+    Move {
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "screenshot" }`.
+    Screenshot,
+    /// `{ type: "scroll", scroll_x, scroll_y, x, y, keys? }`.
+    Scroll {
+        scroll_x: i32,
+        scroll_y: i32,
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keys: Option<Vec<String>>,
+    },
+    /// `{ type: "type", text }`.
+    Type { text: String },
+    /// `{ type: "wait" }`.
+    Wait,
+}
+
+/// Status for a [`ResponseInputOutputItem::ComputerCall`] /
+/// [`ResponseOutputItem::ComputerCall`] item.
+///
+/// Spec (openai-responses-api-spec.md §ComputerCall): `status: "in_progress"
+/// | "completed" | "incomplete"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerCallStatus {
+    InProgress,
+    Completed,
+    Incomplete,
+}
+
+/// One pending or acknowledged safety check attached to a computer-use call.
+///
+/// Spec (openai-responses-api-spec.md §ComputerCall): `pending_safety_checks:
+/// array of { id, code, message }`. Per SDK v2.8.1
+/// (`types/responses/response_computer_tool_call.py::PendingSafetyCheck`),
+/// `code` and `message` are `Optional[str] = None`, so we mirror that here to
+/// round-trip payloads that omit either field.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerSafetyCheck {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Output payload of a [`ResponseInputOutputItem::ComputerCallOutput`] item.
+///
+/// Spec (openai-responses-api-spec.md §ComputerCallOutput.output):
+/// `ResponseComputerToolCallOutputScreenshot { type: "computer_screenshot",
+/// file_id?, image_url? }`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComputerCallOutputContent {
+    /// `{ type: "computer_screenshot", file_id?, image_url? }`.
+    ComputerScreenshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -798,9 +1554,17 @@ pub enum ResponseInputOutputItem {
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
     /// generation by identifier, so `result` and `status` are accepted as
     /// absent on the input side. The full shape is
-    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`. The
-    /// server-side `ResponseOutputItem::ImageGenerationCall` variant remains
-    /// strict because the gateway always populates those fields on emit.
+    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`.
+    ///
+    /// This mirrors the OpenAI Python SDK 2.8.x
+    /// `response_input_item_param.ImageGenerationCall` TypedDict: while the
+    /// TypedDict types those fields as `Required[Optional[...]]`, the HTTP
+    /// API itself documents the id-only multi-turn reference form (see the
+    /// image-generation tool guide), and `skip_serializing_if` keeps the
+    /// serialized form spec-compatible when a full item is round-tripped.
+    /// The server-side `ResponseOutputItem::ImageGenerationCall` variant
+    /// remains strict because the gateway always populates those fields
+    /// on emit.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
@@ -828,6 +1592,194 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    /// `{ type: "computer_call", id, call_id, action?, actions?, status,
+    /// pending_safety_checks }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCall): single-action
+    /// `action` is the legacy shape; `actions` carries the flattened batch
+    /// for `computer_use`. Both fields are optional independently, so callers
+    /// can roundtrip either form.
+    #[serde(rename = "computer_call")]
+    ComputerCall {
+        id: String,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ComputerAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actions: Option<Vec<ComputerAction>>,
+        status: ComputerCallStatus,
+        /// Always serialized (including an empty `[]`). The official OpenAI
+        /// Python SDK (`openai==2.8.1`,
+        /// `types/responses/response_computer_tool_call.py`) declares this as a
+        /// non-`Optional` `List[PendingSafetyCheck]`, so the field must always
+        /// appear on the wire — an empty array is semantically distinct from
+        /// omitting the field.
+        #[serde(default)]
+        pending_safety_checks: Vec<ComputerSafetyCheck>,
+    },
+    /// `{ type: "computer_call_output", id?, call_id, output,
+    /// acknowledged_safety_checks?, status? }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCallOutput): `output` is the
+    /// [`ComputerCallOutputContent::ComputerScreenshot`] payload;
+    /// `acknowledged_safety_checks` and `status` are both optional per spec.
+    #[serde(rename = "computer_call_output")]
+    ComputerCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        call_id: String,
+        output: ComputerCallOutputContent,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        acknowledged_safety_checks: Vec<ComputerSafetyCheck>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ComputerCallStatus>,
+    },
+    /// `type: "custom_tool_call"` — assistant's call into a registered
+    /// custom tool. Spec: `{ call_id, input, name, type, id?, namespace? }`.
+    /// `id` / `namespace` are modelled as `Option<String>` so newly-minted
+    /// client-side calls can omit them; they are populated on items
+    /// round-tripped from a previous response. `input` is the model's
+    /// free-form payload (constrained by the tool's `format` if grammar is
+    /// set); the client owns execution and replies with a matching
+    /// [`Self::CustomToolCallOutput`].
+    #[serde(rename = "custom_tool_call")]
+    CustomToolCall {
+        call_id: String,
+        input: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+    /// `type: "custom_tool_call_output"` — client's response to a
+    /// `custom_tool_call`. Spec: `{ call_id, output, type, id? }` (no
+    /// `status` field per spec — see Drift Log entry for T8). `id` is
+    /// `Option<String>` for the same reason as `CustomToolCall.id` above.
+    /// `output` is either a plain string or an array of input-typed content
+    /// parts (`input_text` / `input_image` / `input_file`).
+    #[serde(rename = "custom_tool_call_output")]
+    CustomToolCallOutput {
+        call_id: String,
+        output: CustomToolCallOutputContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// `type: "shell_call"` — assistant's call into the containerized
+    /// [`ResponseTool::Shell`] tool.
+    ///
+    /// Spec (openai-responses-api-spec.md §ShellCall, L228-231) +
+    /// OpenAI SDK v2.8.1 `ResponseFunctionShellToolCall`:
+    /// `{ action, call_id, type, id, environment, status, created_by? }`.
+    /// `id` is `Option<String>` so newly-minted client-side calls can omit
+    /// it; the model populates it on items round-tripped from a previous
+    /// response. `created_by` carries provenance metadata the SDK types
+    /// as `Optional[str]` — present when the item was emitted by the
+    /// platform, absent on client-authored calls.
+    #[serde(rename = "shell_call")]
+    ShellCall {
+        action: ShellCallAction,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Resolved execution environment. Spec constrains this to
+        /// `local` or `container_reference` on the call form (see
+        /// [`ShellCallEnvironment`] docs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<ShellCallEnvironment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ShellCallStatus>,
+        /// Provenance tag mirroring the SDK's `created_by: Optional[str]`
+        /// on `ResponseFunctionShellToolCall`. Dropped at serialize time
+        /// when absent so client-authored calls do not carry a null
+        /// placeholder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
+    },
+    /// `type: "shell_call_output"` — client's reply to a `shell_call`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238) +
+    /// OpenAI SDK v2.8.1 `ResponseFunctionShellToolCallOutput`:
+    /// `{ call_id, output, type, id, max_output_length?, status, created_by? }`.
+    /// `id`, `max_output_length`, and `created_by` are modelled as
+    /// `Option` per the SDK's `Optional[...]` typing; the server populates
+    /// them on items round-tripped from a previous response.
+    #[serde(rename = "shell_call_output")]
+    ShellCallOutput {
+        call_id: String,
+        output: Vec<ShellOutputChunk>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_output_length: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ShellCallStatus>,
+        /// Provenance tag mirroring the SDK's `created_by: Optional[str]`
+        /// on `ResponseFunctionShellToolCallOutput`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
+    },
+    /// `type: "apply_patch_call"` — model-issued file-edit request. Spec
+    /// (openai-responses-api-spec.md §ApplyPatchCall L240-L246):
+    /// `{ call_id, operation, status, type, id }`. `id` is `Option<String>`
+    /// so newly-minted client-side calls can omit it; it is always present on
+    /// items round-tripped from a previous response. The `operation` union is
+    /// `CreateFile | DeleteFile | UpdateFile` per
+    /// [`ApplyPatchOperation`]; the client owns execution (apply the diff on
+    /// disk) and replies with a matching [`Self::ApplyPatchCallOutput`].
+    #[serde(rename = "apply_patch_call")]
+    ApplyPatchCall {
+        call_id: String,
+        operation: ApplyPatchOperation,
+        status: ApplyPatchCallStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// `type: "apply_patch_call_output"` — client's response to an
+    /// `apply_patch_call`. Spec (openai-responses-api-spec.md
+    /// §ApplyPatchCallOutput L248-L251): `{ call_id, status, type, id,
+    /// output }` where `output` is optional log text. `id` is
+    /// `Option<String>` for the same reason as `ApplyPatchCall.id` above;
+    /// `output` uses `skip_serializing_if` so a no-log success round-trips
+    /// without emitting an explicit `null`.
+    #[serde(rename = "apply_patch_call_output")]
+    ApplyPatchCallOutput {
+        call_id: String,
+        status: ApplyPatchCallOutputStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+    /// `type: "local_shell_call"` — assistant's call into the
+    /// `local_shell` built-in tool. Spec
+    /// (openai-responses-api-spec.md §LocalShellCall L219-222):
+    /// `{ id, action, call_id, status, type }` where `action` is a
+    /// [`LocalShellExec`] payload describing the command to run on the
+    /// host. The client executes the command and replies with a
+    /// matching [`Self::LocalShellCallOutput`].
+    #[serde(rename = "local_shell_call")]
+    LocalShellCall {
+        id: String,
+        call_id: String,
+        action: LocalShellExec,
+        status: LocalShellCallStatus,
+    },
+    /// `type: "local_shell_call_output"` — client's response to a
+    /// `local_shell_call`. Spec
+    /// (openai-responses-api-spec.md §LocalShellCallOutput L224-226):
+    /// `{ id, output, type, status }`. `output` is a single string
+    /// carrying the command's serialized JSON output; `status` is
+    /// optional per SDK v2.8.1 (`openai==2.8.1`,
+    /// `types/responses/response_input_item_param.py`
+    /// `LocalShellCallOutput` — `Optional` on `status`).
+    #[serde(rename = "local_shell_call_output")]
+    LocalShellCallOutput {
+        id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<LocalShellCallStatus>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -835,7 +1787,7 @@ pub enum ResponseInputOutputItem {
         /// Spec: `EasyInputMessage.type` is `optional "message"`. Constrained
         /// to a single-value tag enum so payloads with an unknown `type`
         /// (e.g. `"input_file"`, `"totally_made_up"`) do not silently land
-        /// in this untagged catch-all variant.
+        /// in this untagged catch-all variant — P5 fail-fast contract.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(rename = "type")]
         r#type: Option<SimpleInputMessageTypeTag>,
@@ -846,12 +1798,50 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<MessagePhase>,
     },
+    /// `type: "item_reference"` — pointer to a previously-stored item in the
+    /// active conversation. Spec (openai-responses-api-spec.md §InputItemList
+    /// L275-276): `ItemReference { id, type }` where `type` is
+    /// `optional "item_reference"`. The variant is declared as
+    /// `#[serde(untagged)]` because the `type` discriminator is optional on
+    /// the wire; `r#type` is pinned to [`ItemReferenceTypeTag`] so payloads
+    /// whose `type` is not `"item_reference"` (e.g. `"totally_made_up"`) do
+    /// not silently land in this catch-all variant — P5 fail-fast contract.
+    ///
+    /// Declared AFTER [`Self::SimpleInputMessage`] so a `{id, role, content}`
+    /// payload (the id-carrying shape of `SimpleInputMessage`) still lands in
+    /// `SimpleInputMessage` first; only `{id}` / `{id, type: "item_reference"}`
+    /// payloads — which fail `SimpleInputMessage`'s required-field check —
+    /// fall through to this arm.
+    ///
+    /// Backend resolution (router looks up `id` from conversation history and
+    /// substitutes the referenced item inline) is deferred to a future R
+    /// task; this variant only adds the schema surface.
+    #[serde(untagged)]
+    ItemReference {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "type")]
+        r#type: Option<ItemReferenceTypeTag>,
+    },
+}
+
+/// Single-value tag enum pinning [`ResponseInputOutputItem::ItemReference`]'s
+/// optional `type` discriminator to the spec's only permitted value,
+/// `"item_reference"`. Used because the outer enum is `type`-tagged and the
+/// `ItemReference` variant is declared `#[serde(untagged)]` to accept payloads
+/// that omit `type` entirely — without this pin the catch-all would silently
+/// swallow payloads whose `type` discriminator is an unknown string.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemReferenceTypeTag {
+    ItemReference,
 }
 
 /// Single-value tag enum pinning `EasyInputMessage.type` to the spec's only
 /// permitted value, `"message"`. Used to keep [`ResponseInputOutputItem::SimpleInputMessage`]
 /// — which is the `#[serde(untagged)]` fallback in the outer `type`-tagged enum
-/// — from silently swallowing payloads whose `type` discriminator is unknown.
+/// — from silently swallowing payloads whose `type` discriminator is unknown
+/// (P5 fail-fast contract).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SimpleInputMessageTypeTag {
@@ -960,6 +1950,8 @@ pub enum ResponseReasoningContent {
 /// Tagged content element carried in `Reasoning.summary`.
 ///
 /// OpenAI spec: `summary: array of SummaryTextContent { text, type: "summary_text" }`.
+/// Replaces the prior `Vec<String>` wire-type that broke bidirectional
+/// interoperability with spec-compliant clients.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -1096,6 +2088,147 @@ pub enum ResponseOutputItem {
         id: String,
         encrypted_content: String,
     },
+    /// `{ type: "computer_call", id, call_id, action?, actions?, status,
+    /// pending_safety_checks }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCall): output-side mirror of
+    /// the input variant — emitted when the model issues a computer-use action.
+    /// See [`ComputerAction`].
+    #[serde(rename = "computer_call")]
+    ComputerCall {
+        id: String,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ComputerAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actions: Option<Vec<ComputerAction>>,
+        status: ComputerCallStatus,
+        /// Always serialized (including an empty `[]`). The official OpenAI
+        /// Python SDK (`openai==2.8.1`,
+        /// `types/responses/response_computer_tool_call.py`) declares this as a
+        /// non-`Optional` `List[PendingSafetyCheck]`, so the field must always
+        /// appear on the wire — an empty array is semantically distinct from
+        /// omitting the field.
+        #[serde(default)]
+        pending_safety_checks: Vec<ComputerSafetyCheck>,
+    },
+    /// `{ type: "computer_call_output", id?, call_id, output,
+    /// acknowledged_safety_checks?, status? }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §ComputerCallOutput).
+    #[serde(rename = "computer_call_output")]
+    ComputerCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        call_id: String,
+        output: ComputerCallOutputContent,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        acknowledged_safety_checks: Vec<ComputerSafetyCheck>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ComputerCallStatus>,
+    },
+    /// `type: "shell_call"` — output-side mirror of the input variant.
+    ///
+    /// Spec (openai-responses-api-spec.md §ShellCall, L228-231 and §returns
+    /// L512-513) + OpenAI SDK v2.8.1 `ResponseFunctionShellToolCall`:
+    /// emitted when the model issues a containerized shell action. The
+    /// environment echoed back is restricted to `local` /
+    /// `container_reference` via [`ResponseShellCallEnvironment`], which
+    /// narrows the input-side [`ShellCallEnvironment`] by dropping the
+    /// `skills` attachment on the `local` arm — per spec L513 the response
+    /// form uses `ResponseLocalEnvironment { type: "local" }` only.
+    ///
+    /// `id` and `status` are required on the output wire — the SDK types
+    /// them as non-`Optional` on `ResponseFunctionShellToolCall`, mirroring
+    /// the `ComputerCall` treatment above. `created_by` is the SDK's
+    /// `Optional[str]` provenance tag, populated when the platform stamps
+    /// the item.
+    #[serde(rename = "shell_call")]
+    ShellCall {
+        id: String,
+        call_id: String,
+        action: ShellCallAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<ResponseShellCallEnvironment>,
+        status: ShellCallStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
+    },
+    /// `type: "shell_call_output"` — output-side mirror of the input
+    /// variant.
+    ///
+    /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238) +
+    /// OpenAI SDK v2.8.1 `ResponseFunctionShellToolCallOutput`:
+    /// `{ call_id, output, type, id, max_output_length?, status, created_by? }`.
+    /// Emitted when the platform surfaces captured stdout/stderr plus an
+    /// [`ShellOutcome`] for a prior shell call.
+    ///
+    /// `id` and `status` are required per the SDK's non-`Optional` typing.
+    /// `max_output_length` is `Optional[int]` in the SDK (the platform may
+    /// emit shell outputs when the originating `shell_call.action` did not
+    /// specify a cap) and `created_by` is `Optional[str]` — both dropped at
+    /// serialize time when absent so downstream consumers do not see null
+    /// placeholders.
+    #[serde(rename = "shell_call_output")]
+    ShellCallOutput {
+        id: String,
+        call_id: String,
+        output: Vec<ShellOutputChunk>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_output_length: Option<u64>,
+        status: ShellCallStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<String>,
+    },
+    /// `type: "apply_patch_call"` — server-emitted mirror of the input
+    /// variant. Spec (openai-responses-api-spec.md §ApplyPatchCall L240-L246):
+    /// `{ call_id, operation, status, type, id }`. `id` is required on the
+    /// output wire because the server always assigns one when emitting the
+    /// apply_patch call item.
+    #[serde(rename = "apply_patch_call")]
+    ApplyPatchCall {
+        id: String,
+        call_id: String,
+        operation: ApplyPatchOperation,
+        status: ApplyPatchCallStatus,
+    },
+    /// `type: "apply_patch_call_output"` — server-emitted mirror of the
+    /// input variant. Spec (openai-responses-api-spec.md
+    /// §ApplyPatchCallOutput L248-L251): `{ call_id, status, type, id,
+    /// output }`. `id` is required on the output wire; `output` is optional
+    /// log text surfaced by the upstream apply_patch executor.
+    #[serde(rename = "apply_patch_call_output")]
+    ApplyPatchCallOutput {
+        id: String,
+        call_id: String,
+        status: ApplyPatchCallOutputStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+    /// `type: "local_shell_call"` — output-side mirror of the input
+    /// variant — emitted when the model issues a `local_shell` tool call.
+    /// Spec (openai-responses-api-spec.md §LocalShellCall L219-222):
+    /// `{ id, action, call_id, status, type }` with `action` as a
+    /// [`LocalShellExec`] payload. See [`ResponseInputOutputItem::LocalShellCall`].
+    #[serde(rename = "local_shell_call")]
+    LocalShellCall {
+        id: String,
+        call_id: String,
+        action: LocalShellExec,
+        status: LocalShellCallStatus,
+    },
+    /// `type: "local_shell_call_output"` — output-side mirror of the
+    /// input variant. Spec
+    /// (openai-responses-api-spec.md §LocalShellCallOutput L224-226):
+    /// `{ id, output, type, status }` with `status` optional per SDK
+    /// v2.8.1. See [`ResponseInputOutputItem::LocalShellCallOutput`].
+    #[serde(rename = "local_shell_call_output")]
+    LocalShellCallOutput {
+        id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<LocalShellCallStatus>,
+    },
 }
 
 // ============================================================================
@@ -1199,6 +2332,52 @@ pub struct FileSearchResult {
     pub text: Option<String>,
     pub score: Option<f32>,
     pub attributes: Option<Value>,
+}
+
+/// Status for `local_shell` tool calls.
+///
+/// Spec (openai-responses-api-spec.md §LocalShellCall L221): `"in_progress"
+/// | "completed" | "incomplete"`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalShellCallStatus {
+    InProgress,
+    Completed,
+    Incomplete,
+}
+
+/// `action` payload carried by a [`ResponseInputOutputItem::LocalShellCall`] /
+/// [`ResponseOutputItem::LocalShellCall`] item.
+///
+/// Spec (openai-responses-api-spec.md §LocalShellCall L220):
+/// `{ command: array of string, env: map[string], type: "exec",
+///   timeout_ms?, user?, working_directory? }`. `env` is always present
+/// (an empty object is semantically distinct from omitting the field),
+/// matching the OpenAI Python SDK (`openai==2.8.1`,
+/// `types/responses/response_input_item_param.py` `LocalShellCallAction`
+/// — non-`Optional` `Dict[str, str]`).
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocalShellExec {
+    /// `type: "exec"` — the only action kind defined by the spec today.
+    #[serde(rename = "exec")]
+    Exec {
+        /// Argv of the command to run on the host.
+        command: Vec<String>,
+        /// Environment variables overlaid on the host process env.
+        /// Always serialized (possibly empty) to match SDK shape.
+        env: std::collections::BTreeMap<String, String>,
+        /// Hard timeout in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        /// User to run the command as.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        /// Working directory for the command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_directory: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -1766,7 +2945,18 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. }
                         | ResponseInputOutputItem::ImageGenerationCall { .. }
-                        | ResponseInputOutputItem::Compaction { .. } => {}
+                        | ResponseInputOutputItem::Compaction { .. }
+                        | ResponseInputOutputItem::ComputerCall { .. }
+                        | ResponseInputOutputItem::ComputerCallOutput { .. }
+                        | ResponseInputOutputItem::CustomToolCall { .. }
+                        | ResponseInputOutputItem::CustomToolCallOutput { .. }
+                        | ResponseInputOutputItem::ShellCall { .. }
+                        | ResponseInputOutputItem::ShellCallOutput { .. }
+                        | ResponseInputOutputItem::ItemReference { .. }
+                        | ResponseInputOutputItem::ApplyPatchCall { .. }
+                        | ResponseInputOutputItem::ApplyPatchCallOutput { .. }
+                        | ResponseInputOutputItem::LocalShellCall { .. }
+                        | ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
                     }
                 }
 
@@ -2040,6 +3230,60 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
         ResponseInputOutputItem::ImageGenerationCall { .. } => {}
         ResponseInputOutputItem::Compaction { .. } => {}
+        ResponseInputOutputItem::ComputerCall { .. } => {}
+        ResponseInputOutputItem::ComputerCallOutput { .. } => {}
+        // CustomToolCall is model-generated and echoed back on multi-turn
+        // replay; matches the FunctionToolCall arm above with no content
+        // validation so a parameterless custom tool with empty input can
+        // round-trip cleanly.
+        ResponseInputOutputItem::CustomToolCall { .. } => {}
+        ResponseInputOutputItem::CustomToolCallOutput { output, .. } => match output {
+            CustomToolCallOutputContent::Text(s) if s.is_empty() => {
+                let mut e = ValidationError::new("custom_tool_call_output_empty");
+                e.message = Some("Custom tool call output cannot be empty".into());
+                return Err(e);
+            }
+            CustomToolCallOutputContent::Parts(parts) if parts.is_empty() => {
+                let mut e = ValidationError::new("custom_tool_call_output_empty");
+                e.message = Some("Custom tool call output parts cannot be empty".into());
+                return Err(e);
+            }
+            _ => {}
+        },
+        // ShellCall is model-generated and echoed back on multi-turn replay;
+        // mirrors FunctionToolCall above with no content validation so a
+        // parameterless shell call can round-trip cleanly.
+        ResponseInputOutputItem::ShellCall { .. } => {}
+        ResponseInputOutputItem::ShellCallOutput { .. } => {
+            // Backend execution is out of scope for T6 (schema-only); the
+            // router returns 501 for shell calls, so SMG never synthesises
+            // a ShellCallOutput itself. Skip content validation here so
+            // round-tripping a previously-recorded response (even with an
+            // empty chunk list) stays lossless — the cross-turn replay
+            // contract is the motivating use case for keeping this arm
+            // content-agnostic.
+        }
+        // I2: schema-only; backend resolution (history lookup +
+        // substitution) is deferred to a future R task.
+        ResponseInputOutputItem::ItemReference { .. } => {}
+        // ApplyPatchCall is model-generated and echoed back on multi-turn
+        // replay; matches the FunctionToolCall / CustomToolCall arms with no
+        // diff/path validation — the operation payload is structurally
+        // enforced by the `ApplyPatchOperation` enum, and accepting empty
+        // diffs for `create_file` / `update_file` preserves round-trip
+        // fidelity with items emitted by upstream providers.
+        ResponseInputOutputItem::ApplyPatchCall { .. } => {}
+        // ApplyPatchCallOutput.output is optional log text per spec
+        // (openai-responses-api-spec.md §ApplyPatchCallOutput L251); an
+        // absent or empty log is spec-legal (a clean `completed` with no
+        // output, or a `failed` where the executor had nothing to log) so
+        // no emptiness check applies here.
+        ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
+        // Schema-only pass-through: T5 adds the protocol variants for the
+        // `local_shell` built-in tool. Validation mirrors `ComputerCall` /
+        // `ImageGenerationCall` above (no payload-level content checks).
+        ResponseInputOutputItem::LocalShellCall { .. } => {}
+        ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
     }
     Ok(())
 }

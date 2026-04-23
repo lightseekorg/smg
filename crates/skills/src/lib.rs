@@ -11,7 +11,11 @@ pub mod storage;
 pub mod types;
 pub mod validation;
 
-pub use api::{SkillService, SkillServiceMode};
+pub use api::{
+    CreateSkillRequest, CreateSkillVersionRequest, DeletedSkillVersionResult, SkillCreateResult,
+    SkillService, SkillServiceError, SkillServiceMode, SkillUpload, UpdateSkillRequest,
+    UpdateSkillVersionRequest, UploadedSkillFile,
+};
 pub use config::{
     SkillsAdminConfig, SkillsAdminOperation, SkillsBlobStoreBackend, SkillsBlobStoreConfig,
     SkillsBudgetLimit, SkillsCacheConfig, SkillsConfig, SkillsDependenciesConfig,

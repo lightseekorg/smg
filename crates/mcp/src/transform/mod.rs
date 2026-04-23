@@ -23,6 +23,7 @@ mod transformer;
 mod types;
 
 pub use transformer::{
-    extract_embedded_openai_responses, mcp_response_item_id, ResponseTransformer,
+    compact_image_generation_output, extract_embedded_openai_responses, mcp_response_item_id,
+    ResponseTransformer,
 };
 pub use types::ResponseFormat;

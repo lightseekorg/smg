@@ -19,7 +19,8 @@ use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
         is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
+        ResponseEvent, WebSearchCallEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
@@ -150,6 +151,9 @@ pub(super) fn apply_event_transformations_inplace(
                             // Determine item type and ID prefix based on response_format
                             let (new_type, id_prefix) = match response_format {
                                 ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                                ResponseFormat::ImageGenerationCall => {
+                                    (ItemType::IMAGE_GENERATION_CALL, "ig_")
+                                }
                                 _ => (ItemType::MCP_CALL, "mcp_"),
                             };
 
@@ -523,7 +527,8 @@ pub(super) fn forward_streaming_event(
 }
 
 /// Inject in_progress event after a tool call item is added.
-/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
+/// Handles mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// and image_generation_call items.
 /// Returns false if client disconnected.
 fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
@@ -542,6 +547,7 @@ fn maybe_inject_tool_in_progress(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
         _ => return true, // Not a tool call item, nothing to inject
     };
 
@@ -1048,6 +1054,14 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         &mut sequence_number,
                                     ) {
                                         return;
+                                    }
+
+                                    if disable_mcp_interception {
+                                        // This turn is already in client-driven passthrough mode
+                                        // (triggered by a mixed MCP + user-function batch). Do
+                                        // not re-enter gateway MCP execution for later batches.
+                                        let _ = handler.take_pending_calls();
+                                        continue;
                                     }
 
                                     if has_non_mcp_calls {

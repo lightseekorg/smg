@@ -8,6 +8,18 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 use serde_json::{Map, Value};
+use validator::Validate;
+
+use crate::validated::Normalizable;
+
+/// Multipart field carrying the explicit admin target tenant id.
+pub const SKILLS_MULTIPART_TENANT_ID_FIELD: &str = "tenant_id";
+/// Multipart field for zip archive uploads.
+pub const SKILLS_MULTIPART_BUNDLE_FIELD: &str = "bundle";
+/// Alternate multipart field name accepted for zip archive uploads.
+pub const SKILLS_MULTIPART_FILE_FIELD: &str = "file";
+/// Multipart field for raw file uploads.
+pub const SKILLS_MULTIPART_FILES_FIELD: &str = "files[]";
 
 /// Accepted in `/v1/messages` -> `container.skills[]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -102,6 +114,161 @@ pub enum SkillVersionRef {
     Integer(u32),
     /// Timestamp string (Anthropic-style).
     Timestamp(String),
+}
+
+/// Public skill object returned by CRUD/read endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    pub description: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_version: Option<String>,
+    pub has_code_files: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Public immutable skill-version object returned by CRUD/read endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillVersionResponse {
+    pub skill_id: String,
+    pub version: String,
+    pub version_number: u32,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Value>,
+    pub deprecated: bool,
+    pub files: Vec<SkillVersionFileResponse>,
+    pub created_at: String,
+}
+
+/// Public file-manifest entry for a skill version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillVersionFileResponse {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+/// Non-fatal warning surfaced when a bundle was accepted with partial metadata salvage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillWarningResponse {
+    pub kind: String,
+    pub path: String,
+    pub message: String,
+}
+
+/// Success payload for skill create/upload mutations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillMutationResponse {
+    pub skill: SkillResponse,
+    pub version: SkillVersionResponse,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<SkillWarningResponse>,
+}
+
+/// JSON body accepted by `PATCH /v1/skills/{skill_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SkillPatchRequest {
+    pub default_version: SkillVersionRef,
+}
+
+impl Normalizable for SkillPatchRequest {}
+
+/// JSON body accepted by `PATCH /v1/skills/{skill_id}/versions/{version}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SkillVersionPatchRequest {
+    pub deprecated: bool,
+}
+
+impl Normalizable for SkillVersionPatchRequest {}
+
+/// Query parameters accepted by `GET /v1/skills`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct SkillsListQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Query parameters accepted by `GET /v1/skills/{skill_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct SkillGetQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+}
+
+/// Query parameters accepted by `GET /v1/skills/{skill_id}/versions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct SkillVersionsListQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default)]
+    pub include_deprecated: bool,
+}
+
+/// One page of skill records from `GET /v1/skills`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillsListResponse {
+    pub object: String,
+    pub data: Vec<SkillResponse>,
+    pub has_more: bool,
+    /// Opaque pagination cursor for the first item on this page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    /// Opaque pagination cursor for the last item on this page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_id: Option<String>,
+}
+
+/// One page of version records from `GET /v1/skills/{skill_id}/versions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillVersionsListResponse {
+    pub object: String,
+    pub data: Vec<SkillVersionResponse>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_id: Option<String>,
+}
+
+/// Standard error envelope for skills CRUD endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillsErrorEnvelope {
+    pub error: SkillsErrorBody,
+}
+
+/// Structured error body for skills CRUD endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SkillsErrorBody {
+    pub code: String,
+    pub message: String,
 }
 
 impl Serialize for SkillVersionRef {

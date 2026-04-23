@@ -28,7 +28,7 @@ use crate::{
         ListParams, NewConversation, NewConversationItem, ResponseId, ResponseResult,
         ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
     },
-    postgres_migrations::POSTGRES_MIGRATIONS,
+    postgres_migrations::POSTGRES_HISTORY_MIGRATIONS,
     schema::SchemaConfig,
 };
 
@@ -69,7 +69,7 @@ impl PostgresStore {
         crate::versioning::run_postgres_migrations(
             &mut client,
             &self.schema,
-            &POSTGRES_MIGRATIONS,
+            &POSTGRES_HISTORY_MIGRATIONS,
             self.schema.version,
             self.schema.auto_migrate,
         )

@@ -44,7 +44,42 @@ impl ConfigValidator {
 
         Self::validate_tokenizer_cache(&config.tokenizer_cache)?;
         Self::validate_skills(config)?;
+        Self::validate_background(&config.background)?;
 
+        Ok(())
+    }
+
+    fn validate_background(bg: &BackgroundConfig) -> ConfigResult<()> {
+        let zero_checks = [
+            (
+                "background.worker_concurrency",
+                u64::from(bg.worker_concurrency),
+            ),
+            ("background.max_queue_depth", u64::from(bg.max_queue_depth)),
+            ("background.lease_duration_secs", bg.lease_duration_secs),
+            ("background.sweep_interval_secs", bg.sweep_interval_secs),
+            ("background.poll_interval_ms", bg.poll_interval_ms),
+            ("background.stream_retention_secs", bg.stream_retention_secs),
+        ];
+        for (field, value) in zero_checks {
+            if value == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: field.to_string(),
+                    value: value.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+        }
+        if bg.retry_base_delay_secs > bg.retry_max_delay_secs {
+            return Err(ConfigError::InvalidValue {
+                field: "background.retry_base_delay_secs".to_string(),
+                value: bg.retry_base_delay_secs.to_string(),
+                reason: format!(
+                    "Must be <= retry_max_delay_secs ({})",
+                    bg.retry_max_delay_secs
+                ),
+            });
+        }
         Ok(())
     }
 

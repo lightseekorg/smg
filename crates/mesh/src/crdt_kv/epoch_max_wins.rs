@@ -18,17 +18,6 @@
 //! well-formed write restores clean state before the non-convergence
 //! matters.
 
-// Consumed by RateLimitSyncAdapter in a follow-up PR. `not(test)`
-// gate so the expectation applies only where the lint fires (tests
-// exercise every item).
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by RateLimitSyncAdapter in a follow-up PR"
-    )
-)]
-
 use std::cmp::Ordering;
 
 /// Fixed wire size: 8-byte big-endian epoch + 8-byte big-endian count.

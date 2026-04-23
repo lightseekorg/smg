@@ -41,6 +41,7 @@ pub mod openai;
 pub mod parse;
 pub mod responses;
 pub mod router_manager;
+pub mod skills;
 pub mod tokenize;
 
 pub use factory::RouterFactory;

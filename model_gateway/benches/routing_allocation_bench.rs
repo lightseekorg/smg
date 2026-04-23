@@ -70,6 +70,18 @@ fn extract_text_for_routing_old(req: &ResponsesRequest) -> String {
                 ResponseInputOutputItem::McpApprovalResponse { .. } => None,
                 ResponseInputOutputItem::ImageGenerationCall { .. } => None,
                 ResponseInputOutputItem::Compaction { .. } => None,
+                ResponseInputOutputItem::ComputerCall { .. } => None,
+                ResponseInputOutputItem::ComputerCallOutput { .. } => None,
+                ResponseInputOutputItem::CustomToolCall { .. }
+                | ResponseInputOutputItem::CustomToolCallOutput { .. } => None,
+                ResponseInputOutputItem::ShellCall { .. }
+                | ResponseInputOutputItem::ShellCallOutput { .. } => None,
+                ResponseInputOutputItem::ItemReference { .. } => None,
+                ResponseInputOutputItem::ApplyPatchCall { .. }
+                | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => None,
+                // T5 schema-only: forced-cascade arm, no behavior.
+                ResponseInputOutputItem::LocalShellCall { .. }
+                | ResponseInputOutputItem::LocalShellCallOutput { .. } => None,
             })
             .collect::<Vec<String>>()
             .join(" "),

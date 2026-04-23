@@ -21,6 +21,7 @@ mod factory;
 mod hooked;
 pub mod hooks;
 mod memory;
+mod memory_background;
 mod noop;
 mod oracle;
 mod oracle_migrations;
@@ -58,6 +59,7 @@ pub use factory::{
 pub use hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
+pub use memory_background::MemoryBackgroundRepository;
 pub use noop::NoOpConversationMemoryWriter;
 // Re-export schema config types
 pub use schema::{ColumnDef, SchemaConfig, TableConfig};

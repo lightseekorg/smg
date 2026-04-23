@@ -24,6 +24,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_yml = "0.0.12"
 smg-blob-storage.workspace = true
 thiserror.workspace = true
+ulid = "1.2.1"
 zip = "8.1"
 
 [dev-dependencies]

@@ -143,7 +143,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         });
                     }
                     ResponseInputOutputItem::McpApprovalResponse { .. }
-                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                    | ResponseInputOutputItem::McpApprovalRequest { .. }
+                    | ResponseInputOutputItem::ComputerCall { .. }
+                    | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                         warn!(
                             function = "responses_to_chat",
                             "Approval item reached chat conversion"
@@ -157,7 +159,37 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         );
                         return Err("Unsupported input item type".to_string());
                     }
-                    ResponseInputOutputItem::Compaction { .. } => {
+                    ResponseInputOutputItem::Compaction { .. }
+                    | ResponseInputOutputItem::ItemReference { .. } => {
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::CustomToolCall { .. }
+                    | ResponseInputOutputItem::CustomToolCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Custom tool item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::ShellCall { .. }
+                    | ResponseInputOutputItem::ShellCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Shell tool item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::ApplyPatchCall { .. }
+                    | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "apply_patch item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    // T5 schema-only: forced-cascade arm, no behavior.
+                    ResponseInputOutputItem::LocalShellCall { .. }
+                    | ResponseInputOutputItem::LocalShellCallOutput { .. } => {
                         return Err("Unsupported input item type".to_string());
                     }
                 }
@@ -515,5 +547,28 @@ mod tests {
         let chat_req = responses_to_chat(&req).unwrap();
         assert!(!chat_req.stream);
         assert!(chat_req.stream_options.is_none());
+    }
+
+    #[test]
+    fn test_image_generation_call_input_rejected() {
+        // Regression (R6.4): `image_generation_call` items are server-produced
+        // output (populated via the shared MCP transformer in R6.1) and must
+        // not be round-tripped back into the chat conversion as input.
+        // The regular gRPC path — used by non-Harmony text LLMs that only do
+        // function calling — rejects this variant with the same contract as
+        // sibling hosted-tool items (Computer/Shell/Custom/ApplyPatch).
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::ImageGenerationCall {
+                id: "ig_test".to_string(),
+                result: Some("base64data".to_string()),
+                revised_prompt: Some("a cat".to_string()),
+                status: None,
+            }]),
+            ..Default::default()
+        };
+
+        let result = responses_to_chat(&req);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Unsupported input item type");
     }
 }

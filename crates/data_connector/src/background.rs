@@ -419,10 +419,17 @@ pub trait BackgroundResponseRepository: Send + Sync {
         starting_after: Option<i64>,
     ) -> BackgroundRepositoryResult<ResumeEventBatch>;
 
-    /// Terminalize a leased job. The repository internally resolves the
-    /// cancel/complete race; see [`FinalizeResult::cancel_won`].
-    async fn finalize(&self, update: FinalizeRequest)
-        -> BackgroundRepositoryResult<FinalizeResult>;
+    /// Terminalize a leased job. Fails with
+    /// [`BackgroundRepositoryError::LeaseNotHeld`] if the caller's lease has
+    /// expired at `now`, even if no sweeper has requeued the row yet — this
+    /// prevents a stale worker from committing terminal state after its lease
+    /// window. The repository internally resolves the cancel/complete race;
+    /// see [`FinalizeResult::cancel_won`].
+    async fn finalize(
+        &self,
+        update: FinalizeRequest,
+        now: DateTime<Utc>,
+    ) -> BackgroundRepositoryResult<FinalizeResult>;
 
     /// Re-queue rows whose lease has expired. Idempotent; safe to call from
     /// any replica. Returns the number of rows requeued.

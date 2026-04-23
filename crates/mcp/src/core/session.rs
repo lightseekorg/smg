@@ -576,9 +576,17 @@ impl<'a> McpToolSession<'a> {
             | ResponseOutputItem::CodeInterpreterCall { .. }
             | ResponseOutputItem::FileSearchCall { .. }
             | ResponseOutputItem::ImageGenerationCall { .. }
+            | ResponseOutputItem::ComputerCall { .. }
+            | ResponseOutputItem::ComputerCallOutput { .. }
+            | ResponseOutputItem::ShellCall { .. }
+            | ResponseOutputItem::ShellCallOutput { .. }
+            | ResponseOutputItem::ApplyPatchCall { .. }
+            | ResponseOutputItem::ApplyPatchCallOutput { .. }
             | ResponseOutputItem::Message { .. }
             | ResponseOutputItem::Reasoning { .. }
-            | ResponseOutputItem::Compaction { .. } => true,
+            | ResponseOutputItem::Compaction { .. }
+            | ResponseOutputItem::LocalShellCall { .. }
+            | ResponseOutputItem::LocalShellCallOutput { .. } => true,
         }
     }
 

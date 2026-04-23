@@ -67,6 +67,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     "container",
     "file_search",
     "image_generation",
+    "shell",
 ];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
@@ -438,6 +439,14 @@ impl HarmonyBuilder {
                             ResponseTool::Mcp(_) => "mcp",
                             ResponseTool::FileSearch(_) => "file_search",
                             ResponseTool::ImageGeneration(_) => "image_generation",
+                            ResponseTool::Computer => "computer",
+                            ResponseTool::ComputerUsePreview(_) => "computer_use_preview",
+                            ResponseTool::Custom(_) => "custom",
+                            ResponseTool::Namespace(_) => "namespace",
+                            ResponseTool::Shell(_) => "shell",
+                            ResponseTool::ApplyPatch => "apply_patch",
+                            // T5 schema-only: forced-cascade arm, no behavior.
+                            ResponseTool::LocalShell => "local_shell",
                         })
                         .collect()
                 })
@@ -721,7 +730,9 @@ impl HarmonyBuilder {
             }
 
             ResponseInputOutputItem::McpApprovalResponse { .. }
-            | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+            | ResponseInputOutputItem::McpApprovalRequest { .. }
+            | ResponseInputOutputItem::ComputerCall { .. }
+            | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
                     "Approval item reached Harmony conversion"
@@ -737,7 +748,40 @@ impl HarmonyBuilder {
                 Err("Unsupported input item type".to_string())
             }
 
-            ResponseInputOutputItem::Compaction { .. } => {
+            ResponseInputOutputItem::Compaction { .. }
+            | ResponseInputOutputItem::ItemReference { .. } => {
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::CustomToolCall { .. }
+            | ResponseInputOutputItem::CustomToolCallOutput { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "Custom tool item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::ShellCall { .. }
+            | ResponseInputOutputItem::ShellCallOutput { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "Shell tool item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::ApplyPatchCall { .. }
+            | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "apply_patch item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
+            // T5 schema-only: forced-cascade arm, no behavior.
+            ResponseInputOutputItem::LocalShellCall { .. }
+            | ResponseInputOutputItem::LocalShellCallOutput { .. } => {
                 Err("Unsupported input item type".to_string())
             }
         }
