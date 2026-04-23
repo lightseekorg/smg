@@ -654,6 +654,7 @@ async fn execute_tool_loop_streaming_internal(
                 )
                 .await;
                 let mut event = emitter.emit_completed(usage_json.as_ref());
+                event["response"]["status"] = json!("incomplete");
                 event["response"]["incomplete_details"] = incomplete_details;
                 emitter.send_event(&event, &tx)?;
                 break;

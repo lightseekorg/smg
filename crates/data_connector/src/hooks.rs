@@ -55,6 +55,9 @@ pub enum StorageOperation {
     GetResponseChain,
     ListIdentifierResponses,
     DeleteIdentifierResponses,
+
+    // ── ConversationMemoryWriter ─────────────────────────────────────────
+    CreateMemory,
 }
 
 /// Result from a before-hook. Controls whether the backend operation proceeds.

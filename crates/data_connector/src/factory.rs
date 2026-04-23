@@ -11,7 +11,10 @@ use crate::{
     core::{
         ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, ResponseStorage,
     },
-    hooked::{HookedConversationItemStorage, HookedConversationStorage, HookedResponseStorage},
+    hooked::{
+        HookedConversationItemStorage, HookedConversationMemoryWriter, HookedConversationStorage,
+        HookedResponseStorage,
+    },
     hooks::StorageHook,
     memory::{
         MemoryConversationItemStorage, MemoryConversationMemoryWriter, MemoryConversationStorage,
@@ -50,9 +53,8 @@ pub struct StorageFactoryConfig<'a> {
     pub oracle: Option<&'a OracleConfig>,
     pub postgres: Option<&'a PostgresConfig>,
     pub redis: Option<&'a RedisConfig>,
-    /// Optional storage hook. When provided, all three storage backends are
-    /// wrapped in `Hooked*Storage` that runs before/after hooks around every
-    /// storage operation.
+    /// Optional storage hook. When provided, all storage backends are wrapped
+    /// in hooked adapters that run before/after hooks around every operation.
     pub hook: Option<Arc<dyn StorageHook>>,
 }
 
@@ -174,9 +176,12 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
             )),
             conversation_item_storage: Arc::new(HookedConversationItemStorage::new(
                 bundle.conversation_item_storage,
+                hook.clone(),
+            )),
+            conversation_memory_writer: Arc::new(HookedConversationMemoryWriter::new(
+                bundle.conversation_memory_writer,
                 hook,
             )),
-            conversation_memory_writer: bundle.conversation_memory_writer,
             background_repository: bundle.background_repository,
         })
     } else {

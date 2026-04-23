@@ -14,10 +14,11 @@ use crate::{
     context::{current_request_context, with_extra_columns},
     core::{
         Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemResult,
-        ConversationItemStorage, ConversationItemStorageError, ConversationMetadata,
-        ConversationResult, ConversationStorage, ConversationStorageError, ListParams,
-        NewConversation, NewConversationItem, ResponseChain, ResponseId, ResponseResult,
-        ResponseStorage, ResponseStorageError, StoredResponse,
+        ConversationItemStorage, ConversationItemStorageError, ConversationMemoryId,
+        ConversationMemoryResult, ConversationMemoryStorageError, ConversationMemoryWriter,
+        ConversationMetadata, ConversationResult, ConversationStorage, ConversationStorageError,
+        ListParams, NewConversation, NewConversationItem, NewConversationMemory, ResponseChain,
+        ResponseId, ResponseResult, ResponseStorage, ResponseStorageError, StoredResponse,
     },
     hooks::{BeforeHookResult, ExtraColumns, StorageHook, StorageOperation},
 };
@@ -587,6 +588,52 @@ impl ResponseStorage for HookedResponseStorage {
         run_after(
             &*self.hook,
             StorageOperation::DeleteIdentifierResponses,
+            &payload,
+            &result_json,
+            &extra,
+        )
+        .await;
+
+        Ok(result)
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// HookedConversationMemoryWriter
+// ────────────────────────────────────────────────────────────────────────────
+
+pub struct HookedConversationMemoryWriter {
+    inner: Arc<dyn ConversationMemoryWriter>,
+    hook: Arc<dyn StorageHook>,
+}
+
+impl HookedConversationMemoryWriter {
+    pub fn new(inner: Arc<dyn ConversationMemoryWriter>, hook: Arc<dyn StorageHook>) -> Self {
+        Self { inner, hook }
+    }
+}
+
+#[async_trait]
+impl ConversationMemoryWriter for HookedConversationMemoryWriter {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId> {
+        let payload = serde_json::to_value(&input).unwrap_or_default();
+        let extra = run_before(
+            &*self.hook,
+            StorageOperation::CreateMemory,
+            &payload,
+            ConversationMemoryStorageError::StorageError,
+        )
+        .await?;
+
+        let result = with_extra_columns(extra.clone(), self.inner.create_memory(input)).await?;
+
+        let result_json = serde_json::to_value(&result).unwrap_or_default();
+        run_after(
+            &*self.hook,
+            StorageOperation::CreateMemory,
             &payload,
             &result_json,
             &extra,

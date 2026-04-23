@@ -896,6 +896,27 @@ impl PostgresConversationMemoryWriter {
                 s.col("status")
             ));
         }
+        if !s.is_skipped("status") && !s.is_skipped("next_run_at") {
+            let composite_idx = if s.is_skipped("owner_id") {
+                postgres_index_name(&s.table, "status_next_run_at_idx")
+            } else {
+                postgres_index_name(&s.table, "owner_status_next_run_at_idx")
+            };
+            let composite_cols = if s.is_skipped("owner_id") {
+                format!("{}, {}", s.col("status"), s.col("next_run_at"))
+            } else {
+                format!(
+                    "{}, {}, {}",
+                    s.col("owner_id"),
+                    s.col("status"),
+                    s.col("next_run_at")
+                )
+            };
+            index_ddls.push(format!(
+                "CREATE INDEX IF NOT EXISTS {composite_idx} \
+                 ON {table} ({composite_cols});",
+            ));
+        }
         if !s.is_skipped("response_id") {
             let response_idx = postgres_index_name(&s.table, "response_idx");
             index_ddls.push(format!(

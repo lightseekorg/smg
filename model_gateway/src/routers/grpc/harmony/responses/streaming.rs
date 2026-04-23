@@ -312,6 +312,7 @@ async fn execute_mcp_tool_loop_streaming(
                     )
                     .await;
                     let mut event = emitter.emit_completed(Some(&usage_json));
+                    event["response"]["status"] = json!("incomplete");
                     event["response"]["incomplete_details"] = incomplete_details;
                     emitter.send_event_best_effort(&event, tx);
                     return;

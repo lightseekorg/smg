@@ -1713,11 +1713,14 @@ fn create_index_if_missing(
     ddl: &str,
 ) -> Result<(), String> {
     let count: i64 = match owner_upper {
-        Some(owner) => conn.query_row_as(
-            "SELECT COUNT(*) FROM all_indexes \
-             WHERE owner = :1 AND table_name = :2 AND index_name = :3",
-            &[&owner, &table_upper, &index_name],
-        ),
+        Some(owner) => {
+            let owner = owner.to_ascii_uppercase();
+            conn.query_row_as(
+                "SELECT COUNT(*) FROM all_indexes \
+                 WHERE owner = :1 AND table_name = :2 AND index_name = :3",
+                &[&owner, &table_upper, &index_name],
+            )
+        }
         None => conn.query_row_as(
             "SELECT COUNT(*) FROM user_indexes \
              WHERE table_name = :1 AND index_name = :2",
@@ -1750,10 +1753,13 @@ fn oracle_table_exists(
     table_upper: &str,
 ) -> Result<bool, String> {
     let count: i64 = match owner_upper {
-        Some(owner) => conn.query_row_as(
-            "SELECT COUNT(*) FROM all_tables WHERE owner = :1 AND table_name = :2",
-            &[&owner, &table_upper],
-        ),
+        Some(owner) => {
+            let owner = owner.to_ascii_uppercase();
+            conn.query_row_as(
+                "SELECT COUNT(*) FROM all_tables WHERE owner = :1 AND table_name = :2",
+                &[&owner, &table_upper],
+            )
+        }
         None => conn.query_row_as(
             "SELECT COUNT(*) FROM user_tables WHERE table_name = :1",
             &[&table_upper],

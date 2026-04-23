@@ -4,6 +4,8 @@
 //! into a [`StorageHook`] implementation, allowing WASM guests to intercept
 //! storage operations with custom before/after logic.
 
+use std::sync::Once;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use smg_data_connector::{
@@ -22,6 +24,8 @@ use crate::storage_spec::{
     },
     StorageHook as StorageHookBindings,
 };
+
+static CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE: Once = Once::new();
 
 /// WASI state for storage hook WASM execution.
 struct StorageHookWasiState {
@@ -121,6 +125,16 @@ fn to_wit_operation(op: StorageOperation) -> WitOperation {
         StorageOperation::GetResponseChain => WitOperation::GetResponseChain,
         StorageOperation::ListIdentifierResponses => WitOperation::ListIdentifierResponses,
         StorageOperation::DeleteIdentifierResponses => WitOperation::DeleteIdentifierResponses,
+        // Backward-compatible mapping: existing WIT surface has no dedicated
+        // CreateMemory operation yet.
+        StorageOperation::CreateMemory => {
+            CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE.call_once(|| {
+                tracing::debug!(
+                    "mapping CreateMemory to WIT StoreResponse (no dedicated WIT variant yet)"
+                );
+            });
+            WitOperation::StoreResponse
+        }
     }
 }
 
