@@ -11,8 +11,6 @@ use serde_json::{Map, Value};
 
 /// Multipart field carrying the explicit admin target tenant id.
 pub const SKILLS_MULTIPART_TENANT_ID_FIELD: &str = "tenant_id";
-/// Query parameter carrying the explicit admin target tenant id.
-pub const SKILLS_QUERY_TENANT_ID_PARAM: &str = "tenant_id";
 /// Multipart field for zip archive uploads.
 pub const SKILLS_MULTIPART_BUNDLE_FIELD: &str = "bundle";
 /// Alternate multipart field name accepted for zip archive uploads.
@@ -219,8 +217,10 @@ pub struct SkillsListResponse {
     pub object: String,
     pub data: Vec<SkillResponse>,
     pub has_more: bool,
+    /// Opaque pagination cursor for the first item on this page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_id: Option<String>,
+    /// Opaque pagination cursor for the last item on this page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_id: Option<String>,
 }

@@ -396,10 +396,34 @@ async fn list_skills_returns_paginated_results_and_supports_if_none_match() {
     assert_eq!(list_body["data"].as_array().map(Vec::len), Some(1));
     assert_eq!(list_body["has_more"], true);
 
+    let listed_skill_id = list_body["data"][0]["id"]
+        .as_str()
+        .expect("listed skill id")
+        .to_string();
     let after = list_body["last_id"]
         .as_str()
         .expect("last id on first page")
         .to_string();
+
+    let not_modified = client
+        .get(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a"), ("limit", "1")])
+        .header(reqwest::header::IF_NONE_MATCH, etag)
+        .send()
+        .await
+        .expect("send conditional list skills request");
+    assert_eq!(not_modified.status(), reqwest::StatusCode::NOT_MODIFIED);
+
+    create_skill_version_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        &listed_skill_id,
+        b"---\nname: acme:map\ndescription: Updated list ordering skill\n---\nUse rg --files.",
+    )
+    .await;
+
     let next_page = client
         .get(format!("{base_url}/v1/skills"))
         .bearer_auth("test-admin-key")
@@ -415,7 +439,7 @@ async fn list_skills_returns_paginated_results_and_supports_if_none_match() {
     let next_body: Value = next_page.json().await.expect("json response");
     assert_eq!(next_body["data"].as_array().map(Vec::len), Some(1));
     let returned_id = next_body["data"][0]["id"].as_str().expect("skill id");
-    assert_ne!(returned_id, after);
+    assert_ne!(returned_id, listed_skill_id);
     assert!(
         returned_id == first_skill["skill"]["id"].as_str().expect("first skill id")
             || returned_id
@@ -423,16 +447,6 @@ async fn list_skills_returns_paginated_results_and_supports_if_none_match() {
                     .as_str()
                     .expect("second skill id")
     );
-
-    let not_modified = client
-        .get(format!("{base_url}/v1/skills"))
-        .bearer_auth("test-admin-key")
-        .query(&[("tenant_id", "tenant-a"), ("limit", "1")])
-        .header(reqwest::header::IF_NONE_MATCH, etag)
-        .send()
-        .await
-        .expect("send conditional list skills request");
-    assert_eq!(not_modified.status(), reqwest::StatusCode::NOT_MODIFIED);
 
     server.abort();
 }
@@ -542,13 +556,114 @@ async fn get_skill_and_version_read_endpoints_require_target_tenant_and_return_c
         .get(format!("{base_url}/v1/skills/{skill_id}"))
         .bearer_auth("test-admin-key")
         .query(&[("tenant_id", "tenant-a")])
-        .header(reqwest::header::IF_MODIFIED_SINCE, skill_last_modified)
+        .header(
+            reqwest::header::IF_MODIFIED_SINCE,
+            (chrono::DateTime::parse_from_rfc2822(&skill_last_modified)
+                .expect("parse last-modified header")
+                + chrono::Duration::seconds(1))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string(),
+        )
         .send()
         .await
         .expect("send if-modified-since get skill request");
     assert_eq!(
         not_modified_since.status(),
         reqwest::StatusCode::NOT_MODIFIED
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn invalid_after_cursor_returns_bad_request_before_conditional_cache_checks() {
+    let blob_dir = tempfile::tempdir().expect("blob tempdir");
+    let cache_dir = tempfile::tempdir().expect("cache tempdir");
+    let app = create_skills_test_app(skills_test_config(&blob_dir, &cache_dir, true)).await;
+    let (base_url, server) = spawn_app(app).await;
+    let client = reqwest::Client::new();
+
+    let created = create_skill_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg.",
+    )
+    .await;
+    let skill_id = created["skill"]["id"]
+        .as_str()
+        .expect("skill id")
+        .to_string();
+    create_skill_version_via_api(
+        &client,
+        &base_url,
+        "tenant-a",
+        &skill_id,
+        b"---\nname: acme:map\ndescription: Updated mapping skill\n---\nUse rg --files.",
+    )
+    .await;
+
+    let list_response = client
+        .get(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .send()
+        .await
+        .expect("send list skills request");
+    let list_etag = list_response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .expect("skills list etag")
+        .to_str()
+        .expect("etag text")
+        .to_string();
+
+    let invalid_skills_after = client
+        .get(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a"), ("after", "not-a-valid-cursor")])
+        .header(reqwest::header::IF_NONE_MATCH, list_etag)
+        .send()
+        .await
+        .expect("send invalid after list request");
+    assert_eq!(
+        invalid_skills_after.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let invalid_skills_body: Value = invalid_skills_after.json().await.expect("json response");
+    assert_eq!(invalid_skills_body["error"]["code"], "invalid_after_cursor");
+
+    let versions_response = client
+        .get(format!("{base_url}/v1/skills/{skill_id}/versions"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a")])
+        .send()
+        .await
+        .expect("send list skill versions request");
+    let versions_etag = versions_response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .expect("skill versions etag")
+        .to_str()
+        .expect("etag text")
+        .to_string();
+
+    let invalid_versions_after = client
+        .get(format!("{base_url}/v1/skills/{skill_id}/versions"))
+        .bearer_auth("test-admin-key")
+        .query(&[("tenant_id", "tenant-a"), ("after", "bogus-version")])
+        .header(reqwest::header::IF_NONE_MATCH, versions_etag)
+        .send()
+        .await
+        .expect("send invalid versions after request");
+    assert_eq!(
+        invalid_versions_after.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let invalid_versions_body: Value = invalid_versions_after.json().await.expect("json response");
+    assert_eq!(
+        invalid_versions_body["error"]["code"],
+        "invalid_after_cursor"
     );
 
     server.abort();

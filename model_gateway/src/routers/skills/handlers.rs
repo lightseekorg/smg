@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use openai_protocol::skills::{
     SkillGetQuery, SkillMutationResponse, SkillResponse, SkillVersionFileResponse,
     SkillVersionResponse, SkillVersionsListQuery, SkillVersionsListResponse, SkillWarningResponse,
@@ -14,7 +15,7 @@ use openai_protocol::skills::{
     SKILLS_MULTIPART_BUNDLE_FIELD, SKILLS_MULTIPART_FILES_FIELD, SKILLS_MULTIPART_FILE_FIELD,
     SKILLS_MULTIPART_TENANT_ID_FIELD,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use smg_skills::{
@@ -269,6 +270,7 @@ async fn list_skills_impl(
             .cmp(&left.updated_at)
             .then_with(|| left.skill_id.cmp(&right.skill_id))
     });
+    let start = skills_list_start_index(&records, query.after.as_deref())?;
 
     let etag = build_list_etag(
         &query,
@@ -281,13 +283,19 @@ async fn list_skills_impl(
         return not_modified_response(&etag, last_modified);
     }
 
-    let page = paginate_records(records, query.after.as_deref(), limit, |record| {
-        record.skill_id.as_str()
-    })?;
+    let page = paginate_from_start(records, start, limit);
     let body = SkillsListResponse {
         object: "list".to_string(),
-        first_id: page.items.first().map(|record| record.skill_id.clone()),
-        last_id: page.items.last().map(|record| record.skill_id.clone()),
+        first_id: page
+            .items
+            .first()
+            .map(|record| SkillsListCursor::from_record(record).encode())
+            .transpose()?,
+        last_id: page
+            .items
+            .last()
+            .map(|record| SkillsListCursor::from_record(record).encode())
+            .transpose()?,
         has_more: page.has_more,
         data: page.items.iter().map(skill_response_from_record).collect(),
     };
@@ -352,6 +360,9 @@ async fn list_skill_versions_impl(
             .cmp(&left.version_number)
             .then_with(|| left.version.cmp(&right.version))
     });
+    let start = start_index_from_id_cursor(&versions, query.after.as_deref(), |record| {
+        record.version.as_str()
+    })?;
 
     let etag = build_list_etag(
         &query,
@@ -364,9 +375,7 @@ async fn list_skill_versions_impl(
         return not_modified_response(&etag, last_modified);
     }
 
-    let page = paginate_records(versions, query.after.as_deref(), limit, |record| {
-        record.version.as_str()
-    })?;
+    let page = paginate_from_start(versions, start, limit);
     let body = SkillVersionsListResponse {
         object: "list".to_string(),
         first_id: page.items.first().map(|record| record.version.clone()),
@@ -418,6 +427,64 @@ struct Page<T> {
     has_more: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SkillsListCursorPayload {
+    updated_at: String,
+    skill_id: String,
+}
+
+#[derive(Debug)]
+struct SkillsListCursor {
+    updated_at: chrono::DateTime<chrono::Utc>,
+    skill_id: String,
+}
+
+impl SkillsListCursor {
+    fn from_record(record: &smg_skills::SkillRecord) -> Self {
+        Self {
+            updated_at: record.updated_at,
+            skill_id: record.skill_id.clone(),
+        }
+    }
+
+    fn encode(&self) -> Result<String, SkillsApiError> {
+        let payload = SkillsListCursorPayload {
+            updated_at: self.updated_at.to_rfc3339(),
+            skill_id: self.skill_id.clone(),
+        };
+        let bytes = serde_json::to_vec(&payload).map_err(|error| SkillsApiError::Internal {
+            code: "skills_internal_error",
+            message: format!("failed to serialize skills list cursor: {error}"),
+        })?;
+        Ok(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    fn decode(raw: &str) -> Result<Self, SkillsApiError> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(raw)
+            .map_err(|_| invalid_after_cursor("after cursor is not valid base64url".to_string()))?;
+        let payload: SkillsListCursorPayload = serde_json::from_slice(&bytes).map_err(|_| {
+            invalid_after_cursor("after cursor is not valid skills cursor JSON".to_string())
+        })?;
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&payload.updated_at)
+            .map_err(|_| {
+                invalid_after_cursor(
+                    "after cursor does not contain a valid RFC3339 timestamp".to_string(),
+                )
+            })?
+            .with_timezone(&chrono::Utc);
+        if payload.skill_id.trim().is_empty() {
+            return Err(invalid_after_cursor(
+                "after cursor does not contain a skill id".to_string(),
+            ));
+        }
+        Ok(Self {
+            updated_at,
+            skill_id: payload.skill_id,
+        })
+    }
+}
+
 fn resolve_target_tenant_id(raw_tenant_id: Option<&str>) -> Result<String, SkillsApiError> {
     let tenant_id = raw_tenant_id.ok_or_else(|| SkillsApiError::BadRequest {
         code: "missing_target_tenant",
@@ -442,38 +509,62 @@ fn validate_list_limit(limit: Option<u32>) -> Result<usize, SkillsApiError> {
     Ok(limit as usize)
 }
 
-fn paginate_records<T, F>(
-    items: Vec<T>,
+fn normalized_after_cursor(after: Option<&str>) -> Option<&str> {
+    after.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn skills_list_start_index(
+    items: &[smg_skills::SkillRecord],
     after: Option<&str>,
-    limit: usize,
+) -> Result<usize, SkillsApiError> {
+    let Some(after) = normalized_after_cursor(after) else {
+        return Ok(0);
+    };
+    let cursor = SkillsListCursor::decode(after)?;
+    Ok(items
+        .iter()
+        .position(|record| skill_record_is_after_cursor(record, &cursor))
+        .unwrap_or(items.len()))
+}
+
+fn skill_record_is_after_cursor(
+    record: &smg_skills::SkillRecord,
+    cursor: &SkillsListCursor,
+) -> bool {
+    record.updated_at < cursor.updated_at
+        || (record.updated_at == cursor.updated_at && record.skill_id > cursor.skill_id)
+}
+
+fn start_index_from_id_cursor<T, F>(
+    items: &[T],
+    after: Option<&str>,
     id_of: F,
-) -> Result<Page<T>, SkillsApiError>
+) -> Result<usize, SkillsApiError>
 where
     F: Fn(&T) -> &str,
 {
-    let start = if let Some(after) = after.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(after) = normalized_after_cursor(after) {
         items
             .iter()
             .position(|item| id_of(item) == after)
             .map(|index| index + 1)
-            .ok_or_else(|| SkillsApiError::BadRequest {
-                code: "invalid_after_cursor",
-                message: format!("after cursor '{after}' was not found"),
-            })?
+            .ok_or_else(|| invalid_after_cursor(format!("after cursor '{after}' was not found")))
     } else {
-        0
-    };
+        Ok(0)
+    }
+}
 
+fn paginate_from_start<T>(items: Vec<T>, start: usize, limit: usize) -> Page<T> {
     let total = items.len();
     let items = items
         .into_iter()
         .skip(start)
         .take(limit)
         .collect::<Vec<_>>();
-    Ok(Page {
+    Page {
         has_more: total > start.saturating_add(limit),
         items,
-    })
+    }
 }
 
 fn list_last_modified<I>(timestamps: I) -> chrono::DateTime<chrono::Utc>
@@ -534,10 +625,7 @@ fn is_not_modified(
         .get(header::IF_MODIFIED_SINCE)
         .and_then(|value| value.to_str().ok())
         .and_then(parse_http_date)
-        .is_some_and(|value| {
-            let last_modified = last_modified.timestamp();
-            last_modified <= value.timestamp()
-        })
+        .is_some_and(|value| last_modified <= value)
 }
 
 fn if_none_match_matches(value: &HeaderValue, etag: &str) -> bool {
@@ -726,6 +814,13 @@ fn looks_like_zip_upload(file_name: Option<&str>, content_type: Option<&str>) ->
 fn invalid_multipart(message: String) -> SkillsApiError {
     SkillsApiError::BadRequest {
         code: "invalid_multipart",
+        message,
+    }
+}
+
+fn invalid_after_cursor(message: String) -> SkillsApiError {
+    SkillsApiError::BadRequest {
+        code: "invalid_after_cursor",
         message,
     }
 }
