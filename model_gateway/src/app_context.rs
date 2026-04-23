@@ -13,7 +13,7 @@ use smg_data_connector::{
     StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
-use smg_skills::SkillService;
+use smg_skills::{SkillService, SkillUploadLimits};
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
@@ -673,7 +673,12 @@ impl AppContextBuilder {
         let blob_store =
             create_blob_store(&skills_config.blob_store, Some(&skills_config.cache))
                 .map_err(|error| format!("Failed to initialize skills blob store: {error}"))?;
-        self.skill_service = Some(Arc::new(SkillService::in_memory(blob_store)));
+        let upload_limits = SkillUploadLimits::from_config(skills_config)
+            .map_err(|error| format!("Invalid skills upload limits: {error}"))?;
+        self.skill_service = Some(Arc::new(SkillService::in_memory_with_limits(
+            blob_store,
+            upload_limits,
+        )));
         Ok(self)
     }
 

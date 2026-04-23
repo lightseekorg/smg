@@ -8,8 +8,8 @@ use parking_lot::RwLock;
 
 use crate::{
     storage::{
-        BundleTokenStore, ContinuationCookieStore, SkillMetadataStore, SkillsStoreResult,
-        TenantAliasStore,
+        BundleTokenStore, ContinuationCookieStore, SkillMetadataStore, SkillsStoreError,
+        SkillsStoreResult, TenantAliasStore,
     },
     types::{
         BundleTokenClaim, ContinuationCookieClaim, SkillRecord, SkillVersionRecord,
@@ -41,21 +41,31 @@ pub struct InMemorySkillStore {
 impl SkillMetadataStore for InMemorySkillStore {
     async fn put_skill(&self, record: SkillRecord) -> SkillsStoreResult<()> {
         let mut state = self.state.write();
-        if let Some(existing) = state.skills.get(&record.skill_id) {
-            if existing.tenant_id != record.tenant_id {
-                return Err(crate::storage::SkillsStoreError::InvalidData(format!(
-                    "skill_id '{}' already belongs to tenant '{}'",
-                    record.skill_id, existing.tenant_id
-                )));
-            }
+        put_skill_locked(&mut state, record)?;
+        Ok(())
+    }
+
+    async fn put_skill_with_initial_version(
+        &self,
+        skill: SkillRecord,
+        version: SkillVersionRecord,
+    ) -> SkillsStoreResult<()> {
+        if skill.skill_id != version.skill_id {
+            return Err(SkillsStoreError::InvalidData(format!(
+                "version skill_id '{}' does not match skill_id '{}'",
+                version.skill_id, skill.skill_id
+            )));
         }
 
+        let mut state = self.state.write();
+        validate_skill_tenant_locked(&state, &skill)?;
         state
             .skill_ids_by_tenant
-            .entry(record.tenant_id.clone())
+            .entry(skill.tenant_id.clone())
             .or_default()
-            .insert(record.skill_id.clone());
-        state.skills.insert(record.skill_id.clone(), record);
+            .insert(skill.skill_id.clone());
+        state.skills.insert(skill.skill_id.clone(), skill);
+        put_skill_version_locked(&mut state, version)?;
         Ok(())
     }
 
@@ -122,20 +132,27 @@ impl SkillMetadataStore for InMemorySkillStore {
     }
 
     async fn put_skill_version(&self, record: SkillVersionRecord) -> SkillsStoreResult<()> {
-        let key = (record.skill_id.clone(), record.version.clone());
         let mut state = self.state.write();
-        if !state.skills.contains_key(&record.skill_id) {
-            return Err(crate::storage::SkillsStoreError::InvalidData(format!(
-                "skill_id '{}' must exist before inserting a version",
-                record.skill_id
+        put_skill_version_locked(&mut state, record)?;
+        Ok(())
+    }
+
+    async fn put_skill_version_and_update_skill(
+        &self,
+        version: SkillVersionRecord,
+        skill: SkillRecord,
+    ) -> SkillsStoreResult<()> {
+        if skill.skill_id != version.skill_id {
+            return Err(SkillsStoreError::InvalidData(format!(
+                "version skill_id '{}' does not match skill_id '{}'",
+                version.skill_id, skill.skill_id
             )));
         }
-        state
-            .skill_versions_by_skill
-            .entry(record.skill_id.clone())
-            .or_default()
-            .insert(record.version.clone());
-        state.skill_versions.insert(key, record);
+
+        let mut state = self.state.write();
+        validate_skill_tenant_locked(&state, &skill)?;
+        put_skill_version_locked(&mut state, version)?;
+        put_skill_locked(&mut state, skill)?;
         Ok(())
     }
 
@@ -192,6 +209,53 @@ impl SkillMetadataStore for InMemorySkillStore {
 
         Ok(true)
     }
+}
+
+fn validate_skill_tenant_locked(
+    state: &InMemorySkillState,
+    record: &SkillRecord,
+) -> SkillsStoreResult<()> {
+    if let Some(existing) = state.skills.get(&record.skill_id) {
+        if existing.tenant_id != record.tenant_id {
+            return Err(SkillsStoreError::InvalidData(format!(
+                "skill_id '{}' already belongs to tenant '{}'",
+                record.skill_id, existing.tenant_id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn put_skill_locked(state: &mut InMemorySkillState, record: SkillRecord) -> SkillsStoreResult<()> {
+    validate_skill_tenant_locked(state, &record)?;
+    state
+        .skill_ids_by_tenant
+        .entry(record.tenant_id.clone())
+        .or_default()
+        .insert(record.skill_id.clone());
+    state.skills.insert(record.skill_id.clone(), record);
+    Ok(())
+}
+
+fn put_skill_version_locked(
+    state: &mut InMemorySkillState,
+    record: SkillVersionRecord,
+) -> SkillsStoreResult<()> {
+    let key = (record.skill_id.clone(), record.version.clone());
+    if !state.skills.contains_key(&record.skill_id) {
+        return Err(SkillsStoreError::InvalidData(format!(
+            "skill_id '{}' must exist before inserting a version",
+            record.skill_id
+        )));
+    }
+    state
+        .skill_versions_by_skill
+        .entry(record.skill_id.clone())
+        .or_default()
+        .insert(record.version.clone());
+    state.skill_versions.insert(key, record);
+    Ok(())
 }
 
 fn max_sort_key() -> String {
