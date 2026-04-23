@@ -361,24 +361,24 @@ impl<'a> McpToolSession<'a> {
             // `Filter(McpToolFilter { read_only?, tool_names? })`). Project
             // union variants back into the flat name-list scoping used here:
             //   * `None`, or `Filter { None, None }` → no name constraint
-            //     (all bindings for this server inherit the approval mode).
+            //     (all bindings for this server inherit the explicit approval
+            //     mode).
             //   * `List(names)` / `Filter { tool_names: Some(v), .. }` →
             //     constrain by explicit names.
-            //   * `Filter { tool_names: None, read_only: Some(_) }` →
-            //     fail-closed empty slice: `readOnlyHint`-based filtering is
-            //     unimplemented, so narrow to nothing rather than silently
-            //     broaden approval-mode application to all of the server's
-            //     bindings when the caller explicitly asked to restrict.
+            //   * `Filter { tool_names: None, read_only: Some(_) }` → `None`.
+            //     `readOnlyHint`-based filtering is unimplemented, but the
+            //     safe-default direction for *approval scoping* is the
+            //     opposite of exposure: narrowing to an empty name list here
+            //     would drop the caller's explicit approval mode for all
+            //     bindings (they'd fall back to `PolicyOnly`, which is
+            //     auto-approve-by-policy — LESS restrictive). Returning
+            //     `None` applies the requested approval mode to every
+            //     binding on the server, matching the "over-gate is safer
+            //     than under-gate" contract for approval prompts.
             let allowed_tool_names: Option<&[String]> =
                 mcp_tool.allowed_tools.as_ref().and_then(|at| match at {
                     McpAllowedTools::List(names) => Some(names.as_slice()),
-                    McpAllowedTools::Filter(filter) => {
-                        match (filter.tool_names.as_deref(), filter.read_only) {
-                            (Some(names), _) => Some(names),
-                            (None, Some(_)) => Some(&[] as &[String]),
-                            (None, None) => None,
-                        }
-                    }
+                    McpAllowedTools::Filter(filter) => filter.tool_names.as_deref(),
                 });
             for binding in self.exposed_name_map.values_mut() {
                 if binding.server_label != mcp_tool.server_label {
