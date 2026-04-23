@@ -263,15 +263,31 @@ class TestImageGeneration:
         """
         gateway, client, mock_mcp = gateway_with_mock_mcp
 
-        # Turn 1: create a response with storage enabled and capture its id.
+        # Turn 1: force the model to invoke ``image_generation``. Leaving
+        # tool_choice at the default ``auto`` would let the model answer
+        # without ever running the tool, which would make the later
+        # "base64 not in stored payload" assertion pass vacuously and
+        # miss a real compactor regression. Pinning ``tool_choice`` to
+        # the image_generation tool guarantees the stored payload has an
+        # ``image_generation_call`` item worth checking.
         resp1 = client.responses.create(
             model="gpt-5-nano",
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
+            tool_choice={"type": "image_generation"},
             stream=False,
             store=True,
         )
         assert resp1.error is None, f"Turn 1 error: {resp1.error}"
+
+        # Sanity-check that the tool actually ran — otherwise the
+        # stripped-base64 assertion below is vacuous.
+        assert _find_image_generation_call(resp1.output) is not None, (
+            "Turn 1 response did not contain an image_generation_call item; "
+            "the compactor-replay assertion would be vacuous. "
+            f"output types: {[getattr(i, 'type', None) for i in resp1.output or []]}"
+        )
+
         conversation_id = _extract_conversation_id(resp1)
         if not conversation_id:
             pytest.skip(
