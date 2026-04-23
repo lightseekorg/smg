@@ -302,6 +302,8 @@ pub enum BuiltinToolType {
     CodeInterpreter,
     /// File search tool (OpenAI: file_search)
     FileSearch,
+    /// Image generation tool (OpenAI: image_generation)
+    ImageGeneration,
 }
 
 impl BuiltinToolType {
@@ -311,6 +313,7 @@ impl BuiltinToolType {
             BuiltinToolType::WebSearchPreview => ResponseFormatConfig::WebSearchCall,
             BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
             BuiltinToolType::FileSearch => ResponseFormatConfig::FileSearchCall,
+            BuiltinToolType::ImageGeneration => ResponseFormatConfig::ImageGenerationCall,
         }
     }
 }
@@ -321,6 +324,7 @@ impl fmt::Display for BuiltinToolType {
             BuiltinToolType::WebSearchPreview => write!(f, "web_search_preview"),
             BuiltinToolType::CodeInterpreter => write!(f, "code_interpreter"),
             BuiltinToolType::FileSearch => write!(f, "file_search"),
+            BuiltinToolType::ImageGeneration => write!(f, "image_generation"),
         }
     }
 }
@@ -350,6 +354,7 @@ pub enum ResponseFormatConfig {
     WebSearchCall,
     CodeInterpreterCall,
     FileSearchCall,
+    ImageGenerationCall,
 }
 
 /// Argument mapping configuration for tool aliases.
@@ -1025,6 +1030,10 @@ tools:
                 "\"code_interpreter_call\"",
             ),
             (ResponseFormatConfig::FileSearchCall, "\"file_search_call\""),
+            (
+                ResponseFormatConfig::ImageGenerationCall,
+                "\"image_generation_call\"",
+            ),
         ];
 
         for (format, expected) in formats {
@@ -1191,6 +1200,7 @@ policy:
             (BuiltinToolType::WebSearchPreview, "\"web_search_preview\""),
             (BuiltinToolType::CodeInterpreter, "\"code_interpreter\""),
             (BuiltinToolType::FileSearch, "\"file_search\""),
+            (BuiltinToolType::ImageGeneration, "\"image_generation\""),
         ];
 
         for (builtin_type, expected) in types {
@@ -1215,6 +1225,10 @@ policy:
         assert_eq!(
             BuiltinToolType::FileSearch.response_format(),
             ResponseFormatConfig::FileSearchCall
+        );
+        assert_eq!(
+            BuiltinToolType::ImageGeneration.response_format(),
+            ResponseFormatConfig::ImageGenerationCall
         );
     }
 

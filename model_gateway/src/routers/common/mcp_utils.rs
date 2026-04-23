@@ -158,6 +158,7 @@ pub fn collect_builtin_routing(
         let builtin_type = match tool {
             ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
             ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
+            ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
             _ => continue,
         };
 
@@ -198,6 +199,7 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .filter_map(|t| match t {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
+            ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
             _ => None,
         })
         .collect()
@@ -295,7 +297,8 @@ mod tests {
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, McpTool, ResponseTool, WebSearchPreviewTool,
+            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseTool,
+            WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -522,6 +525,59 @@ mod tests {
         assert_eq!(
             code_routing.response_format,
             ResponseFormat::CodeInterpreterCall
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_image_generation() {
+        // Image generation is wired through the same hosted-tool MCP plumbing
+        // as web_search / code_interpreter / file_search. This test proves
+        // BuiltinToolType::ImageGeneration → ResponseFormat::ImageGenerationCall
+        // so PRs R6.2/R6.3/R6.4 can rely on the infrastructure.
+        let mut image_gen_tools = HashMap::new();
+        image_gen_tools.insert(
+            "generate_image".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::ImageGenerationCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "image-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9997/image".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(image_gen_tools),
+                builtin_type: Some(BuiltinToolType::ImageGeneration),
+                builtin_tool_name: Some("generate_image".to_string()),
+                internal: false,
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+
+        let tools = vec![ResponseTool::ImageGeneration(ImageGenerationTool::default())];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::ImageGeneration);
+        assert_eq!(routing[0].server_name, "image-server");
+        assert_eq!(routing[0].tool_name, "generate_image");
+        assert_eq!(
+            routing[0].response_format,
+            ResponseFormat::ImageGenerationCall
         );
     }
 

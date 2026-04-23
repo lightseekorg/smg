@@ -2,7 +2,8 @@
 
 use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
-    ResponseOutputItem, WebSearchAction, WebSearchCallStatus, WebSearchSource,
+    ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
+    WebSearchSource,
 };
 use tracing::warn;
 
@@ -79,6 +80,9 @@ impl ResponseTransformer {
                 Self::to_code_interpreter_call(result, tool_call_id)
             }
             ResponseFormat::FileSearchCall => Self::to_file_search_call(result, tool_call_id),
+            ResponseFormat::ImageGenerationCall => {
+                Self::to_image_generation_call(result, tool_call_id)
+            }
         }
     }
 
@@ -234,6 +238,80 @@ impl ResponseTransformer {
             },
             results: (!results.is_empty()).then_some(results),
         }
+    }
+
+    /// Transform MCP image generation results to OpenAI image_generation_call format.
+    ///
+    /// Extracts fields from the MCP `CallToolResult`:
+    /// - `result` / `image_base64` / `b64_json`: base64-encoded image bytes
+    /// - `revised_prompt`: optional rewritten prompt preserved for replay
+    ///
+    /// Also probes embedded text blocks carrying `{"openai_response": {...}}`
+    /// payloads for the same fields, mirroring the pattern used by
+    /// `to_web_search_call`.
+    fn to_image_generation_call(
+        result: &serde_json::Value,
+        tool_call_id: &str,
+    ) -> ResponseOutputItem {
+        let (image_b64, revised_prompt) = Self::extract_image_generation_fields(result);
+
+        ResponseOutputItem::ImageGenerationCall {
+            id: format!("ig_{tool_call_id}"),
+            // `result` is non-optional in the spec; fall back to an empty
+            // string when the MCP server returns no image data so the shape
+            // still matches `ResponseOutputItem::ImageGenerationCall`. Router
+            // wiring in R6.2/R6.3/R6.4 is responsible for surfacing an error
+            // status when `image_b64` is missing.
+            result: image_b64.unwrap_or_default(),
+            revised_prompt,
+            status: ImageGenerationCallStatus::Completed,
+        }
+    }
+
+    /// Extract `(image_base64, revised_prompt)` from an MCP result payload.
+    fn extract_image_generation_fields(
+        result: &serde_json::Value,
+    ) -> (Option<String>, Option<String>) {
+        let mut image_b64: Option<String> = None;
+        let mut revised_prompt: Option<String> = None;
+
+        // Merge helper: fills any still-unset output slot from an object.
+        // Using mutable accumulation (instead of early-returning on first
+        // match) prevents losing fields that an MCP server distributes
+        // across multiple text blocks — e.g. `revised_prompt` in one and
+        // `image_base64` in another. First occurrence wins for each slot.
+        let mut update_fields = |obj: &serde_json::Map<String, serde_json::Value>| {
+            if image_b64.is_none() {
+                image_b64 = obj
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| obj.get("image_base64").and_then(|v| v.as_str()))
+                    .or_else(|| obj.get("b64_json").and_then(|v| v.as_str()))
+                    .map(String::from);
+            }
+            if revised_prompt.is_none() {
+                revised_prompt = obj
+                    .get("revised_prompt")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+        };
+
+        // 1) Direct object fields: { result | image_base64 | b64_json, revised_prompt }
+        if let Some(obj) = result.as_object() {
+            update_fields(obj);
+        }
+
+        // 2) Embedded openai_response payloads inside MCP text blocks.
+        if result.is_array() {
+            for openai_response in extract_embedded_openai_responses(result) {
+                if let Some(obj) = openai_response.as_object() {
+                    update_fields(obj);
+                }
+            }
+        }
+
+        (image_b64, revised_prompt)
     }
 
     /// Extract web sources from MCP result.
@@ -423,6 +501,27 @@ impl ResponseTransformer {
             score,
             attributes: None,
         })
+    }
+}
+
+/// Strip the base64 `result` payload from an `ImageGenerationCall` output
+/// item so stored multi-turn context does not balloon with large image bytes.
+///
+/// Per OpenAI spec the `result` field is required on the wire when the item
+/// is freshly emitted, but multi-turn replay/storage references the image by
+/// `id` only (see `ResponseInputOutputItem::ImageGenerationCall` where
+/// `result` is `Option<String>`). This helper clears the payload for storage
+/// while preserving `id`, `revised_prompt`, and `status`.
+///
+/// For any non-image item this is a no-op.
+pub fn compact_image_generation_output(item: &mut ResponseOutputItem) {
+    if let ResponseOutputItem::ImageGenerationCall { result, .. } = item {
+        // `result.clear()` zeros the length but keeps the heap buffer
+        // allocated — for base64 image bytes that can be several MB of
+        // wasted capacity per stored item, defeating the compaction goal.
+        // Replace with a fresh empty string to actually free the backing
+        // buffer.
+        *result = String::new();
     }
 }
 
@@ -874,6 +973,232 @@ mod tests {
                 assert_eq!(results[0].score, Some(0.95));
             }
             _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_direct_fields() {
+        let result = json!({
+            "result": "BASE64_IMAGE_BYTES",
+            "revised_prompt": "a serene mountain at sunrise"
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-1",
+            "server",
+            "image_generation",
+            r#"{"prompt":"mountain"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_req-img-1");
+                assert_eq!(result, "BASE64_IMAGE_BYTES");
+                assert_eq!(
+                    revised_prompt,
+                    Some("a serene mountain at sunrise".to_string())
+                );
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_b64_json_alias() {
+        let result = json!({
+            "b64_json": "PNG_BASE64",
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-2",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "PNG_BASE64");
+                assert!(revised_prompt.is_none());
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_embedded_openai_response() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "result": "EMBEDDED_BYTES",
+                    "revised_prompt": "tweaked prompt"
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-3",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "EMBEDDED_BYTES");
+                assert_eq!(revised_prompt, Some("tweaked prompt".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_fields_distributed_across_blocks() {
+        // MCP servers may split revised_prompt and image bytes across
+        // different text blocks. The extractor must accumulate fields
+        // from all blocks rather than returning early on the first hit.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "revised_prompt": "distributed prompt"
+                  }
+                }"#
+            },
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "result": "DISTRIBUTED_BYTES"
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-dist",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "DISTRIBUTED_BYTES");
+                assert_eq!(revised_prompt, Some("distributed prompt".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_missing_image_data() {
+        // When the MCP server returns neither image nor prompt, the transformer
+        // still produces a well-formed ImageGenerationCall with an empty result.
+        // Per-router wiring in R6.2/R6.3/R6.4 owns surfacing an error status.
+        let result = json!({});
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-4",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_req-img-4");
+                assert!(result.is_empty());
+                assert!(revised_prompt.is_none());
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_compact_image_generation_output_strips_base64() {
+        let mut item = ResponseOutputItem::ImageGenerationCall {
+            id: "ig_abc".to_string(),
+            result: "A_VERY_LONG_BASE64_STRING".to_string(),
+            revised_prompt: Some("mountain".to_string()),
+            status: ImageGenerationCallStatus::Completed,
+        };
+
+        compact_image_generation_output(&mut item);
+
+        match item {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_abc");
+                assert!(result.is_empty());
+                assert_eq!(revised_prompt, Some("mountain".to_string()));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_compact_image_generation_output_is_noop_for_other_items() {
+        let mut item = ResponseOutputItem::WebSearchCall {
+            id: "ws_xyz".to_string(),
+            status: WebSearchCallStatus::Completed,
+            action: WebSearchAction::Search {
+                query: Some("rust".to_string()),
+                queries: vec!["rust".to_string()],
+                sources: vec![],
+            },
+            results: None,
+        };
+
+        compact_image_generation_output(&mut item);
+
+        // WebSearchCall must be unchanged — no panic, id still present.
+        match item {
+            ResponseOutputItem::WebSearchCall { id, .. } => assert_eq!(id, "ws_xyz"),
+            _ => panic!("Expected WebSearchCall"),
         }
     }
 }

@@ -14,8 +14,8 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
-        OutputItemEvent, WebSearchCallEvent,
+        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
+        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
     responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
@@ -466,6 +466,11 @@ fn send_tool_call_intermediate_event(
         ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
         ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
         ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+        // stubbed: full event wiring (incl. partial_image payload events) is
+        // implemented in R6.2 for this router. Emitting `generating` as the
+        // generic intermediate keeps the shape consistent with the shared
+        // emitter in `grpc/common/responses/streaming.rs`.
+        ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 
@@ -508,6 +513,7 @@ fn send_tool_call_completion_events(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::COMPLETED,
         _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
     };
 
@@ -553,6 +559,9 @@ fn stable_streaming_tool_item_id(
         ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
         ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
         ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
+        // stubbed: `ig_` prefix matches the shared transformer's output item id
+        // (`to_image_generation_call`). R6.2 wires the full per-router path.
+        ResponseFormat::ImageGenerationCall => normalize_tool_item_id_with_prefix(source_id, "ig_"),
     }
 }
 
@@ -573,7 +582,10 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
         ResponseFormat::Passthrough => item_id.to_string(),
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
-        | ResponseFormat::FileSearchCall => item_id
+        | ResponseFormat::FileSearchCall
+        // stubbed: image_generation_call shares the fc_/call_ strip behavior
+        // with the other built-ins. R6.2 wires per-router specifics.
+        | ResponseFormat::ImageGenerationCall => item_id
             .strip_prefix("fc_")
             .or_else(|| item_id.strip_prefix("call_"))
             .unwrap_or(item_id)
