@@ -719,9 +719,13 @@ pub struct ShellTool {
 /// Spec (openai-responses-api-spec.md §tools, L464-470):
 /// `environment: ContainerAuto | LocalEnvironment | ContainerReference`.
 ///
-/// Distinct from the response-side [`ShellCallEnvironment`] union: the tool
+/// Distinct from the call-side environment unions
+/// [`ShellCallEnvironment`] (input-side call form, reuses
+/// [`LocalShellEnvironment`] with `skills?`) and
+/// [`ResponseShellCallEnvironment`] (response-side call form, carries the
+/// narrower [`ResponseLocalShellEnvironment`] with no `skills`): the tool
 /// form permits the `container_auto` variant, which asks the platform to
-/// provision a new container; the call form only carries the resolved
+/// provision a new container; both call forms only carry the resolved
 /// `local` / `container_reference` shape that the model echoes back.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
