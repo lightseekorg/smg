@@ -39,9 +39,12 @@ use super::{
     common::{load_conversation_history, ResponsesCallContext},
     conversions, non_streaming, streaming,
 };
-use crate::routers::{
-    error,
-    grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
+use crate::{
+    memory::MemoryExecutionContext,
+    routers::{
+        error,
+        grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
+    },
 };
 
 /// Main handler for POST /v1/responses
@@ -51,6 +54,7 @@ pub(crate) async fn route_responses(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     headers: Option<http::HeaderMap>,
+    memory_execution_context: MemoryExecutionContext,
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
@@ -71,6 +75,7 @@ pub(crate) async fn route_responses(
             headers,
             model_id,
             response_id: None,
+            memory_execution_context,
             tenant_request_meta,
         };
         route_responses_streaming(ctx, request, params).await
@@ -79,6 +84,7 @@ pub(crate) async fn route_responses(
             headers,
             model_id,
             response_id: Some(format!("resp_{}", Uuid::now_v7())),
+            memory_execution_context,
             tenant_request_meta,
         };
         route_responses_sync(ctx, request, params).await

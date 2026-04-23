@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 
 use axum::{
     body::Body,
@@ -77,6 +77,23 @@ async fn build_test_app_with_memory_writer(
     };
     let app = create_test_app_with_context(router, ctx.clone());
     (app, ctx)
+}
+
+async fn wait_for_rows(
+    writer: &RecordingConversationMemoryWriter,
+    expected_count: usize,
+) -> Vec<NewConversationMemory> {
+    let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+    loop {
+        let rows = writer.snapshot().await;
+        if rows.len() >= expected_count {
+            return rows;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return rows;
+        }
+        tokio::time::sleep(StdDuration::from_millis(25)).await;
+    }
 }
 
 #[expect(
@@ -187,6 +204,67 @@ async fn responses_endpoint_enqueues_ltm_and_ondemand_rows() {
 }
 
 #[tokio::test]
+async fn responses_endpoint_without_memory_header_does_not_enqueue_rows() {
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("worker should start");
+
+    let recording_writer = RecordingConversationMemoryWriter::default();
+    let (app, ctx) = build_test_app_with_memory_writer(
+        openai_router_config(worker_url),
+        recording_writer.clone(),
+    )
+    .await;
+
+    let conversation_id = ConversationId::from("conv_no_memory_header");
+    ctx.conversation_storage
+        .create_conversation(NewConversation {
+            id: Some(conversation_id.clone()),
+            metadata: None,
+        })
+        .await
+        .expect("conversation should be created");
+
+    let payload = json!({
+        "model": "mock-model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "this should not enqueue"}]
+        }],
+        "conversation": conversation_id.0,
+        "store": true,
+        "stream": false
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_string(&payload).expect("payload should serialize"),
+        ))
+        .expect("request should build");
+
+    let resp = app.oneshot(req).await.expect("request should succeed");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let rows = wait_for_rows(&recording_writer, 1).await;
+    assert_eq!(
+        rows.len(),
+        0,
+        "responses path without memory config should not enqueue rows"
+    );
+
+    worker.stop().await;
+}
+
+#[tokio::test]
 async fn conversations_items_endpoint_enqueues_rows_without_response_id() {
     let recording_writer = RecordingConversationMemoryWriter::default();
     let (app, _ctx) =
@@ -276,4 +354,84 @@ async fn conversations_items_endpoint_enqueues_rows_without_response_id() {
         ondemand_content["assistant_text"].as_str(),
         Some("seeded assistant response")
     );
+}
+
+#[tokio::test]
+async fn conversations_items_endpoint_with_only_user_text_still_enqueues_ondemand_row() {
+    let recording_writer = RecordingConversationMemoryWriter::default();
+    let (app, _ctx) =
+        build_test_app_with_memory_writer(regular_router_config(), recording_writer.clone()).await;
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/v1/conversations")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .expect("request should build");
+    let create_resp = app
+        .clone()
+        .oneshot(create_req)
+        .await
+        .expect("request should succeed");
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .expect("response body should be readable");
+    let create_json: serde_json::Value =
+        serde_json::from_slice(&create_body).expect("response should be valid JSON");
+    let conversation_id = create_json["id"]
+        .as_str()
+        .expect("conversation id should exist");
+
+    let items_payload = json!({
+        "items": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "only user content"}]
+            }
+        ]
+    });
+
+    let items_req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/conversations/{conversation_id}/items"))
+        .header(CONTENT_TYPE, "application/json")
+        .header("x-conversation-memory-config", memory_header_value())
+        .body(Body::from(
+            serde_json::to_string(&items_payload).expect("payload should serialize"),
+        ))
+        .expect("request should build");
+    let items_resp = app
+        .oneshot(items_req)
+        .await
+        .expect("request should succeed");
+    assert_eq!(items_resp.status(), StatusCode::OK);
+
+    let rows = recording_writer.snapshot().await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "single-sided text should still enqueue two rows"
+    );
+    let ltm = find_row(&rows, ConversationMemoryType::Ltm);
+    let ondemand = find_row(&rows, ConversationMemoryType::OnDemand);
+
+    assert_eq!(ltm.conversation_id.0, conversation_id);
+    assert!(ltm.response_id.is_none());
+    assert_eq!(ondemand.conversation_id.0, conversation_id);
+    assert!(ondemand.response_id.is_none());
+
+    let ondemand_content: serde_json::Value = serde_json::from_str(
+        ondemand
+            .content
+            .as_deref()
+            .expect("ondemand content must be present"),
+    )
+    .expect("ondemand content should be valid JSON");
+    assert_eq!(
+        ondemand_content["user_text"].as_str(),
+        Some("only user content")
+    );
+    assert!(ondemand_content["assistant_text"].is_null());
 }

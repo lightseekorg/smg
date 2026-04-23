@@ -20,11 +20,10 @@ use serde_json::Value;
 use super::core::{
     make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
     ConversationItemStorage, ConversationItemStorageError, ConversationMemoryId,
-    ConversationMemoryResult, ConversationMemoryStatus, ConversationMemoryStorageError,
-    ConversationMemoryType, ConversationMemoryWriter, ConversationMetadata, ConversationStorage,
-    ConversationStorageError, ListParams, NewConversation, NewConversationItem,
-    NewConversationMemory, ResponseId, ResponseStorage, ResponseStorageError, SortOrder,
-    StoredResponse,
+    ConversationMemoryResult, ConversationMemoryStorageError, ConversationMemoryWriter,
+    ConversationMetadata, ConversationStorage, ConversationStorageError, ListParams,
+    NewConversation, NewConversationItem, NewConversationMemory, ResponseId, ResponseStorage,
+    ResponseStorageError, SortOrder, StoredResponse,
 };
 use crate::{
     common::{
@@ -1095,10 +1094,6 @@ impl ConversationItemStorage for OracleConversationItemStorage {
     }
 }
 
-// ============================================================================
-// PART 4: OracleConversationMemoryWriter
-// ============================================================================
-
 /// Parse a single `oracle::Row` into a `ConversationItem`, respecting
 /// the `is_skipped` guards configured in `TableConfig`.
 fn build_item_from_oracle_row(
@@ -1151,6 +1146,10 @@ fn build_item_from_oracle_row(
         created_at,
     })
 }
+
+// ============================================================================
+// PART 4: OracleConversationMemoryWriter
+// ============================================================================
 
 #[derive(Clone)]
 pub(super) struct OracleConversationMemoryWriter {
@@ -1289,8 +1288,8 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
         let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
         let id_for_insert = id.clone();
         let response_id = response_id.map(|value| value.0);
-        let memory_type = conversation_memory_type_label(memory_type);
-        let status = conversation_memory_status_label(status);
+        let memory_type = memory_type.storage_label();
+        let status = status.storage_label();
         let schema = self.store.schema.clone();
 
         self.store
@@ -1337,23 +1336,6 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
             })
             .await
             .map_err(ConversationMemoryStorageError::StorageError)
-    }
-}
-
-fn conversation_memory_type_label(memory_type: ConversationMemoryType) -> &'static str {
-    match memory_type {
-        ConversationMemoryType::OnDemand => "ONDEMAND",
-        ConversationMemoryType::Ltm => "LTM",
-        ConversationMemoryType::Stmo => "STMO",
-    }
-}
-
-fn conversation_memory_status_label(status: ConversationMemoryStatus) -> &'static str {
-    match status {
-        ConversationMemoryStatus::Ready => "READY",
-        ConversationMemoryStatus::Running => "RUNNING",
-        ConversationMemoryStatus::Success => "SUCCESS",
-        ConversationMemoryStatus::Failed => "FAILED",
     }
 }
 

@@ -84,6 +84,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     debug!("Converting chat SSE stream to responses SSE format");
 
     // Get chat streaming response
+    let memory_execution_context = params.memory_execution_context.clone();
     let chat_response = ctx
         .pipeline
         .execute_chat(
@@ -121,7 +122,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             conversation_storage,
             conversation_item_storage,
             conversation_memory_writer,
-            MemoryExecutionContext::default(),
+            memory_execution_context,
             request_context,
             tx.clone(),
         )
@@ -517,6 +518,7 @@ async fn execute_tool_loop_streaming_internal(
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
+    let memory_execution_context = params.memory_execution_context.clone();
 
     // Generate response ID first so we can use it for both emitter and session
     let response_id = format!("resp_{}", Uuid::now_v7());
@@ -634,6 +636,14 @@ async fn execute_tool_loop_streaming_internal(
                     max_tool_calls,
                     DEFAULT_MAX_ITERATIONS
                 );
+                persist_streaming_response(
+                    ctx,
+                    &memory_execution_context,
+                    &emitter,
+                    accumulated_response.usage.clone(),
+                    original_request,
+                )
+                .await;
                 break;
             }
 
@@ -882,6 +892,14 @@ async fn execute_tool_loop_streaming_internal(
                 }
 
                 // Break loop to return response to caller
+                persist_streaming_response(
+                    ctx,
+                    &memory_execution_context,
+                    &emitter,
+                    accumulated_response.usage.clone(),
+                    original_request,
+                )
+                .await;
                 break;
             }
 
@@ -918,6 +936,14 @@ async fn execute_tool_loop_streaming_internal(
                 "total_tokens": u.total_tokens
             })
         });
+        persist_streaming_response(
+            ctx,
+            &memory_execution_context,
+            &emitter,
+            accumulated_response.usage.clone(),
+            original_request,
+        )
+        .await;
         let event = emitter.emit_completed(usage_json.as_ref());
         emitter.send_event(&event, &tx)?;
 
@@ -925,6 +951,27 @@ async fn execute_tool_loop_streaming_internal(
     }
 
     Ok(())
+}
+
+async fn persist_streaming_response(
+    ctx: &ResponsesContext,
+    memory_execution_context: &MemoryExecutionContext,
+    emitter: &ResponseStreamEventEmitter,
+    usage: Option<Usage>,
+    original_request: &ResponsesRequest,
+) {
+    let final_response = emitter.finalize(usage);
+    persist_response_if_needed(
+        ctx.conversation_storage.clone(),
+        ctx.conversation_item_storage.clone(),
+        ctx.response_storage.clone(),
+        ctx.conversation_memory_writer.clone(),
+        memory_execution_context.clone(),
+        &final_response,
+        original_request,
+        ctx.request_context.clone(),
+    )
+    .await;
 }
 
 /// Convert chat stream to Responses API events while accumulating for tool call detection

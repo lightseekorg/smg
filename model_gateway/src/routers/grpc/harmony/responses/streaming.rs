@@ -42,6 +42,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses_stream(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    memory_execution_context: MemoryExecutionContext,
     tenant_request_meta: TenantRequestMeta,
 ) -> Response {
     // Load previous conversation history if previous_response_id is set
@@ -98,6 +99,7 @@ pub(crate) async fn serve_harmony_responses_stream(
                 ctx,
                 current_request,
                 &request,
+                &memory_execution_context,
                 tenant_request_meta.clone(),
                 mcp_servers,
                 &mut emitter,
@@ -109,6 +111,7 @@ pub(crate) async fn serve_harmony_responses_stream(
                 ctx,
                 &current_request,
                 &request,
+                &memory_execution_context,
                 tenant_request_meta,
                 &mut emitter,
                 &tx,
@@ -129,10 +132,15 @@ pub(crate) async fn serve_harmony_responses_stream(
 /// - Loops through tool execution iterations
 /// - Emits final response.completed event
 /// - Persists response internally
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming tool-loop execution needs explicit per-request dependencies"
+)]
 async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
+    memory_execution_context: &MemoryExecutionContext,
     tenant_request_meta: TenantRequestMeta,
     mcp_servers: Vec<McpServerBinding>,
     emitter: &mut ResponseStreamEventEmitter,
@@ -295,6 +303,14 @@ async fn execute_mcp_tool_loop_streaming(
                         "total_tokens": usage.total_tokens,
                         "incomplete_details": incomplete_details,
                     });
+                    persist_streaming_response(
+                        ctx,
+                        memory_execution_context,
+                        emitter,
+                        Some(usage.clone()),
+                        original_request,
+                    )
+                    .await;
                     let event = emitter.emit_completed(Some(&usage_json));
                     emitter.send_event_best_effort(&event, tx);
                     return;
@@ -334,6 +350,15 @@ async fn execute_mcp_tool_loop_streaming(
                     debug!(
                         "Function tool calls present - exiting MCP loop and emitting completion"
                     );
+
+                    persist_streaming_response(
+                        ctx,
+                        memory_execution_context,
+                        emitter,
+                        Some(usage.clone()),
+                        original_request,
+                    )
+                    .await;
 
                     // Function tool calls were already emitted during streaming processing
                     // Just emit response.completed with usage
@@ -378,7 +403,7 @@ async fn execute_mcp_tool_loop_streaming(
                     ctx.conversation_item_storage.clone(),
                     ctx.response_storage.clone(),
                     ctx.conversation_memory_writer.clone(),
-                    MemoryExecutionContext::default(),
+                    memory_execution_context.clone(),
                     &final_response,
                     original_request,
                     ctx.request_context.clone(),
@@ -413,6 +438,7 @@ async fn execute_without_mcp_streaming(
     ctx: &ResponsesContext,
     current_request: &ResponsesRequest,
     original_request: &ResponsesRequest,
+    memory_execution_context: &MemoryExecutionContext,
     tenant_request_meta: TenantRequestMeta,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
@@ -468,7 +494,7 @@ async fn execute_without_mcp_streaming(
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
         ctx.conversation_memory_writer.clone(),
-        MemoryExecutionContext::default(),
+        memory_execution_context.clone(),
         &final_response,
         original_request,
         ctx.request_context.clone(),
@@ -488,4 +514,25 @@ async fn execute_without_mcp_streaming(
     }
     let event = emitter.emit_completed(Some(&usage_json));
     emitter.send_event_best_effort(&event, tx);
+}
+
+async fn persist_streaming_response(
+    ctx: &ResponsesContext,
+    memory_execution_context: &MemoryExecutionContext,
+    emitter: &ResponseStreamEventEmitter,
+    usage: Option<openai_protocol::common::Usage>,
+    original_request: &ResponsesRequest,
+) {
+    let final_response = emitter.finalize(usage);
+    persist_response_if_needed(
+        ctx.conversation_storage.clone(),
+        ctx.conversation_item_storage.clone(),
+        ctx.response_storage.clone(),
+        ctx.conversation_memory_writer.clone(),
+        memory_execution_context.clone(),
+        &final_response,
+        original_request,
+        ctx.request_context.clone(),
+    )
+    .await;
 }

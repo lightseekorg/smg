@@ -14,11 +14,13 @@ use smg_data_connector::{
     ConversationMemoryWriter, ConversationStorage, ListParams, NewConversation,
     NewConversationItem, NoOpConversationMemoryWriter, SortOrder,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{
-    memory::{build_enqueue_plan, EnqueueInputs, MemoryExecutionContext},
-    routers::common::persistence_utils::{extract_role_message_text_from_items, item_to_json},
+    memory::MemoryExecutionContext,
+    routers::common::persistence_utils::{
+        enqueue_conversation_memory_rows, extract_role_message_text_from_items, item_to_json,
+    },
 };
 
 // ============================================================================
@@ -382,7 +384,7 @@ pub async fn create_conversation_items_with_headers(
     if let Err(e) = item_storage.link_items(&conversation_id, &link_pairs).await {
         return internal_error(format!("Failed to link items to conversation: {e}"));
     }
-    enqueue_conversation_memory_rows(
+    enqueue_conversation_memory_rows_for_items(
         conversation_memory_writer,
         &memory_execution_context,
         &conversation_id,
@@ -407,7 +409,7 @@ pub async fn create_conversation_items_with_headers(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-async fn enqueue_conversation_memory_rows(
+async fn enqueue_conversation_memory_rows_for_items(
     conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
     memory_execution_context: &MemoryExecutionContext,
     conversation_id: &ConversationId,
@@ -415,37 +417,15 @@ async fn enqueue_conversation_memory_rows(
 ) {
     let user_text = extract_role_message_text_from_items(created_items, "user");
     let assistant_text = extract_role_message_text_from_items(created_items, "assistant");
-
-    let plan = match build_enqueue_plan(EnqueueInputs {
-        now: Utc::now(),
-        memory_execution_context: memory_execution_context.clone(),
-        conversation_id: conversation_id.clone(),
-        response_id: None,
+    enqueue_conversation_memory_rows(
+        conversation_memory_writer,
+        memory_execution_context,
+        conversation_id,
+        None,
         user_text,
         assistant_text,
-    }) {
-        Ok(Some(plan)) => plan,
-        Ok(None) => return,
-        Err(reason) => {
-            warn!(
-                conversation_id = %conversation_id.0,
-                ?reason,
-                "Skipping conversation-memory enqueue for conversation item ingestion"
-            );
-            return;
-        }
-    };
-
-    for row in plan.rows {
-        if let Err(err) = conversation_memory_writer.create_memory(row).await {
-            warn!(
-                conversation_id = %conversation_id.0,
-                error = %err,
-                "Failed to enqueue conversation memory row from conversation item ingestion"
-            );
-            return;
-        }
-    }
+    )
+    .await;
 }
 
 /// Process a single item for creation. Returns (json, item_id, warning).

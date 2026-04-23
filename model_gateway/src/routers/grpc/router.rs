@@ -24,7 +24,8 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    config::types::RetryConfig,
+    config::types::{MemoryRuntimeConfig, RetryConfig},
+    memory::MemoryExecutionContext,
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
@@ -47,6 +48,7 @@ pub struct GrpcRouter {
     shared_components: Arc<SharedComponents>,
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
+    memory_runtime_config: MemoryRuntimeConfig,
     retry_config: RetryConfig,
 }
 
@@ -169,6 +171,7 @@ impl GrpcRouter {
             shared_components,
             responses_context,
             harmony_responses_context,
+            memory_runtime_config: ctx.router_config.memory_runtime.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
         })
     }
@@ -321,6 +324,10 @@ impl GrpcRouter {
             return error_response;
         }
 
+        let memory_execution_context = headers
+            .map(|h| MemoryExecutionContext::from_http_headers(h, &self.memory_runtime_config))
+            .unwrap_or_default();
+
         // Choose implementation based on Harmony model detection (checks worker metadata)
         let is_harmony =
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
@@ -347,10 +354,21 @@ impl GrpcRouter {
             );
 
             if body.stream.unwrap_or(false) {
-                serve_harmony_responses_stream(&harmony_ctx, body.clone(), tenant_meta.clone())
-                    .await
+                serve_harmony_responses_stream(
+                    &harmony_ctx,
+                    body.clone(),
+                    memory_execution_context,
+                    tenant_meta.clone(),
+                )
+                .await
             } else {
-                match serve_harmony_responses(&harmony_ctx, body.clone(), tenant_meta.clone()).await
+                match serve_harmony_responses(
+                    &harmony_ctx,
+                    body.clone(),
+                    memory_execution_context,
+                    tenant_meta.clone(),
+                )
+                .await
                 {
                     Ok(response) => axum::Json(response).into_response(),
                     Err(error_response) => error_response,
@@ -361,6 +379,7 @@ impl GrpcRouter {
                 &self.responses_context,
                 Arc::new(body.clone()),
                 headers.cloned(),
+                memory_execution_context,
                 tenant_meta.clone(),
                 model_id.to_string(),
             )
