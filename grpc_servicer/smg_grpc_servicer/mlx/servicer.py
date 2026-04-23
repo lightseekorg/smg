@@ -463,6 +463,19 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 self._active_requests -= 1
                 self._request_uid_map.pop(request_id, None)
                 self._uid_queues.pop(uid, None)
+                # Ensure the backend request is removed on any Generate exit
+                # (client disconnect, deadline, CancelledError, unexpected
+                # exception). Without this, a cancelled request keeps decoding
+                # until its own stop/max-tokens condition, wasting batch slots.
+                # Safe to double-call: gen thread's finish-path remove and
+                # Abort's remove both land here if racing, and remove() is
+                # idempotent-ish (raises on unknown uid, which we swallow).
+                with self._gen_lock:
+                    try:
+                        self.batch_generator.remove([uid])
+                    except Exception:
+                        # Already removed by the gen thread or Abort — fine.
+                        pass
 
         except ValueError as e:
             logger.warning("Generate invalid request %s: %s", request_id, e)
@@ -476,9 +489,17 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             uid = self._request_uid_map.pop(request_id, None)
             if uid is not None:
                 queue = self._uid_queues.pop(uid, None)
-                # Wake the Generate waiter blocked on queue.get() so it can
-                # exit cleanly instead of hanging until transport cancellation.
                 if queue is not None:
+                    # Drain already-buffered tokens so Generate stops emitting
+                    # output immediately rather than flushing a backlog of
+                    # stale chunks before seeing the sentinel.
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    # Wake the Generate waiter blocked on queue.get() so it
+                    # exits cleanly instead of hanging until transport cancel.
                     queue.put_nowait(None)
                 # remove() races with the gen thread's next() without the
                 # lock — see class docstring.

@@ -152,16 +152,20 @@ async def serve_grpc(args):
     bound_port = server.add_insecure_port(listen_addr)
     if bound_port == 0:
         raise RuntimeError(f"Failed to bind gRPC server to {listen_addr}")
-    await server.start()
-    logger.info("gRPC server listening on %s", listen_addr)
 
     # Warmup BEFORE starting the generation loop (batch_generator.next() is
     # not thread-safe — only one caller at a time).
     _warmup(batch_generator)
-
     servicer.start_generation_loop()
+
+    # Only accept RPCs after the generation loop is running. Otherwise a
+    # Generate RPC could slip into the window between server.start() and
+    # start_generation_loop() and block forever on queue.get() because no
+    # gen thread is dispatching tokens. HealthCheck always returns OK, so
+    # the router can't use it to detect this window.
+    await server.start()
     health_servicer.set_serving()
-    logger.info("Server ready — model: %s", args.model)
+    logger.info("gRPC server listening on %s — model: %s", listen_addr, args.model)
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
