@@ -227,26 +227,26 @@ impl ResponseTransformer {
     ///
     /// MCP wraps this as
     /// `[{"type":"text","text":"<stringified-json-above>"}]`. We also tolerate
-    /// flat shapes where `result` sits directly on the content item.
+    /// flat content-item shapes and bare objects.
     ///
-    /// On failure (error text in the content block, or missing `result`),
-    /// `result` is left as an empty string and status is set to `Failed`;
-    /// `revised_prompt` is preserved when available. The spec requires
-    /// `result: String` on the server-side output item, so we always emit a
-    /// valid field — the fallback-text path (error messages) is intentionally
-    /// discarded into the gateway's logs via `warn!` to avoid leaking
-    /// server-side error text as if it were an image.
+    /// Status is always emitted as `Completed`, matching the existing
+    /// builtin-transformer contract (web_search_call, code_interpreter_call,
+    /// and file_search_call all return `Completed` regardless of payload
+    /// validity — their failure signal is structural, not status-coded). On a
+    /// malformed or error payload `result` is empty and the gateway logs a
+    /// warning; downstream clients can detect this via `result.is_empty()` but
+    /// the item itself remains a well-formed `image_generation_call`.
     fn to_image_generation_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let payload = extract_image_generation_payload(result);
 
-        let (status, result_b64) = match payload.result {
-            Some(b64) if !b64.is_empty() => (ImageGenerationCallStatus::Completed, b64),
+        let result_b64 = match payload.result {
+            Some(b64) if !b64.is_empty() => b64,
             _ => {
                 warn!(
                     tool_call_id,
-                    "image_generation MCP result is missing `result` (base64); emitting failed status"
+                    "image_generation MCP result is missing `result` (base64); emitting empty result"
                 );
-                (ImageGenerationCallStatus::Failed, String::new())
+                String::new()
             }
         };
 
@@ -254,7 +254,7 @@ impl ResponseTransformer {
             id: format!("ig_{tool_call_id}"),
             result: result_b64,
             revised_prompt: payload.revised_prompt,
-            status,
+            status: ImageGenerationCallStatus::Completed,
         }
     }
 
@@ -523,17 +523,20 @@ fn extract_image_generation_payload(result: &Value) -> ImageGenerationPayload {
         // "..."}` rather than `{"type":"text", ...}`, so we accept any item
         // type that carries a `result` string directly. This mirrors the
         // compactor's flat-strip branch in `types.rs`.
+        // Return whenever *either* `result` or `revised_prompt` is present so
+        // the caller can preserve a revised prompt on partial/failed payloads.
         let flat_result = obj
             .get("result")
             .and_then(Value::as_str)
             .map(str::to_string);
-        if flat_result.is_some() {
+        let flat_revised_prompt = obj
+            .get("revised_prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if flat_result.is_some() || flat_revised_prompt.is_some() {
             return ImageGenerationPayload {
                 result: flat_result,
-                revised_prompt: obj
-                    .get("revised_prompt")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                revised_prompt: flat_revised_prompt,
             };
         }
 
@@ -556,13 +559,14 @@ fn extract_image_generation_payload(result: &Value) -> ImageGenerationPayload {
             .get("result")
             .and_then(Value::as_str)
             .map(str::to_string);
-        if result.is_some() {
+        let revised_prompt = parsed_obj
+            .get("revised_prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if result.is_some() || revised_prompt.is_some() {
             return ImageGenerationPayload {
                 result,
-                revised_prompt: parsed_obj
-                    .get("revised_prompt")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                revised_prompt,
             };
         }
     }
@@ -1102,8 +1106,42 @@ mod tests {
     }
 
     #[test]
-    fn test_image_generation_transform_error_payload_yields_failed_status() {
+    fn test_image_generation_transform_preserves_revised_prompt_when_result_missing() {
+        // A text-wrapped payload with only `revised_prompt` must still flow
+        // through to the output item (not fall back to default/empty).
+        let result = json!([
+            {"type": "text", "text": "{\"revised_prompt\":\"only prompt, no image\"}"}
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-rp",
+            "server",
+            "generate_image",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                status,
+                ..
+            } => {
+                assert!(result.is_empty());
+                assert_eq!(revised_prompt, Some("only prompt, no image".to_string()));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("Expected ImageGenerationCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_error_payload_yields_empty_result_completed_status() {
         // MCP surfaces tool errors as plain text in the content block.
+        // The transformer matches existing builtin-transformer contract: always
+        // emit `Completed`, and signal failure via empty `result`.
         let result = json!([
             {"type": "text", "text": "Error executing tool generate_image: quota exceeded"}
         ]);
@@ -1120,7 +1158,7 @@ mod tests {
         match transformed {
             ResponseOutputItem::ImageGenerationCall { result, status, .. } => {
                 assert!(result.is_empty());
-                assert_eq!(status, ImageGenerationCallStatus::Failed);
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
             }
             other => panic!("Expected ImageGenerationCall, got {other:?}"),
         }
