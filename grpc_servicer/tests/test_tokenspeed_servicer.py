@@ -826,31 +826,18 @@ class TestGetServerInfo:
         assert resp.max_total_num_tokens == 100000
 
     @pytest.mark.asyncio
-    async def test_stamps_runtime_marker_in_server_args(
-        self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
-    ):
-        """The gRPC servicer stamps a TokenSpeed-specific marker key into
-        ``server_args`` so the smg gateway's ``DetectBackendStep`` can
-        disambiguate a TokenSpeed worker from a real SGLang worker. The two
-        engines share the SGLang scheduler proto on the wire, so the marker
-        is the only wire-level signal the router has for runtime identity.
-        Keep this test lockstep with the ``TOKENSPEED_RUNTIME_MARKER_KEY``
-        constant in ``detect_backend.rs``.
+    async def test_uses_tokenspeed_service_bases(self, servicer: TokenSpeedSchedulerServicer):
+        """TokenSpeed's servicer inherits the dedicated
+        ``TokenSpeedSchedulerServicer`` stub — identity is carried by the
+        proto package/service name, not by a field inside ``server_args``.
+        Guard the inheritance so nobody reverts to ``SglangSchedulerServicer``
+        under the impression that 'wire shape is the same'; the wire shape
+        is the same, the *service path* is not, and the Rust router routes
+        on the service path.
         """
-        from smg_grpc_servicer.tokenspeed.servicer import (
-            BACKEND_RUNTIME_MARKER_KEY,
-            BACKEND_RUNTIME_MARKER_VALUE,
-        )
+        from smg_grpc_proto.generated import tokenspeed_scheduler_pb2_grpc
 
-        resp = await servicer.GetServerInfo(
-            sglang_scheduler_pb2.GetServerInfoRequest(), _make_context()
-        )
-        marker = resp.server_args.fields.get(BACKEND_RUNTIME_MARKER_KEY)
-        assert marker is not None, (
-            "server_args must include the TokenSpeed runtime marker; "
-            "DetectBackendStep relies on it to label the worker correctly."
-        )
-        assert marker.string_value == BACKEND_RUNTIME_MARKER_VALUE
+        assert isinstance(servicer, tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerServicer)
 
 
 class TestGetLoads:

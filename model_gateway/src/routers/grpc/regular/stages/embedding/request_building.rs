@@ -96,6 +96,10 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     "MLX embedding is not supported via gRPC",
                 ));
             }
+            GrpcClient::TokenSpeed(c) => {
+                let req = c.build_embed_request(request_id.clone(), original_text, token_ids);
+                ProtoEmbedRequest::Sglang(Box::new(req))
+            }
         };
 
         ctx.state.proto_request = Some(ProtoRequest::Embed(proto_req));

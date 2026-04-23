@@ -1,24 +1,21 @@
 # mypy: ignore-errors
 """TokenSpeed gRPC servicer.
 
-Implements the SGLang ``SglangScheduler`` gRPC service on top of TokenSpeed's
-:class:`tokenspeed.runtime.engine.async_llm.AsyncLLM` — the main-process async
-frontend that replaced ``TokenizerManager`` in the AsyncLLM refactor.
+Implements the ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` gRPC service
+on top of TokenSpeed's :class:`tokenspeed.runtime.engine.async_llm.AsyncLLM` —
+the main-process async frontend that replaced ``TokenizerManager`` in the
+AsyncLLM refactor.
 
-Why the SGLang proto?
----------------------
-The Rust ``smg_router`` auto-detects each worker's runtime by probing the
-gRPC health check for every known proto shape (SGLang → vLLM → TRT-LLM → MLX).
-As soon as one handshake succeeds, that's the wire format the router uses.
-Implementing the SGLang service means TokenSpeed workers slot into the
-existing Rust pipeline unchanged — no new client, no new proto to maintain,
-no schema drift between the TokenSpeed and SGLang surfaces.
-
-The two backends already share the shape the servicer cares about
-(``TokenizedGenerateReqInput``-style tokenized inputs, ``max_new_tokens``
-naming on sampling params, ``{"text", "output_ids", "meta_info"}`` output
-dicts), so the mapping is thin. See ``docs/architecture.md`` (TODO) for
-the detailed field correspondence.
+Wire identity & message sharing
+-------------------------------
+TokenSpeed ships its own proto (``proto/tokenspeed_scheduler.proto``) with a
+distinct package/service name so the Rust gateway's ``DetectBackendStep``
+identifies the worker natively — no SGLang-look-alike hack, no runtime marker
+probe. The proto *imports* SGLang message types today because the two
+backends happen to share the same tokenized-request / sampling-param /
+output-dict shape; any future divergence should land as a dedicated
+TokenSpeed message rather than a field added to the shared SGLang message.
+See ``docs/architecture.md`` (TODO) for the detailed field correspondence.
 """
 
 from __future__ import annotations
@@ -37,7 +34,10 @@ from typing import TYPE_CHECKING, Any
 import grpc
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
-from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
+from smg_grpc_proto import (
+    sglang_scheduler_pb2,
+    tokenspeed_scheduler_pb2_grpc,
+)
 from smg_grpc_proto.generated import common_pb2
 
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
@@ -52,20 +52,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("TOKENSPEED_HEALTH_CHECK_TIMEOUT", "20"))
-
-# Runtime identity marker stamped into every ``GetServerInfo.server_args``
-# response. TokenSpeed speaks the SGLang scheduler proto on the wire, so the
-# SGLang health check + scheduler client in the Rust gateway transparently
-# work against us. That reuse is deliberate (zero proto drift), but it
-# means the Rust side has no wire-level signal telling it *which* engine
-# answered. The gateway reads this marker from ``server_args`` after the
-# SGLang handshake succeeds and promotes the worker's recorded runtime
-# from ``"sglang"`` → ``"tokenspeed"`` so metrics, traces, and operator
-# tooling show the right identity. The key is name-spaced with the
-# ``__ts_*__`` convention to avoid colliding with any legit TokenSpeed
-# ServerArgs field that might later ship upstream.
-BACKEND_RUNTIME_MARKER_KEY = "__ts_backend_runtime__"
-BACKEND_RUNTIME_MARKER_VALUE = "tokenspeed"
 
 
 def _lazy_generate_req_input():
@@ -115,7 +101,7 @@ def _finish_reason_to_dict(reason: Any) -> dict | None:
     return {"type": "stop", "matched": str(reason)}
 
 
-class TokenSpeedSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer):
+class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerServicer):
     """gRPC servicer exposing TokenSpeed's AsyncLLM over the SGLang proto."""
 
     def __init__(
@@ -477,10 +463,6 @@ class TokenSpeedSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServi
             server_args_dict = dataclasses.asdict(self.server_args)
         else:
             server_args_dict = dict(getattr(self.server_args, "__dict__", {}))
-        # Stamp the runtime identity marker — see ``BACKEND_RUNTIME_MARKER_KEY``
-        # docstring for why this is the Rust router's way of disambiguating
-        # a TokenSpeed worker from a real SGLang worker.
-        server_args_dict[BACKEND_RUNTIME_MARKER_KEY] = BACKEND_RUNTIME_MARKER_VALUE
         server_args_struct = Struct()
         server_args_struct.update(_make_json_serializable(server_args_dict))
 

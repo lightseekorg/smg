@@ -6,8 +6,10 @@ same ``check/watch`` contract — but sources liveness signals from a TokenSpeed
 :class:`AsyncLLM` instead of an SGLang ``GrpcRequestManager``.
 
 The Rust router uses this health check to auto-detect the backend runtime.
-We advertise the SGLang service name because TokenSpeed speaks the SGLang
-gRPC proto on the wire (see ``servicer.py`` docstring for rationale).
+TokenSpeed ships its own ``tokenspeed.grpc.scheduler.TokenSpeedScheduler``
+service identity (see ``proto/tokenspeed_scheduler.proto``) so the probe
+distinguishes TokenSpeed workers from real SGLang workers regardless of any
+wire-level message-type sharing between the two backends.
 """
 
 from __future__ import annotations
@@ -37,33 +39,34 @@ class TokenSpeedHealthServicer(health_pb2_grpc.HealthServicer):
 
     * ``""`` (empty) — overall server health, flipped to SERVING once the
       warmup request succeeds and back to NOT_SERVING on shutdown.
-    * ``sglang.grpc.scheduler.SglangScheduler`` — readiness: the base status,
-      plus a scheduler-responsiveness check (if there are pending requests
-      but the scheduler hasn't pushed output for >30s, report NOT_SERVING).
+    * ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` — readiness: the
+      base status, plus a scheduler-responsiveness check (if there are
+      pending requests but the scheduler hasn't pushed output for >30s,
+      report NOT_SERVING).
     """
 
     OVERALL_SERVER = ""
-    SGLANG_SERVICE = "sglang.grpc.scheduler.SglangScheduler"
+    TOKENSPEED_SERVICE = "tokenspeed.grpc.scheduler.TokenSpeedScheduler"
 
     def __init__(self, async_llm: AsyncLLM, scheduler_info: dict):
         self.async_llm = async_llm
         self.scheduler_info = scheduler_info
         self._serving_status: dict[str, int] = {
             self.OVERALL_SERVER: health_pb2.HealthCheckResponse.NOT_SERVING,
-            self.SGLANG_SERVICE: health_pb2.HealthCheckResponse.NOT_SERVING,
+            self.TOKENSPEED_SERVICE: health_pb2.HealthCheckResponse.NOT_SERVING,
         }
         logger.info("TokenSpeed gRPC health service initialized")
 
     def set_serving(self) -> None:
         """Flip both services to SERVING (call after successful warmup)."""
         self._serving_status[self.OVERALL_SERVER] = health_pb2.HealthCheckResponse.SERVING
-        self._serving_status[self.SGLANG_SERVICE] = health_pb2.HealthCheckResponse.SERVING
+        self._serving_status[self.TOKENSPEED_SERVICE] = health_pb2.HealthCheckResponse.SERVING
         logger.info("TokenSpeed gRPC health status -> SERVING")
 
     def set_not_serving(self) -> None:
         """Flip both services to NOT_SERVING (call on shutdown)."""
         self._serving_status[self.OVERALL_SERVER] = health_pb2.HealthCheckResponse.NOT_SERVING
-        self._serving_status[self.SGLANG_SERVICE] = health_pb2.HealthCheckResponse.NOT_SERVING
+        self._serving_status[self.TOKENSPEED_SERVICE] = health_pb2.HealthCheckResponse.NOT_SERVING
         logger.info("TokenSpeed gRPC health status -> NOT_SERVING")
 
     async def Check(
@@ -84,9 +87,9 @@ class TokenSpeedHealthServicer(health_pb2_grpc.HealthServicer):
                 )
             )
 
-        if service_name == self.SGLANG_SERVICE:
+        if service_name == self.TOKENSPEED_SERVICE:
             base = self._serving_status.get(
-                self.SGLANG_SERVICE, health_pb2.HealthCheckResponse.NOT_SERVING
+                self.TOKENSPEED_SERVICE, health_pb2.HealthCheckResponse.NOT_SERVING
             )
             if base != health_pb2.HealthCheckResponse.SERVING:
                 return health_pb2.HealthCheckResponse(status=base)

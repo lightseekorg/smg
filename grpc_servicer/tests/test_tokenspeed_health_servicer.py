@@ -47,7 +47,9 @@ async def test_set_serving_flips_both_levels(servicer: TokenSpeedHealthServicer)
     assert resp.status == health_pb2.HealthCheckResponse.SERVING
 
     # specific
-    resp = await servicer.Check(health_pb2.HealthCheckRequest(service=servicer.SGLANG_SERVICE), ctx)
+    resp = await servicer.Check(
+        health_pb2.HealthCheckRequest(service=servicer.TOKENSPEED_SERVICE), ctx
+    )
     assert resp.status == health_pb2.HealthCheckResponse.SERVING
 
 
@@ -78,7 +80,9 @@ async def test_stuck_scheduler_flips_to_not_serving(
     servicer.async_llm.last_receive_tstamp = time.time() - 45
     servicer.async_llm.rid_to_state["rid-1"] = object()
 
-    resp = await servicer.Check(health_pb2.HealthCheckRequest(service=servicer.SGLANG_SERVICE), ctx)
+    resp = await servicer.Check(
+        health_pb2.HealthCheckRequest(service=servicer.TOKENSPEED_SERVICE), ctx
+    )
     assert resp.status == health_pb2.HealthCheckResponse.NOT_SERVING
 
 
@@ -88,5 +92,7 @@ async def test_recent_activity_keeps_serving(servicer: TokenSpeedHealthServicer)
     servicer.set_serving()
     servicer.async_llm.last_receive_tstamp = time.time() - 1
     servicer.async_llm.rid_to_state["rid-1"] = object()
-    resp = await servicer.Check(health_pb2.HealthCheckRequest(service=servicer.SGLANG_SERVICE), ctx)
+    resp = await servicer.Check(
+        health_pb2.HealthCheckRequest(service=servicer.TOKENSPEED_SERVICE), ctx
+    )
     assert resp.status == health_pb2.HealthCheckResponse.SERVING
