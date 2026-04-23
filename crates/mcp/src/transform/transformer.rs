@@ -272,52 +272,46 @@ impl ResponseTransformer {
     fn extract_image_generation_fields(
         result: &serde_json::Value,
     ) -> (Option<String>, Option<String>) {
-        // 1) Direct object fields: { result | image_base64 | b64_json, revised_prompt }
-        if let Some(obj) = result.as_object() {
-            let image_b64 = obj
-                .get("result")
-                .and_then(|v| v.as_str())
-                .or_else(|| obj.get("image_base64").and_then(|v| v.as_str()))
-                .or_else(|| obj.get("b64_json").and_then(|v| v.as_str()))
-                .map(String::from);
+        let mut image_b64: Option<String> = None;
+        let mut revised_prompt: Option<String> = None;
 
-            let revised_prompt = obj
-                .get("revised_prompt")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            if image_b64.is_some() || revised_prompt.is_some() {
-                return (image_b64, revised_prompt);
-            }
-        }
-
-        // 2) Embedded openai_response payloads inside MCP text blocks.
-        if result.is_array() {
-            for openai_response in extract_embedded_openai_responses(result) {
-                let obj = match openai_response.as_object() {
-                    Some(o) => o,
-                    None => continue,
-                };
-
-                let image_b64 = obj
+        // Merge helper: fills any still-unset output slot from an object.
+        // Using mutable accumulation (instead of early-returning on first
+        // match) prevents losing fields that an MCP server distributes
+        // across multiple text blocks — e.g. `revised_prompt` in one and
+        // `image_base64` in another. First occurrence wins for each slot.
+        let mut update_fields = |obj: &serde_json::Map<String, serde_json::Value>| {
+            if image_b64.is_none() {
+                image_b64 = obj
                     .get("result")
                     .and_then(|v| v.as_str())
                     .or_else(|| obj.get("image_base64").and_then(|v| v.as_str()))
                     .or_else(|| obj.get("b64_json").and_then(|v| v.as_str()))
                     .map(String::from);
-
-                let revised_prompt = obj
+            }
+            if revised_prompt.is_none() {
+                revised_prompt = obj
                     .get("revised_prompt")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+            }
+        };
 
-                if image_b64.is_some() || revised_prompt.is_some() {
-                    return (image_b64, revised_prompt);
+        // 1) Direct object fields: { result | image_base64 | b64_json, revised_prompt }
+        if let Some(obj) = result.as_object() {
+            update_fields(obj);
+        }
+
+        // 2) Embedded openai_response payloads inside MCP text blocks.
+        if result.is_array() {
+            for openai_response in extract_embedded_openai_responses(result) {
+                if let Some(obj) = openai_response.as_object() {
+                    update_fields(obj);
                 }
             }
         }
 
-        (None, None)
+        (image_b64, revised_prompt)
     }
 
     /// Extract web sources from MCP result.
@@ -1071,6 +1065,52 @@ mod tests {
             } => {
                 assert_eq!(result, "EMBEDDED_BYTES");
                 assert_eq!(revised_prompt, Some("tweaked prompt".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_fields_distributed_across_blocks() {
+        // MCP servers may split revised_prompt and image bytes across
+        // different text blocks. The extractor must accumulate fields
+        // from all blocks rather than returning early on the first hit.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "revised_prompt": "distributed prompt"
+                  }
+                }"#
+            },
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "result": "DISTRIBUTED_BYTES"
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-dist",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "DISTRIBUTED_BYTES");
+                assert_eq!(revised_prompt, Some("distributed prompt".to_string()));
             }
             _ => panic!("Expected ImageGenerationCall"),
         }
