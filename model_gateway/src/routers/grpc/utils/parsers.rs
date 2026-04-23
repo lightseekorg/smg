@@ -211,10 +211,9 @@ pub(crate) fn has_constrained_output(
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::common::{FunctionChoice, JsonSchemaFormat, ToolReference};
+
     use super::*;
-    use openai_protocol::common::{
-        FunctionChoice, JsonSchemaFormat, ToolReference,
-    };
 
     // ── has_constrained_output: tool_choice variants ────────────────────
 

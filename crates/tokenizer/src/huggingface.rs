@@ -438,10 +438,6 @@ impl TokenizerTrait for HuggingFaceTokenizer {
         }
     }
 
-    fn eos_token_ids(&self) -> &[TokenIdType] {
-        &self.special_tokens.eos_token_ids
-    }
-
     fn set_chat_template(&mut self, template: String) -> Result<()> {
         self.chat_template.set(template)
     }

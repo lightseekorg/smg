@@ -266,7 +266,7 @@ impl TiktokenTokenizer {
 
         Ok(TiktokenTokenizer {
             tokenizer,
-            special_tokens,
+            special_tokens: config.special_tokens,
             vocab,
             reverse_vocab,
             vocab_size,
