@@ -382,7 +382,7 @@ fn append_current_input(
             });
         }
         ResponseInput::Items(current_items) => {
-            items.extend(current_items.iter().map(normalize_input_item));
+            items.extend(current_items.iter().cloned());
         }
     }
 }

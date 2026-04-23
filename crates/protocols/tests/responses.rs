@@ -2033,6 +2033,8 @@ fn test_custom_tool_call_output_validation_rejects_empty_text_and_parts() {
 /// structurally so the router-side preparation layer can normalize them.
 #[test]
 fn response_input_accepts_mcp_trace_items() {
+    use validator::Validate;
+
     let request: ResponsesRequest = serde_json::from_value(json!({
         "model": "gpt-5.4",
         "store": false,
@@ -2060,6 +2062,10 @@ fn response_input_accepts_mcp_trace_items() {
         ],
     }))
     .expect("request should deserialize");
+
+    request
+        .validate()
+        .expect("mcp trace items should pass structural validation");
 
     let ResponseInput::Items(items) = &request.input else {
         panic!("expected items input");
