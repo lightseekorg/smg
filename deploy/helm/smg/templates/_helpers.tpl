@@ -137,12 +137,20 @@ Called from the router Deployment template.
 - "--service-discovery"
 {{- if .Values.router.serviceDiscovery.selector }}
 - "--selector"
+{{- if kindIs "slice" .Values.router.serviceDiscovery.selector }}
+{{- range .Values.router.serviceDiscovery.selector }}
+- {{ . | quote }}
+{{- end }}
+{{- else }}
 - {{ .Values.router.serviceDiscovery.selector | quote }}
+{{- end }}
 {{- end }}
 - "--service-discovery-port"
 - {{ .Values.router.serviceDiscovery.port | quote }}
+{{- if .Values.router.serviceDiscovery.namespace }}
 - "--service-discovery-namespace"
-- {{ .Values.router.serviceDiscovery.namespace | default .Release.Namespace | quote }}
+- {{ .Values.router.serviceDiscovery.namespace | quote }}
+{{- end }}
 {{- if .Values.router.serviceDiscovery.modelIdFrom }}
 - "--model-id-from"
 - {{ .Values.router.serviceDiscovery.modelIdFrom | quote }}

@@ -38,12 +38,12 @@ router:
 
   # -- Kubernetes service discovery (auto-discover worker pods by label)
   serviceDiscovery:
-    enabled: false
-    namespace: ""          # defaults to release namespace
-    selector: ""           # e.g. "app=sglang-worker"
-    port: 80
+    enabled: true
+    namespace: ""          # leave empty to use chart default behavior
+    selector: "component=predictor"           # broad match for KServe predictor pods
+    port: 8080
     # -- Extract model ID from pod metadata
-    modelIdFrom: ""        # "namespace", "label:key", or "annotation:key"
+    modelIdFrom: "label:smg.lightseek.io/model"        # "namespace", "label:key", or "annotation:key"
 
   # -- Model / tokenizer
   model: ""                # HuggingFace model ID or local path
