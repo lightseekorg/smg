@@ -2138,6 +2138,13 @@ pub enum ResponseOutputItem {
         id: String,
         server_label: String,
         tools: Vec<McpToolInfo>,
+        /// Spec (openai-responses-api-spec.md §McpListTools L253-255):
+        /// `error?: string`. Preserves the failure message when the MCP
+        /// server could not list tools; symmetric with the matching field
+        /// on `ResponseInputOutputItem::McpListTools` so emit↔replay is
+        /// lossless.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(rename = "mcp_call")]
     McpCall {

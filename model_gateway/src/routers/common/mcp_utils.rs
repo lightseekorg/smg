@@ -21,18 +21,23 @@ pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 /// Mapping (documented on the calling sites):
 ///   * `None` → `None` (no constraint; all tools exposed)
 ///   * `Some(List(names))` → `Some(names)`
-///   * `Some(Filter { tool_names: Some(v), .. })` → `Some(v)`
-///   * `Some(Filter { tool_names: None, read_only: Some(_) })` →
-///     `Some(vec![])` — fail-closed. smg has no `readOnlyHint`-based filter
-///     implementation yet, so narrow to nothing rather than silently ignore
-///     a caller-supplied restriction and expose the full tool surface.
+///   * `Some(Filter { tool_names: Some(v), read_only: None })` → `Some(v)`
+///   * `Some(Filter { read_only: Some(_), .. })` → `Some(vec![])` —
+///     fail-closed whenever the caller specified a `read_only` restriction,
+///     regardless of `tool_names`. smg has no `readOnlyHint`-based filter
+///     implementation yet, so honoring only the `tool_names` half would
+///     silently broaden exposure past caller intent (e.g. `{read_only: true,
+///     tool_names: ["mutating_tool"]}` must NOT expose `mutating_tool`).
+///     Narrow to nothing so the downstream retain path exposes none.
 ///   * `Some(Filter { tool_names: None, read_only: None })` → `None`
 pub(crate) fn project_allowed_tools(value: Option<&McpAllowedTools>) -> Option<Vec<String>> {
     value.and_then(|at| match at {
         McpAllowedTools::List(names) => Some(names.clone()),
         McpAllowedTools::Filter(filter) => match (&filter.tool_names, &filter.read_only) {
-            (Some(names), _) => Some(names.clone()),
-            (None, Some(_)) => Some(Vec::new()),
+            // Any `read_only` restriction fails closed: readOnlyHint-based
+            // filtering is unimplemented, so we cannot safely project a subset.
+            (_, Some(_)) => Some(Vec::new()),
+            (Some(names), None) => Some(names.clone()),
             (None, None) => None,
         },
     })
@@ -751,5 +756,20 @@ mod tests {
     fn test_project_allowed_tools_filter_empty_is_unconstrained() {
         let value = McpAllowedTools::Filter(McpToolFilter::default());
         assert_eq!(project_allowed_tools(Some(&value)), None);
+    }
+
+    /// `Filter { read_only: Some(_), tool_names: Some(_) }` — both set — must
+    /// still fail-closed. Any `read_only` restriction disables the normal
+    /// name-list projection because `readOnlyHint`-based filtering is
+    /// unimplemented; honoring only the `tool_names` half would broaden
+    /// exposure past caller intent (e.g. `tool_names: ["mutating_tool"]` with
+    /// `read_only: true` must not expose `mutating_tool`).
+    #[test]
+    fn test_project_allowed_tools_filter_read_only_plus_names_is_fail_closed() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: Some(true),
+            tool_names: Some(vec!["mutating_tool".to_string()]),
+        });
+        assert_eq!(project_allowed_tools(Some(&value)), Some(Vec::new()));
     }
 }

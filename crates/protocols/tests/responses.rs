@@ -3869,6 +3869,48 @@ fn test_mcp_list_tools_input_item_round_trip() {
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
 
+/// Symmetry check: `ResponseOutputItem::McpListTools` carries the same
+/// optional `error` field as its input-side counterpart so a failing list-tools
+/// item can round-trip emit → replay losslessly.
+#[test]
+fn test_mcp_list_tools_output_item_error_round_trip() {
+    let payload = json!({
+        "type": "mcp_list_tools",
+        "id": "mcplist_out_1",
+        "server_label": "deepwiki",
+        "tools": [],
+        "error": "server unreachable",
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("mcp_list_tools output item with error should deserialize");
+    match &item {
+        ResponseOutputItem::McpListTools { tools, error, .. } => {
+            assert!(tools.is_empty());
+            assert_eq!(error.as_deref(), Some("server unreachable"));
+        }
+        other => panic!("expected ResponseOutputItem::McpListTools, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+
+    // error absent: field is omitted rather than emitted as null.
+    let payload_no_error = json!({
+        "type": "mcp_list_tools",
+        "id": "mcplist_out_2",
+        "server_label": "deepwiki",
+        "tools": [],
+    });
+    let item_no_error: ResponseOutputItem = serde_json::from_value(payload_no_error.clone())
+        .expect("mcp_list_tools output item without error should deserialize");
+    match &item_no_error {
+        ResponseOutputItem::McpListTools { error, .. } => assert_eq!(error, &None),
+        other => panic!("expected ResponseOutputItem::McpListTools, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&item_no_error).expect("serialize"),
+        payload_no_error
+    );
+}
+
 /// Input-item `mcp_list_tools` with a populated `error` field round-trips.
 #[test]
 fn test_mcp_list_tools_input_item_with_error_round_trip() {
