@@ -249,6 +249,14 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn background_repository(
+        mut self,
+        background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
+    ) -> Self {
+        self.background_repository = background_repository;
+        self
+    }
+
     pub fn worker_monitor(mut self, worker_monitor: Option<Arc<WorkerMonitor>>) -> Self {
         self.worker_monitor = worker_monitor;
         self
