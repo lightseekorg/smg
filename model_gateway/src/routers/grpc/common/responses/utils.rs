@@ -157,6 +157,7 @@ pub(crate) async fn persist_response_if_needed(
             response_storage,
             Arc::new(NoOpConversationMemoryWriter::new()),
             MemoryExecutionContext::default(),
+            None,
             &response_json,
             original_request,
             request_context,

@@ -179,9 +179,18 @@ pub(in crate::routers::openai) async fn route_responses(
         json: payload,
         url: format!("{}/v1/responses", worker.url()),
     });
+    let conversation_user_turn_count = if ctx.memory_execution_context.stm_enabled {
+        Some(super::history::count_conversation_user_turns(
+            &request_body.input,
+        ))
+    } else {
+        None
+    };
+
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
         existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
+        conversation_user_turn_count,
     });
 
     let response = if ctx.is_streaming() {

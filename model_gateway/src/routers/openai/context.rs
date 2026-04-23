@@ -132,6 +132,7 @@ pub struct PayloadState {
 pub struct ResponsesPayloadState {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub conversation_user_turn_count: Option<usize>,
 }
 
 impl RequestContext {
@@ -260,6 +261,7 @@ pub struct StorageHandles {
     pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub request_context: Option<StorageRequestContext>,
     pub memory_execution_context: MemoryExecutionContext,
+    pub conversation_user_turn_count: Option<usize>,
 }
 
 pub struct OwnedStreamingContext {
@@ -313,6 +315,7 @@ impl RequestContext {
                 conversation_memory_writer,
                 request_context: self.storage_request_context,
                 memory_execution_context: self.memory_execution_context,
+                conversation_user_turn_count: responses_payload_state.conversation_user_turn_count,
             },
         })
     }

@@ -21,6 +21,7 @@ use crate::{
 };
 
 const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
+const USER_ROLE: &str = "user";
 
 pub(crate) struct LoadedInputHistory {
     pub previous_response_id: Option<String>,
@@ -286,5 +287,72 @@ fn append_current_input(
                 items.push(openai_protocol::responses::normalize_input_item(item));
             }
         }
+    }
+}
+
+/// Counts conversation user turns from the assembled Responses input payload.
+///
+/// Rules:
+/// - `ResponseInput::Text` counts as one user turn.
+/// - `ResponseInput::Items` counts message-like items with role `"user"`.
+/// - Non-message items are ignored.
+///
+/// This function is resilient by design: unknown or non-user items are treated
+/// as non-turns and skipped.
+pub(crate) fn count_conversation_user_turns(input: &ResponseInput) -> usize {
+    match input {
+        ResponseInput::Text(_) => 1,
+        ResponseInput::Items(items) => items
+            .iter()
+            .filter(|item| match item {
+                ResponseInputOutputItem::Message { role, .. }
+                | ResponseInputOutputItem::SimpleInputMessage { role, .. } => {
+                    role.eq_ignore_ascii_case(USER_ROLE)
+                }
+                _ => false,
+            })
+            .count(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{
+        ResponseInput, ResponseInputOutputItem, SimpleInputMessageTypeTag, StringOrContentParts,
+    };
+
+    use super::count_conversation_user_turns;
+
+    #[test]
+    fn count_conversation_user_turns_counts_text_as_single_turn() {
+        let input = ResponseInput::Text("hello".to_string());
+        assert_eq!(count_conversation_user_turns(&input), 1);
+    }
+
+    #[test]
+    fn count_conversation_user_turns_counts_user_messages_only() {
+        let input = ResponseInput::Items(vec![
+            ResponseInputOutputItem::Message {
+                id: "m1".to_string(),
+                role: "user".to_string(),
+                content: vec![],
+                status: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("hi".to_string()),
+                role: "assistant".to_string(),
+                r#type: Some(SimpleInputMessageTypeTag::Message),
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("again".to_string()),
+                role: "USER".to_string(),
+                r#type: Some(SimpleInputMessageTypeTag::Message),
+                phase: None,
+            },
+        ]);
+
+        assert_eq!(count_conversation_user_turns(&input), 2);
     }
 }

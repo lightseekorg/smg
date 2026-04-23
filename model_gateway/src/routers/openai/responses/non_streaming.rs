@@ -40,6 +40,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let ResponsesPayloadState {
         previous_response_id,
         existing_mcp_list_tools_labels,
+        conversation_user_turn_count,
     } = ctx.take_responses_payload().unwrap_or_default();
 
     let original_body = match ctx.responses_request() {
@@ -169,6 +170,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             resp_storage.clone(),
             mem_writer.clone(),
             ctx.memory_execution_context.clone(),
+            conversation_user_turn_count,
             &response_json,
             original_body,
             ctx.storage_request_context.clone(),
