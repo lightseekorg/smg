@@ -2361,11 +2361,13 @@ fn shell_call_output_item_round_trips_on_response_side() {
         .expect("response-side shell_call should deserialize");
     match &item {
         ResponseOutputItem::ShellCall {
+            id,
             call_id,
             environment,
             status,
             ..
         } => {
+            assert_eq!(id, "sc_10");
             assert_eq!(call_id, "call_shell_10");
             match environment.as_ref().expect("env present") {
                 ShellCallEnvironment::Local(local) => assert!(local.skills.is_none()),
@@ -2373,7 +2375,7 @@ fn shell_call_output_item_round_trips_on_response_side() {
                     panic!("expected Local env, got ContainerReference")
                 }
             }
-            assert_eq!(*status, Some(ShellCallStatus::Completed));
+            assert_eq!(*status, ShellCallStatus::Completed);
         }
         other => panic!("expected ResponseOutputItem::ShellCall, got {other:?}"),
     }
@@ -2384,7 +2386,8 @@ fn shell_call_output_item_round_trips_on_response_side() {
 fn shell_call_output_response_side_round_trip() {
     // Mirror of shell_call_output_input_item_round_trips_spec_shape but
     // deserialized into [`ResponseOutputItem`] to prove the output union
-    // accepts the same wire shape.
+    // accepts the same wire shape. The response-side variant requires `id`,
+    // `max_output_length`, and `status` per spec L233.
     let payload = json!({
         "type": "shell_call_output",
         "id": "sco_10",
@@ -2396,6 +2399,7 @@ fn shell_call_output_response_side_round_trip() {
                 "stdout": ""
             }
         ],
+        "max_output_length": 65536,
         "status": "incomplete"
     });
 
@@ -2403,15 +2407,16 @@ fn shell_call_output_response_side_round_trip() {
         .expect("response-side shell_call_output should deserialize");
     match &item {
         ResponseOutputItem::ShellCallOutput {
+            id,
             call_id,
             output,
             status,
             max_output_length,
-            ..
         } => {
+            assert_eq!(id, "sco_10");
             assert_eq!(call_id, "call_shell_10");
-            assert_eq!(*status, Some(ShellCallStatus::Incomplete));
-            assert!(max_output_length.is_none());
+            assert_eq!(*status, ShellCallStatus::Incomplete);
+            assert_eq!(*max_output_length, 65536);
             assert_eq!(output.len(), 1);
             match &output[0].outcome {
                 ShellOutcome::Exit(e) => assert_eq!(e.exit_code, 2),

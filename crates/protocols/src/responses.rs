@@ -1877,16 +1877,21 @@ pub enum ResponseOutputItem {
     /// L512-513): emitted when the model issues a containerized shell
     /// action. The environment echoed back is restricted to `local` /
     /// `container_reference` (see [`ShellCallEnvironment`]).
+    ///
+    /// `id` and `status` are required on the output wire — the server
+    /// always populates both when emitting the call, mirroring the
+    /// `ComputerCall` treatment above. Keeping them required at the type
+    /// boundary makes the SDK's non-`Optional` TypedDict contract explicit
+    /// and keeps response-side consumers from having to unwrap fields the
+    /// platform is contractually obligated to emit.
     #[serde(rename = "shell_call")]
     ShellCall {
-        action: ShellCallAction,
+        id: String,
         call_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
+        action: ShellCallAction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<ShellCallEnvironment>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        status: Option<ShellCallStatus>,
+        status: ShellCallStatus,
     },
     /// `type: "shell_call_output"` — output-side mirror of the input
     /// variant.
@@ -1894,16 +1899,17 @@ pub enum ResponseOutputItem {
     /// Spec (openai-responses-api-spec.md §ShellCallOutput, L233-238).
     /// Emitted when the platform surfaces captured stdout/stderr plus an
     /// [`ShellOutcome`] for a prior shell call.
+    ///
+    /// `id`, `max_output_length`, and `status` are required on the output
+    /// wire per spec L233 (`{ call_id, output, type, id, max_output_length,
+    /// status }`) — the server always populates all three on emit.
     #[serde(rename = "shell_call_output")]
     ShellCallOutput {
+        id: String,
         call_id: String,
         output: Vec<ShellOutputChunk>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_output_length: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        status: Option<ShellCallStatus>,
+        max_output_length: u64,
+        status: ShellCallStatus,
     },
 }
 
