@@ -2383,6 +2383,55 @@ fn shell_call_output_item_round_trips_on_response_side() {
 }
 
 #[test]
+fn shell_call_container_reference_on_response_side_round_trip() {
+    // Spec (openai-responses-api-spec.md §returns L512-513): the
+    // response-side shell_call environment covers both `local` and
+    // `container_reference`. The sibling
+    // `shell_call_output_item_round_trips_on_response_side` test only
+    // exercises the `Local` arm; this fixture closes coverage for
+    // [`ResponseShellCallEnvironment::ContainerReference`] so a broken
+    // container_reference arm can't slip through the suite even though
+    // the input- and response-side enums are intentionally distinct.
+    let payload = json!({
+        "type": "shell_call",
+        "id": "sc_20",
+        "call_id": "call_shell_20",
+        "action": {"commands": ["echo", "ok"]},
+        "environment": {
+            "type": "container_reference",
+            "container_id": "container_xyz"
+        },
+        "status": "completed"
+    });
+
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("response-side shell_call w/ container_reference should deserialize");
+    match &item {
+        ResponseOutputItem::ShellCall {
+            id,
+            call_id,
+            environment,
+            status,
+            ..
+        } => {
+            assert_eq!(id, "sc_20");
+            assert_eq!(call_id, "call_shell_20");
+            match environment.as_ref().expect("env present") {
+                ResponseShellCallEnvironment::ContainerReference(r) => {
+                    assert_eq!(r.container_id, "container_xyz");
+                }
+                ResponseShellCallEnvironment::Local(_) => {
+                    panic!("expected ContainerReference env, got Local")
+                }
+            }
+            assert_eq!(*status, ShellCallStatus::Completed);
+        }
+        other => panic!("expected ResponseOutputItem::ShellCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
 fn shell_call_output_response_side_round_trip() {
     // Mirror of shell_call_output_input_item_round_trips_spec_shape but
     // deserialized into [`ResponseOutputItem`] to prove the output union
