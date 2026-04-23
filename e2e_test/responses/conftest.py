@@ -147,10 +147,17 @@ def gateway_with_mock_mcp(
         extra_args=["--mcp-config-path", mock_mcp_config_file],
     )
 
-    client = openai.OpenAI(
-        base_url=f"{gateway.base_url}/v1",
-        api_key=os.environ[api_key_env],
-    )
+    # Construct the client inside a try/except so a failure here does not
+    # leak the already-launched gateway. The outer ``finally`` handles the
+    # happy-path teardown after the test yields.
+    try:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=os.environ[api_key_env],
+        )
+    except Exception:
+        gateway.shutdown()
+        raise
 
     try:
         yield gateway, client, mock_mcp_server

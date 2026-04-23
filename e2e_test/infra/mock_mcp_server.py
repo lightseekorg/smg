@@ -50,6 +50,7 @@ exit and joins the background thread.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import threading
 import time
@@ -122,11 +123,14 @@ class MockMcpServer:
         ready_timeout: float = 5.0,
     ) -> None:
         self.host = host
+        # ``_configured_port`` is the immutable value the caller passed in
+        # (0 = "ask the OS for a free port"). ``_bound_port`` is the runtime
+        # value uvicorn actually bound to — it stays ``None`` until
+        # ``start()`` resolves it, and ``stop()`` clears it so a subsequent
+        # ``start()`` on a port-zero instance picks a fresh free port
+        # instead of reusing the old one.
         self._configured_port = port
-        # ``port`` holds the actually-bound port once the server is running.
-        # When ``port=0`` is passed, the attribute starts as ``None`` and gets
-        # filled in by ``start()`` after uvicorn binds its listening socket.
-        self.port: int | None = None if port == 0 else port
+        self._bound_port: int | None = port if port != 0 else None
         self._log_level = log_level
         self._ready_timeout = ready_timeout
 
@@ -149,29 +153,48 @@ class MockMcpServer:
         self.image_generation_png_base64 = IMAGE_GENERATION_PNG_BASE64
 
     # ------------------------------------------------------------------
-    # Public URL
+    # Public URL / port
     # ------------------------------------------------------------------
+
+    @property
+    def port(self) -> int | None:
+        """Bound port after ``start()`` completes; ``None`` otherwise.
+
+        Backward-compatible read-only accessor. Tests that need the port
+        before ``start()`` returns should just use the ``.url`` property,
+        which embeds the bound port.
+        """
+        return self._bound_port
 
     @property
     def url(self) -> str:
         """Return the MCP streamable-HTTP URL. Requires ``start()`` first."""
-        if self.port is None:
+        if self._bound_port is None:
             raise RuntimeError("MockMcpServer not started — call start() first")
-        return f"http://{self.host}:{self.port}{self._mount_path}"
+        return f"http://{self.host}:{self._bound_port}{self._mount_path}"
 
     @property
     def last_call_args(self) -> dict[str, Any] | None:
-        """Arguments the last tool invocation received, or ``None`` if no calls yet."""
+        """Arguments the last tool invocation received, or ``None`` if no calls yet.
+
+        Returns a deep copy so callers can mutate the result without
+        affecting the internal log.
+        """
         with self._call_log_lock:
             if not self._call_log:
                 return None
-            return dict(self._call_log[-1])
+            return copy.deepcopy(self._call_log[-1])
 
     @property
     def call_log(self) -> list[dict[str, Any]]:
-        """All observed calls, in order, as a copy. Handy for multi-tool assertions."""
+        """All observed calls, in order, as a deep copy.
+
+        Handy for multi-tool assertions. Deep-copying (rather than a shallow
+        ``dict(entry)``) protects test-side mutation of nested structures
+        from leaking back into the server's internal state.
+        """
         with self._call_log_lock:
-            return [dict(entry) for entry in self._call_log]
+            return [copy.deepcopy(entry) for entry in self._call_log]
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -180,12 +203,18 @@ class MockMcpServer:
     def start(self) -> str:
         """Start the server in a background thread and return its URL.
 
-        Port allocation: we hand ``port=0`` (or the caller-specified port)
-        directly to ``uvicorn.Config``. After the server is ready,
+        Port allocation: we hand ``_configured_port`` straight to
+        ``uvicorn.Config``. After the server is ready,
         ``uvicorn.Server.servers[0].sockets[0].getsockname()`` gives us the
-        actually-bound port. This avoids the probe-bind race that would
-        otherwise exist between ``_pick_free_port`` and the subsequent
-        ``uvicorn`` bind.
+        actually-bound port; we cache that in ``_bound_port``. This avoids
+        the probe-bind race that a manual ``socket.bind(0)`` then-close
+        pattern would introduce.
+
+        Failure handling: if ``_wait_ready`` or ``_resolve_bound_port``
+        raises (e.g., startup timeout), we stop the partially-started
+        server, clear ``_server`` / ``_thread`` / ``_bound_port``, and
+        re-raise. Leaving internal state set would make subsequent
+        ``start()`` calls spuriously report "already started".
         """
         if self._server is not None:
             raise RuntimeError("MockMcpServer already started")
@@ -196,30 +225,39 @@ class MockMcpServer:
         config = uvicorn.Config(
             app,
             host=self.host,
-            # Let uvicorn pick a free port atomically when ``self.port`` is
-            # ``None``. For caller-specified ports we pass through unchanged.
-            port=self.port if self.port is not None else 0,
+            port=self._configured_port,
             log_level=self._log_level,
             lifespan="on",
             access_log=False,
         )
         self._server = uvicorn.Server(config)
+        # Thread name carries the configured-or-pending port for thread-dump
+        # readability; patched once the bound port is known.
+        initial_name = f"MockMcpServer:{self._configured_port or 'pending'}"
         self._thread = threading.Thread(
             target=self._run_server,
-            # Name is set to a placeholder for ``port=0`` and patched once the
-            # bound port is known; purely cosmetic for thread inspection.
-            name=f"MockMcpServer:{self.port or 'pending'}",
+            name=initial_name,
             daemon=True,
         )
         self._thread.start()
-        self._wait_ready()
+        try:
+            self._wait_ready()
+            self._bound_port = self._resolve_bound_port()
+        except BaseException:
+            # Roll back. We intentionally swallow cleanup errors here so the
+            # original exception reaches the caller.
+            try:
+                self._server.should_exit = True
+                self._thread.join(timeout=5)
+            except Exception:
+                logger.exception("MockMcpServer cleanup during failed start")
+            self._server = None
+            self._thread = None
+            self._bound_port = None if self._configured_port == 0 else self._configured_port
+            raise
 
-        # Resolve the real bound port from uvicorn's listening socket. For
-        # explicit ports this is a no-op; for ``port=0`` this is the critical
-        # step that replaces the old probe-then-bind pattern.
-        self.port = self._resolve_bound_port()
-        self._thread.name = f"MockMcpServer:{self.port}"
-
+        # Patch thread name with the resolved port for clean debugging.
+        self._thread.name = f"MockMcpServer:{self._bound_port}"
         logger.info("MockMcpServer ready at %s", self.url)
         return self.url
 
@@ -240,10 +278,15 @@ class MockMcpServer:
                 # Don't clear self._thread — leave it set so callers can
                 # inspect/debug the stuck thread if they catch the error.
                 raise RuntimeError(
-                    f"MockMcpServer thread did not exit cleanly within 5s (port={self.port})"
+                    f"MockMcpServer thread did not exit cleanly within 5s (port={self._bound_port})"
                 )
         self._server = None
         self._thread = None
+        # Clear the bound port only when the caller let the OS pick it.
+        # A caller who specified an explicit port keeps it on the instance
+        # so subsequent ``start()`` calls still bind to the same port.
+        if self._configured_port == 0:
+            self._bound_port = None
 
     def __enter__(self) -> MockMcpServer:
         self.start()
