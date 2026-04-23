@@ -1206,6 +1206,7 @@ impl OracleConversationMemoryWriter {
                     col_defs.push(format!("{} {sql_type}", s.col(logical)));
                 }
             }
+            col_defs.extend(extra_column_defs(s));
 
             conn.execute(
                 &format!("CREATE TABLE {table} ({})", col_defs.join(", ")),
@@ -1215,45 +1216,46 @@ impl OracleConversationMemoryWriter {
         }
 
         if !s.is_skipped("conversation_id") {
+            let conv_idx = oracle_index_name(&s.table, "CONV_ID_IDX");
             create_index_if_missing(
                 conn,
                 &s.table,
-                "IDX_CONV_MEMORIES_CONV_ID",
+                &conv_idx,
                 &format!(
-                    "CREATE INDEX IDX_CONV_MEMORIES_CONV_ID ON {table} ({})",
+                    "CREATE INDEX {conv_idx} ON {table} ({})",
                     s.col("conversation_id")
                 ),
             )?;
         }
         if !s.is_skipped("next_run_at") {
+            let next_run_idx = oracle_index_name(&s.table, "NEXT_RUN_AT_IDX");
             create_index_if_missing(
                 conn,
                 &s.table,
-                "IDX_CONV_MEMORIES_NEXT_RUN_AT",
+                &next_run_idx,
                 &format!(
-                    "CREATE INDEX IDX_CONV_MEMORIES_NEXT_RUN_AT ON {table} ({})",
+                    "CREATE INDEX {next_run_idx} ON {table} ({})",
                     s.col("next_run_at")
                 ),
             )?;
         }
         if !s.is_skipped("status") {
+            let status_idx = oracle_index_name(&s.table, "STATUS_IDX");
             create_index_if_missing(
                 conn,
                 &s.table,
-                "IDX_CONV_MEMORIES_STATUS",
-                &format!(
-                    "CREATE INDEX IDX_CONV_MEMORIES_STATUS ON {table} ({})",
-                    s.col("status")
-                ),
+                &status_idx,
+                &format!("CREATE INDEX {status_idx} ON {table} ({})", s.col("status")),
             )?;
         }
         if !s.is_skipped("response_id") {
+            let response_idx = oracle_index_name(&s.table, "RESPONSE_ID_IDX");
             create_index_if_missing(
                 conn,
                 &s.table,
-                "IDX_CONV_MEMORIES_RESPONSE_ID",
+                &response_idx,
                 &format!(
-                    "CREATE INDEX IDX_CONV_MEMORIES_RESPONSE_ID ON {table} ({})",
+                    "CREATE INDEX {response_idx} ON {table} ({})",
                     s.col("response_id")
                 ),
             )?;
@@ -1291,6 +1293,8 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
         let memory_type = memory_type.storage_label();
         let status = status.storage_label();
         let schema = self.store.schema.clone();
+        // Capture extra columns before spawn_blocking (task-locals don't propagate)
+        let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
@@ -1322,6 +1326,14 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
                 push_col!("memory_config", &memory_config);
                 push_col!("scope_id", &scope_id);
                 push_col!("error_msg", &error_msg);
+
+                // Append extra columns from hooks or defaults
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(s, &hook_extra);
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
+                    params.push(val);
+                }
 
                 let placeholders = (1..=params.len())
                     .map(|i| format!(":{i}"))
@@ -1732,4 +1744,16 @@ fn create_index_if_missing(
     }
 
     Ok(())
+}
+
+/// Oracle object names are limited to 30 chars.
+/// Build stable table-scoped names while respecting that limit.
+fn oracle_index_name(table_name: &str, suffix: &str) -> String {
+    const MAX_ORACLE_IDENT_LEN: usize = 30;
+    let table = table_name.to_ascii_uppercase();
+    let suffix = suffix.to_ascii_uppercase();
+    // Need one "_" between table and suffix.
+    let table_budget = MAX_ORACLE_IDENT_LEN.saturating_sub(suffix.len() + 1);
+    let table_part: String = table.chars().take(table_budget).collect();
+    format!("{table_part}_{suffix}")
 }

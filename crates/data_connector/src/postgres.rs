@@ -872,29 +872,33 @@ impl PostgresConversationMemoryWriter {
             col_defs.join(", "),
         );
         if !s.is_skipped("conversation_id") {
+            let conv_idx = postgres_index_name(&s.table, "conv_idx");
             ddl.push_str(&format!(
-                "CREATE INDEX IF NOT EXISTS conversation_memories_conv_idx \
+                "CREATE INDEX IF NOT EXISTS {conv_idx} \
                  ON {table} ({});",
                 s.col("conversation_id")
             ));
         }
         if !s.is_skipped("next_run_at") {
+            let next_run_idx = postgres_index_name(&s.table, "next_run_idx");
             ddl.push_str(&format!(
-                "CREATE INDEX IF NOT EXISTS conversation_memories_next_run_idx \
+                "CREATE INDEX IF NOT EXISTS {next_run_idx} \
                  ON {table} ({});",
                 s.col("next_run_at")
             ));
         }
         if !s.is_skipped("status") {
+            let status_idx = postgres_index_name(&s.table, "status_idx");
             ddl.push_str(&format!(
-                "CREATE INDEX IF NOT EXISTS conversation_memories_status_idx \
+                "CREATE INDEX IF NOT EXISTS {status_idx} \
                  ON {table} ({});",
                 s.col("status")
             ));
         }
         if !s.is_skipped("response_id") {
+            let response_idx = postgres_index_name(&s.table, "response_idx");
             ddl.push_str(&format!(
-                "CREATE INDEX IF NOT EXISTS conversation_memories_response_idx \
+                "CREATE INDEX IF NOT EXISTS {response_idx} \
                  ON {table} ({});",
                 s.col("response_id")
             ));
@@ -954,6 +958,14 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
         push_col!("scope_id", &input.scope_id);
         push_col!("error_msg", &input.error_msg);
 
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
+            params.push(val);
+        }
+
         let placeholders = (1..=params.len())
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
@@ -976,6 +988,21 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
 
         Ok(id)
     }
+}
+
+/// Postgres identifiers are limited to 63 chars.
+/// Keep index names table-scoped and deterministic within that bound.
+fn postgres_index_name(table_name: &str, suffix: &str) -> String {
+    const MAX_POSTGRES_IDENT_LEN: usize = 63;
+    let table = table_name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let suffix = suffix.to_ascii_lowercase();
+    let table_budget = MAX_POSTGRES_IDENT_LEN.saturating_sub(suffix.len() + 1);
+    let table_part: String = table.chars().take(table_budget).collect();
+    format!("{table_part}_{suffix}")
 }
 
 pub(super) struct PostgresResponseStorage {

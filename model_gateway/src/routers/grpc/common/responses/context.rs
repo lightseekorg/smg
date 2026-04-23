@@ -70,4 +70,12 @@ impl ResponsesContext {
             request_context,
         }
     }
+
+    /// Clone this context while swapping in a request-scoped storage context.
+    pub fn with_request_context(&self, request_context: Option<StorageRequestContext>) -> Self {
+        Self {
+            request_context,
+            ..self.clone()
+        }
+    }
 }

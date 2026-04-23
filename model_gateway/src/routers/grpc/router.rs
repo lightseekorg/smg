@@ -331,6 +331,7 @@ impl GrpcRouter {
         // Choose implementation based on Harmony model detection (checks worker metadata)
         let is_harmony =
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
+        let request_context = smg_data_connector::current_request_context();
 
         if is_harmony {
             debug!(
@@ -338,20 +339,9 @@ impl GrpcRouter {
                 model_id,
                 body.stream.unwrap_or(false)
             );
-            let harmony_ctx = ResponsesContext::new(
-                Arc::new(self.harmony_pipeline.clone()),
-                self.shared_components.clone(),
-                self.harmony_responses_context.response_storage.clone(),
-                self.harmony_responses_context.conversation_storage.clone(),
-                self.harmony_responses_context
-                    .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context
-                    .conversation_memory_writer
-                    .clone(),
-                self.harmony_responses_context.mcp_orchestrator.clone(),
-                smg_data_connector::current_request_context(),
-            );
+            let harmony_ctx = self
+                .harmony_responses_context
+                .with_request_context(request_context.clone());
 
             if body.stream.unwrap_or(false) {
                 serve_harmony_responses_stream(
@@ -375,8 +365,9 @@ impl GrpcRouter {
                 }
             }
         } else {
+            let regular_ctx = self.responses_context.with_request_context(request_context);
             responses::route_responses(
-                &self.responses_context,
+                &regular_ctx,
                 Arc::new(body.clone()),
                 headers.cloned(),
                 memory_execution_context,

@@ -358,15 +358,7 @@ pub async fn create_conversation_items_with_headers(
     let added_at = Utc::now();
 
     for item_val in items_array {
-        match process_item(
-            item_storage,
-            &conversation_id,
-            item_val,
-            added_at,
-            &memory_execution_context,
-        )
-        .await
-        {
+        match process_item(item_storage, &conversation_id, item_val, added_at).await {
             Ok((item_json, item_id, warning)) => {
                 if seen_ids.insert(item_id.0.clone()) {
                     link_pairs.push((item_id, added_at));
@@ -415,6 +407,9 @@ async fn enqueue_conversation_memory_rows_for_items(
     conversation_id: &ConversationId,
     created_items: &[Value],
 ) {
+    // `created_items` already contains resolved `item_reference` payloads
+    // (via `process_item_reference`), so referenced message text contributes to
+    // turn text extraction for enqueue.
     let user_text = extract_role_message_text_from_items(created_items, "user");
     let assistant_text = extract_role_message_text_from_items(created_items, "assistant");
     enqueue_conversation_memory_rows(
@@ -435,7 +430,6 @@ async fn process_item(
     conversation_id: &ConversationId,
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
-    _memory_execution_context: &MemoryExecutionContext,
 ) -> Result<(Value, ConversationItemId, Option<String>), Response> {
     let item_type = item_val
         .get("type")
