@@ -516,7 +516,12 @@ impl ResponseTransformer {
 /// For any non-image item this is a no-op.
 pub fn compact_image_generation_output(item: &mut ResponseOutputItem) {
     if let ResponseOutputItem::ImageGenerationCall { result, .. } = item {
-        result.clear();
+        // `result.clear()` zeros the length but keeps the heap buffer
+        // allocated — for base64 image bytes that can be several MB of
+        // wasted capacity per stored item, defeating the compaction goal.
+        // Replace with a fresh empty string to actually free the backing
+        // buffer.
+        *result = String::new();
     }
 }
 
