@@ -374,6 +374,7 @@ impl StreamingProcessor {
                                 model,
                                 created,
                                 system_fingerprint,
+                                tokenizer.as_ref(),
                             )
                             .await;
                         if let Some(chunk) = reasoning_chunk {
@@ -417,6 +418,7 @@ impl StreamingProcessor {
                                     &mut tool_parsers,
                                     &mut has_tool_calls,
                                     tools_ref,
+                                    &tokenizer,
                                     request_id,
                                     model,
                                     created,
@@ -439,7 +441,19 @@ impl StreamingProcessor {
                         }
                     }
 
-                    // Regular content emission
+                    let original_len = delta.len();
+                    let delta = if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        utils::strip_leaked_special_tokens_from_delta(delta, tokenizer.as_ref())
+                    } else {
+                        delta
+                    };
+                    let choice_logprobs = if delta.len() < original_len {
+                        None
+                    } else {
+                        choice_logprobs
+                    };
                     if !delta.is_empty() {
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -463,6 +477,16 @@ impl StreamingProcessor {
                     // Flush any remaining text for this index's stop_decoder
                     if let Some(decoder) = stop_decoders.get_mut(&index) {
                         if let SequenceDecoderOutput::Text(text) = decoder.flush() {
+                            let text = if self.configured_tool_parser.is_some()
+                                || self.configured_reasoning_parser.is_some()
+                            {
+                                utils::strip_leaked_special_tokens_from_delta(
+                                    text,
+                                    tokenizer.as_ref(),
+                                )
+                            } else {
+                                text
+                            };
                             if !text.is_empty() {
                                 let stream_buffer = stream_buffers.entry(index).or_default();
                                 stream_buffer.push_str(&text);
@@ -1108,6 +1132,7 @@ impl StreamingProcessor {
         model: &str,
         created: u64,
         system_fingerprint: Option<&str>,
+        tokenizer: &dyn Tokenizer,
     ) -> (String, Option<ChatCompletionStreamResponse>, bool) {
         // Create fresh parser for this index (not pooled, to avoid state pollution)
         #[expect(
@@ -1146,13 +1171,28 @@ impl StreamingProcessor {
                     let chunk = if reasoning_text.is_empty() {
                         None
                     } else {
-                        Some(
-                            ChatCompletionStreamResponse::builder(request_id, model)
-                                .created(created)
-                                .add_choice_reasoning(index, reasoning_text)
-                                .maybe_system_fingerprint(system_fingerprint)
-                                .build(),
-                        )
+                        let reasoning_text =
+                            if self.configured_tool_parser.is_some()
+                                || self.configured_reasoning_parser.is_some()
+                            {
+                                utils::strip_leaked_special_tokens_from_delta(
+                                    reasoning_text,
+                                    tokenizer,
+                                )
+                            } else {
+                                reasoning_text
+                            };
+                        if reasoning_text.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                ChatCompletionStreamResponse::builder(request_id, model)
+                                    .created(created)
+                                    .add_choice_reasoning(index, reasoning_text)
+                                    .maybe_system_fingerprint(system_fingerprint)
+                                    .build(),
+                            )
+                        }
                     };
                     return (normal_text, chunk, in_reasoning);
                 }
@@ -1227,6 +1267,7 @@ impl StreamingProcessor {
         tool_parsers: &mut HashMap<u32, Arc<tokio::sync::Mutex<Box<dyn ToolParser>>>>,
         has_tool_calls: &mut HashMap<u32, bool>,
         tools: &[Tool],
+        tokenizer: &Arc<dyn Tokenizer>,
         request_id: &str,
         model: &str,
         created: u64,
@@ -1261,7 +1302,16 @@ impl StreamingProcessor {
 
             match parser.parse_incremental(delta, tools).await {
                 Ok(StreamingParseResult { normal_text, calls }) => {
-                    // Emit normal text if present
+                    let normal_text = if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        utils::strip_leaked_special_tokens_from_delta(
+                            normal_text,
+                            tokenizer.as_ref(),
+                        )
+                    } else {
+                        normal_text
+                    };
                     if !normal_text.is_empty() {
                         chunks.push(
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -1740,6 +1790,25 @@ impl StreamingProcessor {
                             (chunk_text, String::new(), false)
                         };
 
+                    // Strip leaked special tokens from both text and reasoning portions
+                    let (normal_text, reasoning_chunk_text) =
+                        if self.configured_tool_parser.is_some()
+                            || self.configured_reasoning_parser.is_some()
+                        {
+                            (
+                                utils::strip_leaked_special_tokens_from_delta(
+                                    normal_text,
+                                    tokenizer.as_ref(),
+                                ),
+                                utils::strip_leaked_special_tokens_from_delta(
+                                    reasoning_chunk_text,
+                                    tokenizer.as_ref(),
+                                ),
+                            )
+                        } else {
+                            (normal_text, reasoning_chunk_text)
+                        };
+
                     // Emit thinking content block deltas
                     if !reasoning_chunk_text.is_empty() {
                         if !thinking_block_open {
@@ -1971,6 +2040,13 @@ impl StreamingProcessor {
                 ProtoResponseVariant::Complete(complete) => {
                     // Flush stop decoder
                     if let SequenceDecoderOutput::Text(text) = stop_decoder.flush() {
+                        let text = if self.configured_tool_parser.is_some()
+                            || self.configured_reasoning_parser.is_some()
+                        {
+                            utils::strip_leaked_special_tokens_from_delta(text, tokenizer.as_ref())
+                        } else {
+                            text
+                        };
                         if !text.is_empty() {
                             if !text_block_open {
                                 Self::send_messages_event(
