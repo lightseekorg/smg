@@ -59,15 +59,22 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
     })
 }
 
-/// Built-in tools that are added to the system message
+/// Built-in tools that are added to the system message.
+///
+/// Scoped to the hosted tools gpt-oss was trained to emit (per the
+/// openai-harmony spec). Advertising a tool here that the model was not
+/// trained for — for example `image_generation`, `shell`, `computer`,
+/// `apply_patch`, `local_shell` — leads to undefined behavior: the model
+/// may hallucinate a malformed tool call, ignore the advertisement, or
+/// garble output. Hosted tools outside this set fall through to the
+/// custom/function-tool path and, in the future, will be gated
+/// per-worker via explicit hosted-tool capability flags + MCP dispatch.
 const BUILTIN_TOOLS: &[&str] = &[
     "web_search_preview",
     "web_search",
     "code_interpreter",
     "container",
     "file_search",
-    "image_generation",
-    "shell",
 ];
 
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
