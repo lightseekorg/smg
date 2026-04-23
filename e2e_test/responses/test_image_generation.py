@@ -14,14 +14,21 @@ The tests point the gateway at the in-process ``MockMcpServer`` so that:
 * no external service (Brave, OpenAI Images API) is a required dependency.
 
 See ``e2e_test/infra/mock_mcp_server.py`` for the mock implementation and
-``e2e_test/responses/conftest.py`` for the ``gateway_with_mock_mcp`` fixture.
+``e2e_test/responses/conftest.py`` for the ``gateway_with_mock_mcp`` and
+local-engine fixtures.
 
 Engine matrix
 -------------
-Only the OpenAI cloud backend is exercised today. Local gRPC lanes
-(``sglang``, ``vllm``) are skipped pending CI maturity on R6.3/R6.4; remove
-the ``skip_for_runtime`` decorators in a follow-up once those lanes are
-stable.
+* **openai** cloud (``TestImageGenerationCloud``) — exercised against the
+  real ``gpt-5-nano`` upstream; the mock MCP server replaces the image
+  backend. Validates the OpenAI-compat router (R6.2).
+* **sglang** + gpt-oss-20b via harmony (``TestImageGenerationGrpc``,
+  engine=sglang) — validates the gRPC-harmony path (R6.3).
+* **vllm** + Llama-3.1-8B-Instruct via regular (``TestImageGenerationGrpc``,
+  engine=vllm) — validates the gRPC-regular path (R6.4).
+
+Real-worker lanes may surface genuine integration gaps in R6.3/R6.4; those
+are filed as R6.6/R6.7 follow-ups rather than patched from this PR.
 """
 
 from __future__ import annotations
@@ -47,6 +54,25 @@ _IMAGE_GEN_PROMPT = "Generate a picture of a cat"
 # ``ToolChoice::Hosted`` in ``crates/protocols/src/responses.rs``.
 _FORCED_TOOL_CHOICE = {"type": "image_generation"}
 
+# Event types emitted for a ``image_generation_call`` streaming response,
+# per ``crates/protocols/src/event_types.rs::ImageGenerationCallEvent`` and
+# the envelope from ``ResponseEvent`` / ``OutputItemEvent``. ``partial_image``
+# is optional (depends on backend support); every other event must appear.
+_IMG_IN_PROGRESS = "response.image_generation_call.in_progress"
+_IMG_GENERATING = "response.image_generation_call.generating"
+_IMG_PARTIAL_IMAGE = "response.image_generation_call.partial_image"
+_IMG_COMPLETED = "response.image_generation_call.completed"
+
+_REQUIRED_STREAM_EVENTS = (
+    "response.created",
+    "response.output_item.added",
+    _IMG_IN_PROGRESS,
+    _IMG_GENERATING,
+    _IMG_COMPLETED,
+    "response.output_item.done",
+    "response.completed",
+)
+
 
 # =============================================================================
 # Helpers
@@ -54,12 +80,7 @@ _FORCED_TOOL_CHOICE = {"type": "image_generation"}
 
 
 def _find_image_generation_call(output) -> object | None:
-    """Return the first ``image_generation_call`` item in a response's output.
-
-    The Responses SDK deserializes each output item into its typed class
-    (``ResponseImageGenCallItem`` and friends); here we just dispatch on the
-    ``type`` string because the suite only cares about the wire shape.
-    """
+    """Return the first ``image_generation_call`` item in a response's output."""
     for item in output:
         if getattr(item, "type", None) == "image_generation_call":
             return item
@@ -67,15 +88,16 @@ def _find_image_generation_call(output) -> object | None:
 
 
 def _assert_image_generation_call_item(item, *, expected_base64: str, expected_prompt: str) -> None:
-    """Assert the shape documented at ``ResponseOutputItem::ImageGenerationCall``.
+    """Assert every field on the emitted ``ImageGenerationCall`` item.
 
-    Spec is defined in
-    ``crates/protocols/src/responses.rs``: ``{ id, result: base64, revised_prompt?,
-    status, type: "image_generation_call" }``. Asserting the specific fields
-    here (rather than relying on SDK deserialization alone) catches any
-    silent drift where the gateway drops a field after R6.1-R6.4.
+    Spec (``crates/protocols/src/responses.rs``):
+    ``{ id, result: base64, revised_prompt?, status, type: "image_generation_call" }``.
+    Asserting each field individually (rather than relying on SDK
+    deserialization alone) catches silent drift where the gateway drops a
+    field after R6.1-R6.4.
     """
     assert item is not None, "Expected an image_generation_call output item"
+    assert item.type == "image_generation_call", f"wrong item type: {item.type!r}"
     assert item.id.startswith("ig_"), f"id should be prefixed 'ig_'; got {item.id!r}"
     assert item.status == "completed", f"status should be 'completed'; got {item.status!r}"
     assert item.result == expected_base64, (
@@ -86,11 +108,11 @@ def _assert_image_generation_call_item(item, *, expected_base64: str, expected_p
     )
 
 
-def _collect_stream_events(events) -> tuple[list[str], list]:
-    """Return (event_types_in_order, events_in_order) from a response iterator."""
+def _collect_stream_events(events) -> list:
+    """Return the full ordered list of events from a streaming response."""
     collected = list(events)
     assert collected, "Streaming response produced no events"
-    return [e.type for e in collected], collected
+    return collected
 
 
 def _final_output_from_stream(events: list) -> list:
@@ -100,6 +122,95 @@ def _final_output_from_stream(events: list) -> list:
         f"Expected exactly one response.completed event; got {len(completed)}"
     )
     return completed[0].response.output
+
+
+def _assert_streaming_envelope(events: list) -> None:
+    """Assert the full ordered streaming envelope for image_generation.
+
+    Verifies:
+    * every non-optional event (``_REQUIRED_STREAM_EVENTS``) appears at
+      least once;
+    * each required event's first index is strictly less than the next
+      required event's first index;
+    * ``sequence_number`` (if present on all events) is strictly
+      monotonically increasing with no gaps > 1;
+    * ``partial_image`` (optional) sits between ``generating`` and
+      ``completed`` when present.
+    """
+    # Coerce to ``str`` so the list is narrowly typed for downstream use —
+    # ``getattr(e, "type", None)`` would otherwise type to ``str | None``.
+    types_in_order: list[str] = [str(getattr(e, "type", "")) for e in events]
+
+    def first_idx(evt: str) -> int:
+        try:
+            return types_in_order.index(evt)
+        except ValueError:
+            return -1
+
+    # Presence
+    missing = [evt for evt in _REQUIRED_STREAM_EVENTS if first_idx(evt) < 0]
+    assert not missing, (
+        f"Missing required streaming events: {missing}. "
+        f"Observed event types: {sorted(set(types_in_order))}"
+    )
+
+    # Order (each event's first occurrence < the next event's first occurrence)
+    idxs = [first_idx(evt) for evt in _REQUIRED_STREAM_EVENTS]
+    for earlier, later in zip(_REQUIRED_STREAM_EVENTS, _REQUIRED_STREAM_EVENTS[1:]):
+        assert first_idx(earlier) < first_idx(later), (
+            f"Events out of order: {earlier!r} (first@{first_idx(earlier)}) must precede "
+            f"{later!r} (first@{first_idx(later)}). Full sequence of required first indices: "
+            f"{dict(zip(_REQUIRED_STREAM_EVENTS, idxs))}"
+        )
+
+    # Optional partial_image must sit between generating and completed
+    partial_idx = first_idx(_IMG_PARTIAL_IMAGE)
+    if partial_idx >= 0:
+        gen_idx = first_idx(_IMG_GENERATING)
+        comp_idx = first_idx(_IMG_COMPLETED)
+        assert gen_idx < partial_idx < comp_idx, (
+            f"partial_image@{partial_idx} must sit between generating@{gen_idx} "
+            f"and completed@{comp_idx}"
+        )
+
+    # Count bounds: exactly one response.created / response.completed and
+    # one output_item.added / output_item.done per image_gen call.
+    assert types_in_order.count("response.created") == 1, (
+        "Expected exactly one response.created event"
+    )
+    assert types_in_order.count("response.completed") == 1, (
+        "Expected exactly one response.completed event"
+    )
+    img_added = sum(
+        1
+        for e in events
+        if getattr(e, "type", None) == "response.output_item.added"
+        and getattr(getattr(e, "item", None), "type", None) == "image_generation_call"
+    )
+    img_done = sum(
+        1
+        for e in events
+        if getattr(e, "type", None) == "response.output_item.done"
+        and getattr(getattr(e, "item", None), "type", None) == "image_generation_call"
+    )
+    assert img_added == img_done == 1, (
+        f"Expected exactly one output_item.added + one output_item.done for the "
+        f"image_generation_call; got added={img_added}, done={img_done}"
+    )
+
+    # sequence_number monotonic-and-no-gaps (when the field is populated on
+    # every event; some streams skip it on a few envelope events, so only
+    # check when every event has one).
+    raw_seqs = [getattr(e, "sequence_number", None) for e in events]
+    if all(s is not None for s in raw_seqs):
+        seqs: list[int] = [int(s) for s in raw_seqs if s is not None]
+        for i in range(1, len(seqs)):
+            assert seqs[i] > seqs[i - 1], (
+                f"sequence_number not strictly increasing at index {i}: {seqs[i - 1]} -> {seqs[i]}"
+            )
+            assert seqs[i] - seqs[i - 1] == 1, (
+                f"sequence_number gap > 1 at index {i}: {seqs[i - 1]} -> {seqs[i]}"
+            )
 
 
 def _extract_conversation_id(resp) -> str | None:
@@ -119,29 +230,31 @@ def _extract_conversation_id(resp) -> str | None:
 
 
 # =============================================================================
-# Image generation tests (OpenAI cloud + mock MCP server)
+# Shared test mix-in body
 # =============================================================================
 
 
-@pytest.mark.vendor("openai")
-@pytest.mark.gpu(0)
-@pytest.mark.skip_for_runtime(
-    "sglang", reason="TBD: R6.3 harmony wiring needs e2e coverage on real worker"
-)
-@pytest.mark.skip_for_runtime(
-    "vllm", reason="TBD: R6.4 regular wiring needs e2e coverage on real worker"
-)
-class TestImageGeneration:
-    """``image_generation`` built-in tool round-trip via the mock MCP server."""
+class _ImageGenerationAssertions:
+    """Concrete test bodies shared by cloud + local fixture classes.
 
-    def test_image_generation_non_streaming(
-        self, gateway_with_mock_mcp, image_gen_tool_args
-    ) -> None:
-        """Non-streaming: assert the ``image_generation_call`` output shape."""
-        _, client, mock_mcp = gateway_with_mock_mcp
+    Subclasses supply a class-level ``_fixture_name`` pointing at the
+    pytest fixture that yields ``(gateway, client, mock_mcp, model)``.
+    Keeping the assertions in a mix-in rather than duplicating them keeps
+    the cloud + gRPC lanes strictly in lock-step.
+    """
+
+    _fixture_name: str = ""  # overridden by subclasses
+
+    def _ctx(self, request):
+        """Pull ``(gateway, client, mock_mcp, model)`` from the concrete fixture."""
+        return request.getfixturevalue(self._fixture_name)
+
+    def test_image_generation_non_streaming(self, request, image_gen_tool_args) -> None:
+        """Non-streaming: assert every documented field on the output item."""
+        _, client, mock_mcp, model = self._ctx(request)
 
         resp = client.responses.create(
-            model="gpt-5-nano",
+            model=model,
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
             tool_choice=_FORCED_TOOL_CHOICE,
@@ -158,63 +271,22 @@ class TestImageGeneration:
             expected_prompt=_IMAGE_GEN_PROMPT,
         )
 
-    def test_image_generation_streaming(self, gateway_with_mock_mcp, image_gen_tool_args) -> None:
-        """Streaming: assert the ordered ``image_generation_call.*`` event trio.
-
-        Required order: ``in_progress`` before ``generating`` before ``completed``.
-        ``partial_image`` is optional (depends on backend support); when
-        present, it must sit between ``generating`` and ``completed``.
-        """
-        _, client, mock_mcp = gateway_with_mock_mcp
+    def test_image_generation_streaming(self, request, image_gen_tool_args) -> None:
+        """Streaming: assert the full envelope sequence and field payload."""
+        _, client, mock_mcp, model = self._ctx(request)
 
         resp = client.responses.create(
-            model="gpt-5-nano",
+            model=model,
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
             tool_choice=_FORCED_TOOL_CHOICE,
             stream=True,
         )
 
-        event_types, events = _collect_stream_events(resp)
+        events = _collect_stream_events(resp)
+        _assert_streaming_envelope(events)
 
-        def first(evt: str) -> int:
-            """Index of the first event matching ``evt``, or ``-1`` if absent."""
-            try:
-                return event_types.index(evt)
-            except ValueError:
-                return -1
-
-        in_progress_idx = first("response.image_generation_call.in_progress")
-        generating_idx = first("response.image_generation_call.generating")
-        completed_idx = first("response.image_generation_call.completed")
-        partial_image_idx = first("response.image_generation_call.partial_image")
-
-        assert in_progress_idx >= 0, (
-            "Missing response.image_generation_call.in_progress; "
-            f"observed event types: {sorted(set(event_types))}"
-        )
-        assert generating_idx >= 0, (
-            "Missing response.image_generation_call.generating; "
-            f"observed event types: {sorted(set(event_types))}"
-        )
-        assert completed_idx >= 0, (
-            "Missing response.image_generation_call.completed; "
-            f"observed event types: {sorted(set(event_types))}"
-        )
-        assert in_progress_idx < generating_idx < completed_idx, (
-            "image_generation_call events out of order: "
-            f"in_progress@{in_progress_idx}, generating@{generating_idx}, "
-            f"completed@{completed_idx}"
-        )
-        if partial_image_idx >= 0:
-            assert generating_idx < partial_image_idx < completed_idx, (
-                "partial_image event must sit between generating and completed; "
-                f"generating@{generating_idx}, partial_image@{partial_image_idx}, "
-                f"completed@{completed_idx}"
-            )
-
-        # Round-trip: the ``response.completed`` event carries the final output,
-        # and the deterministic payload must match the mock.
+        # Final payload must still round-trip.
         final_output = _final_output_from_stream(events)
         item = _find_image_generation_call(final_output)
         _assert_image_generation_call_item(
@@ -223,15 +295,9 @@ class TestImageGeneration:
             expected_prompt=_IMAGE_GEN_PROMPT,
         )
 
-    def test_image_generation_tool_overrides_size(self, gateway_with_mock_mcp) -> None:
-        """Argument compactor: a non-default ``size`` flows through to the tool.
-
-        R6.1 lands the size/quality override pipeline; here we drive a custom
-        ``size`` through the public API and assert the mock server observed
-        the pinned value. If the compactor silently dropped or mutated the
-        size this assertion fails.
-        """
-        _, client, mock_mcp = gateway_with_mock_mcp
+    def test_image_generation_tool_overrides_size(self, request) -> None:
+        """Argument compactor: a non-default ``size``/``quality`` reach the tool."""
+        _, client, mock_mcp, model = self._ctx(request)
 
         tool_args = {
             "type": "image_generation",
@@ -240,7 +306,7 @@ class TestImageGeneration:
         }
 
         resp = client.responses.create(
-            model="gpt-5-nano",
+            model=model,
             input=_IMAGE_GEN_PROMPT,
             tools=[tool_args],
             tool_choice=_FORCED_TOOL_CHOICE,
@@ -259,29 +325,12 @@ class TestImageGeneration:
             f"Compactor did not pin quality override; got {received.get('quality')!r}"
         )
 
-    def test_image_generation_compactor_strips_base64(
-        self, gateway_with_mock_mcp, image_gen_tool_args
-    ) -> None:
-        """Multi-turn replay: base64 payload must not survive into stored context.
+    def test_image_generation_compactor_strips_base64(self, request, image_gen_tool_args) -> None:
+        """Multi-turn replay: base64 payload must not survive into stored context."""
+        gateway, client, mock_mcp, model = self._ctx(request)
 
-        The gateway's compactor is supposed to replace the (potentially huge)
-        ``result`` field with a placeholder when persisting conversation
-        history, so a follow-up turn built on ``previous_response_id`` does
-        not ship the bytes back to the model. We verify the server view via
-        ``/v1/conversations/.../items`` — whichever item type the gateway
-        chose to store, its payload must not contain the raw base64 string.
-        """
-        gateway, client, mock_mcp = gateway_with_mock_mcp
-
-        # Turn 1: force the model to invoke ``image_generation``. Leaving
-        # tool_choice at the default ``auto`` would let the model answer
-        # without ever running the tool, which would make the later
-        # "base64 not in stored payload" assertion pass vacuously and
-        # miss a real compactor regression. Pinning ``tool_choice`` to
-        # the image_generation tool guarantees the stored payload has an
-        # ``image_generation_call`` item worth checking.
         resp1 = client.responses.create(
-            model="gpt-5-nano",
+            model=model,
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
             tool_choice=_FORCED_TOOL_CHOICE,
@@ -290,8 +339,7 @@ class TestImageGeneration:
         )
         assert resp1.error is None, f"Turn 1 error: {resp1.error}"
 
-        # Sanity-check that the tool actually ran — otherwise the
-        # stripped-base64 assertion below is vacuous.
+        # Sanity-check that the tool actually ran.
         assert _find_image_generation_call(resp1.output) is not None, (
             "Turn 1 response did not contain an image_generation_call item; "
             "the compactor-replay assertion would be vacuous. "
@@ -305,8 +353,6 @@ class TestImageGeneration:
                 "— compactor-replay assertion depends on stored history."
             )
 
-        # Pull stored items for the conversation and look for any persisted
-        # form of the image_generation_call payload.
         api_key = client.api_key
         with httpx.Client(timeout=10.0) as http:
             items_resp = http.get(
@@ -317,10 +363,7 @@ class TestImageGeneration:
             f"Failed to list conversation items: {items_resp.status_code} {items_resp.text}"
         )
 
-        # Positive persistence guard: the "base64 not in payload" check
-        # below is vacuous unless items were actually stored. Confirm the
-        # conversation persisted something before asserting on what it
-        # did *not* contain.
+        # Positive persistence guard.
         items_data = items_resp.json()
         stored_items = items_data.get("data") or items_data.get("items") or []
         assert stored_items, (
@@ -333,3 +376,44 @@ class TestImageGeneration:
             "Compactor failed to strip base64 payload from stored conversation "
             "history; replay would re-ship the image bytes to the model."
         )
+
+
+# =============================================================================
+# Engine-specific classes
+# =============================================================================
+
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
+class TestImageGenerationCloud(_ImageGenerationAssertions):
+    """``image_generation`` tool against the OpenAI cloud backend (R6.2)."""
+
+    _fixture_name = "gateway_with_mock_mcp_cloud"
+
+
+@pytest.mark.engine("sglang")
+@pytest.mark.gpu(1)
+@pytest.mark.e2e
+@pytest.mark.model("openai/gpt-oss-20b")
+class TestImageGenerationGrpcSglang(_ImageGenerationAssertions):
+    """``image_generation`` tool against local SGLang + gpt-oss via harmony (R6.3).
+
+    Failures here indicate a genuine R6.3 integration gap; file as R6.6
+    follow-up rather than patching from this PR.
+    """
+
+    _fixture_name = "gateway_with_mock_mcp_grpc_sglang"
+
+
+@pytest.mark.engine("vllm")
+@pytest.mark.gpu(1)
+@pytest.mark.e2e
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
+class TestImageGenerationGrpcVllm(_ImageGenerationAssertions):
+    """``image_generation`` tool against local vLLM + Llama-3.1 via regular (R6.4).
+
+    Failures here indicate a genuine R6.4 integration gap; file as R6.7
+    follow-up rather than patching from this PR.
+    """
+
+    _fixture_name = "gateway_with_mock_mcp_grpc_vllm"

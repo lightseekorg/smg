@@ -1,29 +1,31 @@
 """Shared fixtures for the Responses API test suite.
 
-Hosts the ``gateway_with_mock_mcp`` fixture used by the image_generation tests
-(and, once the TODO stubs in ``infra/mock_mcp_server.py`` are uncommented, by
-the upcoming web_search / file_search / code_interpreter tests). The fixture
-writes a minimal MCP config file pointing at the in-process mock server and
-launches an OpenAI cloud gateway configured to route ``image_generation``
-built-in tool requests through it.
+Hosts the ``image_generation`` test fixtures for the three engine lanes:
+
+* ``gateway_with_mock_mcp_cloud`` — OpenAI cloud backend (R6.2).
+* ``gateway_with_mock_mcp_grpc_sglang`` — local SGLang + gpt-oss-20b via
+  harmony (R6.3).
+* ``gateway_with_mock_mcp_grpc_vllm`` — local vLLM + Llama-3.1-8B-Instruct
+  via regular (R6.4).
+
+Each fixture wires the gateway's MCP client to an in-process
+``MockMcpServer`` so the image-generation path is exercised deterministically
+and without external-service dependencies. Future R6.x PRs can copy the
+gRPC fixture pattern to add ``web_search`` / ``file_search`` /
+``code_interpreter`` tests once the corresponding tool stubs in
+``infra/mock_mcp_server.py`` are uncommented.
 
 Design notes
 ------------
 * The gateway CLI exposes ``--mcp-config-path`` (see
   ``bindings/python/src/smg/router_args.py``) which takes a path to a YAML
-  config deserialized into ``crates/mcp/src/core/config.rs::McpConfig``. That
-  config contains a list of servers, each with an optional ``builtin_type`` —
-  setting ``builtin_type: image_generation`` on a server makes the gateway
+  config deserialized into ``crates/mcp/src/core/config.rs::McpConfig``.
+  Setting ``builtin_type: image_generation`` on a server makes the gateway
   route every ``{"type": "image_generation"}`` tool request through it
   instead of passing the tool to the upstream model.
 * We connect with ``protocol: streamable`` which matches the ``FastMCP`` app
   produced by ``streamable_http_app()``. ``sse`` would also work but would
   require an extra event-stream hop per call.
-* We use the OpenAI cloud backend (``setup_backend == "openai"``) because
-  local-backend routing for ``image_generation`` requires real GPU workers
-  and a model that actually emits ``image_generation`` tool calls.
-  ``skip_for_runtime`` on ``sglang`` and ``vllm`` keeps the gRPC lanes off
-  until R6.3/R6.4 stabilise in CI.
 """
 
 from __future__ import annotations
@@ -111,61 +113,6 @@ def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # no
 
 
 # =============================================================================
-# Gateway fixtures
-# =============================================================================
-
-
-@pytest.fixture(scope="class")
-def gateway_with_mock_mcp(
-    mock_mcp_server: MockMcpServer,  # noqa: F811
-    mock_mcp_config_file: str,
-) -> Iterator[tuple]:
-    """Launch an OpenAI cloud gateway wired to the mock MCP server.
-
-    Returns ``(gateway, client, mock_mcp_server)``. The gateway is the
-    fully-booted ``Gateway`` object, the client is a vanilla ``openai.OpenAI``
-    pointed at it with the real ``OPENAI_API_KEY`` (so that function-calling
-    still works upstream), and the mock is passed through so tests can assert
-    on ``last_call_args`` / ``call_log`` without re-requesting the fixture.
-
-    The gateway is class-scoped to mirror ``setup_backend``; image_generation
-    tests run quickly but bootstrapping the cloud gateway (~1-2 s) is the
-    dominant cost, so a class-scoped reuse keeps the suite snappy.
-    """
-    api_key_env = "OPENAI_API_KEY"
-    if not os.environ.get(api_key_env):
-        pytest.skip(f"{api_key_env} not set — image_generation e2e needs OpenAI")
-
-    logger.info(
-        "Launching OpenAI cloud gateway with mock MCP config (url=%s, config=%s)",
-        mock_mcp_server.url,
-        mock_mcp_config_file,
-    )
-    gateway = launch_cloud_gateway(
-        "openai",
-        history_backend="memory",
-        extra_args=["--mcp-config-path", mock_mcp_config_file],
-    )
-
-    # Construct the client inside a try/except so a failure here does not
-    # leak the already-launched gateway. The outer ``finally`` handles the
-    # happy-path teardown after the test yields.
-    try:
-        client = openai.OpenAI(
-            base_url=f"{gateway.base_url}/v1",
-            api_key=os.environ[api_key_env],
-        )
-    except Exception:
-        gateway.shutdown()
-        raise
-
-    try:
-        yield gateway, client, mock_mcp_server
-    finally:
-        gateway.shutdown()
-
-
-# =============================================================================
 # Tool argument helpers
 # =============================================================================
 
@@ -183,3 +130,167 @@ def image_gen_tool_args() -> dict:
         "size": "1024x1024",
         "quality": "standard",
     }
+
+
+# =============================================================================
+# Cloud gateway fixture
+# =============================================================================
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_cloud(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file: str,
+) -> Iterator[tuple]:
+    """Launch an OpenAI cloud gateway wired to the mock MCP server.
+
+    Yields ``(gateway, client, mock_mcp_server, model)``. Skips when
+    ``OPENAI_API_KEY`` is absent.
+    """
+    api_key_env = "OPENAI_API_KEY"
+    if not os.environ.get(api_key_env):
+        pytest.skip(f"{api_key_env} not set — image_generation cloud lane needs OpenAI")
+
+    logger.info(
+        "Launching OpenAI cloud gateway with mock MCP config (url=%s, config=%s)",
+        mock_mcp_server.url,
+        mock_mcp_config_file,
+    )
+    gateway = launch_cloud_gateway(
+        "openai",
+        history_backend="memory",
+        extra_args=["--mcp-config-path", mock_mcp_config_file],
+    )
+
+    try:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=os.environ[api_key_env],
+        )
+    except Exception:
+        gateway.shutdown()
+        raise
+
+    # ``gpt-5-nano`` is the model configured for the ``openai`` cloud
+    # entry in ``e2e_test/infra/model_specs.py::THIRD_PARTY_MODELS``; keep
+    # the literal pinned in the fixture so ``_ImageGenerationAssertions``
+    # doesn't have to reach into infra.
+    try:
+        yield gateway, client, mock_mcp_server, "gpt-5-nano"
+    finally:
+        gateway.shutdown()
+
+
+# Backwards-compat alias for test code that uses the single-engine name.
+# The rewritten suite prefers the explicit ``_cloud`` / ``_grpc_*`` names
+# but this preserves anyone who imported ``gateway_with_mock_mcp`` before.
+gateway_with_mock_mcp = gateway_with_mock_mcp_cloud
+
+
+# =============================================================================
+# Local gRPC gateway fixtures (sglang + vllm)
+# =============================================================================
+
+
+def _start_local_grpc_gateway_with_mcp(
+    *,
+    engine: str,
+    model_id: str,
+    mcp_config_file: str,
+):
+    """Launch a local gRPC worker + gateway wired to the mock MCP server.
+
+    Returns ``(gateway, client, workers, model_path)``. Caller is
+    responsible for teardown (``gateway.shutdown()`` + ``stop_workers``).
+    Skips (not fails) when worker startup fails — CI runs without GPUs
+    would otherwise poison every engine-parametrized suite.
+    """
+    from infra import ConnectionMode, Gateway
+    from infra.model_specs import get_model_spec
+    from infra.worker import start_workers
+
+    try:
+        workers = start_workers(model_id, engine, mode=ConnectionMode.GRPC, count=1)
+    except Exception as e:
+        pytest.skip(f"gRPC {engine} worker for {model_id} not available: {e}")
+
+    worker = workers[0]
+    model_path = get_model_spec(model_id)["model"]
+
+    gateway = Gateway()
+    try:
+        gateway.start(
+            worker_urls=[worker.base_url],
+            model_path=model_path,
+            extra_args=[
+                "--mcp-config-path",
+                mcp_config_file,
+                "--history-backend",
+                "memory",
+            ],
+        )
+    except Exception:
+        from infra.worker import stop_workers
+
+        stop_workers(workers)
+        raise
+
+    try:
+        client = openai.OpenAI(base_url=f"{gateway.base_url}/v1", api_key="not-used")
+    except Exception:
+        from infra.worker import stop_workers
+
+        gateway.shutdown()
+        stop_workers(workers)
+        raise
+
+    return gateway, client, workers, model_path
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_grpc_sglang(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file: str,
+) -> Iterator[tuple]:
+    """Launch a local SGLang gRPC gateway wired to the mock MCP server.
+
+    Uses the gpt-oss-20b model, which flows through the harmony path
+    (R6.3). Skips when the worker can't start (no GPU available, missing
+    model weights, etc.) rather than hard-failing.
+    """
+    gateway, client, workers, model_path = _start_local_grpc_gateway_with_mcp(
+        engine="sglang",
+        model_id="openai/gpt-oss-20b",
+        mcp_config_file=mock_mcp_config_file,
+    )
+    try:
+        yield gateway, client, mock_mcp_server, model_path
+    finally:
+        from infra.worker import stop_workers
+
+        gateway.shutdown()
+        stop_workers(workers)
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_grpc_vllm(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file: str,
+) -> Iterator[tuple]:
+    """Launch a local vLLM gRPC gateway wired to the mock MCP server.
+
+    Uses Llama-3.1-8B-Instruct, which flows through the regular (non-
+    harmony) path (R6.4). Skips when the worker can't start.
+    """
+    gateway, client, workers, model_path = _start_local_grpc_gateway_with_mcp(
+        engine="vllm",
+        model_id="meta-llama/Llama-3.1-8B-Instruct",
+        mcp_config_file=mock_mcp_config_file,
+    )
+    try:
+        yield gateway, client, mock_mcp_server, model_path
+    finally:
+        from infra.worker import stop_workers
+
+        gateway.shutdown()
+        stop_workers(workers)
