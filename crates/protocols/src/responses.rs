@@ -428,6 +428,17 @@ pub enum ResponseTool {
     /// `Shell { type: "shell", environment? }`.
     #[serde(rename = "shell")]
     Shell(ShellTool),
+
+    /// Built-in `apply_patch` tool — `{ type: "apply_patch" }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools, L478): `ApplyPatch
+    /// { type: "apply_patch" }`. Unit variant with no payload — the model is
+    /// simply told the apply_patch surface is available and subsequently emits
+    /// `apply_patch_call` items carrying file-edit operations (see
+    /// [`ResponseInputOutputItem::ApplyPatchCall`]). Pairs with
+    /// [`ResponsesToolChoice::ApplyPatch`] when callers want to force usage.
+    #[serde(rename = "apply_patch")]
+    ApplyPatch,
 }
 
 /// Payload carried by [`ResponseTool::Namespace`].
@@ -981,6 +992,66 @@ pub struct ShellExit {
     /// Process exit code. Signed to preserve negative error codes on
     /// platforms that report them.
     pub exit_code: i32,
+}
+
+/// File-edit operation payload carried by
+/// [`ResponseInputOutputItem::ApplyPatchCall`] /
+/// [`ResponseOutputItem::ApplyPatchCall`].
+///
+/// Spec (openai-responses-api-spec.md §ApplyPatchCall L240-L246): the
+/// `operation` field is a `type`-tagged union of three shapes —
+/// `CreateFile { diff, path, type: "create_file" }`,
+/// `DeleteFile { path, type: "delete_file" }`, and
+/// `UpdateFile { diff, path, type: "update_file" }`. `DeleteFile` carries no
+/// diff because the whole file is removed; the other two carry a unified
+/// diff payload describing the edit.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+// Variant names intentionally mirror the spec's `*_file` tag set; the shared
+// `File` postfix tracks the spec verbatim and keeps the type discriminator
+// symmetric with the JSON wire shape.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names mirror spec `create_file` / `delete_file` / `update_file` tags by design"
+)]
+pub enum ApplyPatchOperation {
+    /// `{ type: "create_file", diff, path }` — create a new file whose
+    /// contents are described by `diff`.
+    CreateFile { diff: String, path: String },
+    /// `{ type: "delete_file", path }` — remove an existing file.
+    DeleteFile { path: String },
+    /// `{ type: "update_file", diff, path }` — apply a unified diff to an
+    /// existing file at `path`.
+    UpdateFile { diff: String, path: String },
+}
+
+/// Status for a [`ResponseInputOutputItem::ApplyPatchCall`] /
+/// [`ResponseOutputItem::ApplyPatchCall`] item.
+///
+/// Spec (openai-responses-api-spec.md §ApplyPatchCall L245):
+/// `status: "in_progress" | "completed"`. Distinct from
+/// [`ApplyPatchCallOutputStatus`] which adds `"failed"` for the output item.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPatchCallStatus {
+    InProgress,
+    Completed,
+}
+
+/// Status for a [`ResponseInputOutputItem::ApplyPatchCallOutput`] /
+/// [`ResponseOutputItem::ApplyPatchCallOutput`] item.
+///
+/// Spec (openai-responses-api-spec.md §ApplyPatchCallOutput L249):
+/// `status: "completed" | "failed"`. The output-side status intentionally
+/// drops `"in_progress"` because the output only materialises once the
+/// apply_patch attempt has terminated — either the edit applied cleanly or
+/// it failed — so an in-progress output would be spec-invalid.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPatchCallOutputStatus {
+    Completed,
+    Failed,
 }
 
 #[serde_with::skip_serializing_none]
@@ -1632,6 +1703,38 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_by: Option<String>,
     },
+    /// `type: "apply_patch_call"` — model-issued file-edit request. Spec
+    /// (openai-responses-api-spec.md §ApplyPatchCall L240-L246):
+    /// `{ call_id, operation, status, type, id }`. `id` is `Option<String>`
+    /// so newly-minted client-side calls can omit it; it is always present on
+    /// items round-tripped from a previous response. The `operation` union is
+    /// `CreateFile | DeleteFile | UpdateFile` per
+    /// [`ApplyPatchOperation`]; the client owns execution (apply the diff on
+    /// disk) and replies with a matching [`Self::ApplyPatchCallOutput`].
+    #[serde(rename = "apply_patch_call")]
+    ApplyPatchCall {
+        call_id: String,
+        operation: ApplyPatchOperation,
+        status: ApplyPatchCallStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// `type: "apply_patch_call_output"` — client's response to an
+    /// `apply_patch_call`. Spec (openai-responses-api-spec.md
+    /// §ApplyPatchCallOutput L248-L251): `{ call_id, status, type, id,
+    /// output }` where `output` is optional log text. `id` is
+    /// `Option<String>` for the same reason as `ApplyPatchCall.id` above;
+    /// `output` uses `skip_serializing_if` so a no-log success round-trips
+    /// without emitting an explicit `null`.
+    #[serde(rename = "apply_patch_call_output")]
+    ApplyPatchCallOutput {
+        call_id: String,
+        status: ApplyPatchCallOutputStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -2031,6 +2134,31 @@ pub enum ResponseOutputItem {
         status: ShellCallStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_by: Option<String>,
+    },
+    /// `type: "apply_patch_call"` — server-emitted mirror of the input
+    /// variant. Spec (openai-responses-api-spec.md §ApplyPatchCall L240-L246):
+    /// `{ call_id, operation, status, type, id }`. `id` is required on the
+    /// output wire because the server always assigns one when emitting the
+    /// apply_patch call item.
+    #[serde(rename = "apply_patch_call")]
+    ApplyPatchCall {
+        id: String,
+        call_id: String,
+        operation: ApplyPatchOperation,
+        status: ApplyPatchCallStatus,
+    },
+    /// `type: "apply_patch_call_output"` — server-emitted mirror of the
+    /// input variant. Spec (openai-responses-api-spec.md
+    /// §ApplyPatchCallOutput L248-L251): `{ call_id, status, type, id,
+    /// output }`. `id` is required on the output wire; `output` is optional
+    /// log text surfaced by the upstream apply_patch executor.
+    #[serde(rename = "apply_patch_call_output")]
+    ApplyPatchCallOutput {
+        id: String,
+        call_id: String,
+        status: ApplyPatchCallOutputStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
 }
 
@@ -2709,7 +2837,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::CustomToolCallOutput { .. }
                         | ResponseInputOutputItem::ShellCall { .. }
                         | ResponseInputOutputItem::ShellCallOutput { .. }
-                        | ResponseInputOutputItem::ItemReference { .. } => {}
+                        | ResponseInputOutputItem::ItemReference { .. }
+                        | ResponseInputOutputItem::ApplyPatchCall { .. }
+                        | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
                     }
                 }
 
@@ -3019,6 +3149,19 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // I2: schema-only; backend resolution (history lookup +
         // substitution) is deferred to a future R task.
         ResponseInputOutputItem::ItemReference { .. } => {}
+        // ApplyPatchCall is model-generated and echoed back on multi-turn
+        // replay; matches the FunctionToolCall / CustomToolCall arms with no
+        // diff/path validation — the operation payload is structurally
+        // enforced by the `ApplyPatchOperation` enum, and accepting empty
+        // diffs for `create_file` / `update_file` preserves round-trip
+        // fidelity with items emitted by upstream providers.
+        ResponseInputOutputItem::ApplyPatchCall { .. } => {}
+        // ApplyPatchCallOutput.output is optional log text per spec
+        // (openai-responses-api-spec.md §ApplyPatchCallOutput L251); an
+        // absent or empty log is spec-legal (a clean `completed` with no
+        // output, or a `failed` where the executor had nothing to log) so
+        // no emptiness check applies here.
+        ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {}
     }
     Ok(())
 }

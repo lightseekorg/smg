@@ -444,6 +444,7 @@ impl HarmonyBuilder {
                             ResponseTool::Custom(_) => "custom",
                             ResponseTool::Namespace(_) => "namespace",
                             ResponseTool::Shell(_) => "shell",
+                            ResponseTool::ApplyPatch => "apply_patch",
                         })
                         .collect()
                 })
@@ -764,6 +765,15 @@ impl HarmonyBuilder {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
                     "Shell tool item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
+
+            ResponseInputOutputItem::ApplyPatchCall { .. }
+            | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "apply_patch item reached Harmony conversion"
                 );
                 Err("Unsupported input item type".to_string())
             }

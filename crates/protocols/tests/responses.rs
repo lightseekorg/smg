@@ -2780,6 +2780,77 @@ fn item_reference_input_item_rejects_unknown_type_tag() {
     );
 }
 
+// ============================================================================
+// T7 — apply_patch tool + call/output items
+// ============================================================================
+
+#[test]
+fn test_apply_patch_tool_round_trip() {
+    // Spec (openai-responses-api-spec.md §tools L478):
+    // `ApplyPatch { type: "apply_patch" }`. Unit variant with no payload.
+    let payload = json!({"type": "apply_patch"});
+
+    let tool: ResponseTool =
+        serde_json::from_value(payload.clone()).expect("apply_patch tool should deserialize");
+    assert!(matches!(tool, ResponseTool::ApplyPatch));
+
+    let serialized = serde_json::to_value(&tool).expect("apply_patch tool should serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_operation_create_file_round_trip() {
+    // Spec (openai-responses-api-spec.md §ApplyPatchCall L242):
+    // `CreateFile { diff, path, type: "create_file" }`.
+    let payload = json!({
+        "type": "create_file",
+        "diff": "+ hello world\n",
+        "path": "src/greeting.rs",
+    });
+
+    let op: ApplyPatchOperation =
+        serde_json::from_value(payload.clone()).expect("create_file should deserialize");
+    match &op {
+        ApplyPatchOperation::CreateFile { diff, path } => {
+            assert_eq!(diff, "+ hello world\n");
+            assert_eq!(path, "src/greeting.rs");
+        }
+        other => panic!("expected CreateFile, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&op).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_operation_delete_file_round_trip() {
+    // Spec (openai-responses-api-spec.md §ApplyPatchCall L243):
+    // `DeleteFile { path, type: "delete_file" }`. No `diff` — whole file is
+    // removed, so the payload must deserialize cleanly without one and
+    // serialize back without a spurious diff field.
+    let payload = json!({
+        "type": "delete_file",
+        "path": "src/obsolete.rs",
+    });
+
+    let op: ApplyPatchOperation =
+        serde_json::from_value(payload.clone()).expect("delete_file should deserialize");
+    match &op {
+        ApplyPatchOperation::DeleteFile { path } => {
+            assert_eq!(path, "src/obsolete.rs");
+        }
+        other => panic!("expected DeleteFile, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&op).expect("serialize");
+    assert_eq!(serialized, payload);
+    // Ensure no stray `diff` key is emitted for delete_file operations.
+    assert!(
+        serialized.get("diff").is_none(),
+        "delete_file must not emit a diff field"
+    );
+}
+
 #[test]
 fn simple_input_message_with_id_does_not_match_item_reference() {
     // Regression: `ItemReference` is declared after `SimpleInputMessage` in
@@ -2802,4 +2873,265 @@ fn simple_input_message_with_id_does_not_match_item_reference() {
         }
         other => panic!("expected SimpleInputMessage, got {other:?}"),
     }
+}
+
+#[test]
+fn test_apply_patch_operation_update_file_round_trip() {
+    // Spec (openai-responses-api-spec.md §ApplyPatchCall L244):
+    // `UpdateFile { diff, path, type: "update_file" }`.
+    let payload = json!({
+        "type": "update_file",
+        "diff": "@@ -1,1 +1,1 @@\n-old\n+new\n",
+        "path": "src/main.rs",
+    });
+
+    let op: ApplyPatchOperation =
+        serde_json::from_value(payload.clone()).expect("update_file should deserialize");
+    match &op {
+        ApplyPatchOperation::UpdateFile { diff, path } => {
+            assert_eq!(diff, "@@ -1,1 +1,1 @@\n-old\n+new\n");
+            assert_eq!(path, "src/main.rs");
+        }
+        other => panic!("expected UpdateFile, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&op).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_call_input_item_round_trip() {
+    // Spec (openai-responses-api-spec.md §ApplyPatchCall L240-L246):
+    // `{ call_id, operation, status, type, id }` with
+    // `status: "in_progress" | "completed"` and `type: "apply_patch_call"`.
+    let payload = json!({
+        "type": "apply_patch_call",
+        "call_id": "call_patch_001",
+        "operation": {
+            "type": "update_file",
+            "diff": "@@ -1 +1 @@\n-a\n+b\n",
+            "path": "src/lib.rs",
+        },
+        "status": "completed",
+        "id": "apc_01",
+    });
+
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("apply_patch_call should deserialize");
+    match &item {
+        ResponseInputOutputItem::ApplyPatchCall {
+            call_id,
+            operation,
+            status,
+            id,
+        } => {
+            assert_eq!(call_id, "call_patch_001");
+            assert_eq!(*status, ApplyPatchCallStatus::Completed);
+            assert_eq!(id.as_deref(), Some("apc_01"));
+            match operation {
+                ApplyPatchOperation::UpdateFile { diff, path } => {
+                    assert_eq!(diff, "@@ -1 +1 @@\n-a\n+b\n");
+                    assert_eq!(path, "src/lib.rs");
+                }
+                other => panic!("expected UpdateFile operation, got {other:?}"),
+            }
+        }
+        other => panic!("expected ApplyPatchCall, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_call_input_item_in_progress_status_and_omitted_id() {
+    // Spec (L245): status `"in_progress"` is also legal. `id` is
+    // `Option<String>` on the input side, so a newly-minted client-side call
+    // may omit it; `skip_serializing_if` keeps it off the wire.
+    let payload = json!({
+        "type": "apply_patch_call",
+        "call_id": "call_patch_002",
+        "operation": {"type": "delete_file", "path": "old.rs"},
+        "status": "in_progress",
+    });
+
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("apply_patch_call should deserialize");
+    match &item {
+        ResponseInputOutputItem::ApplyPatchCall {
+            call_id,
+            operation,
+            status,
+            id,
+        } => {
+            assert_eq!(call_id, "call_patch_002");
+            assert_eq!(*status, ApplyPatchCallStatus::InProgress);
+            assert!(id.is_none(), "id should be absent when omitted on the wire");
+            assert!(matches!(operation, ApplyPatchOperation::DeleteFile { .. }));
+        }
+        other => panic!("expected ApplyPatchCall, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+    assert!(
+        serialized.get("id").is_none(),
+        "omitted id must not be serialized back as null",
+    );
+}
+
+#[test]
+fn test_apply_patch_call_output_input_item_completed_round_trip() {
+    // Spec (openai-responses-api-spec.md §ApplyPatchCallOutput L248-L251):
+    // `{ call_id, status, type, id, output }` with
+    // `status: "completed" | "failed"` and `output: optional string`.
+    let payload = json!({
+        "type": "apply_patch_call_output",
+        "call_id": "call_patch_001",
+        "status": "completed",
+        "id": "apco_01",
+        "output": "1 file updated",
+    });
+
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("apply_patch_call_output should deserialize");
+    match &item {
+        ResponseInputOutputItem::ApplyPatchCallOutput {
+            call_id,
+            status,
+            id,
+            output,
+        } => {
+            assert_eq!(call_id, "call_patch_001");
+            assert_eq!(*status, ApplyPatchCallOutputStatus::Completed);
+            assert_eq!(id.as_deref(), Some("apco_01"));
+            assert_eq!(output.as_deref(), Some("1 file updated"));
+        }
+        other => panic!("expected ApplyPatchCallOutput, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_call_output_input_item_failed_without_output() {
+    // Spec (L251): `output` is optional — a `failed` output with no log text
+    // must round-trip without emitting an explicit `null`.
+    let payload = json!({
+        "type": "apply_patch_call_output",
+        "call_id": "call_patch_003",
+        "status": "failed",
+    });
+
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("apply_patch_call_output without output should deserialize");
+    match &item {
+        ResponseInputOutputItem::ApplyPatchCallOutput {
+            call_id,
+            status,
+            id,
+            output,
+        } => {
+            assert_eq!(call_id, "call_patch_003");
+            assert_eq!(*status, ApplyPatchCallOutputStatus::Failed);
+            assert!(id.is_none());
+            assert!(output.is_none());
+        }
+        other => panic!("expected ApplyPatchCallOutput, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+    assert!(serialized.get("id").is_none());
+    assert!(serialized.get("output").is_none());
+}
+
+#[test]
+fn test_apply_patch_call_output_item_round_trip() {
+    // Spec: output-side mirror of the input variant. `id` is always populated
+    // by the server on emit, so it appears unconditionally on the wire.
+    let payload = json!({
+        "type": "apply_patch_call",
+        "id": "apc_out_01",
+        "call_id": "call_patch_004",
+        "operation": {
+            "type": "create_file",
+            "diff": "+new line\n",
+            "path": "src/new.rs",
+        },
+        "status": "completed",
+    });
+
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("apply_patch_call output item should deserialize");
+    match &item {
+        ResponseOutputItem::ApplyPatchCall {
+            id,
+            call_id,
+            operation,
+            status,
+        } => {
+            assert_eq!(id, "apc_out_01");
+            assert_eq!(call_id, "call_patch_004");
+            assert_eq!(*status, ApplyPatchCallStatus::Completed);
+            assert!(matches!(operation, ApplyPatchOperation::CreateFile { .. }));
+        }
+        other => panic!("expected ResponseOutputItem::ApplyPatchCall, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_call_output_response_item_round_trip() {
+    // Spec: output-side mirror of `ApplyPatchCallOutput`. `id` is required on
+    // the output wire.
+    let payload = json!({
+        "type": "apply_patch_call_output",
+        "id": "apco_out_01",
+        "call_id": "call_patch_005",
+        "status": "failed",
+        "output": "merge conflict at src/lib.rs:42",
+    });
+
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("apply_patch_call_output output item should deserialize");
+    match &item {
+        ResponseOutputItem::ApplyPatchCallOutput {
+            id,
+            call_id,
+            status,
+            output,
+        } => {
+            assert_eq!(id, "apco_out_01");
+            assert_eq!(call_id, "call_patch_005");
+            assert_eq!(*status, ApplyPatchCallOutputStatus::Failed);
+            assert_eq!(output.as_deref(), Some("merge conflict at src/lib.rs:42"));
+        }
+        other => panic!("expected ResponseOutputItem::ApplyPatchCallOutput, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(serialized, payload);
+}
+
+#[test]
+fn test_apply_patch_tool_choice_round_trip() {
+    // Spec (openai-responses-api-spec.md §tool_choice L424):
+    // `ToolChoiceApplyPatch { type: "apply_patch" }`. Pairs with the
+    // `ResponseTool::ApplyPatch` declaration so callers can force usage.
+    let payload = json!({"type": "apply_patch"});
+    let choice: ResponsesToolChoice = serde_json::from_value(payload.clone())
+        .expect("apply_patch tool_choice should deserialize");
+    match &choice {
+        ResponsesToolChoice::ApplyPatch { tool_type } => {
+            assert_eq!(*tool_type, ApplyPatchToolChoiceTag::ApplyPatch);
+        }
+        other => panic!("expected ResponsesToolChoice::ApplyPatch, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&choice).expect("serialize");
+    assert_eq!(serialized, payload);
 }

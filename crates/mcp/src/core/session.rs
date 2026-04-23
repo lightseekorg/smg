@@ -563,6 +563,8 @@ impl<'a> McpToolSession<'a> {
             | ResponseOutputItem::ComputerCallOutput { .. }
             | ResponseOutputItem::ShellCall { .. }
             | ResponseOutputItem::ShellCallOutput { .. }
+            | ResponseOutputItem::ApplyPatchCall { .. }
+            | ResponseOutputItem::ApplyPatchCallOutput { .. }
             | ResponseOutputItem::Message { .. }
             | ResponseOutputItem::Reasoning { .. }
             | ResponseOutputItem::Compaction { .. } => true,
