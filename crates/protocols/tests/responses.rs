@@ -3574,6 +3574,31 @@ fn test_mcp_tool_allowed_tools_filter_read_only_round_trip() {
     assert_eq!(serialized["allowed_tools"], json!({ "read_only": true }));
 }
 
+/// Typoed keys on the `McpToolFilter` branch fail fast rather than silently
+/// collapsing to an empty filter (which would broaden tool exposure downstream).
+///
+/// `McpAllowedTools` is `#[serde(untagged)]`, so a typoed object fails the
+/// `Filter` arm (via `deny_unknown_fields`) and the `List` arm (wrong type),
+/// surfacing serde's generic "did not match any variant" rejection. The
+/// important guarantee is that the payload is rejected rather than silently
+/// deserialized into an empty filter.
+#[test]
+fn test_mcp_tool_allowed_tools_filter_rejects_unknown_fields() {
+    let err = serde_json::from_value::<McpTool>(json!({
+        "server_label": "deepwiki",
+        "allowed_tools": { "tool_namse": ["x"] }, // typo
+    }))
+    .expect_err("typoed filter key must not deserialize");
+    // Regression guard: under the pre-T11 `Option<Vec<String>>` wire shape the
+    // same payload was also rejected (wrong type). The union migration MUST
+    // preserve that rejection — empty filters would broaden MCP tool exposure.
+    let msg = err.to_string();
+    assert!(
+        !msg.is_empty(),
+        "serde should surface some rejection message, got empty string",
+    );
+}
+
 /// `allowed_tools` object filter with only `tool_names` set round-trips into
 /// `McpAllowedTools::Filter`.
 #[test]

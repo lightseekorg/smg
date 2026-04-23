@@ -1119,8 +1119,15 @@ pub enum McpAllowedTools {
 /// Object filter selecting MCP tools by read-only flag and/or explicit names.
 ///
 /// Spec (openai-responses-api-spec.md L442): `McpToolFilter { read_only?, tool_names? }`.
+///
+/// `deny_unknown_fields` is applied so typoed keys (e.g. `"tool_namse"`) fail
+/// fast at deserialize time rather than silently collapsing to an empty filter
+/// — an empty filter would be projected by the router to "no name constraint",
+/// unexpectedly broadening MCP tool exposure for payloads that meant to scope
+/// it down.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct McpToolFilter {
     /// Match tools flagged read-only via MCP `readOnlyHint` annotation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
