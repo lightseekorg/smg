@@ -279,7 +279,20 @@ pub async fn ensure_request_mcp_client(
                 url: mcp.server_url.clone(),
                 authorization: mcp.authorization.clone(),
                 headers: mcp.headers.clone().unwrap_or_default(),
-                allowed_tools: mcp.allowed_tools.clone(),
+                // T11: `McpTool.allowed_tools` is now an untagged union of
+                // `List(Vec<String>)` or `Filter { read_only?, tool_names? }`.
+                // `McpServerInput.allowed_tools` is still a flat name list, so
+                // reuse the pre-T11 semantics: project the `List` form and the
+                // `Filter.tool_names` form into the name list; the `read_only`-
+                // only filter form (no explicit names) maps to `None` (no name
+                // constraint), matching the prior default behavior for callers
+                // that did not specify `allowed_tools`.
+                allowed_tools: mcp.allowed_tools.as_ref().and_then(|at| match at {
+                    openai_protocol::responses::McpAllowedTools::List(names) => Some(names.clone()),
+                    openai_protocol::responses::McpAllowedTools::Filter(filter) => {
+                        filter.tool_names.clone()
+                    }
+                }),
             }),
             _ => None,
         })
@@ -400,6 +413,8 @@ mod tests {
             server_description: None,
             require_approval: None,
             allowed_tools: None,
+            connector_id: None,
+            defer_loading: None,
         })];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));

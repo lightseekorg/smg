@@ -3508,3 +3508,336 @@ fn local_shell_output_item_variants_round_trip_spec_shape() {
         output_payload,
     );
 }
+
+// ---------------------------------------------------------------------------
+// T11: hosted-MCP protocol-surface coverage
+//
+// Spec refs:
+//   .claude/_audit/openai-responses-api-spec.md L441-445 (McpTool: allowed_tools
+//   union, connector_id, defer_loading), L253-255 (McpListTools), L264-266
+//   (McpCall). SDK reference: openai==2.8.1 `types/responses/tool.py::Mcp`
+//   (connector_id literal set, allowed_tools union) and
+//   `types/responses/response_input_item.py::{McpCall, McpListTools}`.
+// ---------------------------------------------------------------------------
+
+/// Backward compat: pre-T11 `allowed_tools: ["foo","bar"]` wire shape still
+/// deserializes via the untagged `McpAllowedTools::List` variant. Verifies the
+/// Postel-style union migration is wire-compatible with existing callers.
+#[test]
+fn test_mcp_tool_allowed_tools_list_backward_compat() {
+    let tool: McpTool = serde_json::from_value(json!({
+        "server_label": "deepwiki",
+        "allowed_tools": ["ask_question", "read_wiki_structure"]
+    }))
+    .expect("legacy list form should deserialize into McpAllowedTools::List");
+
+    match &tool.allowed_tools {
+        Some(McpAllowedTools::List(names)) => {
+            assert_eq!(
+                names,
+                &vec![
+                    "ask_question".to_string(),
+                    "read_wiki_structure".to_string()
+                ]
+            );
+        }
+        other => panic!("expected McpAllowedTools::List, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("serialize");
+    assert_eq!(
+        serialized["allowed_tools"],
+        json!(["ask_question", "read_wiki_structure"])
+    );
+}
+
+/// `allowed_tools` object filter with only `read_only` set round-trips into
+/// `McpAllowedTools::Filter`.
+#[test]
+fn test_mcp_tool_allowed_tools_filter_read_only_round_trip() {
+    let payload = json!({
+        "server_label": "deepwiki",
+        "allowed_tools": { "read_only": true }
+    });
+    let tool: McpTool = serde_json::from_value(payload.clone())
+        .expect("filter form with read_only should deserialize");
+
+    match &tool.allowed_tools {
+        Some(McpAllowedTools::Filter(filter)) => {
+            assert_eq!(filter.read_only, Some(true));
+            assert_eq!(filter.tool_names, None);
+        }
+        other => panic!("expected McpAllowedTools::Filter, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("serialize");
+    assert_eq!(serialized["allowed_tools"], json!({ "read_only": true }));
+}
+
+/// `allowed_tools` object filter with only `tool_names` set round-trips into
+/// `McpAllowedTools::Filter`.
+#[test]
+fn test_mcp_tool_allowed_tools_filter_tool_names_round_trip() {
+    let payload = json!({
+        "server_label": "deepwiki",
+        "allowed_tools": { "tool_names": ["a", "b"] }
+    });
+    let tool: McpTool = serde_json::from_value(payload.clone())
+        .expect("filter form with tool_names should deserialize");
+
+    match &tool.allowed_tools {
+        Some(McpAllowedTools::Filter(filter)) => {
+            assert_eq!(filter.read_only, None);
+            assert_eq!(
+                filter.tool_names.as_deref(),
+                Some(["a".to_string(), "b".to_string()].as_slice())
+            );
+        }
+        other => panic!("expected McpAllowedTools::Filter, got {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(&tool).expect("serialize");
+    assert_eq!(
+        serialized["allowed_tools"],
+        json!({ "tool_names": ["a", "b"] })
+    );
+}
+
+/// `connector_id` deserializes into the [`McpConnectorId`] enum; all eight spec
+/// literal variants map correctly and round-trip back to the same wire string.
+#[test]
+fn test_mcp_tool_connector_id_round_trip() {
+    // Map wire value -> enum variant for every connector in SDK 2.8.1
+    // `types/responses/tool.py::Mcp.connector_id`.
+    let cases: &[(&str, McpConnectorId)] = &[
+        ("connector_dropbox", McpConnectorId::Dropbox),
+        ("connector_gmail", McpConnectorId::Gmail),
+        ("connector_googlecalendar", McpConnectorId::GoogleCalendar),
+        ("connector_googledrive", McpConnectorId::GoogleDrive),
+        ("connector_microsoftteams", McpConnectorId::MicrosoftTeams),
+        ("connector_outlookcalendar", McpConnectorId::OutlookCalendar),
+        ("connector_outlookemail", McpConnectorId::OutlookEmail),
+        ("connector_sharepoint", McpConnectorId::SharePoint),
+    ];
+
+    for (wire, expected) in cases {
+        let tool: McpTool = serde_json::from_value(json!({
+            "server_label": "ctr",
+            "connector_id": wire,
+        }))
+        .unwrap_or_else(|e| panic!("connector_id={wire} should deserialize: {e}"));
+        assert_eq!(tool.connector_id, Some(*expected), "connector_id={wire}");
+
+        let serialized = serde_json::to_value(&tool).expect("serialize");
+        assert_eq!(serialized["connector_id"], json!(wire));
+    }
+}
+
+/// `defer_loading` optional bool round-trips; unknown `connector_id` values are
+/// rejected by the enum parser (no silent `Unknown` catch-all).
+#[test]
+fn test_mcp_tool_defer_loading_round_trip_and_unknown_connector_rejected() {
+    let tool: McpTool = serde_json::from_value(json!({
+        "server_label": "deepwiki",
+        "defer_loading": true,
+    }))
+    .expect("defer_loading should deserialize");
+    assert_eq!(tool.defer_loading, Some(true));
+    let serialized = serde_json::to_value(&tool).expect("serialize");
+    assert_eq!(serialized["defer_loading"], json!(true));
+
+    // Unknown connector_id must fail-fast (no Unknown silent fallback).
+    let err = serde_json::from_value::<McpTool>(json!({
+        "server_label": "deepwiki",
+        "connector_id": "connector_totally_made_up",
+    }))
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("connector_"),
+        "expected connector enum error, got: {msg}"
+    );
+}
+
+/// Legacy McpTool payloads (no `connector_id`, `defer_loading`, or
+/// `allowed_tools`) still deserialize cleanly with all new fields as `None`.
+#[test]
+fn test_mcp_tool_legacy_payload_still_deserializes() {
+    let tool: McpTool = serde_json::from_value(json!({
+        "server_label": "deepwiki",
+        "server_url": "https://mcp.deepwiki.example",
+    }))
+    .expect("legacy payload should deserialize");
+    assert_eq!(tool.allowed_tools, None);
+    assert_eq!(tool.connector_id, None);
+    assert_eq!(tool.defer_loading, None);
+
+    // Serialization should not emit the absent optional fields.
+    let serialized = serde_json::to_value(&tool).expect("serialize");
+    assert!(serialized.get("allowed_tools").is_none());
+    assert!(serialized.get("connector_id").is_none());
+    assert!(serialized.get("defer_loading").is_none());
+}
+
+/// Input-item `mcp_call` minimal payload (required-only) round-trips cleanly.
+/// Required fields per SDK 2.8.1 `response_input_item.py::McpCall`: `id`,
+/// `arguments`, `name`, `server_label`, `type`.
+#[test]
+fn test_mcp_call_input_item_minimal_round_trip() {
+    let payload = json!({
+        "type": "mcp_call",
+        "id": "mcp_call_1",
+        "arguments": "{\"query\":\"hello\"}",
+        "name": "ask_question",
+        "server_label": "deepwiki",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("mcp_call minimal input item should deserialize");
+
+    match &item {
+        ResponseInputOutputItem::McpCall {
+            id,
+            arguments,
+            name,
+            server_label,
+            approval_request_id,
+            error,
+            output,
+            status,
+        } => {
+            assert_eq!(id, "mcp_call_1");
+            assert_eq!(arguments, "{\"query\":\"hello\"}");
+            assert_eq!(name, "ask_question");
+            assert_eq!(server_label, "deepwiki");
+            assert_eq!(approval_request_id, &None);
+            assert_eq!(error, &None);
+            assert_eq!(output, &None);
+            assert_eq!(status, &None);
+        }
+        other => panic!("expected McpCall, got {other:?}"),
+    }
+
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// Input-item `mcp_call` full payload including all optional fields round-trips
+/// byte-for-byte.
+#[test]
+fn test_mcp_call_input_item_full_round_trip() {
+    let payload = json!({
+        "type": "mcp_call",
+        "id": "mcp_call_2",
+        "arguments": "{\"query\":\"hello\"}",
+        "name": "ask_question",
+        "server_label": "deepwiki",
+        "approval_request_id": "apr_1",
+        "error": null,
+        "output": "{\"answer\":\"42\"}",
+        "status": "completed",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("mcp_call full input item should deserialize");
+
+    match &item {
+        ResponseInputOutputItem::McpCall {
+            approval_request_id,
+            output,
+            status,
+            ..
+        } => {
+            assert_eq!(approval_request_id.as_deref(), Some("apr_1"));
+            assert_eq!(output.as_deref(), Some("{\"answer\":\"42\"}"));
+            assert_eq!(status.as_deref(), Some("completed"));
+        }
+        other => panic!("expected McpCall, got {other:?}"),
+    }
+
+    // The `error: null` field skips serializing, so compare against the
+    // absent-error shape on re-serialization.
+    let expected_serialized = json!({
+        "type": "mcp_call",
+        "id": "mcp_call_2",
+        "arguments": "{\"query\":\"hello\"}",
+        "name": "ask_question",
+        "server_label": "deepwiki",
+        "approval_request_id": "apr_1",
+        "output": "{\"answer\":\"42\"}",
+        "status": "completed",
+    });
+    assert_eq!(
+        serde_json::to_value(&item).expect("serialize"),
+        expected_serialized
+    );
+}
+
+/// Input-item `mcp_list_tools` round-trips with a non-empty `tools` array; the
+/// optional `error` field is omitted on serialize when absent.
+#[test]
+fn test_mcp_list_tools_input_item_round_trip() {
+    let payload = json!({
+        "type": "mcp_list_tools",
+        "id": "mcplist_1",
+        "server_label": "deepwiki",
+        "tools": [
+            {
+                "name": "ask_question",
+                "description": "Ask the wiki a question",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "read_wiki_structure",
+                "input_schema": {"type": "object"},
+            }
+        ],
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("mcp_list_tools input item should deserialize");
+
+    match &item {
+        ResponseInputOutputItem::McpListTools {
+            id,
+            server_label,
+            tools,
+            error,
+        } => {
+            assert_eq!(id, "mcplist_1");
+            assert_eq!(server_label, "deepwiki");
+            assert_eq!(tools.len(), 2);
+            assert_eq!(tools[0].name, "ask_question");
+            assert_eq!(
+                tools[0].description.as_deref(),
+                Some("Ask the wiki a question")
+            );
+            assert_eq!(tools[1].name, "read_wiki_structure");
+            assert_eq!(tools[1].description, None);
+            assert_eq!(error, &None);
+        }
+        other => panic!("expected McpListTools, got {other:?}"),
+    }
+
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// Input-item `mcp_list_tools` with a populated `error` field round-trips.
+#[test]
+fn test_mcp_list_tools_input_item_with_error_round_trip() {
+    let payload = json!({
+        "type": "mcp_list_tools",
+        "id": "mcplist_2",
+        "server_label": "deepwiki",
+        "tools": [],
+        "error": "server unreachable",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("mcp_list_tools with error should deserialize");
+
+    match &item {
+        ResponseInputOutputItem::McpListTools { tools, error, .. } => {
+            assert!(tools.is_empty());
+            assert_eq!(error.as_deref(), Some("server unreachable"));
+        }
+        other => panic!("expected McpListTools, got {other:?}"),
+    }
+
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}

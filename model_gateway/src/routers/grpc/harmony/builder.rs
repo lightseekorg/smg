@@ -847,7 +847,9 @@ impl HarmonyBuilder {
             ResponseInputOutputItem::McpApprovalResponse { .. }
             | ResponseInputOutputItem::McpApprovalRequest { .. }
             | ResponseInputOutputItem::ComputerCall { .. }
-            | ResponseInputOutputItem::ComputerCallOutput { .. } => {
+            | ResponseInputOutputItem::ComputerCallOutput { .. }
+            | ResponseInputOutputItem::McpCall { .. }
+            | ResponseInputOutputItem::McpListTools { .. } => {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
                     "Approval item reached Harmony conversion"

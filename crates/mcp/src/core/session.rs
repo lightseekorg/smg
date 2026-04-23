@@ -9,7 +9,9 @@
 use std::collections::{HashMap, HashSet};
 
 use futures::stream::{self, StreamExt};
-use openai_protocol::responses::{RequireApproval, RequireApprovalMode, ResponseTool};
+use openai_protocol::responses::{
+    McpAllowedTools, RequireApproval, RequireApprovalMode, ResponseTool,
+};
 
 use super::{
     config::BuiltinToolType,
@@ -354,7 +356,18 @@ impl<'a> McpToolSession<'a> {
                 continue;
             }
 
-            let allowed_tool_names = mcp_tool.allowed_tools.as_ref();
+            // T11 forced-cascade: the legacy `allowed_tools: Vec<String>` wire shape
+            // is now `McpAllowedTools` (untagged union of `List(Vec<String>)` or
+            // `Filter(McpToolFilter { read_only?, tool_names? })`). Preserve prior
+            // semantics: only the name-list forms constrain which bindings inherit
+            // the approval mode; the `read_only`-only filter form (new in T11) is
+            // treated as "no name constraint" to avoid changing behavior on legacy
+            // payloads.
+            let allowed_tool_names: Option<&[String]> =
+                mcp_tool.allowed_tools.as_ref().and_then(|at| match at {
+                    McpAllowedTools::List(names) => Some(names.as_slice()),
+                    McpAllowedTools::Filter(filter) => filter.tool_names.as_deref(),
+                });
             for binding in self.exposed_name_map.values_mut() {
                 if binding.server_label != mcp_tool.server_label {
                     continue;
@@ -1028,6 +1041,8 @@ mod tests {
                 server_description: None,
                 require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             },
         )]);
 

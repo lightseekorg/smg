@@ -700,6 +700,8 @@ fn test_validate_tools_mcp_valid_ok() {
             server_description: None,
             require_approval: None,
             allowed_tools: None,
+            connector_id: None,
+            defer_loading: None,
         })]),
         ..Default::default()
     };
@@ -735,6 +737,8 @@ fn test_validate_tools_mcp_duplicate_server_label() {
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             }),
             ResponseTool::Mcp(McpTool {
                 server_url: None,
@@ -744,6 +748,8 @@ fn test_validate_tools_mcp_duplicate_server_label() {
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             }),
         ]),
         ..Default::default()
@@ -778,6 +784,8 @@ fn test_validate_tools_mcp_server_label_invalid_cases() {
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             })]),
             ..Default::default()
         };
