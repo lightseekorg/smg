@@ -3,8 +3,30 @@
 //! Each migration is a function that generates Oracle DDL from [`SchemaConfig`],
 //! so it respects custom table/column names. PL/SQL exception handling ensures
 //! idempotency (safe to re-run if a previous attempt partially completed).
+#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::{schema::SchemaConfig, versioning::Migration};
+
+/// Core history-backend migrations required by the SQL response/conversation
+/// storage path during normal gateway startup.
+pub(crate) static ORACLE_HISTORY_MIGRATIONS: [Migration; 3] = [
+    Migration {
+        version: 1,
+        description: "Add safety_identifier column to responses",
+        up: oracle_v1_up,
+    },
+    Migration {
+        version: 2,
+        description: "Remove legacy user_id column from responses",
+        up: oracle_v2_up,
+    },
+    Migration {
+        version: 3,
+        description:
+            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
+        up: oracle_v3_up,
+    },
+];
 
 /// Oracle migration list. Append new migrations here.
 pub(crate) static ORACLE_MIGRATIONS: [Migration; 11] = [
@@ -448,6 +470,15 @@ fn oracle_v11_up(schema: &SchemaConfig) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::schema::TableConfig;
+
+    #[test]
+    fn oracle_history_migrations_cover_only_core_history_schema() {
+        let versions: Vec<u32> = ORACLE_HISTORY_MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3]);
+    }
 
     #[test]
     fn oracle_migrations_are_sequential() {

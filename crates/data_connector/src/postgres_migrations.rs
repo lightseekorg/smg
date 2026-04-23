@@ -3,8 +3,30 @@
 //! Each migration is a function that generates Postgres DDL from [`SchemaConfig`],
 //! so it respects custom table/column names. `IF NOT EXISTS` / `IF EXISTS`
 //! clauses ensure idempotency.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::{schema::SchemaConfig, versioning::Migration};
+
+/// Core history-backend migrations required by the SQL response/conversation
+/// storage path during normal gateway startup.
+pub(crate) static POSTGRES_HISTORY_MIGRATIONS: [Migration; 3] = [
+    Migration {
+        version: 1,
+        description: "Add safety_identifier column to responses",
+        up: pg_v1_up,
+    },
+    Migration {
+        version: 2,
+        description: "Remove legacy user_id column from responses",
+        up: pg_v2_up,
+    },
+    Migration {
+        version: 3,
+        description:
+            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
+        up: pg_v3_up,
+    },
+];
 
 /// Postgres migration list. Append new migrations here.
 pub(crate) static POSTGRES_MIGRATIONS: [Migration; 11] = [
@@ -393,6 +415,15 @@ fn pg_v11_up(schema: &SchemaConfig) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::schema::TableConfig;
+
+    #[test]
+    fn postgres_history_migrations_cover_only_core_history_schema() {
+        let versions: Vec<u32> = POSTGRES_HISTORY_MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3]);
+    }
 
     #[test]
     fn postgres_migrations_are_sequential() {

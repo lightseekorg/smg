@@ -31,7 +31,7 @@ use crate::{
     },
     config::OracleConfig,
     context::current_extra_columns,
-    oracle_migrations::ORACLE_MIGRATIONS,
+    oracle_migrations::ORACLE_HISTORY_MIGRATIONS,
     schema::SchemaConfig,
 };
 
@@ -86,7 +86,7 @@ impl OracleStore {
         let applied = crate::versioning::run_oracle_migrations(
             &conn,
             &schema,
-            &ORACLE_MIGRATIONS,
+            &ORACLE_HISTORY_MIGRATIONS,
             schema.version,
             schema.auto_migrate,
         )?;
