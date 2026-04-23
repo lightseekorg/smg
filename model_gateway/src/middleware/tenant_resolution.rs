@@ -5,10 +5,11 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     body::Body,
     extract::{connect_info::ConnectInfo, Request, State},
-    http::{header::InvalidHeaderName, HeaderMap, HeaderName},
+    http::{header::InvalidHeaderName, HeaderMap, HeaderName, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
+use smg_skills::TenantAliasStore;
 
 use crate::{
     config::{RouterConfig, TenantResolutionConfig},
@@ -19,6 +20,7 @@ use crate::{
 pub struct TenantResolutionState {
     trust_tenant_header: bool,
     trusted_tenant_header_name: HeaderName,
+    tenant_alias_store: Option<Arc<dyn TenantAliasStore>>,
 }
 
 impl TenantResolutionState {
@@ -32,15 +34,30 @@ impl TenantResolutionState {
         Ok(Self {
             trust_tenant_header: config.trust_tenant_header,
             trusted_tenant_header_name,
+            tenant_alias_store: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_tenant_alias_store(
+        mut self,
+        tenant_alias_store: Option<Arc<dyn TenantAliasStore>>,
+    ) -> Self {
+        self.tenant_alias_store = tenant_alias_store;
+        self
     }
 }
 
-fn resolve_tenant_key(state: &TenantResolutionState, request: &Request<Body>) -> TenantKey {
+#[derive(Debug, thiserror::Error)]
+pub enum RouteRequestMetaError {
+    #[error("tenant alias lookup failed: {0}")]
+    TenantAliasLookup(#[from] smg_skills::SkillsStoreError),
+}
+
+fn resolve_raw_tenant_key(state: &TenantResolutionState, request: &Request<Body>) -> TenantKey {
     if let Some(caller) = request.extensions().get::<DataPlaneCaller>() {
         return caller.tenant_key().clone();
     }
-
     if state.trust_tenant_header {
         if let Some(tenant_id) = extract_trusted_tenant_id(state, request.headers()) {
             return canonical_tenant_key(TenantIdentity::Header(Arc::from(tenant_id)));
@@ -54,6 +71,28 @@ fn resolve_tenant_key(state: &TenantResolutionState, request: &Request<Body>) ->
     canonical_tenant_key(TenantIdentity::Anonymous)
 }
 
+async fn resolve_tenant_key(
+    state: &TenantResolutionState,
+    raw_tenant_key: TenantKey,
+) -> Result<TenantKey, RouteRequestMetaError> {
+    let Some(alias_store) = &state.tenant_alias_store else {
+        return Ok(raw_tenant_key);
+    };
+    let Some(record) = alias_store
+        .get_tenant_alias(raw_tenant_key.as_str())
+        .await?
+    else {
+        return Ok(raw_tenant_key);
+    };
+    if record
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= chrono::Utc::now())
+    {
+        return Ok(raw_tenant_key);
+    }
+    Ok(TenantKey::from(record.canonical_tenant_id))
+}
+
 fn extract_trusted_tenant_id<'a>(
     state: &TenantResolutionState,
     headers: &'a HeaderMap,
@@ -65,12 +104,17 @@ fn extract_trusted_tenant_id<'a>(
         .filter(|value| !value.is_empty())
 }
 
-#[must_use]
-pub fn resolve_route_request_meta(
-    state: &TenantResolutionState,
+pub fn resolve_route_request_meta<'a>(
+    state: &'a TenantResolutionState,
     request: &Request<Body>,
-) -> RouteRequestMeta {
-    RouteRequestMeta::new(resolve_tenant_key(state, request))
+) -> impl std::future::Future<Output = Result<RouteRequestMeta, RouteRequestMetaError>> + Send + 'a
+{
+    let raw_tenant_key = resolve_raw_tenant_key(state, request);
+    async move {
+        Ok(RouteRequestMeta::new(
+            resolve_tenant_key(state, raw_tenant_key).await?,
+        ))
+    }
 }
 
 pub async fn route_request_meta_middleware(
@@ -78,7 +122,16 @@ pub async fn route_request_meta_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let request_meta = resolve_route_request_meta(&state, &request);
+    let request_meta = match resolve_route_request_meta(&state, &request).await {
+        Ok(request_meta) => request_meta,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to resolve tenant metadata: {error}"),
+            )
+                .into_response();
+        }
+    };
     request.extensions_mut().insert(request_meta);
     next.run(request).await
 }
@@ -95,6 +148,8 @@ pub async fn ordinary_tenant_resolution_middleware(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axum::{
         body::Body,
         extract::connect_info::ConnectInfo,
@@ -104,6 +159,7 @@ mod tests {
         routing::get,
         Router,
     };
+    use smg_skills::{InMemorySkillStore, TenantAliasRecord, TenantAliasStore};
     use tower::ServiceExt;
 
     use super::*;
@@ -123,8 +179,8 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn request_meta_prefers_authenticated_data_plane_identity() {
+    #[tokio::test]
+    async fn request_meta_prefers_authenticated_data_plane_identity() {
         let state = resolution_state();
         let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
         request
@@ -134,12 +190,12 @@ mod tests {
             .extensions_mut()
             .insert(ConnectInfo("127.0.0.1:8080".parse::<SocketAddr>().unwrap()));
 
-        let request_meta = resolve_route_request_meta(&state, &request);
+        let request_meta = resolve_route_request_meta(&state, &request).await.unwrap();
         assert_eq!(request_meta.tenant_key().as_str(), "auth:b3c2");
     }
 
-    #[test]
-    fn request_meta_uses_trusted_header_when_enabled() {
+    #[tokio::test]
+    async fn request_meta_uses_trusted_header_when_enabled() {
         let mut config = RouterConfig::new(
             RoutingMode::Regular {
                 worker_urls: vec!["http://worker1:8000".to_string()],
@@ -155,29 +211,79 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        let request_meta = resolve_route_request_meta(&state, &request);
+        let request_meta = resolve_route_request_meta(&state, &request).await.unwrap();
         assert_eq!(request_meta.tenant_key().as_str(), "header:team-red");
     }
 
-    #[test]
-    fn request_meta_falls_back_to_client_ip() {
+    #[tokio::test]
+    async fn request_meta_falls_back_to_client_ip() {
         let state = resolution_state();
         let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
         request.extensions_mut().insert(ConnectInfo(
             "203.0.113.42:443".parse::<SocketAddr>().unwrap(),
         ));
 
-        let request_meta = resolve_route_request_meta(&state, &request);
+        let request_meta = resolve_route_request_meta(&state, &request).await.unwrap();
         assert_eq!(request_meta.tenant_key().as_str(), "ip:203.0.113.42");
     }
 
-    #[test]
-    fn request_meta_falls_back_to_anonymous_without_identity_sources() {
+    #[tokio::test]
+    async fn request_meta_falls_back_to_anonymous_without_identity_sources() {
         let state = resolution_state();
         let request = Request::builder().uri("/").body(Body::empty()).unwrap();
 
-        let request_meta = resolve_route_request_meta(&state, &request);
+        let request_meta = resolve_route_request_meta(&state, &request).await.unwrap();
         assert_eq!(request_meta.tenant_key().as_str(), "anonymous");
+    }
+
+    #[tokio::test]
+    async fn request_meta_uses_active_tenant_alias() {
+        let store = Arc::new(InMemorySkillStore::default());
+        store
+            .put_tenant_alias(TenantAliasRecord {
+                alias_tenant_id: "auth:new-key".to_string(),
+                canonical_tenant_id: "auth:old-key".to_string(),
+                created_at: chrono::Utc::now(),
+                expires_at: None,
+            })
+            .await
+            .unwrap();
+        let state = resolution_state().with_tenant_alias_store(Some(store));
+        let mut request = Request::builder().uri("/").body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(DataPlaneCaller::new(TenantKey::from("auth:new-key")));
+
+        let request_meta = resolve_route_request_meta(&state, &request).await.unwrap();
+        assert_eq!(request_meta.tenant_key().as_str(), "auth:old-key");
+    }
+
+    #[tokio::test]
+    async fn request_meta_ignores_missing_and_expired_tenant_aliases() {
+        let store = Arc::new(InMemorySkillStore::default());
+        store
+            .put_tenant_alias(TenantAliasRecord {
+                alias_tenant_id: "auth:expired-key".to_string(),
+                canonical_tenant_id: "auth:old-key".to_string(),
+                created_at: chrono::Utc::now(),
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            })
+            .await
+            .unwrap();
+        let state = resolution_state().with_tenant_alias_store(Some(store));
+        let mut expired = Request::builder().uri("/").body(Body::empty()).unwrap();
+        expired
+            .extensions_mut()
+            .insert(DataPlaneCaller::new(TenantKey::from("auth:expired-key")));
+        let mut missing = Request::builder().uri("/").body(Body::empty()).unwrap();
+        missing
+            .extensions_mut()
+            .insert(DataPlaneCaller::new(TenantKey::from("auth:missing-key")));
+
+        let expired_meta = resolve_route_request_meta(&state, &expired).await.unwrap();
+        let missing_meta = resolve_route_request_meta(&state, &missing).await.unwrap();
+        assert_eq!(expired_meta.tenant_key().as_str(), "auth:expired-key");
+        assert_eq!(missing_meta.tenant_key().as_str(), "auth:missing-key");
     }
 
     #[tokio::test]

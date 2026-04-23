@@ -29,6 +29,10 @@ use openai_protocol::{
     },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::ResponsesRequest,
+    skills::{
+        SkillGetQuery, SkillPatchRequest, SkillVersionPatchRequest, SkillVersionsListQuery,
+        SkillsListQuery,
+    },
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     transcription::TranscriptionRequest,
     validated::ValidatedJson,
@@ -795,7 +799,7 @@ async fn v1_skills_create(State(state): State<Arc<AppState>>, multipart: Multipa
 
 async fn v1_skills_list(
     State(state): State<Arc<AppState>>,
-    query: Query<openai_protocol::skills::SkillsListQuery>,
+    query: Query<SkillsListQuery>,
     headers: HeaderMap,
 ) -> Response {
     skills::list_skills(State(state), query, headers).await
@@ -804,7 +808,7 @@ async fn v1_skills_list(
 async fn v1_skills_get(
     State(state): State<Arc<AppState>>,
     Path(skill_id): Path<String>,
-    query: Query<openai_protocol::skills::SkillGetQuery>,
+    query: Query<SkillGetQuery>,
     headers: HeaderMap,
 ) -> Response {
     skills::get_skill(State(state), Path(skill_id), query, headers).await
@@ -813,8 +817,8 @@ async fn v1_skills_get(
 async fn v1_skills_patch(
     State(state): State<Arc<AppState>>,
     Path(skill_id): Path<String>,
-    query: Query<openai_protocol::skills::SkillGetQuery>,
-    ValidatedJson(body): ValidatedJson<openai_protocol::skills::SkillPatchRequest>,
+    query: Query<SkillGetQuery>,
+    ValidatedJson(body): ValidatedJson<SkillPatchRequest>,
 ) -> Response {
     skills::patch_skill(State(state), Path(skill_id), query, Json(body)).await
 }
@@ -830,7 +834,7 @@ async fn v1_skills_create_version(
 async fn v1_skills_list_versions(
     State(state): State<Arc<AppState>>,
     Path(skill_id): Path<String>,
-    query: Query<openai_protocol::skills::SkillVersionsListQuery>,
+    query: Query<SkillVersionsListQuery>,
     headers: HeaderMap,
 ) -> Response {
     skills::list_skill_versions(State(state), Path(skill_id), query, headers).await
@@ -839,7 +843,7 @@ async fn v1_skills_list_versions(
 async fn v1_skills_get_version(
     State(state): State<Arc<AppState>>,
     Path((skill_id, version)): Path<(String, String)>,
-    query: Query<openai_protocol::skills::SkillGetQuery>,
+    query: Query<SkillGetQuery>,
     headers: HeaderMap,
 ) -> Response {
     skills::get_skill_version(State(state), Path((skill_id, version)), query, headers).await
@@ -848,8 +852,8 @@ async fn v1_skills_get_version(
 async fn v1_skills_patch_version(
     State(state): State<Arc<AppState>>,
     Path((skill_id, version)): Path<(String, String)>,
-    query: Query<openai_protocol::skills::SkillGetQuery>,
-    ValidatedJson(body): ValidatedJson<openai_protocol::skills::SkillVersionPatchRequest>,
+    query: Query<SkillGetQuery>,
+    ValidatedJson(body): ValidatedJson<SkillVersionPatchRequest>,
 ) -> Response {
     skills::patch_skill_version(State(state), Path((skill_id, version)), query, Json(body)).await
 }
@@ -857,7 +861,7 @@ async fn v1_skills_patch_version(
 async fn v1_skills_delete(
     State(state): State<Arc<AppState>>,
     Path(skill_id): Path<String>,
-    query: Query<openai_protocol::skills::SkillGetQuery>,
+    query: Query<SkillGetQuery>,
 ) -> Response {
     skills::delete_skill(State(state), Path(skill_id), query).await
 }
@@ -865,7 +869,7 @@ async fn v1_skills_delete(
 async fn v1_skills_delete_version(
     State(state): State<Arc<AppState>>,
     Path((skill_id, version)): Path<(String, String)>,
-    query: Query<openai_protocol::skills::SkillGetQuery>,
+    query: Query<SkillGetQuery>,
 ) -> Response {
     skills::delete_skill_version(State(state), Path((skill_id, version)), query).await
 }
@@ -911,7 +915,14 @@ pub fn build_app(
     );
 
     let tenant_resolution_state =
-        middleware::TenantResolutionState::new(&app_state.context.router_config)?;
+        middleware::TenantResolutionState::new(&app_state.context.router_config)?
+            .with_tenant_alias_store(
+                app_state
+                    .context
+                    .skill_service
+                    .as_ref()
+                    .and_then(|skill_service| skill_service.tenant_alias_store()),
+            );
 
     let protected_routes = Router::new()
         .route("/v1/responses", post(v1_responses))
