@@ -27,11 +27,14 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     }
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
+        // Qwen3.5 shares Qwen3-VL's image pipeline in sglang.
         let id = metadata.model_id.to_ascii_lowercase();
-        id.contains("qwen3") && id.contains("vl")
-            || metadata
-                .config_model_type()
-                .is_some_and(|mt| mt == "qwen3_vl")
+        let id_match = id.contains("qwen3")
+            && (id.contains("vl") || id.contains("3.5") || id.contains("3-5"));
+        let type_match = metadata.config_model_type().is_some_and(|mt| {
+            matches!(mt, "qwen3_vl" | "qwen3_vl_moe" | "qwen3_5" | "qwen3_5_moe")
+        });
+        id_match || type_match
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -176,6 +179,69 @@ mod tests {
         let spec = registry
             .lookup(&metadata)
             .expect("should match qwen3 alias");
+        assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_5_matches_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 248056)]);
+        let config = json!({
+            "model_type": "qwen3_5",
+            "vision_start_token_id": 248053,
+            "image_token_id": 248056,
+            "vision_end_token_id": 248054,
+            "vision_config": {"patch_size": 16, "spatial_merge_size": 2}
+        });
+        let metadata = ModelMetadata {
+            model_id: "shadow/qwen3-5-9b-smg-grpc",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("qwen3_5 spec");
+        assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_5_moe_matches_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 248056)]);
+        let config = json!({
+            "model_type": "qwen3_5_moe",
+            "vision_start_token_id": 248053,
+            "image_token_id": 248056,
+            "vision_end_token_id": 248054,
+            "vision_config": {"patch_size": 16, "spatial_merge_size": 2}
+        });
+        let metadata = ModelMetadata {
+            model_id: "some-qwen-moe-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry
+            .lookup(&metadata)
+            .expect("should match qwen3_5_moe");
+        assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_5_matches_by_model_id_dotted() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 248056)]);
+        let config = json!({
+            "model_type": "qwen3_5",
+            "image_token_id": 248056,
+            "vision_start_token_id": 248053,
+            "vision_end_token_id": 248054
+        });
+        let metadata = ModelMetadata {
+            model_id: "togethercomputer/Qwen3.5-9B-FP8",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry
+            .lookup(&metadata)
+            .expect("should match Qwen3.5 model id");
         assert_eq!(spec.name(), "qwen3_vl");
     }
 }
