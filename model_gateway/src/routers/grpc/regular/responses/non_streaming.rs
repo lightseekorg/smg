@@ -261,6 +261,8 @@ pub(super) async fn execute_tool_loop(
             );
 
             // Separate MCP and function tool calls using session policy.
+            // `should_intercept_function_call` preserves user-function
+            // precedence for name collisions with MCP tools.
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
                 tool_calls.into_iter().partition(|tc| {
                     session.should_intercept_function_call(tc.name.as_str(), &user_function_names)

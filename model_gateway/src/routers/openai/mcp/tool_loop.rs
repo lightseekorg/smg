@@ -685,6 +685,8 @@ fn canonicalize_mcp_tools_for_dedupe(tools: &Value) -> Value {
         let right_name = right.get("name").and_then(|v| v.as_str()).unwrap_or("");
         left_name
             .cmp(right_name)
+            // Canonicalized objects already have recursively sorted keys. Use
+            // serialized JSON only as a deterministic tiebreaker for equal names.
             .then_with(|| left.to_string().cmp(&right.to_string()))
     });
 

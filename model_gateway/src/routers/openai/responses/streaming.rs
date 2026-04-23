@@ -30,7 +30,7 @@ use smg_mcp::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{
     accumulator::StreamingResponseAccumulator,
@@ -1006,8 +1006,8 @@ pub(super) fn handle_streaming_with_tool_interception(
                                     }
                                 }
                                 StreamAction::Buffer => {
-                                    if disable_mcp_interception
-                                        && !forward_streaming_event(
+                                    if disable_mcp_interception {
+                                        if !forward_streaming_event(
                                             SseEventData {
                                                 raw_block: &raw_block,
                                                 event_name,
@@ -1019,9 +1019,12 @@ pub(super) fn handle_streaming_with_tool_interception(
                                             &passthrough_streaming_ctx,
                                             Some(&session),
                                             &mut sequence_number,
-                                        )
-                                    {
-                                        return;
+                                        ) {
+                                            return;
+                                        }
+                                    } else {
+                                        // In interception mode, buffer handling is internal to
+                                        // `StreamingToolHandler`; no passthrough forward needed.
                                     }
                                 }
                                 StreamAction::ExecuteTools => {
@@ -1060,7 +1063,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         // This turn is already in client-driven passthrough mode
                                         // (triggered by a mixed MCP + user-function batch). Do
                                         // not re-enter gateway MCP execution for later batches.
-                                        let _ = handler.take_pending_calls();
+                                        let drained_calls = handler.take_pending_calls();
+                                        if !drained_calls.is_empty() {
+                                            debug!(
+                                                drained = drained_calls.len(),
+                                                "Drained pending tool calls in passthrough mode"
+                                            );
+                                        }
                                         continue;
                                     }
 
@@ -1127,6 +1136,9 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                                         // Any user-function call in the batch means this turn must
                                         // remain client-driven; continue passthrough streaming.
+                                        // This can produce mixed output in one response:
+                                        // already-emitted `mcp_call` items from this batch, then
+                                        // raw function_call items for later passthrough batches.
                                         disable_mcp_interception = true;
                                         continue;
                                     }

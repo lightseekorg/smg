@@ -5,10 +5,10 @@ use std::{collections::HashSet, sync::Arc};
 use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::{
-    common::Tool,
+    common::{Tool, ToolReference},
     responses::{
-        ResponseOutputItem, ResponseTool, ResponsesRequest, ResponsesResponse, ResponsesToolChoice,
-        ToolChoiceOptions,
+        BuiltInToolChoiceType, ResponseOutputItem, ResponseTool, ResponsesRequest,
+        ResponsesResponse, ResponsesToolChoice, ToolChoiceOptions,
     },
 };
 use serde_json::to_value;
@@ -212,6 +212,102 @@ fn has_function_tool(tools: &[ResponseTool], tool_name: &str) -> bool {
     })
 }
 
+fn has_builtin_tool(tools: &[ResponseTool], tool_type: BuiltInToolChoiceType) -> bool {
+    tools.iter().any(|tool| match tool_type {
+        BuiltInToolChoiceType::FileSearch => matches!(tool, ResponseTool::FileSearch(_)),
+        BuiltInToolChoiceType::WebSearch => matches!(tool, ResponseTool::WebSearch(_)),
+        BuiltInToolChoiceType::WebSearchPreview
+        | BuiltInToolChoiceType::WebSearchPreview20250311 => {
+            matches!(tool, ResponseTool::WebSearchPreview(_))
+        }
+        BuiltInToolChoiceType::ImageGeneration => {
+            matches!(tool, ResponseTool::ImageGeneration(_))
+        }
+        BuiltInToolChoiceType::ComputerUsePreview => {
+            matches!(tool, ResponseTool::ComputerUsePreview(_))
+        }
+        BuiltInToolChoiceType::CodeInterpreter => {
+            matches!(tool, ResponseTool::CodeInterpreter(_))
+        }
+    })
+}
+
+fn has_mcp_tool(tools: &[ResponseTool], server_label: &str, name: Option<&str>) -> bool {
+    tools.iter().any(|tool| match tool {
+        ResponseTool::Mcp(mcp_tool) if mcp_tool.server_label == server_label => {
+            if let Some(name) = name {
+                match &mcp_tool.allowed_tools {
+                    Some(allowed_tools) => allowed_tools.iter().any(|tool_name| tool_name == name),
+                    None => true,
+                }
+            } else {
+                true
+            }
+        }
+        _ => false,
+    })
+}
+
+fn has_custom_tool(tools: &[ResponseTool], custom_name: &str) -> bool {
+    tools.iter().any(
+        |tool| matches!(tool, ResponseTool::Custom(custom_tool) if custom_tool.name == custom_name),
+    )
+}
+
+fn has_allowed_tool_reference(tools: &[ResponseTool], tool_reference: &ToolReference) -> bool {
+    match tool_reference {
+        ToolReference::Function { name } => has_function_tool(tools, name),
+        ToolReference::Mcp { server_label, name } => {
+            has_mcp_tool(tools, server_label, name.as_deref())
+        }
+        ToolReference::FileSearch => has_builtin_tool(tools, BuiltInToolChoiceType::FileSearch),
+        ToolReference::WebSearchPreview => {
+            has_builtin_tool(tools, BuiltInToolChoiceType::WebSearchPreview)
+        }
+        ToolReference::ComputerUsePreview => {
+            has_builtin_tool(tools, BuiltInToolChoiceType::ComputerUsePreview)
+        }
+        ToolReference::CodeInterpreter => {
+            has_builtin_tool(tools, BuiltInToolChoiceType::CodeInterpreter)
+        }
+        ToolReference::ImageGeneration => {
+            has_builtin_tool(tools, BuiltInToolChoiceType::ImageGeneration)
+        }
+    }
+}
+
+fn is_tool_choice_compatible(
+    choice: &ResponsesToolChoice,
+    available_tools: &[ResponseTool],
+) -> bool {
+    match choice {
+        ResponsesToolChoice::Options(_) => true,
+        ResponsesToolChoice::Types { tool_type } => has_builtin_tool(available_tools, *tool_type),
+        ResponsesToolChoice::Function(function_choice) => {
+            has_function_tool(available_tools, &function_choice.name)
+        }
+        ResponsesToolChoice::AllowedTools {
+            tools: allowed_tools,
+            ..
+        } => {
+            !allowed_tools.is_empty()
+                && allowed_tools.iter().all(|tool_reference| {
+                    has_allowed_tool_reference(available_tools, tool_reference)
+                })
+        }
+        ResponsesToolChoice::Mcp {
+            server_label, name, ..
+        } => has_mcp_tool(available_tools, server_label, name.as_deref()),
+        ResponsesToolChoice::Custom { name, .. } => has_custom_tool(available_tools, name),
+        ResponsesToolChoice::ApplyPatch { .. } => available_tools
+            .iter()
+            .any(|tool| matches!(tool, ResponseTool::ApplyPatch)),
+        ResponsesToolChoice::Shell { .. } => available_tools
+            .iter()
+            .any(|tool| matches!(tool, ResponseTool::Shell(_))),
+    }
+}
+
 fn normalize_request_tool_choice(
     tool_choice: &mut Option<ResponsesToolChoice>,
     tools: &[ResponseTool],
@@ -221,11 +317,8 @@ fn normalize_request_tool_choice(
         return;
     }
 
-    if let Some(selected_name) = tool_choice
-        .as_ref()
-        .and_then(ResponsesToolChoice::function_name)
-    {
-        if !has_function_tool(tools, selected_name) {
+    if let Some(choice) = tool_choice.as_ref() {
+        if !is_tool_choice_compatible(choice, tools) {
             *tool_choice = Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto));
         }
     }
@@ -237,13 +330,13 @@ fn normalize_response_tool_choice(tool_choice: &mut String, tools: &[ResponseToo
         return;
     }
 
-    let selected_name = serde_json::from_str::<ResponsesToolChoice>(tool_choice)
-        .ok()
-        .and_then(|choice| choice.function_name().map(str::to_string));
-    if let Some(selected_name) = selected_name {
-        if !has_function_tool(tools, &selected_name) {
-            *tool_choice = "auto".to_string();
-        }
+    let Ok(choice) = serde_json::from_str::<ResponsesToolChoice>(tool_choice) else {
+        *tool_choice = "auto".to_string();
+        return;
+    };
+
+    if !is_tool_choice_compatible(&choice, tools) {
+        *tool_choice = "auto".to_string();
     }
 }
 
