@@ -16,6 +16,7 @@ pub enum EnqueueValidationError {
     SubjectId,
     EmbeddingModel,
     ExtractionModel,
+    PolicyMode,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +47,11 @@ pub fn build_enqueue_plan(
     if !inputs.memory_execution_context.store_ltm.active() {
         return Ok(None);
     }
+    let policy_label = match inputs.memory_execution_context.policy_mode {
+        MemoryPolicyMode::StoreOnly => "store_only",
+        MemoryPolicyMode::StoreAndRecall => "store_and_recall",
+        _ => return Err(EnqueueValidationError::PolicyMode),
+    };
 
     let subject_id = required_value(
         inputs.memory_execution_context.subject_id.clone(),
@@ -61,7 +67,7 @@ pub fn build_enqueue_plan(
     )?;
 
     let memory_config = json!({
-        "policy": policy_mode_label(inputs.memory_execution_context.policy_mode),
+        "policy": policy_label,
         "subject_id": subject_id,
         "embedding_model_id": embedding_model,
         "extraction_model_id": extraction_model,
@@ -128,17 +134,6 @@ fn normalize_text(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn policy_mode_label(mode: MemoryPolicyMode) -> &'static str {
-    match mode {
-        MemoryPolicyMode::StoreOnly => "store_only",
-        MemoryPolicyMode::StoreAndRecall => "store_and_recall",
-        MemoryPolicyMode::RecallOnly => "recall_only",
-        MemoryPolicyMode::ExplicitNone => "none",
-        MemoryPolicyMode::Unspecified => "unspecified",
-        MemoryPolicyMode::Unrecognized => "unrecognized",
-    }
 }
 
 #[cfg(test)]

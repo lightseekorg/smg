@@ -867,13 +867,14 @@ impl PostgresConversationMemoryWriter {
         }
         col_defs.extend(extra_column_defs(s));
 
-        let mut ddl = format!(
+        let table_ddl = format!(
             "CREATE TABLE IF NOT EXISTS {table} ({});",
             col_defs.join(", "),
         );
+        let mut index_ddls = Vec::new();
         if !s.is_skipped("conversation_id") {
             let conv_idx = postgres_index_name(&s.table, "conv_idx");
-            ddl.push_str(&format!(
+            index_ddls.push(format!(
                 "CREATE INDEX IF NOT EXISTS {conv_idx} \
                  ON {table} ({});",
                 s.col("conversation_id")
@@ -881,7 +882,7 @@ impl PostgresConversationMemoryWriter {
         }
         if !s.is_skipped("next_run_at") {
             let next_run_idx = postgres_index_name(&s.table, "next_run_idx");
-            ddl.push_str(&format!(
+            index_ddls.push(format!(
                 "CREATE INDEX IF NOT EXISTS {next_run_idx} \
                  ON {table} ({});",
                 s.col("next_run_at")
@@ -889,7 +890,7 @@ impl PostgresConversationMemoryWriter {
         }
         if !s.is_skipped("status") {
             let status_idx = postgres_index_name(&s.table, "status_idx");
-            ddl.push_str(&format!(
+            index_ddls.push(format!(
                 "CREATE INDEX IF NOT EXISTS {status_idx} \
                  ON {table} ({});",
                 s.col("status")
@@ -897,7 +898,7 @@ impl PostgresConversationMemoryWriter {
         }
         if !s.is_skipped("response_id") {
             let response_idx = postgres_index_name(&s.table, "response_idx");
-            ddl.push_str(&format!(
+            index_ddls.push(format!(
                 "CREATE INDEX IF NOT EXISTS {response_idx} \
                  ON {table} ({});",
                 s.col("response_id")
@@ -910,9 +911,16 @@ impl PostgresConversationMemoryWriter {
             .await
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
         client
-            .batch_execute(&ddl)
+            .batch_execute(&table_ddl)
             .await
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+        for index_ddl in index_ddls {
+            if let Err(e) = client.batch_execute(&index_ddl).await {
+                tracing::debug!(
+                    "deferred conversation memory index creation (column may not exist yet): {e}"
+                );
+            }
+        }
 
         Ok(Self { store })
     }
@@ -1014,18 +1022,16 @@ fn postgres_index_name(table_name: &str, suffix: &str) -> String {
         suffix = suffix.chars().take(max_suffix_len).collect();
     }
 
-    let table_budget = MAX_POSTGRES_IDENT_LEN.saturating_sub(suffix.len() + 1);
-    let mut table_part = if table.len() <= table_budget {
-        table.chars().take(table_budget).collect::<String>()
-    } else {
-        let hash = stable_hash_hex_lower(table.as_bytes(), HASH_HEX_LEN);
-        let prefix_budget = table_budget.saturating_sub(hash.len() + 1);
-        let mut prefix: String = table.chars().take(prefix_budget).collect();
-        if prefix.is_empty() {
-            prefix.push('t');
-        }
-        format!("{prefix}_{hash}")
-    };
+    // Ensure we always reserve at least one table-part character.
+    let mut table_budget = MAX_POSTGRES_IDENT_LEN.saturating_sub(suffix.len() + 1);
+    if table_budget == 0 {
+        let allowed_suffix = MAX_POSTGRES_IDENT_LEN.saturating_sub(2); // "t_"
+        suffix = suffix.chars().take(allowed_suffix).collect();
+        table_budget = 1;
+    }
+
+    let mut table_part =
+        build_index_table_part(&table, table_budget, HASH_HEX_LEN, stable_hash_hex_lower);
     if table_part.is_empty() {
         table_part.push('t');
     }
@@ -1037,6 +1043,9 @@ fn postgres_index_name(table_name: &str, suffix: &str) -> String {
         table_part.replace_range(0..1, "_");
     }
 
+    // Clamp suffix as a final guard so the identifier always fits.
+    let max_suffix = MAX_POSTGRES_IDENT_LEN.saturating_sub(table_part.len() + 1);
+    suffix = suffix.chars().take(max_suffix).collect();
     format!("{table_part}_{suffix}")
 }
 
@@ -1051,6 +1060,28 @@ fn stable_hash_hex_lower(bytes: &[u8], hex_len: usize) -> String {
     }
     let full = format!("{hash:016x}");
     full.chars().take(hex_len.min(full.len())).collect()
+}
+
+fn build_index_table_part(
+    table: &str,
+    table_budget: usize,
+    hash_hex_len: usize,
+    hash_fn: fn(&[u8], usize) -> String,
+) -> String {
+    if table_budget == 0 {
+        return String::new();
+    }
+    if table.len() <= table_budget {
+        return table.chars().take(table_budget).collect();
+    }
+    // Need room for at least "<prefix>_<hash>" to use the hashed branch.
+    if table_budget >= hash_hex_len + 2 {
+        let hash = hash_fn(table.as_bytes(), hash_hex_len);
+        let prefix_budget = table_budget.saturating_sub(hash.len() + 1);
+        let prefix: String = table.chars().take(prefix_budget).collect();
+        return format!("{prefix}_{hash}");
+    }
+    table.chars().take(table_budget).collect()
 }
 
 pub(super) struct PostgresResponseStorage {
