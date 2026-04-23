@@ -34,6 +34,16 @@ fn to_chrono(d: Duration) -> BackgroundRepositoryResult<chrono::Duration> {
     })
 }
 
+/// Patch `raw_response.status` so the persisted response payload agrees with
+/// the structured `responses.status` column after a terminal transition.
+/// Without this, `GET /v1/responses/{id}` returns the pre-cancel payload
+/// (e.g. `status: "queued"`) even though the row is terminal.
+fn overwrite_raw_response_status(raw: &mut Value, terminal: &str) {
+    if let Some(obj) = raw.as_object_mut() {
+        obj.insert("status".to_string(), Value::String(terminal.to_string()));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalStatus {
     Queued,
@@ -284,6 +294,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
                 entry.completed_at = Some(now);
                 entry.worker_id = None;
                 entry.lease_expires_at = None;
+                overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
                 Ok(StoredCancelResult::QueuedCancelled)
             }
             InternalStatus::InProgress => {
@@ -389,6 +400,12 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
 
         entry.status = InternalStatus::from_finalize(final_status);
         entry.raw_response = update.raw_response;
+        // When cancel wins, overwrite the status field in the worker-supplied
+        // payload so `GET /v1/responses/{id}` doesn't return a payload that
+        // claims "completed" while the row is terminal-cancelled.
+        if cancel_won {
+            overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+        }
         entry.completed_at = Some(update.completed_at);
         entry.worker_id = None;
         entry.lease_expires_at = None;
@@ -744,6 +761,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_cancel_rewrites_raw_response_status() {
+        // `GET /v1/responses/{id}` must see status=cancelled in the persisted
+        // payload, not the original queued snapshot.
+        let repo = MemoryBackgroundRepository::new();
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::QueuedCancelled
+        );
+        let state = repo.state.read();
+        let entry = state.entries.get(&ResponseId::from("r1")).unwrap();
+        assert_eq!(entry.raw_response["status"], "cancelled");
+    }
+
+    #[tokio::test]
     async fn finalize_cancel_wins_over_worker_status() {
         let repo = MemoryBackgroundRepository::new();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
@@ -767,6 +799,13 @@ mod tests {
             .unwrap();
         assert_eq!(result.final_status, FinalizeStatus::Cancelled);
         assert!(result.cancel_won);
+
+        // Worker's raw_response carried `status: "completed"` (see
+        // `finalize_req` helper). The repo must overwrite it so the persisted
+        // payload agrees with the row's terminal status.
+        let state = repo.state.read();
+        let entry = state.entries.get(&ResponseId::from("r1")).unwrap();
+        assert_eq!(entry.raw_response["status"], "cancelled");
     }
 
     #[tokio::test]
