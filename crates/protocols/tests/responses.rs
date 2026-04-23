@@ -2026,7 +2026,6 @@ fn test_custom_tool_call_output_validation_rejects_empty_text_and_parts() {
         ok_text.validate().is_ok(),
         "non-empty CustomToolCallOutput must validate",
     );
-
 }
 
 /// Client-stitched transcripts may carry `mcp_list_tools` and `mcp_call`

@@ -283,7 +283,7 @@ async fn test_openai_router_responses_with_mock() {
     };
 
     let response3 = router
-        .route_responses(None, &request3, &request3.model)
+        .route_responses(None, &tenant_meta, &request3, &request3.model)
         .await;
     assert_eq!(response3.status(), StatusCode::OK);
     let body3_bytes = axum::body::to_bytes(response3.into_body(), usize::MAX)
@@ -307,6 +307,7 @@ async fn test_openai_router_responses_with_mock() {
     let empty_previous_response = router
         .route_responses(
             None,
+            &tenant_meta,
             &empty_previous_response_request,
             &empty_previous_response_request.model,
         )
