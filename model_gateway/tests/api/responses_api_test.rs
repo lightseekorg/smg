@@ -660,18 +660,28 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
     let output = body2_json["output"]
         .as_array()
         .expect("response output missing");
-    assert_eq!(
-        output.len(),
-        2,
-        "resume turn should return only current-turn MCP activity plus the final message: {body2_json}",
-    );
-    assert_eq!(output[0]["type"], "mcp_call");
-    assert_eq!(output[1]["type"], "message");
+    // Prior `mcp_call` history is normalized into `function_call` +
+    // `function_call_output` on the upstream transcript, so the mock model
+    // sees the prior tool result and does not re-execute the tool on resume.
+    // The invariant tested here is that `mcp_list_tools` is not repeated on a
+    // `previous_response_id` continuation for an existing binding.
     assert!(
         output
             .iter()
             .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("mcp_list_tools")),
-        "existing bindings should not repeat mcp_list_tools on previous_response_id turns"
+        "existing bindings should not repeat mcp_list_tools on previous_response_id turns: {body2_json}"
+    );
+    assert!(
+        output
+            .iter()
+            .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("mcp_call")),
+        "resume turn must consume the prior tool result without re-executing the MCP tool: {body2_json}"
+    );
+    assert!(
+        output
+            .iter()
+            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("message")),
+        "resume turn should still produce a final assistant message: {body2_json}"
     );
 
     worker.stop().await;

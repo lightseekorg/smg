@@ -674,6 +674,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
+    let upstream_input = req.upstream_input;
     let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
     let url = req.url;
     let storage = req.storage;
@@ -689,10 +690,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
     )]
     tokio::spawn(async move {
-        let mut state = ToolLoopState::new(
-            original_request.input.clone(),
-            existing_mcp_list_tools_labels,
-        );
+        let mut state = ToolLoopState::new(upstream_input, existing_mcp_list_tools_labels);
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)

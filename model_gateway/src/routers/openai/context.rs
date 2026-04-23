@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
-use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    responses::{ResponseInput, ResponsesRequest},
+};
 use serde_json::Value;
 use smg_data_connector::{
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
@@ -131,6 +134,7 @@ pub struct PayloadState {
 #[derive(Default)]
 pub struct ResponsesPayloadState {
     pub previous_response_id: Option<String>,
+    pub upstream_input: Option<ResponseInput>,
     pub existing_mcp_list_tools_labels: Vec<String>,
 }
 
@@ -267,6 +271,7 @@ pub struct OwnedStreamingContext {
     pub payload: Value,
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
+    pub upstream_input: ResponseInput,
     pub existing_mcp_list_tools_labels: Vec<String>,
     pub storage: StorageHandles,
 }
@@ -279,6 +284,9 @@ impl RequestContext {
             .responses_request()
             .ok_or("Expected responses request")?
             .clone();
+        let upstream_input = responses_payload_state
+            .upstream_input
+            .unwrap_or_else(|| original_body.input.clone());
         let response = self
             .components
             .response_storage()
@@ -305,6 +313,7 @@ impl RequestContext {
             payload: payload_state.json,
             original_body,
             previous_response_id: responses_payload_state.previous_response_id,
+            upstream_input,
             existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
             storage: StorageHandles {
                 response,

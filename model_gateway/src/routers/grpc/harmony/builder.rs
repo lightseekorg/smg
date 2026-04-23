@@ -495,8 +495,11 @@ impl HarmonyBuilder {
                 let mut prev_outputs: Vec<&ResponseInputOutputItem> = Vec::new();
 
                 for item in items {
-                    let msg = self.parse_response_item_to_harmony_message(item, &prev_outputs)?;
-                    all_messages.push(msg);
+                    if let Some(msg) =
+                        self.parse_response_item_to_harmony_message(item, &prev_outputs)?
+                    {
+                        all_messages.push(msg);
+                    }
 
                     // Track function tool calls so that function_call_output can find the name
                     if matches!(item, ResponseInputOutputItem::FunctionToolCall { .. }) {
@@ -529,7 +532,7 @@ impl HarmonyBuilder {
         &self,
         item: &ResponseInputOutputItem,
         prev_outputs: &[&ResponseInputOutputItem],
-    ) -> Result<HarmonyMessage, String> {
+    ) -> Result<Option<HarmonyMessage>, String> {
         match item {
             // Regular message (user or assistant)
             ResponseInputOutputItem::Message { role, content, .. } => {
@@ -558,7 +561,7 @@ impl HarmonyBuilder {
 
                 let text = text_parts.join("\n");
 
-                Ok(HarmonyMessage {
+                Ok(Some(HarmonyMessage {
                     author: Author {
                         role: harmony_role,
                         name: None,
@@ -567,7 +570,7 @@ impl HarmonyBuilder {
                     content: vec![Content::Text(TextContent { text })],
                     channel: None,
                     content_type: None,
-                })
+                }))
             }
 
             // Reasoning content (chain-of-thought)
@@ -583,7 +586,7 @@ impl HarmonyBuilder {
                 let text = reasoning_texts.join("\n");
 
                 // Reasoning goes in the "analysis" channel for Harmony
-                Ok(HarmonyMessage {
+                Ok(Some(HarmonyMessage {
                     author: Author {
                         role: Role::Assistant,
                         name: None,
@@ -592,7 +595,7 @@ impl HarmonyBuilder {
                     content: vec![Content::Text(TextContent { text })],
                     channel: Some("analysis".to_string()),
                     content_type: None,
-                })
+                }))
             }
 
             // Function tool call (with optional output)
@@ -615,7 +618,7 @@ impl HarmonyBuilder {
                         output_preview = %output_str.chars().take(100).collect::<String>(),
                         "Building tool result message with Tool role (recipient=assistant, no channel)"
                     );
-                    Ok(HarmonyMessage {
+                    Ok(Some(HarmonyMessage {
                         author: Author {
                             role: Role::Tool,
                             name: Some(author_name),
@@ -626,7 +629,7 @@ impl HarmonyBuilder {
                         })],
                         channel: None,
                         content_type: None,
-                    })
+                    }))
                 } else {
                     // Tool call - assistant message in commentary channel with recipient
                     // msg.with_channel("commentary").with_recipient(f"functions.{name}")
@@ -636,7 +639,7 @@ impl HarmonyBuilder {
                         recipient = %recipient,
                         "Building tool call message with recipient"
                     );
-                    Ok(HarmonyMessage {
+                    Ok(Some(HarmonyMessage {
                         author: Author {
                             role: Role::Assistant,
                             name: None,
@@ -647,7 +650,7 @@ impl HarmonyBuilder {
                         })],
                         channel: Some("commentary".to_string()),
                         content_type: Some("json".to_string()),
-                    })
+                    }))
                 }
             }
 
@@ -672,7 +675,7 @@ impl HarmonyBuilder {
                 // Create Tool message with "functions.{name}" prefix
                 // IMPORTANT: Must include recipient="assistant" for parser to recognize it.
                 // We keep channel=None to minimize what the model might copy.
-                Ok(HarmonyMessage {
+                Ok(Some(HarmonyMessage {
                     author: Author {
                         role: Role::Tool,
                         name: Some(format!("functions.{call}")),
@@ -683,7 +686,7 @@ impl HarmonyBuilder {
                     })],
                     channel: None,
                     content_type: None,
-                })
+                }))
             }
 
             // Simple input message (usually user message)
@@ -717,7 +720,7 @@ impl HarmonyBuilder {
                     }
                 };
 
-                Ok(HarmonyMessage {
+                Ok(Some(HarmonyMessage {
                     author: Author {
                         role: harmony_role,
                         name: None,
@@ -726,12 +729,21 @@ impl HarmonyBuilder {
                     content: vec![Content::Text(TextContent { text })],
                     channel: None,
                     content_type: None,
-                })
+                }))
             }
 
             ResponseInputOutputItem::McpApprovalResponse { .. }
             | ResponseInputOutputItem::McpApprovalRequest { .. }
-            | ResponseInputOutputItem::ComputerCall { .. }
+            | ResponseInputOutputItem::McpListTools { .. }
+            | ResponseInputOutputItem::McpCall { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "Skipping replayed MCP trace item during Harmony conversion"
+                );
+                Ok(None)
+            }
+
+            ResponseInputOutputItem::ComputerCall { .. }
             | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
@@ -1042,5 +1054,77 @@ impl HarmonyBuilder {
 impl Default for HarmonyBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{
+        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest,
+    };
+
+    use super::HarmonyBuilder;
+
+    #[test]
+    fn test_construct_input_messages_skips_replayed_mcp_trace_items() {
+        let request = ResponsesRequest {
+            previous_response_id: Some("resp_prev".to_string()),
+            input: ResponseInput::Items(vec![
+                ResponseInputOutputItem::Message {
+                    id: "msg_user".to_string(),
+                    role: "user".to_string(),
+                    content: vec![ResponseContentPart::InputText {
+                        text: "hello".to_string(),
+                    }],
+                    status: None,
+                    phase: None,
+                },
+                ResponseInputOutputItem::McpApprovalRequest {
+                    id: "mcpr_1".to_string(),
+                    server_label: "mock".to_string(),
+                    name: "brave_web_search".to_string(),
+                    arguments: "{\"query\":\"hello\"}".to_string(),
+                },
+                ResponseInputOutputItem::McpApprovalResponse {
+                    id: Some("mcprr_1".to_string()),
+                    approval_request_id: "mcpr_1".to_string(),
+                    approve: true,
+                    reason: None,
+                },
+                ResponseInputOutputItem::McpListTools {
+                    id: "mcp_list_1".to_string(),
+                    server_label: "mock".to_string(),
+                    tools: vec![],
+                },
+                ResponseInputOutputItem::McpCall {
+                    id: "mcp_1".to_string(),
+                    server_label: "mock".to_string(),
+                    name: "brave_web_search".to_string(),
+                    arguments: "{\"query\":\"hello\"}".to_string(),
+                    output: "{\"result\":\"world\"}".to_string(),
+                    status: "completed".to_string(),
+                    approval_request_id: None,
+                    error: None,
+                },
+                ResponseInputOutputItem::Message {
+                    id: "msg_assistant".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![ResponseContentPart::OutputText {
+                        text: "done".to_string(),
+                        annotations: vec![],
+                        logprobs: None,
+                    }],
+                    status: None,
+                    phase: None,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let messages = HarmonyBuilder::new()
+            .construct_input_messages_with_harmony(&request)
+            .expect("replayed MCP trace items are skipped");
+
+        assert_eq!(messages.len(), 2);
     }
 }

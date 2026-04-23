@@ -2028,6 +2028,88 @@ fn test_custom_tool_call_output_validation_rejects_empty_text_and_parts() {
     );
 }
 
+/// Client-stitched transcripts may carry `mcp_list_tools` and `mcp_call`
+/// items echoing prior output. Protocol validation must accept them
+/// structurally so the router-side preparation layer can normalize them.
+#[test]
+fn response_input_accepts_mcp_trace_items() {
+    use validator::Validate;
+
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "store": false,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "search something"}],
+            },
+            {
+                "type": "mcp_list_tools",
+                "id": "mcpl_123",
+                "server_label": "deepwiki",
+                "tools": [],
+            },
+            {
+                "type": "mcp_call",
+                "id": "mcp_123",
+                "server_label": "deepwiki",
+                "name": "ask_question",
+                "arguments": "{\"query\":\"something\"}",
+                "output": "{\"result\":\"ok\"}",
+                "status": "completed",
+            },
+        ],
+    }))
+    .expect("request should deserialize");
+
+    request
+        .validate()
+        .expect("mcp trace items should pass structural validation");
+
+    let ResponseInput::Items(items) = &request.input else {
+        panic!("expected items input");
+    };
+
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, ResponseInputOutputItem::McpListTools { .. })),
+        "mcp_list_tools should deserialize as an input item",
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, ResponseInputOutputItem::McpCall { .. })),
+        "mcp_call should deserialize as an input item",
+    );
+
+    let serialized = serde_json::to_value(&request).expect("serialize");
+    assert_eq!(serialized["input"][1]["type"], json!("mcp_list_tools"));
+    assert_eq!(serialized["input"][2]["type"], json!("mcp_call"));
+}
+
+/// Optional fields on `mcp_call` (`approval_request_id`, `error`) should
+/// be omitted from serialized output when unset, matching the output-side
+/// contract and keeping spec parity on re-emit.
+#[test]
+fn mcp_call_input_omits_optional_fields_when_unset() {
+    let item = ResponseInputOutputItem::McpCall {
+        id: "mcp_abc".to_string(),
+        server_label: "deepwiki".to_string(),
+        name: "ask_question".to_string(),
+        arguments: "{}".to_string(),
+        output: "ok".to_string(),
+        status: "completed".to_string(),
+        approval_request_id: None,
+        error: None,
+    };
+
+    let v = serde_json::to_value(&item).expect("serialize");
+    assert!(v.get("approval_request_id").is_none());
+    assert!(v.get("error").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // T6 — containerized `shell` tool + call/output items
 // ---------------------------------------------------------------------------

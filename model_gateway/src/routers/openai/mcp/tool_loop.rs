@@ -754,6 +754,7 @@ fn approval_prefix_items(
 
 pub(crate) struct ToolLoopExecutionContext<'a> {
     pub original_body: &'a ResponsesRequest,
+    pub upstream_input: &'a ResponseInput,
     pub existing_mcp_list_tools_labels: &'a [String],
     pub session: &'a McpToolSession<'a>,
 }
@@ -769,12 +770,13 @@ pub(crate) async fn execute_tool_loop(
 ) -> Result<Value, String> {
     let ToolLoopExecutionContext {
         original_body,
+        upstream_input,
         existing_mcp_list_tools_labels,
         session,
     } = tool_loop_ctx;
 
     let mut state = ToolLoopState::new(
-        original_body.input.clone(),
+        upstream_input.clone(),
         existing_mcp_list_tools_labels.to_vec(),
     );
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);

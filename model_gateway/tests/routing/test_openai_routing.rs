@@ -268,10 +268,64 @@ async fn test_openai_router_responses_with_mock() {
         .await
         .unwrap();
     let body2: serde_json::Value = serde_json::from_slice(&body2_bytes).unwrap();
-    let resp2_id = body2["id"].as_str().expect("second id missing");
+    let resp2_id = body2["id"].as_str().expect("second id missing").to_string();
     assert_eq!(
         body2["previous_response_id"].as_str(),
         Some(resp1_id.as_str())
+    );
+
+    let request3 = ResponsesRequest {
+        model: "gpt-4o-mini".to_string(),
+        input: ResponseInput::Text("Bye".to_string()),
+        store: Some(true),
+        previous_response_id: Some(resp2_id.clone()),
+        ..Default::default()
+    };
+
+    let response3 = router
+        .route_responses(None, &tenant_meta, &request3, &request3.model)
+        .await;
+    assert_eq!(response3.status(), StatusCode::OK);
+    let body3_bytes = axum::body::to_bytes(response3.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body3: serde_json::Value = serde_json::from_slice(&body3_bytes).unwrap();
+    let resp3_id = body3["id"].as_str().expect("third id missing").to_string();
+    assert_eq!(
+        body3["previous_response_id"].as_str(),
+        Some(resp2_id.as_str())
+    );
+
+    let empty_previous_response_request = ResponsesRequest {
+        model: "gpt-4o-mini".to_string(),
+        input: ResponseInput::Text("Empty previous response id".to_string()),
+        store: Some(true),
+        previous_response_id: Some(String::new()),
+        ..Default::default()
+    };
+
+    let empty_previous_response = router
+        .route_responses(
+            None,
+            &tenant_meta,
+            &empty_previous_response_request,
+            &empty_previous_response_request.model,
+        )
+        .await;
+    assert_eq!(empty_previous_response.status(), StatusCode::OK);
+    let empty_prev_body_bytes =
+        axum::body::to_bytes(empty_previous_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+    let empty_prev_body: serde_json::Value =
+        serde_json::from_slice(&empty_prev_body_bytes).unwrap();
+    let empty_prev_resp_id = empty_prev_body["id"]
+        .as_str()
+        .expect("empty-prev response id missing")
+        .to_string();
+    assert_eq!(
+        empty_prev_body["previous_response_id"],
+        serde_json::Value::Null
     );
 
     let stored1 = storage
@@ -279,13 +333,42 @@ async fn test_openai_router_responses_with_mock() {
         .await
         .unwrap()
         .expect("first response missing");
-    // Input is now stored as a JSON array of items
-    assert!(stored1.input.is_array());
-    let input_items = stored1.input.as_array().unwrap();
-    assert_eq!(input_items.len(), 1);
-    assert_eq!(input_items[0]["type"], "message");
-    assert_eq!(input_items[0]["role"], "user");
-    assert_eq!(input_items[0]["content"][0]["text"], "Say hi");
+    let stored2 = storage
+        .get_response(&ResponseId::from(resp2_id.clone()))
+        .await
+        .unwrap()
+        .expect("second response missing");
+    let stored3 = storage
+        .get_response(&ResponseId::from(resp3_id.clone()))
+        .await
+        .unwrap()
+        .expect("third response missing");
+    let stored_empty_prev = storage
+        .get_response(&ResponseId::from(empty_prev_resp_id.clone()))
+        .await
+        .unwrap()
+        .expect("empty-prev response missing");
+
+    let assert_single_turn_input =
+        |stored: &StoredResponse, expected_text: &str, expected_prev: Option<&str>| {
+            let input_items = stored
+                .input
+                .as_array()
+                .expect("stored input should be an array");
+            assert_eq!(input_items.len(), 1);
+            assert_eq!(input_items[0]["type"], "message");
+            assert_eq!(input_items[0]["role"], "user");
+            assert_eq!(input_items[0]["content"][0]["text"], expected_text);
+            assert_eq!(
+                stored.previous_response_id.as_ref().map(|id| id.0.as_str()),
+                expected_prev
+            );
+        };
+
+    assert_single_turn_input(&stored1, "Say hi", None);
+    assert_single_turn_input(&stored2, "Thanks", Some(resp1_id.as_str()));
+    assert_single_turn_input(&stored3, "Bye", Some(resp2_id.as_str()));
+    assert_single_turn_input(&stored_empty_prev, "Empty previous response id", None);
 
     // Output is now stored in raw_response["output"] as a JSON array of items
     let output_val = &stored1.raw_response["output"];
@@ -294,15 +377,6 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(output_items.len(), 1);
     assert_eq!(output_items[0]["content"][0]["text"], "mock_output_1");
 
-    assert!(stored1.previous_response_id.is_none());
-
-    let stored2 = storage
-        .get_response(&ResponseId::from(resp2_id))
-        .await
-        .unwrap()
-        .expect("second response missing");
-    assert_eq!(stored2.previous_response_id.unwrap().0, resp1_id);
-
     // Output is now stored in raw_response["output"] as a JSON array
     let output_val2 = &stored2.raw_response["output"];
     assert!(output_val2.is_array());
@@ -310,8 +384,16 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(output_items2.len(), 1);
     assert_eq!(output_items2[0]["content"][0]["text"], "mock_output_2");
 
+    let output_val3 = &stored3.raw_response["output"];
+    assert!(output_val3.is_array());
+    let output_items3 = output_val3.as_array().unwrap();
+    assert_eq!(output_items3.len(), 1);
+    assert_eq!(output_items3[0]["content"][0]["text"], "mock_output_3");
+
     assert_eq!(stored1.raw_response, body1);
     assert_eq!(stored2.raw_response, body2);
+    assert_eq!(stored3.raw_response, body3);
+    assert_eq!(stored_empty_prev.raw_response, empty_prev_body);
 
     server.abort();
 }
