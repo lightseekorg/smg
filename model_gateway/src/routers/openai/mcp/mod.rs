@@ -13,5 +13,6 @@ pub(crate) use tool_loop::{
     build_resume_payload, execute_streaming_tool_calls, execute_tool_loop,
     inject_mcp_metadata_streaming, mcp_list_tools_bindings_to_emit,
     mcp_list_tools_dedupe_key_from_item, prepare_mcp_tools_as_functions,
-    send_mcp_list_tools_events, ToolLoopExecutionContext, ToolLoopState,
+    remove_intercepted_mcp_function_calls_from_output, send_mcp_list_tools_events,
+    ToolLoopExecutionContext, ToolLoopState,
 };

@@ -654,6 +654,8 @@ async fn execute_tool_loop_streaming_internal(
                 let output_item_type =
                     ResponseStreamEventEmitter::output_item_type_for_format(Some(&response_format));
                 let resolved_label = session.resolve_tool_server_label(&tool_call.name);
+                // Keep this probe shape aligned with fields currently inspected by
+                // `McpToolSession::should_hide_output_item_json`.
                 let mut visibility_probe_item = json!({
                     "type": item_type,
                     "name": tool_call.name,

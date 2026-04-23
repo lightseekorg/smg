@@ -673,7 +673,7 @@ fn visible_mcp_list_tools_items(
         .collect()
 }
 
-fn remove_intercepted_mcp_function_calls_from_output(
+pub(crate) fn remove_intercepted_mcp_function_calls_from_output(
     response: &mut Value,
     session: &McpToolSession<'_>,
     user_function_names: &HashSet<String>,

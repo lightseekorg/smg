@@ -141,9 +141,20 @@ impl StreamingToolHandler {
     }
 
     pub fn mark_output_hidden(&mut self, upstream_index: usize) {
-        if self.visibility_state(upstream_index) == OutputVisibilityState::Unknown {
-            self.output_visibility
-                .insert(upstream_index, OutputVisibilityState::Hidden);
+        match self.visibility_state(upstream_index) {
+            OutputVisibilityState::Unknown => {
+                self.output_visibility
+                    .insert(upstream_index, OutputVisibilityState::Hidden);
+            }
+            OutputVisibilityState::Hidden => {}
+            OutputVisibilityState::Visible => {
+                // First-writer-wins by design: once an index has been mapped and emitted
+                // client-visible, we must not silently remap/remove it.
+                warn!(
+                    upstream_index,
+                    "Ignoring hide attempt for already-visible output index"
+                );
+            }
         }
     }
 
@@ -399,5 +410,42 @@ impl StreamingToolHandler {
 
     pub fn take_pending_calls(&mut self) -> Vec<FunctionCallInProgress> {
         std::mem::take(&mut self.pending_calls)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutputVisibilityState, StreamingToolHandler};
+
+    #[test]
+    fn hidden_before_resolution_stays_hidden_and_unmapped() {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+
+        assert_eq!(handler.visibility_state(3), OutputVisibilityState::Unknown);
+        handler.mark_output_hidden(3);
+
+        assert!(handler.is_output_hidden(3));
+        assert_eq!(handler.resolve_output_index_for_forwarding(3), None);
+        assert_eq!(handler.mapped_output_index(3), None);
+    }
+
+    #[test]
+    fn resolving_unknown_commits_visible_mapping() {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+
+        assert_eq!(handler.resolve_output_index_for_forwarding(7), Some(0));
+        assert_eq!(handler.visibility_state(7), OutputVisibilityState::Visible);
+        assert_eq!(handler.mapped_output_index(7), Some(0));
+    }
+
+    #[test]
+    fn hide_after_visible_is_ignored() {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        assert_eq!(handler.resolve_output_index_for_forwarding(11), Some(0));
+
+        handler.mark_output_hidden(11);
+
+        assert_eq!(handler.visibility_state(11), OutputVisibilityState::Visible);
+        assert_eq!(handler.resolve_output_index_for_forwarding(11), Some(0));
     }
 }

@@ -7,7 +7,7 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, io, sync::Arc};
 
 use axum::{
     body::Body,
@@ -55,7 +55,8 @@ use crate::{
             mcp::{
                 build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
                 mcp_list_tools_bindings_to_emit, prepare_mcp_tools_as_functions,
-                send_mcp_list_tools_events, StreamAction, StreamingToolHandler, ToolLoopState,
+                remove_intercepted_mcp_function_calls_from_output, send_mcp_list_tools_events,
+                StreamAction, StreamingToolHandler, ToolLoopState,
             },
         },
     },
@@ -320,7 +321,7 @@ fn should_drop_hidden_internal_tool_event(
     parsed_data: &Value,
     handler: &mut StreamingToolHandler,
     visibility_session: Option<&McpToolSession<'_>>,
-    user_function_names: &std::collections::HashSet<String>,
+    user_function_names: &HashSet<String>,
 ) -> bool {
     let Some(session) = visibility_session else {
         return false;
@@ -346,6 +347,8 @@ fn should_drop_hidden_internal_tool_event(
             .is_some_and(|item| session.should_hide_output_item_json(item, user_function_names)),
         // MCP ARGUMENTS_DELTA events are handled before this function is reached
         // (buffered and re-emitted synthetically), so only ARGUMENTS_DONE needs handling here.
+        // This branch assumes pending_calls has already been populated from prior
+        // function_call/output_item events for this output_index.
         Some(FunctionCallEvent::ARGUMENTS_DONE) => output_index
             .and_then(|idx| {
                 handler
@@ -385,6 +388,8 @@ pub(super) fn forward_streaming_event(
     handler: &mut StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
+    // Optional policy-only session used when interception is disabled but
+    // visibility/redaction must still apply.
     redaction_session: Option<&McpToolSession<'_>>,
     sequence_number: &mut u64,
 ) -> bool {
@@ -451,6 +456,9 @@ pub(super) fn forward_streaming_event(
 
     if mapped_output_index.is_none() {
         if let Some(idx) = extract_output_index(&parsed_data) {
+            // IMPORTANT: resolve_output_index_for_forwarding has committing side-effects
+            // for Unknown indices (allocates + marks Visible). Keep hidden-drop checks above
+            // this call so hidden items cannot become visible by accident.
             let Some(mapped) = handler.resolve_output_index_for_forwarding(idx) else {
                 return true;
             };
@@ -555,6 +563,19 @@ fn maybe_inject_tool_in_progress(
     send_sse_event(tx, event_type, &event)
 }
 
+fn reconcile_mixed_mode_final_response(
+    final_response: &mut Value,
+    state: &ToolLoopState,
+    session: &McpToolSession<'_>,
+    user_function_names: &HashSet<String>,
+) {
+    // In mixed MCP + user-function batches, upstream final responses still contain
+    // function_call placeholders for MCP calls we already executed server-side.
+    // Remove those placeholders before injecting executed MCP output metadata.
+    remove_intercepted_mcp_function_calls_from_output(final_response, session, user_function_names);
+    inject_mcp_metadata_streaming(final_response, state, session, user_function_names);
+}
+
 /// Send final response.completed event to client
 /// Returns false if client disconnected
 pub(super) fn send_final_response_event(
@@ -581,6 +602,13 @@ pub(super) fn send_final_response_event(
 
     if let Some(session) = ctx.session {
         inject_mcp_metadata_streaming(&mut final_response, state, session, ctx.user_function_names);
+    } else if let Some(session) = redaction_session.filter(|_| state.total_calls > 0) {
+        reconcile_mixed_mode_final_response(
+            &mut final_response,
+            state,
+            session,
+            ctx.user_function_names,
+        );
     }
 
     let session_for_redaction = redaction_session.or(ctx.session);
@@ -1034,6 +1062,9 @@ pub(super) fn handle_streaming_with_tool_interception(
                                                     &user_function_names,
                                                 )
                                         });
+                                        // `_passthrough_calls` are intentionally not executed
+                                        // here; they are surfaced to the client in upstream
+                                        // response output so the client can drive them.
 
                                         if !mcp_pending_calls.is_empty() {
                                             state.iteration += 1;
@@ -1144,6 +1175,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                     }
                     if !disable_mcp_interception {
                         inject_mcp_metadata_streaming(
+                            &mut response_json,
+                            &state,
+                            &session,
+                            &user_function_names,
+                        );
+                    } else if state.total_calls > 0 {
+                        reconcile_mixed_mode_final_response(
                             &mut response_json,
                             &state,
                             &session,
@@ -1309,4 +1347,217 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &mcp_orchestrator,
         mcp_servers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use openai_protocol::responses::ResponseInput;
+    use serde_json::json;
+    use smg_mcp::{
+        McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession,
+        McpTransport, Tool, ToolEntry,
+    };
+
+    use super::{
+        reconcile_mixed_mode_final_response, should_drop_hidden_internal_tool_event,
+        StreamingToolHandler,
+    };
+
+    fn test_tool(name: &str) -> Tool {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert("properties".to_string(), json!({}));
+
+        Tool {
+            name: name.to_string().into(),
+            title: None,
+            description: Some("test".into()),
+            input_schema: schema.into(),
+            output_schema: None,
+            icons: None,
+            annotations: None,
+        }
+    }
+
+    fn internal_server_config() -> McpServerConfig {
+        McpServerConfig {
+            name: "internal-server".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: Default::default(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
+            internal: true,
+        }
+    }
+
+    fn internal_server_binding() -> McpServerBinding {
+        McpServerBinding {
+            label: "internal_label".to_string(),
+            server_key: "internal-server".to_string(),
+            allowed_tools: Some(vec!["internal_non_builtin_tool".to_string()]),
+        }
+    }
+
+    fn visible_server_config() -> McpServerConfig {
+        McpServerConfig {
+            name: "visible-server".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3001/sse".to_string(),
+                token: None,
+                headers: Default::default(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
+            internal: false,
+        }
+    }
+
+    fn visible_server_binding() -> McpServerBinding {
+        McpServerBinding {
+            label: "visible_label".to_string(),
+            server_key: "visible-server".to_string(),
+            allowed_tools: Some(vec!["visible_mcp_tool".to_string()]),
+        }
+    }
+
+    #[tokio::test]
+    async fn drops_hidden_done_event_even_without_added_event() {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![internal_server_config()],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_non_builtin_tool"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![internal_server_binding()],
+            "test-request",
+        );
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+
+        let done_event = json!({
+            "type": "response.output_item.done",
+            "output_index": 4,
+            "item": {
+                "type": "function_call",
+                "name": "internal_non_builtin_tool",
+                "status": "completed",
+                "arguments": "{}"
+            }
+        });
+
+        let dropped = should_drop_hidden_internal_tool_event(
+            Some("response.output_item.done"),
+            &done_event,
+            &mut handler,
+            Some(&session),
+            &HashSet::new(),
+        );
+
+        assert!(dropped);
+        assert!(handler.is_output_hidden(4));
+    }
+
+    #[tokio::test]
+    async fn mixed_mode_reconciliation_removes_mcp_placeholders() {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![visible_server_config()],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "visible-server",
+                test_tool("visible_mcp_tool"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![visible_server_binding()],
+            "test-request",
+        );
+        let mut state = super::ToolLoopState::new(ResponseInput::Text("hello".to_string()), vec![]);
+        state.total_calls = 1;
+        state.mcp_call_items.push(json!({
+            "type": "mcp_call",
+            "id": "mcp_visible_tool",
+            "name": "visible_mcp_tool",
+            "server_label": "visible_label",
+            "status": "completed",
+            "arguments": "{}",
+            "output": "ok"
+        }));
+
+        let mut final_response = json!({
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_internal",
+                    "name": "visible_mcp_tool",
+                    "status": "completed",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_user",
+                    "name": "user_tool",
+                    "status": "completed",
+                    "arguments": "{}"
+                }
+            ]
+        });
+        let user_function_names = HashSet::from(["user_tool".to_string()]);
+
+        reconcile_mixed_mode_final_response(
+            &mut final_response,
+            &state,
+            &session,
+            &user_function_names,
+        );
+
+        let output = final_response
+            .get("output")
+            .and_then(|value| value.as_array())
+            .expect("output array");
+
+        assert!(
+            output.iter().any(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("mcp_call")
+                    && item.get("name").and_then(|v| v.as_str()) == Some("visible_mcp_tool")
+            }),
+            "expected executed MCP output item to be present"
+        );
+        assert!(
+            output.iter().any(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                    && item.get("name").and_then(|v| v.as_str()) == Some("user_tool")
+            }),
+            "expected user function call to remain in final output"
+        );
+        assert!(
+            !output.iter().any(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                    && item.get("name").and_then(|v| v.as_str()) == Some("visible_mcp_tool")
+            }),
+            "expected intercepted MCP function_call placeholder to be removed"
+        );
+    }
 }

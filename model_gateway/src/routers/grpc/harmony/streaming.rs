@@ -704,6 +704,8 @@ impl HarmonyStreamingProcessor {
                                     response_format.as_ref(),
                                 );
 
+                                // Keep this probe shape aligned with fields currently inspected
+                                // by `McpToolSession::should_hide_output_item_json`.
                                 let mut visibility_probe_item = json!({
                                     "type": type_str,
                                     "name": tool_name,
