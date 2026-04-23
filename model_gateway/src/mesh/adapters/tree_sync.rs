@@ -166,6 +166,10 @@ impl TreeSyncAdapter {
     /// hash here would collide with the sentinel in the apply path
     /// landing next slice.
     pub fn on_local_insert(&self, model_id: &str, delta: TreeDelta) {
+        debug_assert!(
+            !model_id.is_empty(),
+            "TreeSyncAdapter::on_local_insert requires non-empty model_id",
+        );
         debug_assert_ne!(
             delta.node_hash, 0,
             "TreeDelta.node_hash must be non-zero (0 is reserved for GLOBAL_EVICTION_HASH)",
