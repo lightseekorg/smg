@@ -293,6 +293,19 @@ pub(super) async fn execute_tool_loop(
                         format!("Failed to convert to responses format: {e}"),
                     )
                 })?;
+                if state.total_calls > 0 {
+                    let tool_items = std::mem::take(&mut state.mcp_call_items);
+                    session.inject_client_visible_mcp_output_items(
+                        &mut responses_response.output,
+                        tool_items,
+                        &user_function_names,
+                    );
+                }
+                retain_client_visible_output_items(
+                    &mut responses_response.output,
+                    &session,
+                    &user_function_names,
+                );
                 retain_client_visible_response_tools(
                     &mut responses_response,
                     &session,
@@ -341,6 +354,14 @@ pub(super) async fn execute_tool_loop(
                 // Mark as completed but with incomplete details
                 responses_response.status = ResponseStatus::Completed;
                 responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+                if state.total_calls > 0 {
+                    let tool_items = std::mem::take(&mut state.mcp_call_items);
+                    session.inject_client_visible_mcp_output_items(
+                        &mut responses_response.output,
+                        tool_items,
+                        &user_function_names,
+                    );
+                }
                 retain_client_visible_output_items(
                     &mut responses_response.output,
                     &session,

@@ -16,8 +16,9 @@ servers:
     internal: true
 ```
 
-In the current implementation, `internal: true` applies only to self-provided
-MCP servers declared under `servers:`. It affects both final assembled
+In the current implementation, the session's internal-server set is derived
+from both configured `servers:` entries and static server registrations
+(`McpOrchestrator::internal_server_names()`). It affects both final assembled
 responses and streaming output by allowing higher layers to strip
 client-visible internal server tool lists and internal non-builtin tool-call
 trace items.

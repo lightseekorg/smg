@@ -637,8 +637,45 @@ pub(crate) fn mcp_list_tools_bindings_to_emit(
 }
 
 pub(crate) fn mcp_list_tools_dedupe_key(server_label: &str, tools: &Value) -> String {
-    let serialized_tools = serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string());
+    let canonical_tools = canonicalize_mcp_tools_for_dedupe(tools);
+    let serialized_tools =
+        serde_json::to_string(&canonical_tools).unwrap_or_else(|_| "[]".to_string());
     format!("{server_label}\u{1f}{serialized_tools}")
+}
+
+fn canonicalize_mcp_tools_for_dedupe(tools: &Value) -> Value {
+    fn canonicalize_value(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(canonicalize_value).collect()),
+            Value::Object(map) => {
+                let mut sorted_keys: Vec<_> = map.keys().collect();
+                sorted_keys.sort_unstable();
+                let mut normalized = serde_json::Map::with_capacity(map.len());
+                for key in sorted_keys {
+                    if let Some(entry) = map.get(key) {
+                        normalized.insert(key.clone(), canonicalize_value(entry));
+                    }
+                }
+                Value::Object(normalized)
+            }
+            _ => value.clone(),
+        }
+    }
+
+    let Some(items) = tools.as_array() else {
+        return canonicalize_value(tools);
+    };
+
+    let mut canonical_items: Vec<Value> = items.iter().map(canonicalize_value).collect();
+    canonical_items.sort_by(|left, right| {
+        let left_name = left.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let right_name = right.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        left_name
+            .cmp(right_name)
+            .then_with(|| left.to_string().cmp(&right.to_string()))
+    });
+
+    Value::Array(canonical_items)
 }
 
 pub(crate) fn mcp_list_tools_dedupe_key_from_item(item: &Value) -> Option<String> {
@@ -790,7 +827,22 @@ fn retained_output_items(
 ) -> Vec<Value> {
     output_array
         .iter()
-        .filter(|item| !session.should_hide_output_item_json(item, user_function_names))
+        .filter(|item| {
+            if session.should_hide_output_item_json(item, user_function_names) {
+                return false;
+            }
+
+            let item_type = item.get("type").and_then(|value| value.as_str());
+            if !item_type.is_some_and(is_function_call_type) {
+                return true;
+            }
+
+            let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
+                return true;
+            };
+
+            !session.should_intercept_function_call(name, user_function_names)
+        })
         .cloned()
         .collect()
 }
@@ -903,6 +955,14 @@ pub(crate) async fn execute_tool_loop(
                 "Returning response with {} user function call(s) without MCP interception",
                 user_function_calls.len()
             );
+            if state.total_calls > 0 {
+                inject_mcp_metadata_streaming(
+                    &mut response_json,
+                    &state,
+                    session,
+                    &user_function_names,
+                );
+            }
             return Ok(response_json);
         }
 
@@ -910,10 +970,10 @@ pub(crate) async fn execute_tool_loop(
         Metrics::record_mcp_tool_iteration(&original_body.model);
 
         info!(
-            "Tool loop iteration {}: {} MCP function call(s) detected (user calls in batch: {})",
+            "Tool loop iteration {}: {} MCP function call(s) detected (user function call(s) in batch: {})",
             state.iteration,
             mcp_function_calls.len(),
-            has_user_function_calls
+            user_function_calls.len()
         );
 
         let effective_limit = match max_tool_calls {
@@ -1132,6 +1192,21 @@ fn build_incomplete_response(
                 incomplete_items.push(mcp_call_item);
             }
         }
+
+        // Drop intercepted function_call placeholders that were converted into
+        // mcp_call incomplete items above to avoid duplicate tool entries.
+        output_array.retain(|item| {
+            let item_type = item.get("type").and_then(|value| value.as_str());
+            if !item_type.is_some_and(is_function_call_type) {
+                return true;
+            }
+
+            let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
+                return true;
+            };
+
+            !session.should_intercept_function_call(name, &user_function_names)
+        });
 
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
