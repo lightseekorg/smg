@@ -347,6 +347,30 @@ def _create_code_interpreter_response(api_client, model, stream):
     )
 
 
+_CODE_INTERPRETER_UNAVAILABLE_MARKERS = (
+    "code_interpreter",
+    "code interpreter",
+    "tool is not supported",
+    "not supported",
+    "unsupported tool",
+    "unknown tool",
+    "not enabled",
+)
+
+
+def _is_code_interpreter_unavailable(exc: openai.BadRequestError) -> bool:
+    """Narrow the BadRequest catch to genuine "tool unavailable" signals.
+
+    A bare ``except openai.BadRequestError`` would also swallow 400s from a
+    broken request path (gateway payload bug, rejected schema, etc.), which
+    is exactly the kind of regression this test exists to catch. Restrict
+    the skip to responses whose error message explicitly mentions that the
+    code_interpreter tool itself is unavailable on the target model.
+    """
+    message = (getattr(exc, "message", None) or str(exc) or "").lower()
+    return any(marker in message for marker in _CODE_INTERPRETER_UNAVAILABLE_MARKERS)
+
+
 @pytest.fixture(scope="class")
 def code_interpreter_response_pair(setup_backend):
     """Run code_interpreter twice (non-stream + stream) and cache both outputs.
@@ -369,14 +393,18 @@ def code_interpreter_response_pair(setup_backend):
     try:
         non_stream_resp = _create_code_interpreter_response(api_client, model, stream=False)
     except openai.BadRequestError as exc:
-        pytest.skip(f"code_interpreter unavailable on this model: {exc}")
+        if _is_code_interpreter_unavailable(exc):
+            pytest.skip(f"code_interpreter unavailable on this model: {exc}")
+        raise
     assert non_stream_resp.error is None, f"Response error: {non_stream_resp.error}"
 
     time.sleep(_API_RATE_LIMIT_DELAY)
     try:
         stream_resp = _create_code_interpreter_response(api_client, model, stream=True)
     except openai.BadRequestError as exc:
-        pytest.skip(f"code_interpreter unavailable on this model: {exc}")
+        if _is_code_interpreter_unavailable(exc):
+            pytest.skip(f"code_interpreter unavailable on this model: {exc}")
+        raise
     streaming_output = _stream_to_final_output(stream_resp)
 
     return {
