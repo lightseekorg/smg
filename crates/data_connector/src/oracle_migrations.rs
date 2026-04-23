@@ -7,85 +7,70 @@
 
 use crate::{schema::SchemaConfig, versioning::Migration};
 
+const ORACLE_V1: Migration = Migration {
+    version: 1,
+    description: "Add safety_identifier column to responses",
+    up: oracle_v1_up,
+};
+const ORACLE_V2: Migration = Migration {
+    version: 2,
+    description: "Remove legacy user_id column from responses",
+    up: oracle_v2_up,
+};
+const ORACLE_V3: Migration = Migration {
+    version: 3,
+    description: "Drop redundant output, metadata, instructions, tool_calls columns from responses",
+    up: oracle_v3_up,
+};
+const ORACLE_V4: Migration = Migration {
+    version: 4,
+    description: "Create skills table",
+    up: oracle_v4_up,
+};
+const ORACLE_V5: Migration = Migration {
+    version: 5,
+    description: "Create skill_versions table",
+    up: oracle_v5_up,
+};
+const ORACLE_V6: Migration = Migration {
+    version: 6,
+    description: "Create tenant_aliases table",
+    up: oracle_v6_up,
+};
+const ORACLE_V7: Migration = Migration {
+    version: 7,
+    description: "Create bundle_tokens table",
+    up: oracle_v7_up,
+};
+const ORACLE_V8: Migration = Migration {
+    version: 8,
+    description: "Create continuation_cookies table",
+    up: oracle_v8_up,
+};
+const ORACLE_V9: Migration = Migration {
+    version: 9,
+    description: "Extend responses with background-mode columns",
+    up: oracle_v9_up,
+};
+const ORACLE_V10: Migration = Migration {
+    version: 10,
+    description: "Create background_queue table",
+    up: oracle_v10_up,
+};
+const ORACLE_V11: Migration = Migration {
+    version: 11,
+    description: "Create response_stream_chunks table",
+    up: oracle_v11_up,
+};
+
 /// Core history-backend migrations required by the SQL response/conversation
 /// storage path during normal gateway startup.
-pub(crate) static ORACLE_HISTORY_MIGRATIONS: [Migration; 3] = [
-    Migration {
-        version: 1,
-        description: "Add safety_identifier column to responses",
-        up: oracle_v1_up,
-    },
-    Migration {
-        version: 2,
-        description: "Remove legacy user_id column from responses",
-        up: oracle_v2_up,
-    },
-    Migration {
-        version: 3,
-        description:
-            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
-        up: oracle_v3_up,
-    },
-];
+pub(crate) static ORACLE_HISTORY_MIGRATIONS: [Migration; 3] = [ORACLE_V1, ORACLE_V2, ORACLE_V3];
 
 /// Oracle migration list. Append new migrations here.
 pub(crate) static ORACLE_MIGRATIONS: [Migration; 11] = [
-    Migration {
-        version: 1,
-        description: "Add safety_identifier column to responses",
-        up: oracle_v1_up,
-    },
-    Migration {
-        version: 2,
-        description: "Remove legacy user_id column from responses",
-        up: oracle_v2_up,
-    },
-    Migration {
-        version: 3,
-        description:
-            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
-        up: oracle_v3_up,
-    },
-    Migration {
-        version: 4,
-        description: "Create skills table",
-        up: oracle_v4_up,
-    },
-    Migration {
-        version: 5,
-        description: "Create skill_versions table",
-        up: oracle_v5_up,
-    },
-    Migration {
-        version: 6,
-        description: "Create tenant_aliases table",
-        up: oracle_v6_up,
-    },
-    Migration {
-        version: 7,
-        description: "Create bundle_tokens table",
-        up: oracle_v7_up,
-    },
-    Migration {
-        version: 8,
-        description: "Create continuation_cookies table",
-        up: oracle_v8_up,
-    },
-    Migration {
-        version: 9,
-        description: "Extend responses with background-mode columns",
-        up: oracle_v9_up,
-    },
-    Migration {
-        version: 10,
-        description: "Create background_queue table",
-        up: oracle_v10_up,
-    },
-    Migration {
-        version: 11,
-        description: "Create response_stream_chunks table",
-        up: oracle_v11_up,
-    },
+    ORACLE_V1, ORACLE_V2, ORACLE_V3, ORACLE_V4, ORACLE_V5, ORACLE_V6, ORACLE_V7, ORACLE_V8,
+    ORACLE_V9, ORACLE_V10, ORACLE_V11,
 ];
 
 fn oracle_v1_up(schema: &SchemaConfig) -> Vec<String> {
