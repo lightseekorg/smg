@@ -2505,6 +2505,32 @@ fn shell_call_environment_rejects_container_auto() {
 }
 
 #[test]
+fn shell_call_environment_rejects_container_auto_on_response_side() {
+    // Mirror of `shell_call_environment_rejects_container_auto` targeting
+    // the response-side union. [`ResponseShellCallEnvironment`] is a
+    // separate enum from the input-side [`ShellCallEnvironment`], so the
+    // input-side rejection test doesn't prove the response-side variant
+    // also refuses `container_auto`. Spec §returns L512-513 constrains
+    // the response-side shell_call environment to `local` /
+    // `container_reference` only.
+    let payload = json!({
+        "type": "shell_call",
+        "id": "sc_bad",
+        "call_id": "call_shell_bad",
+        "action": {"commands": ["ls"]},
+        "environment": {
+            "type": "container_auto",
+            "file_ids": []
+        },
+        "status": "completed"
+    });
+    assert!(
+        serde_json::from_value::<ResponseOutputItem>(payload).is_err(),
+        "container_auto must be rejected on response-side shell_call.environment"
+    );
+}
+
+#[test]
 fn shell_call_environment_local_accepts_skills_on_input_side() {
     // Spec (openai-responses-api-spec.md §ShellCall L228-230): the
     // input-side `shell_call.environment.local` arm accepts the tool-side

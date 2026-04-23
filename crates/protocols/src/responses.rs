@@ -414,10 +414,15 @@ pub enum ResponseTool {
     #[serde(rename = "namespace")]
     Namespace(NamespaceToolDef),
 
-    /// Containerized `shell` tool. Distinct from `local_shell` — the model
-    /// issues `shell_call` items scoped to an optional
-    /// [`ShellEnvironment`] (container-auto, local, or existing container
-    /// reference).
+    /// Containerized `shell` tool. Distinct from `local_shell` — the tool
+    /// definition itself may carry an optional [`ShellEnvironment`]
+    /// (container-auto, local, or existing container reference) that the
+    /// platform resolves into a concrete execution target. Emitted
+    /// `shell_call` items use the narrower call-side unions
+    /// [`ShellCallEnvironment`] (input path) and
+    /// [`ResponseShellCallEnvironment`] (response path), which drop the
+    /// `container_auto` variant and (on the response path) the tool-side
+    /// `skills` attachment.
     ///
     /// Spec (openai-responses-api-spec.md §tools, L463-470):
     /// `Shell { type: "shell", environment? }`.
