@@ -21,7 +21,8 @@ use crate::{
         SkillVersionRecord,
     },
     validation::{
-        normalize_skill_bundle_zip, parse_skill_bundle, SkillBundleArchiveError, SkillParseError,
+        is_code_file_path, normalize_skill_bundle_zip, parse_skill_bundle, SkillBundleArchiveError,
+        SkillParseError,
     },
 };
 
@@ -84,10 +85,30 @@ pub struct CreateSkillVersionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateSkillRequest {
+    pub tenant_id: String,
+    pub skill_id: String,
+    pub default_version_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateSkillVersionRequest {
+    pub tenant_id: String,
+    pub skill_id: String,
+    pub version_ref: String,
+    pub deprecated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillCreateResult {
     pub skill: SkillRecord,
     pub version: SkillVersionRecord,
     pub warnings: Vec<SkillParseWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedSkillVersionResult {
+    pub deleted_skill: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -142,6 +163,18 @@ pub enum SkillServiceError {
 
     #[error("failed to build skill bundle: {0}")]
     BundleBuild(String),
+
+    #[error("skill '{skill_id}' in tenant '{tenant_id}' has no default version")]
+    MissingDefaultVersion { tenant_id: String, skill_id: String },
+
+    #[error(
+        "cannot delete default version '{version}' for skill '{skill_id}' in tenant '{tenant_id}' while other versions remain"
+    )]
+    CannotDeleteDefaultVersion {
+        tenant_id: String,
+        skill_id: String,
+        version: String,
+    },
 }
 
 impl Default for SkillService {
@@ -290,50 +323,7 @@ impl SkillService {
             .ok_or(SkillServiceError::MissingComponent {
                 component: "metadata_store",
             })?;
-
-        let skill = metadata_store
-            .get_skill(&tenant_id, &skill_id)
-            .await?
-            .ok_or_else(|| SkillServiceError::SkillNotFound {
-                tenant_id: tenant_id.clone(),
-                skill_id: skill_id.clone(),
-            })?;
-
-        if version_ref == "latest" {
-            if let Some(latest_version) = skill.latest_version {
-                return metadata_store
-                    .get_skill_version(&skill_id, &latest_version)
-                    .await?
-                    .ok_or(SkillServiceError::SkillVersionNotFound {
-                        tenant_id,
-                        skill_id,
-                        version: latest_version,
-                    });
-            }
-        }
-
-        if let Some(record) = metadata_store
-            .get_skill_version(&skill_id, &version_ref)
-            .await?
-        {
-            return Ok(record);
-        }
-
-        if let Ok(version_number) = version_ref.parse::<u32>() {
-            let versions = metadata_store.list_skill_versions(&skill_id).await?;
-            if let Some(record) = versions
-                .into_iter()
-                .find(|record| record.version_number == version_number)
-            {
-                return Ok(record);
-            }
-        }
-
-        Err(SkillServiceError::SkillVersionNotFound {
-            tenant_id,
-            skill_id,
-            version: version_ref,
-        })
+        resolve_skill_version_record(&*metadata_store, &tenant_id, &skill_id, &version_ref).await
     }
 
     pub async fn list_skill_versions(
@@ -517,14 +507,29 @@ impl SkillService {
         }
 
         let mut updated_skill = existing_skill.clone();
-        updated_skill.name = parsed_bundle.name.clone();
-        updated_skill.short_description = parsed_bundle.short_description.clone();
-        updated_skill.description = Some(parsed_bundle.description.clone());
-        updated_skill.has_code_files = bundle.has_code_files;
         updated_skill.latest_version = Some(version.clone());
         if updated_skill.default_version.is_none() {
             updated_skill.default_version = Some(version.clone());
         }
+        let default_version = updated_skill.default_version.clone().ok_or_else(|| {
+            SkillServiceError::MissingDefaultVersion {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            }
+        })?;
+        let default_projection = if default_version == version {
+            version_record.clone()
+        } else {
+            metadata_store
+                .get_skill_version(&skill_id, &default_version)
+                .await?
+                .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+                    tenant_id: tenant_id.clone(),
+                    skill_id: skill_id.clone(),
+                    version: default_version.clone(),
+                })?
+        };
+        apply_skill_projection_from_version(&mut updated_skill, &default_projection);
         updated_skill.updated_at = now;
 
         if let Err(error) = metadata_store.put_skill(updated_skill.clone()).await {
@@ -539,6 +544,229 @@ impl SkillService {
             skill: updated_skill,
             version: version_record,
             warnings: parsed_bundle.warnings,
+        })
+    }
+
+    pub async fn update_skill(
+        &self,
+        request: UpdateSkillRequest,
+    ) -> Result<SkillRecord, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(request.tenant_id, SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(request.skill_id, SkillServiceError::MissingSkillId)?;
+        let default_version_ref = normalize_required_value(
+            request.default_version_ref,
+            SkillServiceError::SkillVersionNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+                version: String::new(),
+            },
+        )?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+
+        let mut skill = metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+        let target_version = resolve_skill_version_record(
+            &*metadata_store,
+            &tenant_id,
+            &skill_id,
+            &default_version_ref,
+        )
+        .await?;
+
+        skill.default_version = Some(target_version.version.clone());
+        apply_skill_projection_from_version(&mut skill, &target_version);
+        skill.updated_at = Utc::now();
+        metadata_store.put_skill(skill.clone()).await?;
+        Ok(skill)
+    }
+
+    pub async fn update_skill_version(
+        &self,
+        request: UpdateSkillVersionRequest,
+    ) -> Result<SkillVersionRecord, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(request.tenant_id, SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(request.skill_id, SkillServiceError::MissingSkillId)?;
+        let version_ref = normalize_required_value(
+            request.version_ref,
+            SkillServiceError::SkillVersionNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+                version: String::new(),
+            },
+        )?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+
+        let mut skill = metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+        let mut version =
+            resolve_skill_version_record(&*metadata_store, &tenant_id, &skill_id, &version_ref)
+                .await?;
+
+        version.deprecated = request.deprecated;
+        metadata_store.put_skill_version(version.clone()).await?;
+
+        skill.updated_at = Utc::now();
+        metadata_store.put_skill(skill).await?;
+
+        Ok(version)
+    }
+
+    pub async fn delete_skill(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+    ) -> Result<(), SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+        let blob_store = self
+            .blob_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "blob_store",
+            })?;
+
+        metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+
+        let versions = metadata_store.list_skill_versions(&skill_id).await?;
+        metadata_store.delete_skill(&tenant_id, &skill_id).await?;
+        for version in &versions {
+            cleanup_blobs(&*blob_store, &version.file_manifest).await;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_skill_version(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+        version_ref: &str,
+    ) -> Result<DeletedSkillVersionResult, SkillServiceError> {
+        let tenant_id =
+            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+        let skill_id =
+            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let version_ref = normalize_required_value(
+            version_ref.to_string(),
+            SkillServiceError::SkillVersionNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+                version: version_ref.trim().to_string(),
+            },
+        )?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+        let blob_store = self
+            .blob_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "blob_store",
+            })?;
+
+        let mut skill = metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+        let version =
+            resolve_skill_version_record(&*metadata_store, &tenant_id, &skill_id, &version_ref)
+                .await?;
+        let versions = metadata_store.list_skill_versions(&skill_id).await?;
+
+        if versions.len() > 1
+            && skill
+                .default_version
+                .as_deref()
+                .is_some_and(|default_version| default_version == version.version)
+        {
+            return Err(SkillServiceError::CannotDeleteDefaultVersion {
+                tenant_id,
+                skill_id,
+                version: version.version,
+            });
+        }
+
+        metadata_store
+            .delete_skill_version(&skill.skill_id, &version.version)
+            .await?;
+        cleanup_blobs(&*blob_store, &version.file_manifest).await;
+
+        if versions.len() == 1 {
+            metadata_store
+                .delete_skill(&skill.tenant_id, &skill.skill_id)
+                .await?;
+            return Ok(DeletedSkillVersionResult {
+                deleted_skill: true,
+            });
+        }
+
+        let remaining_versions = metadata_store.list_skill_versions(&skill.skill_id).await?;
+        let latest_version = latest_skill_version(&remaining_versions).ok_or_else(|| {
+            SkillServiceError::SkillVersionNotFound {
+                tenant_id: skill.tenant_id.clone(),
+                skill_id: skill.skill_id.clone(),
+                version: "latest".to_string(),
+            }
+        })?;
+        skill.latest_version = Some(latest_version.version.clone());
+        let default_version = skill.default_version.clone().ok_or_else(|| {
+            SkillServiceError::MissingDefaultVersion {
+                tenant_id: skill.tenant_id.clone(),
+                skill_id: skill.skill_id.clone(),
+            }
+        })?;
+        let default_projection = remaining_versions
+            .iter()
+            .find(|record| record.version == default_version)
+            .cloned()
+            .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+                tenant_id: skill.tenant_id.clone(),
+                skill_id: skill.skill_id.clone(),
+                version: default_version,
+            })?;
+        apply_skill_projection_from_version(&mut skill, &default_projection);
+        skill.updated_at = Utc::now();
+        metadata_store.put_skill(skill).await?;
+
+        Ok(DeletedSkillVersionResult {
+            deleted_skill: false,
         })
     }
 }
@@ -698,6 +926,83 @@ fn next_version_number(existing_versions: &[SkillVersionRecord]) -> u32 {
         .saturating_add(1)
 }
 
+async fn resolve_skill_version_record(
+    metadata_store: &dyn SkillMetadataStore,
+    tenant_id: &str,
+    skill_id: &str,
+    version_ref: &str,
+) -> Result<SkillVersionRecord, SkillServiceError> {
+    let skill = metadata_store
+        .get_skill(tenant_id, skill_id)
+        .await?
+        .ok_or_else(|| SkillServiceError::SkillNotFound {
+            tenant_id: tenant_id.to_string(),
+            skill_id: skill_id.to_string(),
+        })?;
+
+    if version_ref == "latest" {
+        let latest_version =
+            skill
+                .latest_version
+                .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+                    tenant_id: tenant_id.to_string(),
+                    skill_id: skill_id.to_string(),
+                    version: "latest".to_string(),
+                })?;
+        return metadata_store
+            .get_skill_version(skill_id, &latest_version)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+                tenant_id: tenant_id.to_string(),
+                skill_id: skill_id.to_string(),
+                version: latest_version,
+            });
+    }
+
+    if let Some(record) = metadata_store
+        .get_skill_version(skill_id, version_ref)
+        .await?
+    {
+        return Ok(record);
+    }
+
+    if let Ok(version_number) = version_ref.parse::<u32>() {
+        let versions = metadata_store.list_skill_versions(skill_id).await?;
+        if let Some(record) = versions
+            .into_iter()
+            .find(|record| record.version_number == version_number)
+        {
+            return Ok(record);
+        }
+    }
+
+    Err(SkillServiceError::SkillVersionNotFound {
+        tenant_id: tenant_id.to_string(),
+        skill_id: skill_id.to_string(),
+        version: version_ref.to_string(),
+    })
+}
+
+fn apply_skill_projection_from_version(skill: &mut SkillRecord, version: &SkillVersionRecord) {
+    skill.name.clone_from(&version.name);
+    skill
+        .short_description
+        .clone_from(&version.short_description);
+    skill.description = Some(version.description.clone());
+    skill.has_code_files = version
+        .file_manifest
+        .iter()
+        .any(|file| is_code_file_path(&file.relative_path));
+}
+
+fn latest_skill_version(versions: &[SkillVersionRecord]) -> Option<SkillVersionRecord> {
+    versions.iter().cloned().max_by(|left, right| {
+        left.version_number
+            .cmp(&right.version_number)
+            .then_with(|| left.version.cmp(&right.version))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -708,7 +1013,7 @@ mod tests {
 
     use super::{
         CreateSkillRequest, CreateSkillVersionRequest, SkillService, SkillServiceMode, SkillUpload,
-        UploadedSkillFile,
+        UpdateSkillRequest, UpdateSkillVersionRequest, UploadedSkillFile,
     };
 
     #[test]
@@ -839,6 +1144,211 @@ mod tests {
             next.skill.default_version,
             Some(created.version.version.clone())
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_skill_switches_default_projection() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        let created = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let second = service
+            .create_skill_version(CreateSkillVersionRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                upload: SkillUpload::Files(vec![
+                    UploadedSkillFile {
+                        relative_path: "SKILL.md".to_string(),
+                        contents:
+                            b"---\nname: acme:search\ndescription: Search the repo\n---\nUse fd."
+                                .to_vec(),
+                        media_type: Some("text/markdown".to_string()),
+                    },
+                    UploadedSkillFile {
+                        relative_path: "scripts/run.py".to_string(),
+                        contents: b"print('v2')".to_vec(),
+                        media_type: Some("text/x-python".to_string()),
+                    },
+                ]),
+            })
+            .await?;
+
+        assert_eq!(second.skill.name, "acme:map");
+        assert!(!second.skill.has_code_files);
+
+        let updated = service
+            .update_skill(UpdateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                default_version_ref: "2".to_string(),
+            })
+            .await?;
+
+        assert_eq!(
+            updated.default_version,
+            Some(second.version.version.clone())
+        );
+        assert_eq!(updated.name, "acme:search");
+        assert!(updated.has_code_files);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_default_version_requires_switch_when_multiple_versions_remain() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        let created = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+        let second = service
+            .create_skill_version(CreateSkillVersionRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:search\ndescription: Search the repo\n---\nUse fd."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let error = service
+            .delete_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                &created.version.version,
+            )
+            .await
+            .expect_err("default version delete should fail");
+        assert!(matches!(
+            error,
+            super::SkillServiceError::CannotDeleteDefaultVersion { .. }
+        ));
+
+        let switched = service
+            .update_skill(UpdateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                default_version_ref: second.version.version.clone(),
+            })
+            .await?;
+        assert_eq!(
+            switched.default_version,
+            Some(second.version.version.clone())
+        );
+
+        service
+            .delete_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                &created.version.version,
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_last_version_removes_skill() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        let created = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let deleted = service
+            .delete_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                &created.version.version,
+            )
+            .await?;
+        assert!(deleted.deleted_skill);
+
+        let metadata_store = service
+            .metadata_store()
+            .ok_or_else(|| anyhow!("metadata store missing"))?;
+        assert!(metadata_store
+            .get_skill("tenant-a", &created.skill.skill_id)
+            .await?
+            .is_none());
+        assert!(metadata_store
+            .list_skill_versions(&created.skill.skill_id)
+            .await?
+            .is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_skill_version_marks_deprecated_and_updates_skill_timestamp() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        let created = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+        let before_updated_at = created.skill.updated_at;
+
+        let updated = service
+            .update_skill_version(UpdateSkillVersionRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                version_ref: created.version.version.clone(),
+                deprecated: true,
+            })
+            .await?;
+        assert!(updated.deprecated);
+
+        let skill = service
+            .get_skill("tenant-a", &created.skill.skill_id)
+            .await?;
+        assert!(skill.updated_at >= before_updated_at);
 
         Ok(())
     }

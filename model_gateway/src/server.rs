@@ -810,6 +810,15 @@ async fn v1_skills_get(
     skills::get_skill(State(state), Path(skill_id), query, headers).await
 }
 
+async fn v1_skills_patch(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    query: Query<openai_protocol::skills::SkillGetQuery>,
+    ValidatedJson(body): ValidatedJson<openai_protocol::skills::SkillPatchRequest>,
+) -> Response {
+    skills::patch_skill(State(state), Path(skill_id), query, Json(body)).await
+}
+
 async fn v1_skills_create_version(
     State(state): State<Arc<AppState>>,
     Path(skill_id): Path<String>,
@@ -834,6 +843,31 @@ async fn v1_skills_get_version(
     headers: HeaderMap,
 ) -> Response {
     skills::get_skill_version(State(state), Path((skill_id, version)), query, headers).await
+}
+
+async fn v1_skills_patch_version(
+    State(state): State<Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    query: Query<openai_protocol::skills::SkillGetQuery>,
+    ValidatedJson(body): ValidatedJson<openai_protocol::skills::SkillVersionPatchRequest>,
+) -> Response {
+    skills::patch_skill_version(State(state), Path((skill_id, version)), query, Json(body)).await
+}
+
+async fn v1_skills_delete(
+    State(state): State<Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    query: Query<openai_protocol::skills::SkillGetQuery>,
+) -> Response {
+    skills::delete_skill(State(state), Path(skill_id), query).await
+}
+
+async fn v1_skills_delete_version(
+    State(state): State<Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    query: Query<openai_protocol::skills::SkillGetQuery>,
+) -> Response {
+    skills::delete_skill_version(State(state), Path((skill_id, version)), query).await
 }
 
 pub struct ServerConfig {
@@ -1032,15 +1066,22 @@ pub fn build_app(
     {
         admin_routes = admin_routes
             .route("/v1/skills", post(v1_skills_create).get(v1_skills_list))
-            .route("/v1/skills/{skill_id}", get(v1_skills_get))
+            .route(
+                "/v1/skills/{skill_id}",
+                get(v1_skills_get)
+                    .patch(v1_skills_patch)
+                    .delete(v1_skills_delete),
+            )
             .route(
                 "/v1/skills/{skill_id}/versions",
                 post(v1_skills_create_version).get(v1_skills_list_versions),
+            )
+            .route(
+                "/v1/skills/{skill_id}/versions/{version}",
+                get(v1_skills_get_version)
+                    .patch(v1_skills_patch_version)
+                    .delete(v1_skills_delete_version),
             );
-        admin_routes = admin_routes.route(
-            "/v1/skills/{skill_id}/versions/{version}",
-            get(v1_skills_get_version),
-        );
     }
 
     // Build worker routes

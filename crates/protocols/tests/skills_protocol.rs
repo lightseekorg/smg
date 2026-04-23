@@ -3,7 +3,8 @@ use openai_protocol::{
     responses::{CodeInterpreterTool, ResponseTool},
     skills::{
         MessagesSkillRef, OpaqueOpenAIObject, ResponsesSkillEntry, ResponsesSkillRef,
-        SkillMutationResponse, SkillVersionRef, SkillsErrorEnvelope,
+        SkillMutationResponse, SkillPatchRequest, SkillVersionPatchRequest, SkillVersionRef,
+        SkillsErrorEnvelope,
     },
 };
 use schemars::schema_for;
@@ -247,6 +248,28 @@ fn skill_mutation_response_round_trips() {
     });
 
     let parsed: SkillMutationResponse = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+}
+
+#[test]
+fn skill_patch_request_round_trips() {
+    let raw = json!({
+        "default_version": 2
+    });
+
+    let parsed: SkillPatchRequest = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(parsed.default_version, SkillVersionRef::Integer(2));
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+}
+
+#[test]
+fn skill_version_patch_request_round_trips() {
+    let raw = json!({
+        "deprecated": true
+    });
+
+    let parsed: SkillVersionPatchRequest = serde_json::from_value(raw.clone()).unwrap();
+    assert!(parsed.deprecated);
     assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
 }
 

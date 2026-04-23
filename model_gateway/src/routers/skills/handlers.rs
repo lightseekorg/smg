@@ -9,18 +9,18 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use openai_protocol::skills::{
-    SkillGetQuery, SkillMutationResponse, SkillResponse, SkillVersionFileResponse,
-    SkillVersionResponse, SkillVersionsListQuery, SkillVersionsListResponse, SkillWarningResponse,
-    SkillsErrorBody, SkillsErrorEnvelope, SkillsListQuery, SkillsListResponse,
-    SKILLS_MULTIPART_BUNDLE_FIELD, SKILLS_MULTIPART_FILES_FIELD, SKILLS_MULTIPART_FILE_FIELD,
-    SKILLS_MULTIPART_TENANT_ID_FIELD,
+    SkillGetQuery, SkillMutationResponse, SkillPatchRequest, SkillResponse,
+    SkillVersionFileResponse, SkillVersionPatchRequest, SkillVersionRef, SkillVersionResponse,
+    SkillVersionsListQuery, SkillVersionsListResponse, SkillWarningResponse, SkillsErrorBody,
+    SkillsErrorEnvelope, SkillsListQuery, SkillsListResponse, SKILLS_MULTIPART_BUNDLE_FIELD,
+    SKILLS_MULTIPART_FILES_FIELD, SKILLS_MULTIPART_FILE_FIELD, SKILLS_MULTIPART_TENANT_ID_FIELD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use smg_skills::{
     CreateSkillRequest, CreateSkillVersionRequest, SkillCreateResult, SkillServiceError,
-    SkillUpload, UploadedSkillFile,
+    SkillUpload, UpdateSkillRequest, UpdateSkillVersionRequest, UploadedSkillFile,
 };
 
 use crate::{middleware::resolve_admin_target_tenant_key, server::AppState};
@@ -115,11 +115,19 @@ impl From<SkillServiceError> for SkillsApiError {
                     message: error.to_string(),
                 }
             }
+            SkillServiceError::CannotDeleteDefaultVersion { .. } => Self::Conflict {
+                code: "default_version_conflict",
+                message: error.to_string(),
+            },
             SkillServiceError::BundleBuild(_)
             | SkillServiceError::BlobStore(_)
             | SkillServiceError::Store(_)
             | SkillServiceError::MissingComponent { .. } => Self::Internal {
                 code: "skills_internal_error",
+                message: error.to_string(),
+            },
+            SkillServiceError::MissingDefaultVersion { .. } => Self::Conflict {
+                code: "default_version_missing",
                 message: error.to_string(),
             },
         }
@@ -164,10 +172,9 @@ pub async fn get_skill(
     Query(query): Query<SkillGetQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match get_skill_impl(state, skill_id, query, &headers).await {
-        Ok(response) => response,
-        Err(error) => error.into_response(),
-    }
+    get_skill_impl(state, skill_id, query, &headers)
+        .await
+        .unwrap_or_else(|error| error.into_response())
 }
 
 pub async fn list_skill_versions(
@@ -176,10 +183,9 @@ pub async fn list_skill_versions(
     Query(query): Query<SkillVersionsListQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match list_skill_versions_impl(state, skill_id, query, &headers).await {
-        Ok(response) => response,
-        Err(error) => error.into_response(),
-    }
+    list_skill_versions_impl(state, skill_id, query, &headers)
+        .await
+        .unwrap_or_else(|error| error.into_response())
 }
 
 pub async fn get_skill_version(
@@ -188,8 +194,53 @@ pub async fn get_skill_version(
     Query(query): Query<SkillGetQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match get_skill_version_impl(state, skill_id, version, query, &headers).await {
-        Ok(response) => response,
+    get_skill_version_impl(state, skill_id, version, query, &headers)
+        .await
+        .unwrap_or_else(|error| error.into_response())
+}
+
+pub async fn patch_skill(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    Query(query): Query<SkillGetQuery>,
+    Json(body): Json<SkillPatchRequest>,
+) -> Response {
+    match patch_skill_impl(state, skill_id, query, body).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn patch_skill_version(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    Query(query): Query<SkillGetQuery>,
+    Json(body): Json<SkillVersionPatchRequest>,
+) -> Response {
+    match patch_skill_version_impl(state, skill_id, version, query, body).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn delete_skill(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(skill_id): Path<String>,
+    Query(query): Query<SkillGetQuery>,
+) -> Response {
+    match delete_skill_impl(state, skill_id, query).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+pub async fn delete_skill_version(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path((skill_id, version)): Path<(String, String)>,
+    Query(query): Query<SkillGetQuery>,
+) -> Response {
+    match delete_skill_version_impl(state, skill_id, version, query).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error.into_response(),
     }
 }
@@ -242,6 +293,106 @@ async fn create_skill_version_impl(
         .await
         .map_err(SkillsApiError::from)?;
     build_mutation_response(result)
+}
+
+async fn patch_skill_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    query: SkillGetQuery,
+    body: SkillPatchRequest,
+) -> Result<SkillResponse, SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let updated = skill_service
+        .update_skill(UpdateSkillRequest {
+            tenant_id,
+            skill_id,
+            default_version_ref: skill_version_ref_to_string(&body.default_version),
+        })
+        .await
+        .map_err(SkillsApiError::from)?;
+    Ok(skill_response_from_record(&updated))
+}
+
+async fn patch_skill_version_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    version: String,
+    query: SkillGetQuery,
+    body: SkillVersionPatchRequest,
+) -> Result<SkillVersionResponse, SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let updated = skill_service
+        .update_skill_version(UpdateSkillVersionRequest {
+            tenant_id,
+            skill_id,
+            version_ref: version,
+            deprecated: body.deprecated,
+        })
+        .await
+        .map_err(SkillsApiError::from)?;
+    skill_version_response_from_record(&updated)
+}
+
+async fn delete_skill_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    query: SkillGetQuery,
+) -> Result<(), SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    skill_service
+        .delete_skill(&tenant_id, &skill_id)
+        .await
+        .map_err(SkillsApiError::from)
+}
+
+async fn delete_skill_version_impl(
+    state: std::sync::Arc<AppState>,
+    skill_id: String,
+    version: String,
+    query: SkillGetQuery,
+) -> Result<(), SkillsApiError> {
+    let skill_service =
+        state
+            .context
+            .skill_service
+            .clone()
+            .ok_or_else(|| SkillsApiError::Internal {
+                code: "skills_not_configured",
+                message: "skills service is not configured".to_string(),
+            })?;
+    let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    skill_service
+        .delete_skill_version(&tenant_id, &skill_id, &version)
+        .await
+        .map(|_| ())
+        .map_err(SkillsApiError::from)
 }
 
 async fn list_skills_impl(
@@ -350,6 +501,10 @@ async fn list_skill_versions_impl(
             })?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let limit = validate_list_limit(query.limit)?;
+    let skill = skill_service
+        .get_skill(&tenant_id, &skill_id)
+        .await
+        .map_err(SkillsApiError::from)?;
     let mut versions = skill_service
         .list_skill_versions(&tenant_id, &skill_id, query.include_deprecated)
         .await
@@ -366,11 +521,14 @@ async fn list_skill_versions_impl(
 
     let etag = build_list_etag(
         &query,
-        versions
-            .iter()
-            .map(|record| (record.version.clone(), record.created_at.to_rfc3339())),
+        versions.iter().map(|record| {
+            (
+                record.version.clone(),
+                format!("{}:{}", record.created_at.to_rfc3339(), record.deprecated),
+            )
+        }),
     )?;
-    let last_modified = list_last_modified(versions.iter().map(|record| record.created_at));
+    let last_modified = skill.updated_at;
     if is_not_modified(request_headers, &etag, last_modified) {
         return not_modified_response(&etag, last_modified);
     }
@@ -408,13 +566,17 @@ async fn get_skill_version_impl(
                 message: "skills service is not configured".to_string(),
             })?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
+    let skill = skill_service
+        .get_skill(&tenant_id, &skill_id)
+        .await
+        .map_err(SkillsApiError::from)?;
     let record = skill_service
         .get_skill_version(&tenant_id, &skill_id, &version)
         .await
         .map_err(SkillsApiError::from)?;
     let response_body = skill_version_response_from_record(&record)?;
     let etag = build_resource_etag(&response_body, false)?;
-    let last_modified = record.created_at;
+    let last_modified = skill.updated_at;
     if is_not_modified(request_headers, &etag, last_modified) {
         return not_modified_response(&etag, last_modified);
     }
@@ -869,6 +1031,14 @@ fn skill_response_from_record(record: &smg_skills::SkillRecord) -> SkillResponse
         has_code_files: record.has_code_files,
         created_at: record.created_at.to_rfc3339(),
         updated_at: record.updated_at.to_rfc3339(),
+    }
+}
+
+fn skill_version_ref_to_string(version: &SkillVersionRef) -> String {
+    match version {
+        SkillVersionRef::Latest => "latest".to_string(),
+        SkillVersionRef::Integer(value) => value.to_string(),
+        SkillVersionRef::Timestamp(value) => value.clone(),
     }
 }
 
