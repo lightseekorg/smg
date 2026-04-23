@@ -20,7 +20,7 @@ dependencies = [
   "pytest-rerunfailures",
   "requests",
   "tqdm",
-  "uvicorn",
+  "uvicorn>=0.30",
   "websockets",
 ]
 

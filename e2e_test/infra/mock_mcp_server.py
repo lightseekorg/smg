@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import socket
 import threading
 import time
 from typing import Any
@@ -73,8 +72,7 @@ logger = logging.getLogger(__name__)
 #   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489'
 #   '0000000d49444154789c6300010000000500010d0a2db40000000049454e44ae426082')).decode())"``
 IMAGE_GENERATION_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQott"
-    "AAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
 )
 
 
@@ -125,13 +123,22 @@ class MockMcpServer:
     ) -> None:
         self.host = host
         self._configured_port = port
+        # ``port`` holds the actually-bound port once the server is running.
+        # When ``port=0`` is passed, the attribute starts as ``None`` and gets
+        # filled in by ``start()`` after uvicorn binds its listening socket.
         self.port: int | None = None if port == 0 else port
         self._log_level = log_level
         self._ready_timeout = ready_timeout
 
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
+        # ``_call_log`` is written by tool handlers running on the server's
+        # asyncio event-loop thread and read by the test thread. Wrap every
+        # access in ``_call_log_lock`` to avoid ``RuntimeError: list changed
+        # size during iteration`` in ``call_log`` and to ensure
+        # ``last_call_args`` sees a consistent snapshot.
         self._call_log: list[dict[str, Any]] = []
+        self._call_log_lock = threading.Lock()
 
         # The server's streamable HTTP mount path. FastMCP fixes this at /mcp
         # and the gateway's MCP client is configured with the same path.
@@ -155,26 +162,33 @@ class MockMcpServer:
     @property
     def last_call_args(self) -> dict[str, Any] | None:
         """Arguments the last tool invocation received, or ``None`` if no calls yet."""
-        if not self._call_log:
-            return None
-        return dict(self._call_log[-1])
+        with self._call_log_lock:
+            if not self._call_log:
+                return None
+            return dict(self._call_log[-1])
 
     @property
     def call_log(self) -> list[dict[str, Any]]:
         """All observed calls, in order, as a copy. Handy for multi-tool assertions."""
-        return [dict(entry) for entry in self._call_log]
+        with self._call_log_lock:
+            return [dict(entry) for entry in self._call_log]
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start(self) -> str:
-        """Start the server in a background thread and return its URL."""
+        """Start the server in a background thread and return its URL.
+
+        Port allocation: we hand ``port=0`` (or the caller-specified port)
+        directly to ``uvicorn.Config``. After the server is ready,
+        ``uvicorn.Server.servers[0].sockets[0].getsockname()`` gives us the
+        actually-bound port. This avoids the probe-bind race that would
+        otherwise exist between ``_pick_free_port`` and the subsequent
+        ``uvicorn`` bind.
+        """
         if self._server is not None:
             raise RuntimeError("MockMcpServer already started")
-
-        if self.port is None:
-            self.port = _pick_free_port(self.host)
 
         fastmcp = self._build_fastmcp()
         app = fastmcp.streamable_http_app()
@@ -182,7 +196,9 @@ class MockMcpServer:
         config = uvicorn.Config(
             app,
             host=self.host,
-            port=self.port,
+            # Let uvicorn pick a free port atomically when ``self.port`` is
+            # ``None``. For caller-specified ports we pass through unchanged.
+            port=self.port if self.port is not None else 0,
             log_level=self._log_level,
             lifespan="on",
             access_log=False,
@@ -190,23 +206,42 @@ class MockMcpServer:
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(
             target=self._run_server,
-            name=f"MockMcpServer:{self.port}",
+            # Name is set to a placeholder for ``port=0`` and patched once the
+            # bound port is known; purely cosmetic for thread inspection.
+            name=f"MockMcpServer:{self.port or 'pending'}",
             daemon=True,
         )
         self._thread.start()
         self._wait_ready()
+
+        # Resolve the real bound port from uvicorn's listening socket. For
+        # explicit ports this is a no-op; for ``port=0`` this is the critical
+        # step that replaces the old probe-then-bind pattern.
+        self.port = self._resolve_bound_port()
+        self._thread.name = f"MockMcpServer:{self.port}"
+
         logger.info("MockMcpServer ready at %s", self.url)
         return self.url
 
     def stop(self) -> None:
-        """Ask the server to exit and join the background thread."""
+        """Ask the server to exit and join the background thread.
+
+        Raises ``RuntimeError`` if the thread is still alive after the join
+        timeout; silently leaking a daemon thread would make orphaned
+        sockets and test-flakiness regressions invisible.
+        """
         if self._server is None:
             return
         self._server.should_exit = True
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            if self._thread.is_alive():
-                logger.warning("MockMcpServer thread did not exit cleanly")
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                # Don't clear self._thread — leave it set so callers can
+                # inspect/debug the stuck thread if they catch the error.
+                raise RuntimeError(
+                    f"MockMcpServer thread did not exit cleanly within 5s (port={self.port})"
+                )
         self._server = None
         self._thread = None
 
@@ -233,9 +268,25 @@ class MockMcpServer:
             if self._server.started:
                 return
             time.sleep(0.05)
-        raise RuntimeError(
-            f"MockMcpServer did not become ready within {self._ready_timeout}s"
-        )
+        raise RuntimeError(f"MockMcpServer did not become ready within {self._ready_timeout}s")
+
+    def _resolve_bound_port(self) -> int:
+        """Return the port uvicorn actually bound to.
+
+        Runs after ``_wait_ready`` so ``self._server.servers`` and its
+        sockets are populated. Using the bound socket's ``getsockname()``
+        avoids the TOCTOU race of picking a port via a probe socket and then
+        letting uvicorn bind later; the OS can guarantee no one grabs this
+        port because uvicorn is already listening on it.
+        """
+        assert self._server is not None
+        # uvicorn exposes the list of ``asyncio`` servers it started. Each
+        # server in turn exposes its listening sockets. For HTTP-only serving
+        # there is exactly one server with one socket.
+        for asyncio_server in self._server.servers:
+            for sock in asyncio_server.sockets:
+                return int(sock.getsockname()[1])
+        raise RuntimeError("uvicorn reports no listening sockets")
 
     def _build_fastmcp(self) -> FastMCP:
         """Construct the FastMCP app and register tools.
@@ -252,15 +303,25 @@ class MockMcpServer:
         self._register_tools(fastmcp)
         return fastmcp
 
+    def _record_call(self, entry: dict[str, Any]) -> None:
+        """Append a tool-call record under the lock.
+
+        Tool handlers run on uvicorn's asyncio event-loop thread; tests read
+        ``call_log`` / ``last_call_args`` from the main thread. Serializing
+        appends here keeps readers from racing with writers.
+        """
+        with self._call_log_lock:
+            self._call_log.append(entry)
+
     def _register_tools(self, fastmcp: FastMCP) -> None:
         """Attach all supported tools. Add new tools here.
 
-        Each tool appends to ``self._call_log`` so tests can assert on what
+        Each tool calls ``self._record_call`` so tests can assert on what
         arguments reached the server. The FastMCP tool-return convention is to
         return a plain ``dict`` (or ``str``); FastMCP wraps it into the MCP
         tool-result envelope automatically.
         """
-        call_log = self._call_log
+        record_call = self._record_call
         deterministic_image = self.image_generation_png_base64
 
         @fastmcp.tool(
@@ -277,7 +338,7 @@ class MockMcpServer:
             moderation: str = "auto",
             output_format: str = "png",
         ) -> dict[str, str]:
-            call_log.append(
+            record_call(
                 {
                     "tool": "image_generation",
                     "arguments": {
@@ -303,7 +364,7 @@ class MockMcpServer:
         #
         # @fastmcp.tool(name="web_search", description="Mock web_search tool.")
         # def web_search(query: str, count: int = 3) -> dict[str, list[dict]]:
-        #     call_log.append({"tool": "web_search", "arguments": {"query": query, "count": count}})
+        #     record_call({"tool": "web_search", "arguments": {"query": query, "count": count}})
         #     return {
         #         "results": [
         #             {
@@ -316,30 +377,12 @@ class MockMcpServer:
         #
         # @fastmcp.tool(name="file_search", description="Mock file_search tool.")
         # def file_search(query: str, max_results: int = 3) -> dict[str, list[dict]]:
-        #     call_log.append({"tool": "file_search", "arguments": {"query": query,
-        #                                                             "max_results": max_results}})
+        #     record_call({"tool": "file_search",
+        #                  "arguments": {"query": query, "max_results": max_results}})
         #     return {"results": [{"file_id": "file_mock_1", "score": 1.0,
         #                          "content": [{"type": "text", "text": "mock"}]}]}
         #
         # @fastmcp.tool(name="code_interpreter", description="Mock code_interpreter tool.")
         # def code_interpreter(code: str) -> dict[str, str]:
-        #     call_log.append({"tool": "code_interpreter", "arguments": {"code": code}})
+        #     record_call({"tool": "code_interpreter", "arguments": {"code": code}})
         #     return {"stdout": "mock stdout", "stderr": "", "status": "completed"}
-
-
-# =============================================================================
-# Port utility
-# =============================================================================
-
-
-def _pick_free_port(host: str) -> int:
-    """Ask the OS for a free TCP port on ``host`` and return it.
-
-    There is an unavoidable race between closing the probe socket and binding
-    the uvicorn listener, but it is the same pattern used elsewhere in
-    ``e2e_test/infra/process_utils.py`` (``get_open_port``) and is good enough
-    for local test orchestration.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((host, 0))
-        return sock.getsockname()[1]

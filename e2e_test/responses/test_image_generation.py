@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 import pytest
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,22 @@ def _final_output_from_stream(events: list) -> list:
     return completed[0].response.output
 
 
+def _extract_conversation_id(resp) -> str | None:
+    """Normalise the conversation id across SDK variations.
+
+    The OpenAI Responses SDK surfaces the conversation id as either
+    ``resp.conversation_id`` (a plain string) or ``resp.conversation`` (an
+    object with an ``.id`` attribute), and older releases expose neither.
+    This helper collapses those cases to a single ``str | None``.
+    """
+    conv_attr = getattr(resp, "conversation_id", None) or getattr(resp, "conversation", None)
+    if conv_attr is None:
+        return None
+    if isinstance(conv_attr, str):
+        return conv_attr
+    return getattr(conv_attr, "id", None)
+
+
 # =============================================================================
 # Image generation tests (OpenAI cloud + mock MCP server)
 # =============================================================================
@@ -133,9 +150,7 @@ class TestImageGeneration:
             expected_prompt=_IMAGE_GEN_PROMPT,
         )
 
-    def test_image_generation_streaming(
-        self, gateway_with_mock_mcp, image_gen_tool_args
-    ) -> None:
+    def test_image_generation_streaming(self, gateway_with_mock_mcp, image_gen_tool_args) -> None:
         """Streaming: assert the ordered ``image_generation_call.*`` event trio.
 
         Required order: ``in_progress`` before ``generating`` before ``completed``.
@@ -257,18 +272,7 @@ class TestImageGeneration:
             store=True,
         )
         assert resp1.error is None, f"Turn 1 error: {resp1.error}"
-        conv_attr = getattr(resp1, "conversation_id", None) or getattr(
-            resp1, "conversation", None
-        )
-        # ``conversation`` may be either a string id or an object with ``.id``;
-        # normalise to a plain string before we use it in a URL.
-        conversation_id: str | None
-        if conv_attr is None:
-            conversation_id = None
-        elif isinstance(conv_attr, str):
-            conversation_id = conv_attr
-        else:
-            conversation_id = getattr(conv_attr, "id", None)
+        conversation_id = _extract_conversation_id(resp1)
         if not conversation_id:
             pytest.skip(
                 "Gateway did not expose a conversation_id on the first response "
@@ -277,8 +281,6 @@ class TestImageGeneration:
 
         # Pull stored items for the conversation and look for any persisted
         # form of the image_generation_call payload.
-        import httpx
-
         api_key = client.api_key
         with httpx.Client(timeout=10.0) as http:
             items_resp = http.get(
@@ -286,8 +288,7 @@ class TestImageGeneration:
                 headers={"Authorization": f"Bearer {api_key}"},
             )
         assert items_resp.status_code == 200, (
-            f"Failed to list conversation items: "
-            f"{items_resp.status_code} {items_resp.text}"
+            f"Failed to list conversation items: {items_resp.status_code} {items_resp.text}"
         )
 
         payload = items_resp.text

@@ -36,7 +36,17 @@ from collections.abc import Iterator
 import openai
 import pytest
 import yaml
+
+# Fixture re-export: pytest discovers fixtures by walking the names defined
+# in the conftest module. Importing ``mock_mcp_server`` here makes it
+# visible to every test collected from this conftest without the
+# PytestAssertRewriteWarning we'd get from registering ``infra.mock_mcp``
+# as a ``pytest_plugins`` entry after it's already been imported via
+# ``infra``. Ruff flags this as F401 (unused import) and then flags the
+# fixture argument sites as F811 (redefinition); both are ignored
+# intentionally — pytest needs the name to be bound at module scope.
 from infra import MockMcpServer, launch_cloud_gateway
+from infra.mock_mcp import mock_mcp_server as mock_mcp_server  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
