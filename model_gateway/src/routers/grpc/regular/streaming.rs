@@ -233,10 +233,6 @@ impl StreamingProcessor {
 
         // Check parser availability once upfront (log warning only once per request)
         let reasoning_parser_available = separate_reasoning
-            && !utils::has_constrained_output(
-                tool_choice.as_ref(),
-                original_request.response_format.as_ref(),
-            )
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
