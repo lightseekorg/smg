@@ -207,18 +207,23 @@ def _start_local_grpc_gateway_with_mcp(
     """
     from infra import ConnectionMode, Gateway
     from infra.model_specs import get_model_spec
-    from infra.worker import start_workers
+    from infra.worker import start_workers, stop_workers
 
     try:
         workers = start_workers(model_id, engine, mode=ConnectionMode.GRPC, count=1)
     except Exception as e:
         pytest.skip(f"gRPC {engine} worker for {model_id} not available: {e}")
 
-    worker = workers[0]
-    model_path = get_model_spec(model_id)["model"]
-
-    gateway = Gateway()
+    # Everything from this point onward must clean up ``workers`` on any
+    # exception — ``get_model_spec`` / ``Gateway()`` / ``gateway.start`` /
+    # ``openai.OpenAI`` each have independent failure modes, and leaking
+    # the GPU worker on init failure would strand quota until CI
+    # reclaimed it.
     try:
+        worker = workers[0]
+        model_path = get_model_spec(model_id)["model"]
+
+        gateway = Gateway()
         gateway.start(
             worker_urls=[worker.base_url],
             model_path=model_path,
@@ -230,16 +235,12 @@ def _start_local_grpc_gateway_with_mcp(
             ],
         )
     except Exception:
-        from infra.worker import stop_workers
-
         stop_workers(workers)
         raise
 
     try:
         client = openai.OpenAI(base_url=f"{gateway.base_url}/v1", api_key="not-used")
     except Exception:
-        from infra.worker import stop_workers
-
         gateway.shutdown()
         stop_workers(workers)
         raise
