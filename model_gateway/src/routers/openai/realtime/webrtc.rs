@@ -178,12 +178,23 @@ async fn parse_multipart(
 
     let sdp = validate_sdp(&sdp_bytes)?;
 
+    // Trim the model in place so the normalized value is used for both
+    // local worker selection and the upstream request body.
+    if let Some(m) = session_json
+        .as_mut()
+        .and_then(|s| s.get_mut("model"))
+        .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+    {
+        if let Some(model_val) = session_json.as_mut().and_then(|s| s.get_mut("model")) {
+            *model_val = serde_json::Value::String(m);
+        }
+    }
+
     let model = session_json
         .as_ref()
         .and_then(|s| s.get("model"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .trim()
         .to_string();
 
     if model.is_empty() {
