@@ -228,12 +228,18 @@ pub(crate) async fn execute_streaming_tool_calls(
         // Merge caller-pinned tool config (e.g. image_generation `size`,
         // `quality`) over model-emitted arguments before dispatch.
         apply_request_tool_overrides(&response_format, original_body, &mut arguments);
+        // Snapshot the post-merge arguments so the history item records what
+        // actually ran (not just the raw model-emitted buffer).
+        let effective_arguments_str = arguments.to_string();
 
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
         }
 
-        debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
+        debug!(
+            "Calling MCP tool '{}' with args: {}",
+            call.name, effective_arguments_str
+        );
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -287,7 +293,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             session.is_builtin_tool(&call.name),
             call.call_id,
             call.name,
-            call.arguments_buffer,
+            effective_arguments_str,
             model_context_output,
             mcp_call_item,
         );
@@ -953,20 +959,23 @@ pub(crate) async fn execute_tool_loop(
             // multi-MB base64 while keeping revised_prompt/status.
             let model_context_output =
                 response_format.compact_tool_output_for_model_context(&tool_output.output);
+            // Record the *effective* arguments (post-override merge) in both
+            // the transformed output item and the conversation history, so the
+            // next loop iteration sees inputs that match what actually ran.
             let transformed_item = build_transformed_mcp_call_item(
                 &tool_output.output,
                 &response_format,
                 &tool_item_id,
                 &server_label,
                 &call.name,
-                &call.arguments,
+                &effective_arguments_str,
             );
 
             state.record_call(
                 session.is_builtin_tool(&call.name),
                 call.call_id,
                 call.name,
-                call.arguments,
+                effective_arguments_str,
                 model_context_output,
                 transformed_item,
             );

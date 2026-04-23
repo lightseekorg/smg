@@ -48,7 +48,6 @@ impl ResponseFormat {
 
         debug!(
             response_format = ?self,
-            input_len = output.to_string().len(),
             compacted_len = compacted.len(),
             "compact_tool_output_for_model_context"
         );
@@ -61,7 +60,10 @@ impl ResponseFormat {
 /// model only sees metadata (status, revised_prompt) when the transcript
 /// replays on subsequent turns.
 ///
-/// Input shapes we tolerate:
+/// Input shapes we tolerate (matching `extract_image_generation_payload` in
+/// the transformer):
+/// - `{"result": "<base64>", "revised_prompt": "..."}` — bare object, used by
+///   non-MCP adapters.
 /// - `[{"type":"text","text":"{\"result\":\"<base64>\",\"revised_prompt\":\"...\"}"}]`
 ///   — typical success: stringified JSON embedded in a text content block.
 /// - `[{"type":"text","result":"<base64>", ...}]` — flat variant where
@@ -70,6 +72,14 @@ impl ResponseFormat {
 /// Any shape we do not recognize falls through unchanged via
 /// `output.to_string()` so we never silently drop information.
 fn compact_image_generation(output: &Value) -> String {
+    // Shape 3: bare object. Strip base64 keys directly.
+    if let Some(obj) = output.as_object() {
+        let mut sanitized = obj.clone();
+        sanitized.remove("result");
+        sanitized.remove("data");
+        return Value::Object(sanitized).to_string();
+    }
+
     let Some(items) = output.as_array() else {
         return output.to_string();
     };
@@ -177,6 +187,24 @@ mod tests {
         assert!(!compacted.contains("BBBBBBBB"));
         assert!(!compacted.contains("CCCCCCCC"));
         assert!(compacted.contains("1024x1024"));
+    }
+
+    #[test]
+    fn compact_image_generation_strips_bare_object_result_and_data() {
+        // Shape 3: non-MCP adapter returning a bare object. Matches what the
+        // transformer's `extract_image_generation_payload` accepts.
+        let output = json!({
+            "result": "DDDDDDDD",
+            "data": "EEEEEEEE",
+            "revised_prompt": "keep-me",
+            "status": "completed"
+        });
+        let compacted =
+            ResponseFormat::ImageGenerationCall.compact_tool_output_for_model_context(&output);
+        assert!(!compacted.contains("DDDDDDDD"));
+        assert!(!compacted.contains("EEEEEEEE"));
+        assert!(compacted.contains("keep-me"));
+        assert!(compacted.contains("completed"));
     }
 
     #[test]

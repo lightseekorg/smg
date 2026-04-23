@@ -518,11 +518,11 @@ fn extract_image_generation_payload(result: &Value) -> ImageGenerationPayload {
         let Some(obj) = item.as_object() else {
             continue;
         };
-        if obj.get("type").and_then(Value::as_str) != Some("text") {
-            continue;
-        }
 
-        // Shape 2: flat.
+        // Shape 2: flat variant. Some adapters emit `{"type":"image", "result":
+        // "..."}` rather than `{"type":"text", ...}`, so we accept any item
+        // type that carries a `result` string directly. This mirrors the
+        // compactor's flat-strip branch in `types.rs`.
         let flat_result = obj
             .get("result")
             .and_then(Value::as_str)
@@ -537,7 +537,12 @@ fn extract_image_generation_payload(result: &Value) -> ImageGenerationPayload {
             };
         }
 
-        // Shape 1: text-wrapped JSON.
+        // Shape 1: text-wrapped JSON. This path is specific to text content
+        // blocks — the `text` field only carries meaningful JSON for
+        // `type == "text"` items.
+        if obj.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
         let Some(text) = obj.get("text").and_then(Value::as_str) else {
             continue;
         };
@@ -1036,6 +1041,38 @@ mod tests {
             } => {
                 assert_eq!(result, "BBBBBBBBBBBB");
                 assert_eq!(revised_prompt, Some("flat cat".to_string()));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("Expected ImageGenerationCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_flat_image_typed_content_item() {
+        // Adapters that emit `type: "image"` (not `"text"`) with a flat
+        // `result` must still round-trip to `Completed` status.
+        let result = json!([
+            {"type": "image", "result": "FFFFFFFFFFFF", "revised_prompt": "image-typed"}
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-2b",
+            "server",
+            "generate_image",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                status,
+                ..
+            } => {
+                assert_eq!(result, "FFFFFFFFFFFF");
+                assert_eq!(revised_prompt, Some("image-typed".to_string()));
                 assert_eq!(status, ImageGenerationCallStatus::Completed);
             }
             other => panic!("Expected ImageGenerationCall, got {other:?}"),
