@@ -492,7 +492,8 @@ fn send_tool_call_intermediate_event(
 }
 
 /// Send tool call completion events after tool execution.
-/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
+/// Handles mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// and image_generation_call items.
 /// Returns false if client disconnected.
 fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -1139,7 +1140,8 @@ fn build_mcp_approval_request_item(
 /// Build a transformed output item using ResponseTransformer
 ///
 /// Converts the output using the tool's response_format to the correctly-typed
-/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call).
+/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// image_generation_call).
 /// Returns the result as a JSON Value for SSE event streaming.
 fn build_transformed_mcp_call_item(
     output: &Value,

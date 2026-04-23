@@ -416,7 +416,8 @@ pub(super) fn forward_streaming_event(
 }
 
 /// Inject in_progress event after a tool call item is added.
-/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
+/// Handles mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// and image_generation_call items.
 /// Returns false if client disconnected.
 fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
