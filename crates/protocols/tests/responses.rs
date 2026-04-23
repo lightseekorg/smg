@@ -2370,8 +2370,8 @@ fn shell_call_output_item_round_trips_on_response_side() {
             assert_eq!(id, "sc_10");
             assert_eq!(call_id, "call_shell_10");
             match environment.as_ref().expect("env present") {
-                ShellCallEnvironment::Local(_) => {}
-                ShellCallEnvironment::ContainerReference(_) => {
+                ResponseShellCallEnvironment::Local(_) => {}
+                ResponseShellCallEnvironment::ContainerReference(_) => {
                     panic!("expected Local env, got ContainerReference")
                 }
             }
@@ -2456,25 +2456,98 @@ fn shell_call_environment_rejects_container_auto() {
 }
 
 #[test]
-fn shell_call_environment_local_rejects_skills_on_response_side() {
-    // Spec (openai-responses-api-spec.md §returns L513): the response-side
-    // `local` environment is `ResponseLocalEnvironment { type: "local" }` —
-    // `skills` is a request-side attachment on the tool's
-    // `LocalShellEnvironment` and is not echoed back on the resolved call.
-    // `deny_unknown_fields` on [`ResponseLocalShellEnvironment`] must reject
-    // a payload that tries to carry `skills` across the boundary so the
-    // request-only field cannot silently round-trip on the response union.
+fn shell_call_environment_local_accepts_skills_on_input_side() {
+    // Spec (openai-responses-api-spec.md §ShellCall L228-230): the
+    // input-side `shell_call.environment.local` arm accepts the tool-side
+    // `LocalEnvironment { type: "local", skills? }` shape verbatim.
+    // Clients that replay prior input items with skill attachments must
+    // round-trip losslessly through [`ResponseInputOutputItem`].
     let payload = json!({
         "type": "shell_call",
-        "call_id": "call_shell_4",
+        "call_id": "call_shell_skills",
+        "action": {"commands": ["ls"]},
+        "environment": {
+            "type": "local",
+            "skills": [
+                {
+                    "type": "local",
+                    "name": "fmt",
+                    "description": "Run rustfmt",
+                    "path": "/usr/local/bin/rustfmt"
+                }
+            ]
+        }
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("input-side shell_call with local skills should deserialize");
+    match &item {
+        ResponseInputOutputItem::ShellCall { environment, .. } => {
+            match environment.as_ref().expect("env present") {
+                ShellCallEnvironment::Local(local) => {
+                    let skills = local.skills.as_ref().expect("skills present");
+                    assert_eq!(skills.len(), 1);
+                }
+                ShellCallEnvironment::ContainerReference(_) => {
+                    panic!("expected Local env, got ContainerReference")
+                }
+            }
+        }
+        other => panic!("expected ShellCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn shell_call_environment_local_rejects_skills_on_response_side() {
+    // Spec (openai-responses-api-spec.md §returns L512-513): the
+    // response-side `local` environment is `ResponseLocalEnvironment {
+    // type: "local" }` — `skills` is an input/tool-side attachment and is
+    // not echoed back on the resolved call. `deny_unknown_fields` on
+    // [`ResponseLocalShellEnvironment`] (carried by
+    // [`ResponseShellCallEnvironment::Local`]) must reject a payload that
+    // tries to carry `skills` across the boundary so the input-only field
+    // cannot silently round-trip on the response union.
+    let payload = json!({
+        "type": "shell_call",
+        "id": "sc_reject",
+        "call_id": "call_shell_reject",
         "action": {"commands": ["ls"]},
         "environment": {
             "type": "local",
             "skills": []
-        }
+        },
+        "status": "completed"
     });
     assert!(
-        serde_json::from_value::<ResponseInputOutputItem>(payload).is_err(),
+        serde_json::from_value::<ResponseOutputItem>(payload).is_err(),
         "skills must be rejected on response-side shell_call.environment.local"
+    );
+}
+
+#[test]
+fn shell_call_output_validation_accepts_empty_output_for_replay() {
+    // Spec (openai-responses-api-spec.md §ShellCallOutput L233-238):
+    // `output: array of ResponseFunctionShellCallOutputContent`. The array
+    // is legitimately empty on replay-only fixtures where the platform
+    // surfaced an outcome without per-chunk stdout/stderr — request-level
+    // validation (`validate_input_item`) keeps empty arrays valid. This
+    // regression fixture locks that relaxed shape in so it cannot be
+    // accidentally tightened, matching the pattern used for apply_patch
+    // replay acceptance elsewhere in this file.
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            {"role": "user", "content": "hi"},
+            {
+                "type": "shell_call_output",
+                "call_id": "call_shell_empty",
+                "output": []
+            }
+        ]
+    }))
+    .expect("request with empty shell_call_output.output should deserialize");
+    assert!(
+        validator::Validate::validate(&request).is_ok(),
+        "empty shell_call_output.output must remain valid for lossless replay"
     );
 }

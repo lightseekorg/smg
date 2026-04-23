@@ -827,39 +827,69 @@ pub struct ContainerDomainSecret {
     pub value: String,
 }
 
-/// Response-side environment union carried on
-/// [`ResponseInputOutputItem::ShellCall`] / [`ResponseOutputItem::ShellCall`].
+/// Input-side environment union carried on
+/// [`ResponseInputOutputItem::ShellCall`].
 ///
-/// Spec (openai-responses-api-spec.md §ShellCall, L228-231 and §returns,
-/// L512-513): only the resolved `local` / `container_reference` shapes are
-/// echoed back by the model — `container_auto` is a request-side hint that
-/// the platform resolves into one of these two before the call is surfaced.
-/// Spec L513 explicitly types the response-side local arm as
-/// `ResponseLocalEnvironment { type: "local" }` (no `skills` attachment on
-/// the call form) — `skills` is a request-side input on the tool, never
-/// echoed back on the resolved call.
+/// Spec (openai-responses-api-spec.md §ShellCall, L228-230): the input-side
+/// call form carries `environment: optional LocalEnvironment { type: "local",
+/// skills? } | ContainerReference { container_id, type: "container_reference"
+/// }`. `container_auto` is rejected here — it is a request-side *tool*
+/// hint (§tools L465) that the platform resolves into `local` /
+/// `container_reference` before a call is surfaced, not a call-form value.
+///
+/// The tool-side [`LocalShellEnvironment`] is intentionally reused so
+/// spec-compliant replay flows that echo back input call items with their
+/// original `skills` attachment continue to round-trip losslessly.
+/// Response-side emissions use the narrower [`ResponseShellCallEnvironment`]
+/// instead.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ShellCallEnvironment {
-    /// `type: "local"` — resolved local environment on the response-side
-    /// call form. Per spec L513 this is `ResponseLocalEnvironment { type:
-    /// "local" }`, without the `skills` attachment carried on the
-    /// request-side [`LocalShellEnvironment`].
+    /// `type: "local"` — input-side local environment. Spec L230 allows
+    /// `skills?`, so this variant reuses the tool-form
+    /// [`LocalShellEnvironment`] verbatim. Preserves round-trip fidelity
+    /// for clients that replay prior input items carrying skill
+    /// attachments.
     #[serde(rename = "local")]
-    Local(ResponseLocalShellEnvironment),
+    Local(LocalShellEnvironment),
     /// `type: "container_reference"` — resolved container binding.
     #[serde(rename = "container_reference")]
     ContainerReference(ContainerReferenceEnvironment),
 }
 
-/// Payload for [`ShellCallEnvironment::Local`].
+/// Response-side environment union carried on
+/// [`ResponseOutputItem::ShellCall`].
+///
+/// Spec (openai-responses-api-spec.md §returns L512-513): the ShellCall
+/// response form has `environment: ResponseLocalEnvironment { type: "local"
+/// } | ResponseContainerReference { container_id, type: "container_reference"
+/// }`. Unlike the input-side [`ShellCallEnvironment`], the response-side
+/// local arm is `ResponseLocalEnvironment { type: "local" }` with no
+/// `skills` field — skills is a tool/input-side attachment that is not
+/// echoed back on the resolved call.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+pub enum ResponseShellCallEnvironment {
+    /// `type: "local"` — resolved local environment on the response-side
+    /// call form. Per spec L513 this is `ResponseLocalEnvironment { type:
+    /// "local" }`, without the `skills` attachment carried on the
+    /// input-side [`ShellCallEnvironment::Local`].
+    #[serde(rename = "local")]
+    Local(ResponseLocalShellEnvironment),
+    /// `type: "container_reference"` — resolved container binding.
+    /// Structurally identical to the input-side variant; reused directly.
+    #[serde(rename = "container_reference")]
+    ContainerReference(ContainerReferenceEnvironment),
+}
+
+/// Payload for [`ResponseShellCallEnvironment::Local`].
 ///
 /// Spec (openai-responses-api-spec.md §returns L513): response-side local
 /// environment is `ResponseLocalEnvironment { type: "local" }` — the
 /// discriminator is the only field the model echoes back. `skills` is a
-/// request-side attachment on [`LocalShellEnvironment`] (tool form) and is
-/// not part of the response-side envelope; modelling it here would let
-/// unknown request fields leak through the response union unchecked.
+/// request/input-side attachment on [`LocalShellEnvironment`] and is not
+/// part of the response-side envelope; modelling it here would let
+/// request-only fields leak through the response union unchecked.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseLocalShellEnvironment {}
@@ -1894,7 +1924,10 @@ pub enum ResponseOutputItem {
     /// Spec (openai-responses-api-spec.md §ShellCall, L228-231 and §returns
     /// L512-513): emitted when the model issues a containerized shell
     /// action. The environment echoed back is restricted to `local` /
-    /// `container_reference` (see [`ShellCallEnvironment`]).
+    /// `container_reference` via [`ResponseShellCallEnvironment`], which
+    /// narrows the input-side [`ShellCallEnvironment`] by dropping the
+    /// `skills` attachment on the `local` arm — per spec L513 the response
+    /// form uses `ResponseLocalEnvironment { type: "local" }` only.
     ///
     /// `id` and `status` are required on the output wire — the server
     /// always populates both when emitting the call, mirroring the
@@ -1908,7 +1941,7 @@ pub enum ResponseOutputItem {
         call_id: String,
         action: ShellCallAction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        environment: Option<ShellCallEnvironment>,
+        environment: Option<ResponseShellCallEnvironment>,
         status: ShellCallStatus,
     },
     /// `type: "shell_call_output"` — output-side mirror of the input
