@@ -10,10 +10,12 @@ use openai_protocol::responses::{
 use serde_json::{json, Value};
 use smg_data_connector::{
     with_request_context, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationStorage, NewConversationItem,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, NewConversationItem,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
+
+use crate::memory::MemoryExecutionContext;
 
 // ============================================================================
 // Constants
@@ -378,10 +380,16 @@ async fn link_items_to_conversation(
 /// 2. Extracts output items from the response
 /// 3. Stores ALL items in response storage (always)
 /// 4. If conversation provided, also links items to conversation
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads storage handles plus request payload/context through a shared persistence entrypoint"
+)]
 pub async fn persist_conversation_items(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -390,6 +398,8 @@ pub async fn persist_conversation_items(
         conversation_storage,
         item_storage,
         response_storage,
+        conversation_memory_writer,
+        memory_execution_context,
         response_json,
         original_body,
     );
@@ -403,6 +413,8 @@ async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    _conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    _memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
 ) -> Result<(), String> {
