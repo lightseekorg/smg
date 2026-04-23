@@ -637,6 +637,11 @@ pub(crate) fn assemble_multimodal_data(
         GrpcClient::Mlx(_) => unreachable!(
             "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
         ),
+        // TokenSpeed reuses SGLang's multimodal wire shape. Keep them in the
+        // same ``MultimodalData::Sglang`` variant until TokenSpeed actually
+        // diverges (see ``proto/tokenspeed_scheduler.proto`` — messages are
+        // imported from the SGLang proto today).
+        GrpcClient::TokenSpeed(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
     }
 }
 

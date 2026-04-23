@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 import openai
 import pytest
@@ -18,11 +19,31 @@ import smg_client
 logger = logging.getLogger(__name__)
 
 
+def _skip_if_tokenspeed_grammar_pipeline_unwired() -> None:
+    """Skip tests that depend on json_schema constraint enforcement on tokenspeed.
+
+    TokenSpeed ships a grammar backend (``xgrammar_backend.py``) and a
+    ``--grammar-backend xgrammar`` server-args knob, but the pipeline from
+    ``sampling_params.json_schema`` → ``req.grammar`` → vocab-mask application
+    is not yet wired into the regular sampling path (``create_grammar_backend``
+    is defined but never called; ``Request.grammar`` is never assigned;
+    ``SamplingBatchInfo.grammars`` is never populated). The smg gateway
+    translates ``tool_choice=required`` and ``tool_choice={function}`` into
+    ``sampling_params.json_schema``, so these tests silently regress to
+    "model did whatever it wanted" on tokenspeed until the upstream wiring
+    lands (tracked in lightseekorg/tokenspeed#361).
+    """
+    if os.environ.get("E2E_ENGINE") == "tokenspeed":
+        pytest.xfail("tokenspeed grammar pipeline not wired; see lightseekorg/tokenspeed#361")
+
+
 # =============================================================================
 # Shared Tool Definitions
 # =============================================================================
 
-# System message for Llama3.2 function calling
+# System message for Llama3.2 function calling — prescribes the
+# {"name": ..., "parameters": ...} JSON shape that the ``llama`` tool
+# parser looks for. Used by ``TestToolChoiceLlama`` below.
 LLAMA_SYSTEM_MESSAGE = (
     "You are a helpful assistant with tool calling capabilities. "
     "Only reply with a tool call if the function exists in the library provided by the user. "
@@ -100,14 +121,14 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIServerFunctionCalling:
-    """Tests for OpenAI-compatible function calling with Llama tool parser."""
+    """Tests for OpenAI-compatible function calling with the llama tool parser."""
 
     def test_function_calling_format(self, model, api_client):
         """Test: Whether the function call format returned by the AI is correct.
@@ -265,8 +286,8 @@ class TestOpenAIServerFunctionCalling:
                         },
                         "required": ["a", "b"],
                     },
-                    # Llama-3.2-1B is flaky in tool call. It won't always respond with
-                    # parameters unless we set strict.
+                    # Llama-3.2-1B is flaky in tool call format, so we force it
+                    # with strict mode.
                     "strict": True,
                 },
             }
@@ -377,6 +398,7 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice == "required", the model should return one or more tool_calls.
         """
+        _skip_if_tokenspeed_grammar_pipeline_unwired()
 
         tools = [
             {
@@ -457,6 +479,7 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
+        _skip_if_tokenspeed_grammar_pipeline_unwired()
 
         tools = [
             {
@@ -526,6 +549,8 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
+        # Uses tool_choice="required" below, so inherits the tokenspeed gap.
+        _skip_if_tokenspeed_grammar_pipeline_unwired()
 
         tools = [
             {

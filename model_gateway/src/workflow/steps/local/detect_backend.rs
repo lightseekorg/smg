@@ -1,8 +1,12 @@
 //! Backend runtime detection step.
 //!
-//! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
+//! Detects the runtime type (sglang, vllm, trtllm, mlx, tokenspeed) for both HTTP
+//! and gRPC workers.
 //! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
-//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
+//! - gRPC: tries tokenspeed → sglang → vllm → trtllm → mlx health checks
+//!   sequentially. TokenSpeed speaks its own ``tokenspeed.grpc.scheduler``
+//!   service (see `proto/tokenspeed_scheduler.proto`), so the health handshake
+//!   natively identifies the worker — no SGLang-proto fallback hack needed.
 
 use std::time::Duration;
 
@@ -43,8 +47,12 @@ async fn detect_grpc_backend(
         }
     }
 
-    // Try each runtime sequentially (most common first), skipping the hint we already tried
-    for runtime in &["sglang", "vllm", "trtllm", "mlx"] {
+    // Try each runtime sequentially. TokenSpeed comes before SGLang because
+    // it has its own ``tokenspeed.grpc.scheduler`` service — a real SGLang
+    // worker never answers that handshake, so testing it first unambiguously
+    // distinguishes the two backends without SGLang ever being probed
+    // against a TokenSpeed worker (and vice versa).
+    for runtime in &["tokenspeed", "sglang", "vllm", "trtllm", "mlx"] {
         if Some(*runtime) == runtime_hint {
             continue;
         }
@@ -57,7 +65,7 @@ async fn detect_grpc_backend(
     }
 
     Err(format!(
-        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, mlx)"
+        "gRPC backend detection failed for {url} (tried tokenspeed, sglang, vllm, trtllm, mlx)"
     ))
 }
 
@@ -105,6 +113,7 @@ async fn detect_via_models_endpoint(
     match first_model.owned_by.as_deref() {
         Some("sglang") => Ok("sglang".to_string()),
         Some("vllm") => Ok("vllm".to_string()),
+        Some("tokenspeed") => Ok("tokenspeed".to_string()),
         other => Err(format!("Unrecognized owned_by value: {other:?}")),
     }
 }

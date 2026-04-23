@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smg-grpc-servicer"
 version = "0.5.2"
-description = "SMG gRPC servicer implementations for LLM inference engines (vLLM, SGLang)"
+description = "SMG gRPC servicer implementations for LLM inference engines (vLLM, SGLang, TokenSpeed)"
 requires-python = ">=3.10"
 dependencies = [
     "smg-grpc-proto>=0.4.6",
@@ -32,6 +32,23 @@ classifiers = [
 [project.optional-dependencies]
 vllm = ["vllm>=0.19.0"]
 sglang = ["sglang>=0.5.10"]
+tokenspeed = [
+    # TokenSpeed is installed out-of-tree (usually as an editable ``pip install -e``
+    # against the sibling checkout). We don't hard-pin a PyPI version here so the
+    # extra can be used in dev containers that mount the repo directly.
+    "uvloop>=0.19.0",
+]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "tokenspeed: tests that require TokenSpeed",
+]
 
 [project.urls]
 Homepage = "https://github.com/lightseekorg/smg"

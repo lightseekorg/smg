@@ -1,4 +1,4 @@
-"""SMG gRPC Proto - Protocol definitions for SGLang, vLLM, and TRT-LLM."""
+"""SMG gRPC Proto - Protocol definitions for SGLang, TokenSpeed, vLLM, and TRT-LLM."""
 
 from importlib.metadata import version
 
@@ -12,6 +12,8 @@ try:
         sglang_encoder_pb2_grpc,
         sglang_scheduler_pb2,
         sglang_scheduler_pb2_grpc,
+        tokenspeed_scheduler_pb2,
+        tokenspeed_scheduler_pb2_grpc,
         trtllm_service_pb2,
         trtllm_service_pb2_grpc,
         vllm_engine_pb2,
@@ -23,6 +25,8 @@ try:
         "sglang_scheduler_pb2_grpc",
         "sglang_encoder_pb2",
         "sglang_encoder_pb2_grpc",
+        "tokenspeed_scheduler_pb2",
+        "tokenspeed_scheduler_pb2_grpc",
         "vllm_engine_pb2",
         "vllm_engine_pb2_grpc",
         "trtllm_service_pb2",
