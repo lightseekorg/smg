@@ -3194,3 +3194,91 @@ fn test_apply_patch_tool_choice_round_trip() {
     let serialized = serde_json::to_value(&choice).expect("serialize");
     assert_eq!(serialized, payload);
 }
+
+#[test]
+fn test_apply_patch_request_validate_accepts_relaxed_shapes() {
+    // Regression for CodeRabbit feedback on PR #1339: the `validate_input_item`
+    // arms for `ApplyPatchCall` and `ApplyPatchCallOutput` intentionally do
+    // no content checking — the spec permits empty/absent `output` on the
+    // call-output side (L251), and the `ApplyPatchOperation` enum
+    // structurally enforces the `diff` / `path` shape so an empty `diff`
+    // string on `create_file` / `update_file` is spec-legal. This test
+    // locks those relaxed branches in so they cannot regress back to a
+    // stricter non-empty check.
+    //
+    // The cross-parameter validator (see `validate_response_request`)
+    // requires at least one Message/SimpleInputMessage alongside any tool
+    // item, so every fixture below pairs the apply_patch item with a plain
+    // user message to isolate the apply_patch branch under test.
+    use validator::Validate;
+
+    let user_msg = json!({"role": "user", "content": "hi"});
+
+    // (a) apply_patch_call_output with `output: ""` — empty-string log
+    // must validate cleanly because the output-empty path was intentionally
+    // omitted (cf. the `custom_tool_call_output_empty` check we did NOT
+    // mirror here).
+    let empty_output: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            user_msg.clone(),
+            {
+                "type": "apply_patch_call_output",
+                "call_id": "call_patch_1",
+                "status": "completed",
+                "output": "",
+            }
+        ]
+    }))
+    .expect("request should deserialize");
+    assert!(
+        empty_output.validate().is_ok(),
+        "empty ApplyPatchCallOutput.output string must pass validation"
+    );
+
+    // (b) apply_patch_call_output with `output` omitted entirely — spec
+    // L251 marks `output` as optional, so a no-log `failed` output must
+    // validate without raising.
+    let omitted_output: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            user_msg.clone(),
+            {
+                "type": "apply_patch_call_output",
+                "call_id": "call_patch_2",
+                "status": "failed",
+            }
+        ]
+    }))
+    .expect("request should deserialize");
+    assert!(
+        omitted_output.validate().is_ok(),
+        "omitted ApplyPatchCallOutput.output must pass validation"
+    );
+
+    // (c) apply_patch_call UpdateFile with `diff: ""` — an empty-diff
+    // update is structurally legal (the `ApplyPatchOperation` enum only
+    // enforces presence of the fields, not their contents) and the
+    // validator intentionally does not content-check the operation.
+    let empty_update_diff: ResponsesRequest = serde_json::from_value(json!({
+        "model": "gpt-5.4",
+        "input": [
+            user_msg,
+            {
+                "type": "apply_patch_call",
+                "call_id": "call_patch_3",
+                "operation": {
+                    "type": "update_file",
+                    "diff": "",
+                    "path": "src/main.rs"
+                },
+                "status": "completed"
+            }
+        ]
+    }))
+    .expect("request should deserialize");
+    assert!(
+        empty_update_diff.validate().is_ok(),
+        "empty ApplyPatchCall.operation.diff on update_file must pass validation"
+    );
+}
