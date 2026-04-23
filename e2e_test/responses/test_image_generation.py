@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_GEN_PROMPT = "Generate a picture of a cat"
 
+# Force the model to invoke ``image_generation`` rather than auto-planning its
+# way to a text-only answer. Without this, a model run that skips the tool
+# would make every assertion below either vacuous (the base64-strip test
+# would trivially pass) or silently misleading. The wire shape matches
+# ``ToolChoice::Hosted`` in ``crates/protocols/src/responses.rs``.
+_FORCED_TOOL_CHOICE = {"type": "image_generation"}
+
 
 # =============================================================================
 # Helpers
@@ -137,6 +144,7 @@ class TestImageGeneration:
             model="gpt-5-nano",
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
+            tool_choice=_FORCED_TOOL_CHOICE,
             stream=False,
         )
 
@@ -163,6 +171,7 @@ class TestImageGeneration:
             model="gpt-5-nano",
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
+            tool_choice=_FORCED_TOOL_CHOICE,
             stream=True,
         )
 
@@ -234,6 +243,7 @@ class TestImageGeneration:
             model="gpt-5-nano",
             input=_IMAGE_GEN_PROMPT,
             tools=[tool_args],
+            tool_choice=_FORCED_TOOL_CHOICE,
             stream=False,
         )
 
@@ -274,7 +284,7 @@ class TestImageGeneration:
             model="gpt-5-nano",
             input=_IMAGE_GEN_PROMPT,
             tools=[image_gen_tool_args],
-            tool_choice={"type": "image_generation"},
+            tool_choice=_FORCED_TOOL_CHOICE,
             stream=False,
             store=True,
         )
@@ -305,6 +315,17 @@ class TestImageGeneration:
             )
         assert items_resp.status_code == 200, (
             f"Failed to list conversation items: {items_resp.status_code} {items_resp.text}"
+        )
+
+        # Positive persistence guard: the "base64 not in payload" check
+        # below is vacuous unless items were actually stored. Confirm the
+        # conversation persisted something before asserting on what it
+        # did *not* contain.
+        items_data = items_resp.json()
+        stored_items = items_data.get("data") or items_data.get("items") or []
+        assert stored_items, (
+            "Conversation persisted no items — compactor-strip assertion would be "
+            f"vacuous. Full response: {items_data!r}"
         )
 
         payload = items_resp.text
