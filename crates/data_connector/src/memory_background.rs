@@ -25,6 +25,15 @@ use crate::{
     core::ResponseId,
 };
 
+/// Convert `std::time::Duration` → `chrono::Duration` for lease arithmetic.
+/// Fails only for durations exceeding ~292 billion years, which would indicate
+/// a misconfigured `BackgroundConfig::lease_duration_secs`.
+fn to_chrono(d: Duration) -> BackgroundRepositoryResult<chrono::Duration> {
+    chrono::Duration::from_std(d).map_err(|e| {
+        BackgroundRepositoryError::Backend(format!("lease duration out of range for chrono: {e}"))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InternalStatus {
     Queued,
@@ -170,59 +179,62 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         lease: Duration,
     ) -> BackgroundRepositoryResult<Option<LeasedJob>> {
         let mut state = self.state.write();
+        let lease_chrono = to_chrono(lease)?;
 
-        let pick = state
-            .entries
-            .iter()
-            .filter(|(_, e)| e.status == InternalStatus::Queued && e.next_attempt_at <= now)
-            .min_by(|(_, a), (_, b)| {
-                a.priority
-                    .cmp(&b.priority)
-                    .then(a.next_attempt_at.cmp(&b.next_attempt_at))
-                    .then(a.created_at.cmp(&b.created_at))
-            })
-            .map(|(id, _)| id.clone());
+        loop {
+            let pick = state
+                .entries
+                .iter()
+                .filter(|(_, e)| e.status == InternalStatus::Queued && e.next_attempt_at <= now)
+                .min_by(|(_, a), (_, b)| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then(a.next_attempt_at.cmp(&b.next_attempt_at))
+                        .then(a.created_at.cmp(&b.created_at))
+                })
+                .map(|(id, _)| id.clone());
 
-        let Some(id) = pick else {
-            return Ok(None);
-        };
+            let Some(id) = pick else {
+                return Ok(None);
+            };
 
-        let entry = state.entries.get_mut(&id).ok_or_else(|| {
-            BackgroundRepositoryError::Backend(
-                "claim_next invariant: picked entry missing under write lock".to_string(),
-            )
-        })?;
+            let entry = state.entries.get_mut(&id).ok_or_else(|| {
+                BackgroundRepositoryError::Backend(
+                    "claim_next invariant: picked entry missing under write lock".to_string(),
+                )
+            })?;
 
-        // Cancel-before-claim: flip straight to Cancelled rather than hand
-        // a worker a job it must not execute. The worker sees `None`.
-        if entry.cancel_requested {
-            entry.status = InternalStatus::Cancelled;
-            entry.completed_at = Some(now);
-            return Ok(None);
+            // Cancel-before-claim: flip straight to Cancelled and keep
+            // scanning rather than hand a worker a job it must not execute
+            // or let the worker loop sleep while other runnable rows exist.
+            if entry.cancel_requested {
+                entry.status = InternalStatus::Cancelled;
+                entry.completed_at = Some(now);
+                continue;
+            }
+
+            let expires_at = now + lease_chrono;
+            entry.status = InternalStatus::InProgress;
+            entry.worker_id = Some(worker_id.to_string());
+            entry.lease_expires_at = Some(expires_at);
+            if entry.started_at.is_none() {
+                entry.started_at = Some(now);
+            }
+
+            return Ok(Some(LeasedJob {
+                response_id: id,
+                retry_attempt: entry.retry_attempt,
+                priority: entry.priority,
+                worker_id: worker_id.to_string(),
+                lease_expires_at: expires_at,
+                input: entry.input.clone(),
+                request_json: entry.request_json.clone(),
+                model: entry.model.clone(),
+                conversation_id: entry.conversation_id.clone(),
+                previous_response_id: entry.previous_response_id.clone(),
+                stream_enabled: entry.stream_enabled,
+            }));
         }
-
-        let expires_at =
-            now + chrono::Duration::from_std(lease).unwrap_or(chrono::Duration::zero());
-        entry.status = InternalStatus::InProgress;
-        entry.worker_id = Some(worker_id.to_string());
-        entry.lease_expires_at = Some(expires_at);
-        if entry.started_at.is_none() {
-            entry.started_at = Some(now);
-        }
-
-        Ok(Some(LeasedJob {
-            response_id: id,
-            retry_attempt: entry.retry_attempt,
-            priority: entry.priority,
-            worker_id: worker_id.to_string(),
-            lease_expires_at: expires_at,
-            input: entry.input.clone(),
-            request_json: entry.request_json.clone(),
-            model: entry.model.clone(),
-            conversation_id: entry.conversation_id.clone(),
-            previous_response_id: entry.previous_response_id.clone(),
-            stream_enabled: entry.stream_enabled,
-        }))
     }
 
     async fn heartbeat(
@@ -248,8 +260,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             });
         }
 
-        entry.lease_expires_at =
-            Some(now + chrono::Duration::from_std(lease).unwrap_or(chrono::Duration::zero()));
+        entry.lease_expires_at = Some(now + to_chrono(lease)?);
         Ok(())
     }
 
@@ -342,6 +353,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
     async fn finalize(
         &self,
         update: FinalizeRequest,
+        now: DateTime<Utc>,
     ) -> BackgroundRepositoryResult<FinalizeResult> {
         let mut state = self.state.write();
         let entry = state
@@ -357,7 +369,12 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             });
         }
 
-        if entry.worker_id.as_deref() != Some(update.worker_id.as_str()) {
+        // Lease fence: reject when either the caller isn't the lease holder
+        // or the lease has already expired at `now`. The latter stops a stale
+        // worker from committing terminal state after its window, even if
+        // the sweeper hasn't run yet.
+        let lease_still_valid = entry.lease_expires_at.is_some_and(|exp| exp > now);
+        if entry.worker_id.as_deref() != Some(update.worker_id.as_str()) || !lease_still_valid {
             return Err(BackgroundRepositoryError::LeaseNotHeld {
                 response_id: update.response_id.clone(),
                 worker_id: update.worker_id,
@@ -479,10 +496,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_next_respects_priority_and_creation_order() {
+    async fn claim_next_respects_priority_order() {
+        // Fully distinct priorities so ordering is determined by the
+        // priority tiebreaker alone, not by timestamps that could collide on
+        // coarse-clock systems.
         let repo = MemoryBackgroundRepository::new();
         let mut r1 = enqueue_req("r1");
-        r1.priority = 5;
+        r1.priority = 10;
         let mut r2 = enqueue_req("r2");
         r2.priority = 1;
         let mut r3 = enqueue_req("r3");
@@ -503,7 +523,59 @@ mod tests {
                 .unwrap_or_default();
             claim_order.push(id);
         }
-        assert_eq!(claim_order, vec!["r2", "r1", "r3"]);
+        assert_eq!(claim_order, vec!["r2", "r3", "r1"]);
+    }
+
+    #[tokio::test]
+    async fn claim_next_skips_cancelled_and_returns_next_runnable() {
+        // A Queued-with-cancel-requested row arises when an InProgress row
+        // has cancel_requested=true set by `request_cancel`, then its lease
+        // expires and `requeue_expired` flips it back to Queued with the
+        // flag preserved. When the picker encounters that row next, it must
+        // mark it Cancelled and keep scanning rather than return `None`.
+        let repo = MemoryBackgroundRepository::new();
+
+        let mut r1 = enqueue_req("r1");
+        r1.priority = 1;
+        let mut r2 = enqueue_req("r2");
+        r2.priority = 5;
+        repo.enqueue(r1, None).await.unwrap();
+        repo.enqueue(r2, None).await.unwrap();
+
+        // 1. Claim r1 (higher priority), ask to cancel → r1 becomes
+        //    InProgress with cancel_requested=true.
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("r1 claimed");
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::CancelRequested
+        );
+
+        // 2. Sweep expires the lease → r1 flips back to Queued but keeps
+        //    cancel_requested=true.
+        assert_eq!(
+            repo.requeue_expired(claim_time + chrono::Duration::seconds(120))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // 3. Next claim: picker lands on r1 (priority 1), flips to Cancelled,
+        //    keeps scanning, and returns r2 instead of `None`.
+        let job = repo
+            .claim_next(
+                "w2",
+                claim_time + chrono::Duration::seconds(130),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap()
+            .expect("r2 should be returned after skipping cancelled r1");
+        assert_eq!(job.response_id, ResponseId::from("r2"));
     }
 
     #[tokio::test]
@@ -644,20 +716,28 @@ mod tests {
     async fn finalize_writes_terminal_and_clears_lease() {
         let repo = MemoryBackgroundRepository::new();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        let claim_time = Utc::now();
         let _ = repo
-            .claim_next("w1", Utc::now(), Duration::from_secs(60))
+            .claim_next("w1", claim_time, Duration::from_secs(60))
             .await
             .unwrap()
             .expect("claim");
+        let within_lease = claim_time + chrono::Duration::seconds(10);
         let result = repo
-            .finalize(finalize_req("r1", "w1", FinalizeStatus::Completed))
+            .finalize(
+                finalize_req("r1", "w1", FinalizeStatus::Completed),
+                within_lease,
+            )
             .await
             .unwrap();
         assert_eq!(result.final_status, FinalizeStatus::Completed);
         assert!(!result.cancel_won);
 
         let result = repo
-            .finalize(finalize_req("r1", "w1", FinalizeStatus::Failed))
+            .finalize(
+                finalize_req("r1", "w1", FinalizeStatus::Failed),
+                within_lease,
+            )
             .await
             .unwrap();
         assert_eq!(result.final_status, FinalizeStatus::Completed);
@@ -667,8 +747,9 @@ mod tests {
     async fn finalize_cancel_wins_over_worker_status() {
         let repo = MemoryBackgroundRepository::new();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        let claim_time = Utc::now();
         let _ = repo
-            .claim_next("w1", Utc::now(), Duration::from_secs(60))
+            .claim_next("w1", claim_time, Duration::from_secs(60))
             .await
             .unwrap()
             .expect("claim");
@@ -678,7 +759,10 @@ mod tests {
         );
 
         let result = repo
-            .finalize(finalize_req("r1", "w1", FinalizeStatus::Completed))
+            .finalize(
+                finalize_req("r1", "w1", FinalizeStatus::Completed),
+                claim_time + chrono::Duration::seconds(10),
+            )
             .await
             .unwrap();
         assert_eq!(result.final_status, FinalizeStatus::Cancelled);
@@ -689,13 +773,44 @@ mod tests {
     async fn finalize_rejects_non_lease_holder() {
         let repo = MemoryBackgroundRepository::new();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        let claim_time = Utc::now();
         let _ = repo
-            .claim_next("w1", Utc::now(), Duration::from_secs(60))
+            .claim_next("w1", claim_time, Duration::from_secs(60))
             .await
             .unwrap()
             .expect("claim");
         let err = repo
-            .finalize(finalize_req("r1", "w2", FinalizeStatus::Completed))
+            .finalize(
+                finalize_req("r1", "w2", FinalizeStatus::Completed),
+                claim_time + chrono::Duration::seconds(10),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BackgroundRepositoryError::LeaseNotHeld { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn finalize_rejects_expired_lease_even_before_sweeper() {
+        // Stale-worker guard: a worker whose lease has already expired must
+        // not be able to commit terminal state, even if `requeue_expired`
+        // hasn't run yet.
+        let repo = MemoryBackgroundRepository::new();
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        let after_expiry = claim_time + chrono::Duration::seconds(120);
+        let err = repo
+            .finalize(
+                finalize_req("r1", "w1", FinalizeStatus::Completed),
+                after_expiry,
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -783,8 +898,9 @@ mod tests {
         );
 
         repo.enqueue(enqueue_req("r2"), None).await.unwrap();
+        let claim_time = Utc::now();
         let _ = repo
-            .claim_next("w1", Utc::now(), Duration::from_secs(60))
+            .claim_next("w1", claim_time, Duration::from_secs(60))
             .await
             .unwrap()
             .expect("claim");
@@ -796,7 +912,10 @@ mod tests {
         );
 
         let _ = repo
-            .finalize(finalize_req("r2", "w1", FinalizeStatus::Completed))
+            .finalize(
+                finalize_req("r2", "w1", FinalizeStatus::Completed),
+                claim_time + chrono::Duration::seconds(10),
+            )
             .await
             .unwrap();
         assert_eq!(

@@ -806,6 +806,36 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_zero_background_fields() {
+        type BgMutator = fn(&mut BackgroundConfig);
+        let cases: &[(&str, BgMutator)] = &[
+            ("worker_concurrency", |b| b.worker_concurrency = 0),
+            ("max_queue_depth", |b| b.max_queue_depth = 0),
+            ("lease_duration_secs", |b| b.lease_duration_secs = 0),
+            ("sweep_interval_secs", |b| b.sweep_interval_secs = 0),
+            ("poll_interval_ms", |b| b.poll_interval_ms = 0),
+            ("stream_retention_secs", |b| b.stream_retention_secs = 0),
+        ];
+        for (field, mutate) in cases {
+            let mut cfg = RouterConfig::default();
+            mutate(&mut cfg.background);
+            let err = cfg.validate().expect_err(field);
+            assert!(
+                format!("{err:?}").contains(field),
+                "{field} validation must fail with field in error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_retry_base_exceeding_max() {
+        let mut cfg = RouterConfig::default();
+        cfg.background.retry_base_delay_secs = 30;
+        cfg.background.retry_max_delay_secs = 10;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn test_background_config_yaml_round_trip_with_custom_values() {
         let yaml = r"
 worker_concurrency: 32
