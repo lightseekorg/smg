@@ -10,6 +10,7 @@ pub mod common_proto {
 pub mod mlx_engine;
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
+pub mod tokenspeed_scheduler;
 pub mod trtllm_service;
 pub mod vllm_engine;
 
@@ -19,6 +20,9 @@ use std::sync::Arc;
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
 use tonic::metadata::MetadataMap;
+// TokenSpeed reuses ``sglang_proto`` for message types today; the module
+// below owns the ``tokenspeed.grpc.scheduler`` service stub and its client.
+pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
 pub use vllm_engine::{proto as vllm_proto, VllmEngineClient};
 

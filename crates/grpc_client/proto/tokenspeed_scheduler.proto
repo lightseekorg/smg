@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package tokenspeed.grpc.scheduler;
+
+import "sglang_scheduler.proto";
+import "common.proto";
+
+// Service definition for TokenSpeed scheduler communication.
+//
+// Wire-level identity (package, service name) is distinct from SGLang so the
+// gateway's backend detector, metrics, and operator tooling can tell a
+// TokenSpeed worker apart from a real SGLang worker. Messages currently
+// piggy-back on the SGLang proto via ``import`` because the two backends
+// happen to share the same tokenized-request shape, sampling-param naming,
+// and output-dict layout today — any future divergence (new fields, changed
+// semantics) should land as a TokenSpeed-specific message defined here, not
+// by mutating the shared SGLang message in-place.
+service TokenSpeedScheduler {
+  rpc Generate(sglang.grpc.scheduler.GenerateRequest)
+      returns (stream sglang.grpc.scheduler.GenerateResponse);
+
+  rpc Embed(sglang.grpc.scheduler.EmbedRequest)
+      returns (sglang.grpc.scheduler.EmbedResponse);
+
+  rpc HealthCheck(sglang.grpc.scheduler.HealthCheckRequest)
+      returns (sglang.grpc.scheduler.HealthCheckResponse);
+
+  rpc Abort(sglang.grpc.scheduler.AbortRequest)
+      returns (sglang.grpc.scheduler.AbortResponse);
+
+  rpc GetModelInfo(sglang.grpc.scheduler.GetModelInfoRequest)
+      returns (sglang.grpc.scheduler.GetModelInfoResponse);
+
+  rpc GetServerInfo(sglang.grpc.scheduler.GetServerInfoRequest)
+      returns (sglang.grpc.scheduler.GetServerInfoResponse);
+
+  rpc GetLoads(sglang.grpc.scheduler.GetLoadsRequest)
+      returns (sglang.grpc.scheduler.GetLoadsResponse);
+
+  rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest)
+      returns (stream smg.grpc.common.GetTokenizerChunk);
+
+  rpc SubscribeKvEvents(smg.grpc.common.SubscribeKvEventsRequest)
+      returns (stream smg.grpc.common.KvEventBatch);
+}
