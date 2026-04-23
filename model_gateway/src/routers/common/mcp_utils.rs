@@ -118,8 +118,9 @@ pub async fn connect_mcp_servers(
 
 /// Routing information for a built-in tool type.
 ///
-/// When a built-in tool type (web_search_preview, code_interpreter, file_search)
-/// is configured to route to an MCP server, this struct holds the routing details.
+/// When a built-in tool type (web_search_preview, code_interpreter, image_generation,
+/// file_search) is configured to route to an MCP server, this struct holds the
+/// routing details.
 #[derive(Debug, Clone)]
 pub struct BuiltinToolRouting {
     /// The built-in tool type being routed.
@@ -134,8 +135,8 @@ pub struct BuiltinToolRouting {
 
 /// Collect routing information for built-in tools in a request.
 ///
-/// Scans request tools for built-in types (web_search_preview, code_interpreter, file_search)
-/// and looks up configured MCP servers to handle them.
+/// Scans request tools for built-in types (web_search_preview, code_interpreter,
+/// image_generation, file_search) and looks up configured MCP servers to handle them.
 ///
 /// # Arguments
 /// * `mcp_orchestrator` - The MCP orchestrator with server configuration
@@ -158,6 +159,7 @@ pub fn collect_builtin_routing(
         let builtin_type = match tool {
             ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
             ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
+            ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
             _ => continue,
         };
 
@@ -198,6 +200,7 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .filter_map(|t| match t {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
+            ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
             _ => None,
         })
         .collect()

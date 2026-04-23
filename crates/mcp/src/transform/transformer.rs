@@ -2,8 +2,10 @@
 
 use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
-    ResponseOutputItem, WebSearchAction, WebSearchCallStatus, WebSearchSource,
+    ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
+    WebSearchSource,
 };
+use serde_json::Value;
 use tracing::warn;
 
 use super::ResponseFormat;
@@ -28,7 +30,7 @@ pub fn mcp_response_item_id(source_id: &str) -> String {
 }
 
 /// Extract non-null `openai_response` objects from embedded MCP text-block payloads.
-pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serde_json::Value> {
+pub fn extract_embedded_openai_responses(result: &Value) -> Vec<Value> {
     let text_blocks = result
         .as_array()
         .map(|items| items.as_slice())
@@ -61,7 +63,7 @@ impl ResponseTransformer {
     ///
     /// Returns a `ResponseOutputItem` from the protocols crate.
     pub fn transform(
-        result: &serde_json::Value,
+        result: &Value,
         format: &ResponseFormat,
         tool_call_id: &str,
         server_label: &str,
@@ -79,12 +81,15 @@ impl ResponseTransformer {
                 Self::to_code_interpreter_call(result, tool_call_id)
             }
             ResponseFormat::FileSearchCall => Self::to_file_search_call(result, tool_call_id),
+            ResponseFormat::ImageGenerationCall => {
+                Self::to_image_generation_call(result, tool_call_id)
+            }
         }
     }
 
     /// Transform to mcp_call output (passthrough).
     fn to_mcp_call(
-        result: &serde_json::Value,
+        result: &Value,
         tool_call_id: &str,
         server_label: &str,
         tool_name: &str,
@@ -103,9 +108,9 @@ impl ResponseTransformer {
     }
 
     /// Flatten passthrough MCP results into the plain-string output shape used by OpenAI.
-    fn flatten_mcp_output(result: &serde_json::Value) -> String {
+    fn flatten_mcp_output(result: &Value) -> String {
         match result {
-            serde_json::Value::String(text) => text.clone(),
+            Value::String(text) => text.clone(),
             _ => {
                 let mut text_parts = Vec::new();
                 Self::collect_text_parts(result, &mut text_parts);
@@ -118,14 +123,14 @@ impl ResponseTransformer {
         }
     }
 
-    fn collect_text_parts(value: &serde_json::Value, text_parts: &mut Vec<String>) {
+    fn collect_text_parts(value: &Value, text_parts: &mut Vec<String>) {
         match value {
-            serde_json::Value::Array(items) => {
+            Value::Array(items) => {
                 for item in items {
                     Self::collect_text_parts(item, text_parts);
                 }
             }
-            serde_json::Value::Object(obj) => {
+            Value::Object(obj) => {
                 if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
                     if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
                         text_parts.push(text.to_string());
@@ -163,7 +168,7 @@ impl ResponseTransformer {
 
     /// Transform MCP web search results to OpenAI web_search_call format.
     fn to_web_search_call(
-        result: &serde_json::Value,
+        result: &Value,
         tool_call_id: &str,
         arguments: &str,
     ) -> ResponseOutputItem {
@@ -186,10 +191,7 @@ impl ResponseTransformer {
     }
 
     /// Transform MCP code interpreter results to OpenAI code_interpreter_call format.
-    fn to_code_interpreter_call(
-        result: &serde_json::Value,
-        tool_call_id: &str,
-    ) -> ResponseOutputItem {
+    fn to_code_interpreter_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let obj = result.as_object();
 
         let container_id = obj
@@ -214,8 +216,50 @@ impl ResponseTransformer {
         }
     }
 
+    /// Transform MCP image generation results to OpenAI image_generation_call format.
+    ///
+    /// Expected success payload shape (OpenAI Python SDK 2.8.1,
+    /// `openai/types/responses/response_image_generation_call.py`):
+    ///
+    /// ```text
+    /// {"result": "<base64 image bytes>", "revised_prompt": "...", "status": "completed"}
+    /// ```
+    ///
+    /// MCP wraps this as
+    /// `[{"type":"text","text":"<stringified-json-above>"}]`. We also tolerate
+    /// flat shapes where `result` sits directly on the content item.
+    ///
+    /// On failure (error text in the content block, or missing `result`),
+    /// `result` is left as an empty string and status is set to `Failed`;
+    /// `revised_prompt` is preserved when available. The spec requires
+    /// `result: String` on the server-side output item, so we always emit a
+    /// valid field — the fallback-text path (error messages) is intentionally
+    /// discarded into the gateway's logs via `warn!` to avoid leaking
+    /// server-side error text as if it were an image.
+    fn to_image_generation_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
+        let payload = extract_image_generation_payload(result);
+
+        let (status, result_b64) = match payload.result {
+            Some(b64) if !b64.is_empty() => (ImageGenerationCallStatus::Completed, b64),
+            _ => {
+                warn!(
+                    tool_call_id,
+                    "image_generation MCP result is missing `result` (base64); emitting failed status"
+                );
+                (ImageGenerationCallStatus::Failed, String::new())
+            }
+        };
+
+        ResponseOutputItem::ImageGenerationCall {
+            id: format!("ig_{tool_call_id}"),
+            result: result_b64,
+            revised_prompt: payload.revised_prompt,
+            status,
+        }
+    }
+
     /// Transform MCP file search results to OpenAI file_search_call format.
-    fn to_file_search_call(result: &serde_json::Value, tool_call_id: &str) -> ResponseOutputItem {
+    fn to_file_search_call(result: &Value, tool_call_id: &str) -> ResponseOutputItem {
         let obj = result.as_object();
 
         let queries = Self::extract_queries(result);
@@ -237,7 +281,7 @@ impl ResponseTransformer {
     }
 
     /// Extract web sources from MCP result.
-    fn extract_web_sources(result: &serde_json::Value) -> Vec<WebSearchSource> {
+    fn extract_web_sources(result: &Value) -> Vec<WebSearchSource> {
         let mut sources = Vec::new();
 
         if result.is_array() {
@@ -284,7 +328,7 @@ impl ResponseTransformer {
     }
 
     /// Parse a single web source from JSON.
-    fn parse_web_source(item: &serde_json::Value) -> Option<WebSearchSource> {
+    fn parse_web_source(item: &Value) -> Option<WebSearchSource> {
         let obj = item.as_object()?;
         let url = obj.get("url").and_then(|v| v.as_str())?;
         let source_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("url");
@@ -295,7 +339,7 @@ impl ResponseTransformer {
     }
 
     /// Extract queries from MCP result.
-    fn extract_queries(result: &serde_json::Value) -> Vec<String> {
+    fn extract_queries(result: &Value) -> Vec<String> {
         let mut queries = Vec::new();
 
         if let Some(text_blocks) = result.as_array() {
@@ -342,7 +386,7 @@ impl ResponseTransformer {
     }
 
     fn extract_query_from_arguments(arguments: &str) -> Option<String> {
-        let args_json = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+        let args_json = serde_json::from_str::<Value>(arguments).ok()?;
         args_json
             .as_object()
             .and_then(|obj| obj.get("query"))
@@ -351,7 +395,7 @@ impl ResponseTransformer {
     }
 
     /// Extract code interpreter outputs from MCP result.
-    fn extract_code_outputs(result: &serde_json::Value) -> Vec<CodeInterpreterOutput> {
+    fn extract_code_outputs(result: &Value) -> Vec<CodeInterpreterOutput> {
         let mut outputs = Vec::new();
 
         if let Some(obj) = result.as_object() {
@@ -399,7 +443,7 @@ impl ResponseTransformer {
     }
 
     /// Extract file search results from MCP result.
-    fn extract_file_results(result: &serde_json::Value) -> Vec<FileSearchResult> {
+    fn extract_file_results(result: &Value) -> Vec<FileSearchResult> {
         result
             .as_object()
             .and_then(|obj| obj.get("results"))
@@ -409,7 +453,7 @@ impl ResponseTransformer {
     }
 
     /// Parse a file search result from JSON.
-    fn parse_file_result(item: &serde_json::Value) -> Option<FileSearchResult> {
+    fn parse_file_result(item: &Value) -> Option<FileSearchResult> {
         let obj = item.as_object()?;
         let file_id = obj.get("file_id").and_then(|v| v.as_str())?.to_string();
         let filename = obj.get("filename").and_then(|v| v.as_str())?.to_string();
@@ -426,7 +470,102 @@ impl ResponseTransformer {
     }
 }
 
-fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Value> {
+/// Payload extracted from an MCP image_generation tool result.
+///
+/// Only fields present in T4's `ResponseOutputItem::ImageGenerationCall`
+/// variant (`result`, `revised_prompt`) are captured — the spec also allows
+/// other image-tool request knobs (`background`, `quality`, etc.) but those
+/// are not part of the server-side *output* item, so we intentionally do not
+/// parse them here.
+#[derive(Debug, Default)]
+struct ImageGenerationPayload {
+    result: Option<String>,
+    revised_prompt: Option<String>,
+}
+
+/// Extract the image-generation success payload from an MCP tool result.
+///
+/// Accepted shapes (first match wins):
+/// 1. `[{"type":"text","text":"{\"result\":\"<base64>\",\"revised_prompt\":\"...\"}"}]`
+///    — canonical: stringified JSON embedded in a text content block.
+/// 2. `[{"type":"text","result":"<base64>","revised_prompt":"..."}]`
+///    — flat: keys on the content item itself.
+/// 3. `{"result": "...", "revised_prompt": "..."}` — top-level object
+///    (non-MCP adapters that return raw image payloads).
+///
+/// Anything else returns an empty payload; the caller then emits a `Failed`
+/// status rather than inventing data.
+fn extract_image_generation_payload(result: &Value) -> ImageGenerationPayload {
+    // Shape 3: bare object.
+    if let Some(obj) = result.as_object() {
+        return ImageGenerationPayload {
+            result: obj
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            revised_prompt: obj
+                .get("revised_prompt")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+    }
+
+    let Some(items) = result.as_array() else {
+        return ImageGenerationPayload::default();
+    };
+
+    for item in items {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        if obj.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+
+        // Shape 2: flat.
+        let flat_result = obj
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if flat_result.is_some() {
+            return ImageGenerationPayload {
+                result: flat_result,
+                revised_prompt: obj
+                    .get("revised_prompt")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+        }
+
+        // Shape 1: text-wrapped JSON.
+        let Some(text) = obj.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        let Some(parsed_obj) = parsed.as_object() else {
+            continue;
+        };
+        let result = parsed_obj
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if result.is_some() {
+            return ImageGenerationPayload {
+                result,
+                revised_prompt: parsed_obj
+                    .get("revised_prompt")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+        }
+    }
+
+    ImageGenerationPayload::default()
+}
+
+fn parse_text_block_payload(item: &Value) -> Option<Value> {
     let Some(obj) = item.as_object() else {
         warn!("Expected MCP result item to be an object");
         return None;
@@ -441,7 +580,7 @@ fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Valu
         return None;
     };
 
-    match serde_json::from_str::<serde_json::Value>(text) {
+    match serde_json::from_str::<Value>(text) {
         Ok(payload) => Some(payload),
         Err(error) => {
             warn!("Failed to parse embedded MCP text block payload: {error}");
@@ -836,6 +975,117 @@ mod tests {
                 assert_eq!(outputs.unwrap().len(), 1);
             }
             _ => panic!("Expected CodeInterpreterCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_embedded_json_success() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": "{\"result\":\"AAAAAAAAAAAAAAAA\",\"revised_prompt\":\"a fluffy cat\",\"status\":\"completed\"}"
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-1",
+            "server",
+            "generate_image",
+            r#"{"prompt":"a cat"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+            } => {
+                assert_eq!(id, "ig_req-img-1");
+                assert_eq!(result, "AAAAAAAAAAAAAAAA");
+                assert_eq!(revised_prompt, Some("a fluffy cat".to_string()));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("Expected ImageGenerationCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_flat_content_item() {
+        let result = json!([
+            {"type": "text", "result": "BBBBBBBBBBBB", "revised_prompt": "flat cat"}
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-2",
+            "server",
+            "generate_image",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                status,
+                ..
+            } => {
+                assert_eq!(result, "BBBBBBBBBBBB");
+                assert_eq!(revised_prompt, Some("flat cat".to_string()));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("Expected ImageGenerationCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_top_level_object() {
+        let result = json!({"result": "CCCCCCC", "revised_prompt": "plain"});
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-3",
+            "server",
+            "generate_image",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { result, status, .. } => {
+                assert_eq!(result, "CCCCCCC");
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            other => panic!("Expected ImageGenerationCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_error_payload_yields_failed_status() {
+        // MCP surfaces tool errors as plain text in the content block.
+        let result = json!([
+            {"type": "text", "text": "Error executing tool generate_image: quota exceeded"}
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-err",
+            "server",
+            "generate_image",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { result, status, .. } => {
+                assert!(result.is_empty());
+                assert_eq!(status, ImageGenerationCallStatus::Failed);
+            }
+            other => panic!("Expected ImageGenerationCall, got {other:?}"),
         }
     }
 
