@@ -873,6 +873,29 @@ impl WorkerManager {
             }
         }
 
+        // Fallback: if gRPC workers exist but the HTTP port+1 scrape got nothing,
+        // try reading from PROMETHEUS_MULTIPROC_DIR (TRT-LLM path).
+        let grpc_scraped = metric_packs.iter().any(|p| {
+            p.labels
+                .iter()
+                .any(|(k, v)| k == "worker_addr" && v.starts_with("grpc"))
+        });
+        if !grpc_workers.is_empty() && !grpc_scraped {
+            match collect_prometheus_multiproc_metrics().await {
+                Ok(text) => {
+                    metric_packs.push(MetricPack {
+                        labels: vec![],
+                        metrics_text: text,
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to collect gRPC worker metrics from PROMETHEUS_MULTIPROC_DIR: {e}"
+                    );
+                }
+            }
+        }
+
         if metric_packs.is_empty() {
             return EngineMetricsResult::Err("All backend requests failed".to_string());
         }
@@ -882,6 +905,40 @@ impl WorkerManager {
             Err(e) => EngineMetricsResult::Err(format!("Failed to aggregate metrics: {e}")),
         }
     }
+}
+
+/// Collect gRPC worker metrics by aggregating `PROMETHEUS_MULTIPROC_DIR` via a python3 subprocess.
+async fn collect_prometheus_multiproc_metrics() -> Result<String, String> {
+    let dir = std::env::var("PROMETHEUS_MULTIPROC_DIR").map_err(|_| {
+        "PROMETHEUS_MULTIPROC_DIR not set; cannot collect metrics from gRPC workers".to_string()
+    })?;
+
+    let output = tokio::process::Command::new("python3")
+        .args([
+            "-c",
+            "import sys\n\
+             from prometheus_client import CollectorRegistry, generate_latest\n\
+             from prometheus_client.multiprocess import MultiProcessCollector\n\
+             registry = CollectorRegistry()\n\
+             MultiProcessCollector(registry)\n\
+             sys.stdout.buffer.write(generate_latest(registry))\n",
+        ])
+        .env("PROMETHEUS_MULTIPROC_DIR", &dir)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run python3 prometheus collector: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("python3 prometheus collector failed: {stderr}"));
+    }
+
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| format!("prometheus collector output is not valid UTF-8: {e}"))?;
+    if text.trim().is_empty() {
+        return Err("no metrics available from gRPC workers yet".to_string());
+    }
+    Ok(text)
 }
 
 /// Derive the HTTP metrics URL for a gRPC worker.
