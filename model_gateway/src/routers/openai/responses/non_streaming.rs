@@ -63,9 +63,8 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     };
 
     // Check for MCP tools and create session if needed
-    let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools, &forwarded_headers).await
+        ensure_request_mcp_client(mcp_orchestrator, tools).await
     } else {
         None
     };
@@ -77,6 +76,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+        let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
         let mut session = McpToolSession::new_with_headers(
             mcp_orchestrator,
             mcp_servers,

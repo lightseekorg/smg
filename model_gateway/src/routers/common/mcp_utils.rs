@@ -28,27 +28,6 @@ pub struct McpServerInput {
     pub allowed_tools: Option<Vec<String>>,
 }
 
-fn merge_forwarded_headers(
-    explicit_headers: &HashMap<String, String>,
-    explicit_authorization: Option<&str>,
-    forwarded_headers: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut merged = explicit_headers.clone();
-
-    for (name, value) in forwarded_headers {
-        let is_authorization = name.eq_ignore_ascii_case("authorization");
-        let already_present = merged.keys().any(|key| key.eq_ignore_ascii_case(name));
-
-        if already_present || (is_authorization && explicit_authorization.is_some()) {
-            continue;
-        }
-
-        merged.insert(name.clone(), value.clone());
-    }
-
-    merged
-}
-
 /// Connect to MCP servers described by protocol-agnostic inputs.
 ///
 /// For each input:
@@ -289,7 +268,6 @@ pub async fn ensure_mcp_servers(
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-    forwarded_headers: &HashMap<String, String>,
 ) -> Option<Vec<McpServerBinding>> {
     let inputs: Vec<McpServerInput> = tools
         .iter()
@@ -298,11 +276,7 @@ pub async fn ensure_request_mcp_client(
                 label: mcp.server_label.clone(),
                 url: mcp.server_url.clone(),
                 authorization: mcp.authorization.clone(),
-                headers: merge_forwarded_headers(
-                    &mcp.headers.clone().unwrap_or_default(),
-                    mcp.authorization.as_deref(),
-                    forwarded_headers,
-                ),
+                headers: mcp.headers.clone().unwrap_or_default(),
                 allowed_tools: mcp.allowed_tools.clone(),
             }),
             _ => None,
@@ -565,7 +539,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, &HashMap::new()).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
@@ -588,7 +562,7 @@ mod tests {
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, &HashMap::new()).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -608,7 +582,7 @@ mod tests {
             },
         })];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, &HashMap::new()).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -632,7 +606,7 @@ mod tests {
             ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, &HashMap::new()).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
@@ -640,45 +614,5 @@ mod tests {
         let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].label, "search-server");
-    }
-
-    #[test]
-    fn test_merge_forwarded_headers_adds_missing_request_headers() {
-        let mut explicit_headers = HashMap::new();
-        explicit_headers.insert("x-explicit".to_string(), "explicit".to_string());
-
-        let mut forwarded_headers = HashMap::new();
-        forwarded_headers.insert("traceparent".to_string(), "trace-123".to_string());
-
-        let merged = merge_forwarded_headers(&explicit_headers, None, &forwarded_headers);
-
-        assert_eq!(
-            merged.get("x-explicit").map(String::as_str),
-            Some("explicit")
-        );
-        assert_eq!(
-            merged.get("traceparent").map(String::as_str),
-            Some("trace-123")
-        );
-    }
-
-    #[test]
-    fn test_merge_forwarded_headers_preserves_explicit_header_precedence() {
-        let mut explicit_headers = HashMap::new();
-        explicit_headers.insert("Traceparent".to_string(), "explicit-trace".to_string());
-
-        let mut forwarded_headers = HashMap::new();
-        forwarded_headers.insert("traceparent".to_string(), "forwarded-trace".to_string());
-        forwarded_headers.insert("authorization".to_string(), "Bearer forwarded".to_string());
-
-        let merged =
-            merge_forwarded_headers(&explicit_headers, Some("tool-token"), &forwarded_headers);
-
-        assert_eq!(
-            merged.get("Traceparent").map(String::as_str),
-            Some("explicit-trace")
-        );
-        assert!(!merged.contains_key("traceparent"));
-        assert!(!merged.contains_key("authorization"));
     }
 }

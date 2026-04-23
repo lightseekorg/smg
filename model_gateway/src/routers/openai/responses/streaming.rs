@@ -1047,9 +1047,8 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     // Check for MCP tools and create request context if needed
-    let forwarded_headers = extract_forwardable_request_headers(headers.as_ref());
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(&mcp_orchestrator, tools, &forwarded_headers).await
+        ensure_request_mcp_client(&mcp_orchestrator, tools).await
     } else {
         None
     };

@@ -1,6 +1,6 @@
 //! Utility functions for /v1/responses endpoint
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::response::Response;
 use openai_protocol::{
@@ -59,7 +59,9 @@ pub(crate) async fn ensure_mcp_connection(
     }
 
     if let Some(tools) = tools {
-        match ensure_request_mcp_client(mcp_orchestrator, tools, &HashMap::new()).await {
+        // TODO: Thread real request headers through the gRPC responses path if/when
+        // gRPC MCP flows need the same forwarded-header preservation contract.
+        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
             Some(mcp_servers) => {
                 return Ok((true, mcp_servers));
             }

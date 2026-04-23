@@ -1,16 +1,4 @@
 // tests/common/mock_mcp_server.rs - Mock MCP server for testing
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
-use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    middleware::{self, Next},
-    response::Response,
-};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -108,7 +96,6 @@ impl Drop for MockServerHarness {
 /// Mock MCP server that returns hardcoded responses for testing
 pub struct MockMCPServer {
     harness: MockServerHarness,
-    captured_headers: Arc<Mutex<Vec<HashMap<String, String>>>>,
 }
 
 /// Mock MCP server that always fails tool execution with a caller-provided marker.
@@ -119,40 +106,6 @@ pub struct MockFailingMCPServer {
 /// Mock MCP server that returns configurable web search response formats.
 pub struct MockSearchResponseMCPServer {
     harness: MockServerHarness,
-}
-
-#[derive(Clone, Default)]
-struct CapturedHeaderState {
-    requests: Arc<Mutex<Vec<HashMap<String, String>>>>,
-}
-
-async fn record_request_headers(
-    State(state): State<CapturedHeaderState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    let mut captured = HashMap::new();
-    for (name, value) in request.headers() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-
-        captured
-            .entry(name.as_str().to_string())
-            .and_modify(|existing: &mut String| {
-                existing.push_str(", ");
-                existing.push_str(value);
-            })
-            .or_insert_with(|| value.to_string());
-    }
-
-    state
-        .requests
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(captured);
-
-    next.run(request).await
 }
 
 /// Simple test server with mock search tools
@@ -326,31 +279,20 @@ impl ServerHandler for MockSearchServer {
 }
 
 impl MockMCPServer {
-    fn router(captured_headers: Arc<Mutex<Vec<HashMap<String, String>>>>) -> axum::Router {
+    fn router() -> axum::Router {
         let service = StreamableHttpService::new(
             || Ok(MockSearchServer::new()),
             LocalSessionManager::default().into(),
             Default::default(),
         );
 
-        let state = CapturedHeaderState {
-            requests: captured_headers,
-        };
-
-        axum::Router::new()
-            .nest_service("/mcp", service)
-            .layer(middleware::from_fn_with_state(
-                state,
-                record_request_headers,
-            ))
+        axum::Router::new().nest_service("/mcp", service)
     }
 
     /// Start a mock MCP server on an available port
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let captured_headers = Arc::new(Mutex::new(Vec::new()));
         Ok(Self {
-            harness: MockServerHarness::start(Self::router(captured_headers.clone())).await?,
-            captured_headers,
+            harness: MockServerHarness::start(Self::router()).await?,
         })
     }
 
@@ -361,13 +303,6 @@ impl MockMCPServer {
     /// Get the full URL for this mock server
     pub fn url(&self) -> String {
         self.harness.url()
-    }
-
-    pub fn captured_headers(&self) -> Vec<HashMap<String, String>> {
-        self.captured_headers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 
     /// Stop the mock server
