@@ -27,6 +27,11 @@ use crate::{
 /// Filters for IPv4 since our UDP sockets bind to `0.0.0.0`.
 /// Times out after 3 seconds to avoid blocking bridge setup on slow DNS.
 /// Returns `None` if disabled ("none") or resolution fails.
+///
+/// Limitation: IPv6 bind addresses are not currently supported. If `bind_addr`
+/// is IPv6 (e.g., `::`), STUN gathering will silently return `None` because
+/// only IPv4 addresses are selected from DNS results. Add bind-family-aware
+/// resolution when IPv6 deployments are required.
 async fn resolve_stun_server(server: Option<&str>) -> Option<SocketAddr> {
     use std::time::Duration;
 
@@ -178,12 +183,23 @@ async fn parse_multipart(
 
     let sdp = validate_sdp(&sdp_bytes)?;
 
+    // Trim the model in place so the normalized value is used for both
+    // local worker selection and the upstream request body.
+    if let Some(m) = session_json
+        .as_mut()
+        .and_then(|s| s.get_mut("model"))
+        .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+    {
+        if let Some(model_val) = session_json.as_mut().and_then(|s| s.get_mut("model")) {
+            *model_val = serde_json::Value::String(m);
+        }
+    }
+
     let model = session_json
         .as_ref()
         .and_then(|s| s.get("model"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .trim()
         .to_string();
 
     if model.is_empty() {
