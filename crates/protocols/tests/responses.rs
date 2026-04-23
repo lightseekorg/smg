@@ -2253,6 +2253,27 @@ fn shell_call_input_item_round_trips_spec_shape() {
 }
 
 #[test]
+fn item_reference_input_item_round_trips_with_type() {
+    // Spec (openai-responses-api-spec.md L275-276):
+    // `ItemReference { id, type }` where `type` is `optional "item_reference"`.
+    // The tagged form carries the discriminator explicitly.
+    let payload = json!({
+        "type": "item_reference",
+        "id": "msg_abc123",
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("tagged item_reference should deserialize");
+    match &item {
+        ResponseInputOutputItem::ItemReference { id, r#type } => {
+            assert_eq!(id, "msg_abc123");
+            assert_eq!(*r#type, Some(ItemReferenceTypeTag::ItemReference));
+        }
+        other => panic!("expected ItemReference, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
 fn shell_call_minimal_shape_round_trips() {
     // Spec: `id`, `environment`, `status` are all acceptable as absent on
     // the input side; `action` and `call_id` are the only required fields
@@ -2285,6 +2306,28 @@ fn shell_call_minimal_shape_round_trips() {
         }
         other => panic!("expected ShellCall, got {other:?}"),
     }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+#[test]
+fn item_reference_input_item_accepts_missing_type() {
+    // Spec L276: `type: optional "item_reference"` — the discriminator can
+    // be omitted on the wire. Bare `{id}` must still land in the
+    // `ItemReference` variant and not in any other catch-all shape.
+    let payload = json!({
+        "id": "msg_abc123",
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload.clone()).expect("id-only item_reference should deserialize");
+    match &item {
+        ResponseInputOutputItem::ItemReference { id, r#type } => {
+            assert_eq!(id, "msg_abc123");
+            assert!(r#type.is_none());
+        }
+        other => panic!("expected ItemReference, got {other:?}"),
+    }
+    // `r#type: None` is `skip_serializing_if = Option::is_none`, so the
+    // serialized shape round-trips exactly to the id-only payload.
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
 
@@ -2718,4 +2761,45 @@ fn shell_call_output_validation_accepts_empty_output_for_replay() {
         validator::Validate::validate(&request).is_ok(),
         "empty shell_call_output.output must remain valid for lossless replay"
     );
+}
+
+#[test]
+fn item_reference_input_item_rejects_unknown_type_tag() {
+    // Spec L276 constrains `type` to exactly `"item_reference"` when
+    // present. A payload carrying a different `type` must not silently land
+    // in the `ItemReference` variant — the untagged catch-all is pinned to
+    // [`ItemReferenceTypeTag::ItemReference`] for this reason (P5 fail-fast).
+    let payload = json!({
+        "type": "totally_made_up",
+        "id": "msg_abc123",
+    });
+    let result: Result<ResponseInputOutputItem, _> = serde_json::from_value(payload);
+    assert!(
+        result.is_err(),
+        "item_reference must reject unknown `type` discriminator, got: {result:?}"
+    );
+}
+
+#[test]
+fn simple_input_message_with_id_does_not_match_item_reference() {
+    // Regression: `ItemReference` is declared after `SimpleInputMessage` in
+    // the untagged fallback chain, so a `{id, role, content}` payload — the
+    // id-carrying shape of [`ResponseInputOutputItem::SimpleInputMessage`] —
+    // lands in `SimpleInputMessage` first and does NOT silently drop
+    // `role` / `content` by matching the bare-`id` `ItemReference` arm
+    // behind it.
+    let payload = json!({
+        "id": "msg_abc123",
+        "role": "user",
+        "content": "hello",
+    });
+    let item: ResponseInputOutputItem =
+        serde_json::from_value(payload).expect("message-shaped payload with id must deserialize");
+    match &item {
+        ResponseInputOutputItem::SimpleInputMessage { role, content, .. } => {
+            assert_eq!(role, "user");
+            assert!(matches!(content, StringOrContentParts::String(s) if s == "hello"));
+        }
+        other => panic!("expected SimpleInputMessage, got {other:?}"),
+    }
 }

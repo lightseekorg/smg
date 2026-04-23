@@ -76,6 +76,7 @@ fn extract_text_for_routing_old(req: &ResponsesRequest) -> String {
                 | ResponseInputOutputItem::CustomToolCallOutput { .. } => None,
                 ResponseInputOutputItem::ShellCall { .. }
                 | ResponseInputOutputItem::ShellCallOutput { .. } => None,
+                ResponseInputOutputItem::ItemReference { .. } => None,
             })
             .collect::<Vec<String>>()
             .join(" "),

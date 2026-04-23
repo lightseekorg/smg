@@ -1650,6 +1650,43 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<MessagePhase>,
     },
+    /// `type: "item_reference"` — pointer to a previously-stored item in the
+    /// active conversation. Spec (openai-responses-api-spec.md §InputItemList
+    /// L275-276): `ItemReference { id, type }` where `type` is
+    /// `optional "item_reference"`. The variant is declared as
+    /// `#[serde(untagged)]` because the `type` discriminator is optional on
+    /// the wire; `r#type` is pinned to [`ItemReferenceTypeTag`] so payloads
+    /// whose `type` is not `"item_reference"` (e.g. `"totally_made_up"`) do
+    /// not silently land in this catch-all variant — P5 fail-fast contract.
+    ///
+    /// Declared AFTER [`Self::SimpleInputMessage`] so a `{id, role, content}`
+    /// payload (the id-carrying shape of `SimpleInputMessage`) still lands in
+    /// `SimpleInputMessage` first; only `{id}` / `{id, type: "item_reference"}`
+    /// payloads — which fail `SimpleInputMessage`'s required-field check —
+    /// fall through to this arm.
+    ///
+    /// Backend resolution (router looks up `id` from conversation history and
+    /// substitutes the referenced item inline) is deferred to a future R
+    /// task; this variant only adds the schema surface.
+    #[serde(untagged)]
+    ItemReference {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "type")]
+        r#type: Option<ItemReferenceTypeTag>,
+    },
+}
+
+/// Single-value tag enum pinning [`ResponseInputOutputItem::ItemReference`]'s
+/// optional `type` discriminator to the spec's only permitted value,
+/// `"item_reference"`. Used because the outer enum is `type`-tagged and the
+/// `ItemReference` variant is declared `#[serde(untagged)]` to accept payloads
+/// that omit `type` entirely — without this pin the catch-all would silently
+/// swallow payloads whose `type` discriminator is an unknown string.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemReferenceTypeTag {
+    ItemReference,
 }
 
 /// Single-value tag enum pinning `EasyInputMessage.type` to the spec's only
@@ -2671,7 +2708,8 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::CustomToolCall { .. }
                         | ResponseInputOutputItem::CustomToolCallOutput { .. }
                         | ResponseInputOutputItem::ShellCall { .. }
-                        | ResponseInputOutputItem::ShellCallOutput { .. } => {}
+                        | ResponseInputOutputItem::ShellCallOutput { .. }
+                        | ResponseInputOutputItem::ItemReference { .. } => {}
                     }
                 }
 
@@ -2978,6 +3016,9 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
             // contract is the motivating use case for keeping this arm
             // content-agnostic.
         }
+        // I2: schema-only; backend resolution (history lookup +
+        // substitution) is deferred to a future R task.
+        ResponseInputOutputItem::ItemReference { .. } => {}
     }
     Ok(())
 }
