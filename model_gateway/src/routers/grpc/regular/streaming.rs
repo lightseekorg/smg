@@ -225,11 +225,9 @@ impl StreamingProcessor {
         // Reusable SSE formatting buffer to avoid allocations per chunk
         let mut sse_buffer = Vec::with_capacity(512);
 
-        // Buffer for cross-chunk markdown fence stripping in JSON responses.
-        // Holds trailing content that could be a partial fence (e.g. "`", "``",
-        // "```", "```j", "```js", "```jso", "```json", or just "json"/"JSON"
-        // after a ``` was already stripped).
-        let mut fence_buffer = String::new();
+        // Tracks whether the previous chunk's backticks were stripped so that
+        // a language tag arriving at the start of the next chunk can be removed.
+        let mut fence_backticks_stripped = false;
 
         // Use dispatch metadata for consistent response fields
         let request_id = &dispatch.request_id;
@@ -496,53 +494,26 @@ impl StreamingProcessor {
                             | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
                     );
                     if is_json_response {
-                        // Prepend any buffered partial-fence content from the
-                        // previous chunk so cross-chunk fences are handled
-                        // atomically.
-                        if !fence_buffer.is_empty() {
-                            delta = std::mem::take(&mut fence_buffer) + &delta;
-                        }
-
                         delta = delta
                             .replace("```json", "")
                             .replace("```JSON", "")
                             .replace("```", "");
-
-                        // Drop residual language tag left after fence removal
                         let trimmed = delta.trim();
                         if trimmed == "json" || trimmed == "JSON" {
                             delta = String::new();
-                        } else if !delta.is_empty() {
-                            // Check if the delta ends with a partial fence
-                            // or language tag that could complete in the
-                            // next chunk.  Buffer it instead of emitting.
-                            let suffixes: &[&str] = &[
-                                "`", "``", "```", "```j", "```js", "```jso", "```J", "```JS",
-                                "```JSO",
-                            ];
-                            let mut buffered = false;
-                            for suffix in suffixes {
-                                if delta.ends_with(suffix) {
-                                    let split_at = delta.len() - suffix.len();
-                                    fence_buffer = delta[split_at..].to_string();
-                                    delta.truncate(split_at);
-                                    buffered = true;
+                        }
+                        // Handle cross-chunk fence split: backticks were
+                        // stripped from the previous chunk, language tag
+                        // arrives at the start of this one.
+                        if fence_backticks_stripped {
+                            for tag in ["json\r\n", "JSON\r\n", "json\n", "JSON\n"] {
+                                if delta.starts_with(tag) {
+                                    delta = delta[tag.len()..].to_string();
                                     break;
                                 }
                             }
-                            if !buffered {
-                                // Also check if we end with a standalone
-                                // "json"/"JSON" that may be residual
-                                let end_trimmed = delta.trim_end();
-                                if end_trimmed.ends_with("json") || end_trimmed.ends_with("JSON") {
-                                    let tag_start = end_trimmed.len() - 4;
-                                    let before_tag = &end_trimmed[..tag_start];
-                                    if before_tag.is_empty() || before_tag.ends_with('\n') {
-                                        delta.truncate(tag_start);
-                                    }
-                                }
-                            }
                         }
+                        fence_backticks_stripped = delta.is_empty();
                     }
 
                     if !delta.is_empty() {
@@ -564,35 +535,6 @@ impl StreamingProcessor {
                 }
                 ProtoResponseVariant::Complete(complete) => {
                     let index = complete.index();
-
-                    // Flush fence_buffer: at end-of-stream, partial fences
-                    // (backticks, "json" tags) are closing-fence residue and
-                    // should be dropped.  Only emit non-fence content.
-                    if !fence_buffer.is_empty() {
-                        let flushed = std::mem::take(&mut fence_buffer)
-                            .replace("```json", "")
-                            .replace("```JSON", "")
-                            .replace("```", "");
-                        let trimmed = flushed.trim();
-                        if !trimmed.is_empty()
-                            && trimmed != "json"
-                            && trimmed != "JSON"
-                            && trimmed != "`"
-                            && trimmed != "``"
-                        {
-                            let stream_buffer = stream_buffers.entry(index).or_default();
-                            stream_buffer.push_str(&flushed);
-
-                            let fb_chunk = ChatCompletionStreamResponse::builder(request_id, model)
-                                .created(created)
-                                .add_choice_content(index, "assistant", flushed)
-                                .maybe_system_fingerprint(system_fingerprint)
-                                .build();
-                            Self::format_sse_chunk_into(&mut sse_buffer, &fb_chunk);
-                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
-                                .map_err(|_| "Failed to send fence buffer".to_string())?;
-                        }
-                    }
 
                     // Flush any remaining text for this index's stop_decoder
                     if let Some(decoder) = stop_decoders.get_mut(&index) {
