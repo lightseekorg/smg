@@ -220,35 +220,74 @@ fn is_data_url(url: &str) -> bool {
     url.len() >= 5 && url.as_bytes()[..5].eq_ignore_ascii_case(b"data:")
 }
 
+/// Number of base64 characters that decode to at least [`PDF_MAGIC`]'s
+/// length (5 bytes). base64 encodes 3 bytes per 4 chars, so 8 chars
+/// decode to 6 bytes — the smallest multiple-of-4 window that still
+/// covers the magic-byte prefix. Sniffing only this window avoids the
+/// DOS-adjacent case where a 500 MB rejected `file_data` would otherwise
+/// be fully base64-decoded just to check its leading bytes (see
+/// `max_payload_size` default in `model_gateway/src/config/types.rs`).
+const PDF_SNIFF_BASE64_LEN: usize = 8;
+/// Decoded buffer size needed for [`PDF_SNIFF_BASE64_LEN`] base64
+/// characters. base64 decodes 4 input chars to 3 output bytes.
+const PDF_SNIFF_DECODED_LEN: usize = PDF_SNIFF_BASE64_LEN / 4 * 3;
+
 /// Return `true` if the decoded prefix of `file_data` contains the PDF
 /// magic bytes `%PDF-`. Accepts either a raw base64 payload or a
 /// `data:<mime>;base64,<payload>` wrapper for robustness against
 /// clients that send the latter in a `file_data` field.
+///
+/// Only decodes [`PDF_SNIFF_BASE64_LEN`] base64 chars into a fixed-size
+/// stack buffer; the full payload is never materialized. This matters
+/// because the router's default `max_payload_size` permits multi-hundred
+/// megabyte `file_data` inputs that would otherwise be fully decoded
+/// just to be rejected.
 fn looks_like_pdf(file_data: &str) -> bool {
-    let payload = strip_data_url_prefix(file_data);
-    let Ok(decoded) = BASE64_STANDARD.decode(payload.trim()) else {
-        // If base64 fails we fall through to the generic
-        // "file_data unsupported" message rather than a PDF-specific
-        // one; malformed base64 is a separate kind of error and the
-        // harmony backend can't handle it anyway.
+    let payload = strip_data_url_prefix(file_data).trim_start();
+    let Some(prefix) = payload.get(..PDF_SNIFF_BASE64_LEN) else {
+        // Input shorter than the sniff window — safe to fall through
+        // to the generic "file_data unsupported" message. An 8-byte
+        // `file_data` payload can't be a real PDF anyway.
         return false;
     };
-    decoded.starts_with(PDF_MAGIC)
+    let mut decoded = [0u8; PDF_SNIFF_DECODED_LEN];
+    let Ok(len) = BASE64_STANDARD.decode_slice(prefix.as_bytes(), &mut decoded) else {
+        // Malformed base64 is a separate rejection kind; fall through
+        // so callers see the generic "file_data unsupported" message.
+        return false;
+    };
+    decoded[..len].starts_with(PDF_MAGIC)
 }
 
 /// Strip a `data:<mime>;base64,` prefix from `input` if present, returning
-/// the remainder; otherwise return the input unchanged.
+/// the remainder; otherwise return the input unchanged. Case-insensitive
+/// on the `;base64,` separator to stay consistent with [`is_data_url`],
+/// which is case-insensitive on the `data:` scheme per RFC 2397 §3; without
+/// this, a payload like `data:application/pdf;Base64,JVBERi...` would pass
+/// the data-URL gate but miss the strip, falling through to the generic
+/// "file_data unsupported" message instead of the PDF-specific R4 message.
 fn strip_data_url_prefix(input: &str) -> &str {
     if !is_data_url(input) {
         return input;
     }
-    match input.find(";base64,") {
+    match find_base64_separator(input) {
         Some(idx) => &input[idx + ";base64,".len()..],
         // `data:<text>,<payload>` (non-base64) is not something we can
         // meaningfully magic-byte sniff; return the full input so the
         // caller falls through to the generic file-unsupported path.
         None => input,
     }
+}
+
+/// Locate the `;base64,` separator inside a data URL, matching
+/// case-insensitively. Uses a byte-window walk (no allocation) so the
+/// hot path stays allocation-free even on large payloads.
+fn find_base64_separator(input: &str) -> Option<usize> {
+    const NEEDLE: &[u8] = b";base64,";
+    input
+        .as_bytes()
+        .windows(NEEDLE.len())
+        .position(|window| window.eq_ignore_ascii_case(NEEDLE))
 }
 
 /// Build the standard `400 unsupported_content` response used by every
@@ -516,6 +555,51 @@ mod tests {
         }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("data-URL-wrapped PDF file_data must be rejected");
+        assert_is_unsupported(err);
+    }
+
+    #[test]
+    fn data_url_prefix_is_case_insensitive_on_base64_separator() {
+        // `is_data_url` matches `data:` case-insensitively, so
+        // `strip_data_url_prefix` must match `;base64,` with the same
+        // flexibility. Before the R3 follow-up both `Data:` and
+        // `;Base64,` would skip the strip, mis-routing the request into
+        // the generic "file_data unsupported" path instead of the
+        // PDF-specific R4 message.
+        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+            detail: None,
+            file_data: Some("Data:application/pdf;Base64,JVBERi0xLjQK".to_string()),
+            file_id: None,
+            file_url: None,
+            filename: None,
+        }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("mixed-case data-URL wrapper must still reach the PDF sniffer");
+        assert_is_unsupported(err);
+    }
+
+    #[test]
+    fn pdf_sniff_decodes_only_magic_prefix_not_full_payload() {
+        // Regression guard for the bounded-decode path: a large PDF
+        // `file_data` must still route to the R4-specific message
+        // without the validator materializing the entire payload. We
+        // construct a payload whose first 6 bytes base64-decode to
+        // `%PDF-1` and pad the remainder with a long run of `A`s; the
+        // prefix-only decoder reaches the magic bytes before looking
+        // at anything beyond the first 8 base64 chars.
+        //
+        // `%PDF-1` → base64 `JVBERi0x` (the canonical PDF header).
+        let mut payload = String::from("JVBERi0x");
+        payload.push_str(&"A".repeat(65_536));
+        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+            detail: None,
+            file_data: Some(payload),
+            file_id: None,
+            file_url: None,
+            filename: None,
+        }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("large PDF file_data must still be rejected with the R4 message");
         assert_is_unsupported(err);
     }
 }
