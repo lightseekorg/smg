@@ -501,13 +501,15 @@ fn derive_thinking_mode(params: &ChatTemplateParams) -> deepseek_v32::ThinkingMo
     }
 }
 
-/// Drop earlier reasoning unless any message declares tools — matches the
-/// canonical V4 encoding spec (V4 also enforces this internally; V3.2 does not).
+/// Per DeepSeek's encoding README, preserve all reasoning when a system or
+/// developer message declares `tools`; otherwise drop earlier reasoning.
 fn resolve_drop_thinking(messages: &[serde_json::Value]) -> bool {
     !messages.iter().any(|m| {
-        m.get("tools")
-            .and_then(|t| t.as_array())
-            .is_some_and(|arr| !arr.is_empty())
+        let role = m.get("role").and_then(|r| r.as_str());
+        matches!(role, Some("system" | "developer"))
+            && m.get("tools")
+                .and_then(|t| t.as_array())
+                .is_some_and(|arr| !arr.is_empty())
     })
 }
 fn apply_deepseek_v32(
