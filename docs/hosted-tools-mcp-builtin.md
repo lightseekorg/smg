@@ -625,7 +625,7 @@ the gateway and protocol crates; no client changes are required.
    config fixture in `e2e_test/responses/conftest.py` mirroring
    `_image_generation_mcp_config`.
 
-The image-generation lane (R6.5 in `e2e_test/responses/test_image_generation.py`)
+The image-generation lane in `e2e_test/responses/test_image_generation.py`
 is the canonical worked example — it covers the OpenAI cloud router, the
 gRPC-harmony router (gpt-oss via SGLang), and the gRPC-regular router (Llama
 via vLLM) for the same MCP-builtin dispatch. Use it as the template when
