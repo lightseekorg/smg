@@ -13,13 +13,16 @@
 //!
 //! Intentionally out of scope (deferred to later PRs):
 //! - Strict typing of `incomplete_details` (still `Option<Value>`).
-//! - Any change to the `validate_responses_cross_parameters` validator.
+//!
+//! BGM-PR-04 additionally covers the new `background_requires_store` rule in
+//! `validate_responses_cross_parameters` (below).
 
 use openai_protocol::responses::{
-    ResponseInputOutputItem, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
-    ResponsesRequest, ResponsesResponse, SummaryTextContent,
+    ResponseInput, ResponseInputOutputItem, ResponseOutputItem, ResponseReasoningContent,
+    ResponseStatus, ResponsesRequest, ResponsesResponse, SummaryTextContent,
 };
 use serde_json::json;
+use validator::Validate;
 
 // ---------------------------------------------------------------------------
 // ResponseStatus::Incomplete
@@ -193,4 +196,74 @@ fn is_incomplete_helper() {
     assert!(resp.is_incomplete());
     assert!(!resp.is_complete());
     assert!(!resp.is_failed());
+}
+
+// ---------------------------------------------------------------------------
+// validate_responses_cross_parameters: background requires store
+// ---------------------------------------------------------------------------
+
+fn valid_user_input() -> ResponseInput {
+    ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+        id: "msg_0".to_string(),
+        role: "user".to_string(),
+        content: vec![openai_protocol::responses::ResponseContentPart::InputText {
+            text: "hi".to_string(),
+        }],
+        status: None,
+        phase: None,
+    }])
+}
+
+fn has_error_code(err: &validator::ValidationErrors, target: &str) -> bool {
+    // ValidationError#code lands on the `__all__` pseudo-field for
+    // struct-level (schema) validators like
+    // `validate_responses_cross_parameters`.
+    err.field_errors()
+        .values()
+        .flat_map(|v| v.iter())
+        .any(|e| e.code == target)
+}
+
+#[test]
+fn background_true_with_store_false_is_rejected() {
+    let req = ResponsesRequest {
+        model: "gpt-5.1".to_string(),
+        input: valid_user_input(),
+        background: Some(true),
+        store: Some(false),
+        ..Default::default()
+    };
+    let err = req
+        .validate()
+        .expect_err("background=true + store=false must fail");
+    assert!(
+        has_error_code(&err, "background_requires_store"),
+        "expected `background_requires_store` code, got: {err:?}"
+    );
+}
+
+#[test]
+fn background_true_with_store_unset_is_accepted() {
+    // `store=None` is the OpenAI spec default (true), so an implicit default
+    // must not trigger `background_requires_store`.
+    let req = ResponsesRequest {
+        model: "gpt-5.1".to_string(),
+        input: valid_user_input(),
+        background: Some(true),
+        store: None,
+        ..Default::default()
+    };
+    req.validate().expect("background + store=None is allowed");
+}
+
+#[test]
+fn background_true_with_store_true_is_accepted() {
+    let req = ResponsesRequest {
+        model: "gpt-5.1".to_string(),
+        input: valid_user_input(),
+        background: Some(true),
+        store: Some(true),
+        ..Default::default()
+    };
+    req.validate().expect("background + store=true is allowed");
 }

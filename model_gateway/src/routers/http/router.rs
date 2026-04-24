@@ -23,16 +23,13 @@ use reqwest::{
     multipart::{Form, Part},
     Client,
 };
-use smg_data_connector::{
-    BackgroundResponseRepository, ConversationItemStorage, ConversationStorage, ResponseStorage,
-};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tracing::error;
 
 use crate::{
     app_context::AppContext,
-    config::{types::RetryConfig, BackgroundConfig},
+    config::types::RetryConfig,
     middleware::TenantRequestMeta,
     observability::{
         events::{self, Event},
@@ -42,7 +39,6 @@ use crate::{
     policies::{PolicyRegistry, SelectWorkerInfo},
     routers::{
         common::{
-            background::create::{handle_background_create, BackgroundCreateDeps},
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
         },
@@ -59,11 +55,6 @@ pub struct Router {
     policy_registry: Arc<PolicyRegistry>,
     client: Client,
     retry_config: RetryConfig,
-    background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
-    response_storage: Arc<dyn ResponseStorage>,
-    conversation_storage: Arc<dyn ConversationStorage>,
-    conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    background_config: Arc<BackgroundConfig>,
 }
 
 impl std::fmt::Debug for Router {
@@ -89,11 +80,6 @@ impl Router {
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
-            background_repository: ctx.background_repository.clone(),
-            response_storage: ctx.response_storage.clone(),
-            conversation_storage: ctx.conversation_storage.clone(),
-            conversation_item_storage: ctx.conversation_item_storage.clone(),
-            background_config: Arc::new(ctx.router_config.background.clone()),
         })
     }
 
@@ -1157,16 +1143,6 @@ impl RouterTrait for Router {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        if body.background.unwrap_or(false) {
-            let deps = BackgroundCreateDeps {
-                repository: self.background_repository.as_ref(),
-                response_storage: self.response_storage.as_ref(),
-                conversation_storage: self.conversation_storage.as_ref(),
-                conversation_item_storage: self.conversation_item_storage.as_ref(),
-                background_config: self.background_config.as_ref(),
-            };
-            return handle_background_create(deps, body, model_id).await;
-        }
         self.route_typed_request(headers, body, "/v1/responses", model_id)
             .await
     }
@@ -1283,13 +1259,6 @@ mod tests {
             policy_registry,
             client: Client::new(),
             retry_config: RetryConfig::default(),
-            background_repository: None,
-            response_storage: Arc::new(smg_data_connector::MemoryResponseStorage::new()),
-            conversation_storage: Arc::new(smg_data_connector::MemoryConversationStorage::new()),
-            conversation_item_storage: Arc::new(
-                smg_data_connector::MemoryConversationItemStorage::new(),
-            ),
-            background_config: Arc::new(BackgroundConfig::default()),
         }
     }
 

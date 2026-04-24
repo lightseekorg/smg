@@ -6,8 +6,8 @@ use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
 use smg_data_connector::{
-    BackgroundResponseRepository, ConversationItemStorage, ConversationMemoryWriter,
-    ConversationStorage, RequestContext as StorageRequestContext, ResponseStorage,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    RequestContext as StorageRequestContext, ResponseStorage,
 };
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
@@ -51,7 +51,6 @@ pub struct ResponsesComponents {
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
     pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
-    pub background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
 }
 
 pub enum ComponentRefs {

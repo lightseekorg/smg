@@ -5,15 +5,12 @@
 use std::sync::Arc;
 
 use smg_data_connector::{
-    BackgroundResponseRepository, ConversationItemStorage, ConversationMemoryWriter,
-    ConversationStorage, RequestContext as StorageRequestContext, ResponseStorage,
+    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
+    RequestContext as StorageRequestContext, ResponseStorage,
 };
 use smg_mcp::McpOrchestrator;
 
-use crate::{
-    config::BackgroundConfig,
-    routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
-};
+use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
 
 /// Context for /v1/responses endpoint
 ///
@@ -44,13 +41,6 @@ pub(crate) struct ResponsesContext {
 
     /// Storage hook request context extracted from HTTP headers by middleware.
     pub request_context: Option<StorageRequestContext>,
-
-    /// Background-mode repository handle; `None` when the active backend
-    /// does not support background mode.
-    pub background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
-
-    /// Background-mode tuning (queue depth cap, lease, retry) — shared.
-    pub background_config: Arc<BackgroundConfig>,
 }
 
 impl ResponsesContext {
@@ -68,8 +58,6 @@ impl ResponsesContext {
         conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
         mcp_orchestrator: Arc<McpOrchestrator>,
         request_context: Option<StorageRequestContext>,
-        background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
-        background_config: Arc<BackgroundConfig>,
     ) -> Self {
         Self {
             pipeline,
@@ -80,8 +68,6 @@ impl ResponsesContext {
             conversation_memory_writer,
             mcp_orchestrator,
             request_context,
-            background_repository,
-            background_config,
         }
     }
 }

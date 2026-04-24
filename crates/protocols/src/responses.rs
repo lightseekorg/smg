@@ -3131,6 +3131,14 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         return Err(e);
     }
 
+    // 3a. Background requires store. `store=None` follows the OpenAI spec
+    // default (true), so only an explicit `store=false` is a conflict.
+    if request.background == Some(true) && request.store == Some(false) {
+        let mut e = ValidationError::new("background_requires_store");
+        e.message = Some("Background mode requires 'store' to be true.".into());
+        return Err(e);
+    }
+
     // 4. Validate conversation and previous_response_id are mutually exclusive
     if request.conversation.is_some() && request.previous_response_id.is_some() {
         let mut e = ValidationError::new("mutually_exclusive_parameters");

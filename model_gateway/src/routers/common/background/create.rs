@@ -10,16 +10,23 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use openai_protocol::responses::ResponsesRequest;
+use openai_protocol::{
+    event_types::ItemType,
+    responses::{ResponseContentPart, ResponseInputOutputItem, ResponsesRequest},
+};
 use serde_json::{json, Value};
 use smg_data_connector::{
-    BackgroundRepositoryError, BackgroundResponseRepository, ConversationId,
-    ConversationItemStorage, ConversationStorage, EnqueueRequest, ResponseId, ResponseStorage,
-    StoredResponse,
+    BackgroundRepositoryError, BackgroundResponseRepository, ConversationId, ConversationItem,
+    ConversationItemStorage, ConversationStorage, EnqueueRequest,
+    RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
+use tracing::warn;
 use uuid::Uuid;
 
-use crate::{config::BackgroundConfig, routers::error};
+use crate::{
+    config::BackgroundConfig,
+    routers::{common::persistence_utils::split_stored_message_content, error},
+};
 
 const MAX_SNAPSHOT_ITEMS: usize = 100;
 
@@ -33,6 +40,11 @@ pub struct BackgroundCreateDeps<'a> {
     pub conversation_storage: &'a dyn ConversationStorage,
     pub conversation_item_storage: &'a dyn ConversationItemStorage,
     pub background_config: &'a BackgroundConfig,
+    /// Storage-hook request context extracted from HTTP headers. Threaded
+    /// through to `BackgroundResponseRepository::enqueue` so the worker can
+    /// replay tenant/principal identity during finalize-adjacent writes and
+    /// conversation linkage.
+    pub request_context: Option<&'a StorageRequestContext>,
 }
 
 /// Handle `POST /v1/responses` with `background=true`.
@@ -52,12 +64,9 @@ pub async fn handle_background_create(
         );
     };
 
-    if request.store != Some(true) {
-        return error::bad_request(
-            "background_requires_store",
-            "Background mode requires 'store' to be true.",
-        );
-    }
+    // `store != Some(false)` and `stream != Some(true)` are enforced at the
+    // `ValidatedJson` boundary by `validate_responses_cross_parameters`, so
+    // request-shape preconditions are guaranteed by the time we reach here.
 
     let snapshot = match resolve_snapshot(&deps, request).await {
         Ok(s) => s,
@@ -76,7 +85,7 @@ pub async fn handle_background_create(
         Value::Array(snapshot),
         initial_raw.clone(),
         false,
-        0,
+        request.priority,
     );
     enqueue_req.conversation_id = request.conversation.as_ref().map(|c| c.as_id().to_string());
     enqueue_req
@@ -88,7 +97,11 @@ pub async fn handle_background_create(
         .map(ResponseId::from);
 
     let max_depth = u64::from(deps.background_config.max_queue_depth);
-    match repository.enqueue(enqueue_req, None, Some(max_depth)).await {
+    let request_context = deps.request_context.cloned();
+    match repository
+        .enqueue(enqueue_req, request_context, Some(max_depth))
+        .await
+    {
         Ok(_) => Json(initial_raw).into_response(),
         Err(BackgroundRepositoryError::QueueFull { current, limit }) => error::create_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -244,24 +257,116 @@ async fn append_conversation_items(
         }
     }
 
+    // Fetch one past the cap so we can detect oversize conversations rather
+    // than silently truncating them. The snapshot contract in Phase 1 rejects
+    // resolved inputs above 100 items.
     let list_params = smg_data_connector::ListParams {
-        limit: MAX_SNAPSHOT_ITEMS,
+        limit: MAX_SNAPSHOT_ITEMS + 1,
         order: smg_data_connector::SortOrder::Asc,
         after: None,
     };
-    match item_storage.list_items(&conv_id, list_params).await {
-        Ok(conv_items) => {
-            for ci in conv_items.into_iter().take(MAX_SNAPSHOT_ITEMS) {
-                if let Ok(v) = serde_json::to_value(&ci) {
-                    items.push(v);
+    let conv_items = match item_storage.list_items(&conv_id, list_params).await {
+        Ok(items) => items,
+        Err(e) => {
+            return Err(error::internal_error(
+                "load_conversation_items_failed",
+                format!("Failed to load conversation items for '{conv_id_str}': {e}"),
+            ));
+        }
+    };
+
+    if conv_items.len() > MAX_SNAPSHOT_ITEMS {
+        return Err(error::create_error(
+            StatusCode::CONFLICT,
+            "conversation_too_large",
+            format!(
+                "Conversation '{conv_id_str}' has more than {MAX_SNAPSHOT_ITEMS} items; \
+                 background snapshots must fit within the Phase 1 cap."
+            ),
+        ));
+    }
+
+    for ci in conv_items {
+        match conversation_item_to_snapshot_value(ci, conv_id_str) {
+            Ok(Some(value)) => items.push(value),
+            Ok(None) => {}
+            Err(boxed) => return Err(*boxed),
+        }
+    }
+    Ok(())
+}
+
+/// Convert a stored `ConversationItem` into the `ResponseInputOutputItem`
+/// shape the execution path consumes. Mirrors the conversion logic in
+/// `openai/responses/history.rs` so the background snapshot matches what a
+/// synchronous replay from conversation history would produce.
+///
+/// Returns `Ok(None)` for item types that are intentionally dropped (reasoning,
+/// unknown types) and `Err(Box<Response>)` when a known shape fails to
+/// deserialize — boxed so the `Result`'s `Err` variant stays compact.
+fn conversation_item_to_snapshot_value(
+    ci: ConversationItem,
+    conv_id_str: &str,
+) -> Result<Option<Value>, Box<Response>> {
+    let converted: Option<ResponseInputOutputItem> = match ci.item_type.as_str() {
+        "message" => {
+            let (content_value, stored_phase) = split_stored_message_content(ci.content);
+            let content_parts: Vec<ResponseContentPart> =
+                match serde_json::from_value(content_value) {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        return Err(Box::new(error::internal_error(
+                            "deserialize_conversation_item_failed",
+                            format!(
+                                "Failed to deserialize message content for conversation \
+                                 '{conv_id_str}' item '{}': {e}",
+                                ci.id.0
+                            ),
+                        )));
+                    }
+                };
+            Some(ResponseInputOutputItem::Message {
+                id: ci.id.0,
+                role: ci.role.unwrap_or_else(|| "user".to_string()),
+                content: content_parts,
+                status: ci.status,
+                phase: stored_phase,
+            })
+        }
+        ItemType::FUNCTION_CALL | ItemType::FUNCTION_CALL_OUTPUT => {
+            match serde_json::from_value::<ResponseInputOutputItem>(ci.content) {
+                Ok(item) => Some(item),
+                Err(e) => {
+                    return Err(Box::new(error::internal_error(
+                        "deserialize_conversation_item_failed",
+                        format!(
+                            "Failed to deserialize {} content for conversation \
+                             '{conv_id_str}' item '{}': {e}",
+                            ci.item_type, ci.id.0
+                        ),
+                    )));
                 }
             }
-            Ok(())
         }
-        Err(e) => Err(error::internal_error(
-            "load_conversation_items_failed",
-            format!("Failed to load conversation items for '{conv_id_str}': {e}"),
-        )),
+        "reasoning" => None,
+        other => {
+            warn!(
+                "Dropping unknown conversation item type '{other}' in background snapshot \
+                 for conversation '{conv_id_str}'"
+            );
+            None
+        }
+    };
+
+    match converted {
+        Some(item) => match serde_json::to_value(&item) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => Err(Box::new(error::internal_error(
+                "serialize_conversation_item_failed",
+                format!("Failed to serialize conversation item for '{conv_id_str}': {e}"),
+            ))),
+        },
+        None => Ok(None),
     }
 }
 
@@ -334,6 +439,7 @@ mod tests {
                 conversation_storage: self.conversation_storage.as_ref(),
                 conversation_item_storage: self.conversation_item_storage.as_ref(),
                 background_config: &self.config,
+                request_context: None,
             }
         }
 
@@ -344,6 +450,7 @@ mod tests {
                 conversation_storage: self.conversation_storage.as_ref(),
                 conversation_item_storage: self.conversation_item_storage.as_ref(),
                 background_config: &self.config,
+                request_context: None,
             }
         }
     }
@@ -370,17 +477,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "background_not_supported");
-    }
-
-    #[tokio::test]
-    async fn returns_bad_request_when_store_not_true() {
-        let h = Harness::new(10);
-        let mut req = bg_req();
-        req.store = Some(false);
-        let resp = handle_background_create(h.deps_with_repo(), &req, "gpt-5.1").await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = body_json(resp).await;
-        assert_eq!(body["error"]["code"], "background_requires_store");
     }
 
     #[tokio::test]
@@ -452,5 +548,114 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "previous_response_not_usable");
+    }
+
+    async fn seed_conversation(h: &Harness, conv_id_str: &str, item_count: usize) {
+        use smg_data_connector::{
+            ConversationItemStorage, ConversationStorage, NewConversation, NewConversationItem,
+        };
+        let conv_id = ConversationId::from(conv_id_str.to_string());
+        h.conversation_storage
+            .create_conversation(NewConversation {
+                id: Some(conv_id.clone()),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        for i in 0..item_count {
+            let item = h
+                .conversation_item_storage
+                .create_item(NewConversationItem {
+                    id: None,
+                    response_id: None,
+                    item_type: "message".to_string(),
+                    role: Some("user".to_string()),
+                    content: json!([{"type": "input_text", "text": format!("turn {i}")}]),
+                    status: Some("completed".to_string()),
+                })
+                .await
+                .unwrap();
+            h.conversation_item_storage
+                .link_item(&conv_id, &item.id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn conversation_snapshot_uses_response_input_output_shape() {
+        // Regression: before the shape fix, conversation items were serialized
+        // as raw `ConversationItem` rows with `item_type`/`created_at`, which
+        // the worker's execution path cannot deserialize. The snapshot must
+        // emit the on-wire `ResponseInputOutputItem` shape (`type`/`content`).
+        let h = Harness::new(10);
+        seed_conversation(&h, "conv_snapshot", 1).await;
+
+        let mut req = bg_req();
+        req.conversation = Some(openai_protocol::common::ConversationRef::Id(
+            "conv_snapshot".to_string(),
+        ));
+        let resp = handle_background_create(h.deps_with_repo(), &req, "gpt-5.1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let job =
+            h.bg.claim_next(
+                "test-worker",
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap()
+            .expect("enqueued job is claimable");
+        let input = job.input.as_array().expect("snapshot is an array");
+        let first = &input[0];
+        assert_eq!(
+            first["type"], "message",
+            "conversation item should use ResponseInputOutputItem shape"
+        );
+        assert_eq!(first["role"], "user");
+        assert_eq!(
+            first["content"][0]["type"], "input_text",
+            "content parts should be preserved"
+        );
+        assert!(
+            first.get("item_type").is_none(),
+            "ConversationItem shape (item_type) must not leak into the snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_too_large_returns_conflict() {
+        let h = Harness::new(10);
+        seed_conversation(&h, "conv_overflow", MAX_SNAPSHOT_ITEMS + 1).await;
+
+        let mut req = bg_req();
+        req.conversation = Some(openai_protocol::common::ConversationRef::Id(
+            "conv_overflow".to_string(),
+        ));
+        let resp = handle_background_create(h.deps_with_repo(), &req, "gpt-5.1").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "conversation_too_large");
+    }
+
+    #[tokio::test]
+    async fn priority_is_propagated_to_enqueue() {
+        let h = Harness::new(10);
+        let mut req = bg_req();
+        req.priority = 7;
+        let resp = handle_background_create(h.deps_with_repo(), &req, "gpt-5.1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let job =
+            h.bg.claim_next(
+                "test-worker",
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .unwrap()
+            .expect("enqueued job is claimable");
+        assert_eq!(job.priority, 7);
     }
 }

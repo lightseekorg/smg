@@ -12,8 +12,9 @@
 //! 1. **Synchronous** - Returns complete response immediately (non_streaming.rs)
 //! 2. **Streaming** - Returns SSE stream with real-time events (streaming.rs)
 //!
-//! Note: Background mode is no longer supported. Requests with background=true
-//! will be rejected with a 400 error.
+//! Background mode is dispatched at the axum handler layer
+//! (`v1_responses` in server.rs) before reaching this router, so it never
+//! enters this path.
 //!
 //! # Request Flow
 //!
@@ -40,7 +41,6 @@ use super::{
     conversions, non_streaming, streaming,
 };
 use crate::routers::{
-    common::background::create::{handle_background_create, BackgroundCreateDeps},
     error,
     grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
 };
@@ -55,19 +55,6 @@ pub(crate) async fn route_responses(
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
-    let is_background = request.background.unwrap_or(false);
-    if is_background {
-        let deps = BackgroundCreateDeps {
-            repository: ctx.background_repository.as_ref(),
-            response_storage: ctx.response_storage.as_ref(),
-            conversation_storage: ctx.conversation_storage.as_ref(),
-            conversation_item_storage: ctx.conversation_item_storage.as_ref(),
-            background_config: ctx.background_config.as_ref(),
-        };
-        return handle_background_create(deps, &request, &model_id).await;
-    }
-
-    // 2. Route based on execution mode
     let is_streaming = request.stream.unwrap_or(false);
     if is_streaming {
         let params = ResponsesCallContext {
