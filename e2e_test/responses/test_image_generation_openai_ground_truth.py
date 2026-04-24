@@ -48,12 +48,19 @@ _OPTIONAL_ITEM_FIELDS: dict[str, type | tuple[type, ...]] = {
 }
 _VALID_STATUS: set[str] = {"in_progress", "completed", "generating", "failed"}
 
+# Observed event set for a live `image_generation` call on gpt-5-nano.
+# NOTE: despite what the published streaming-events reference lists,
+# `response.image_generation_call.completed` is NOT emitted by production
+# OpenAI — completion is signaled via the image-specific
+# `response.output_item.done` (with item.type == "image_generation_call")
+# alone. Test assertions must therefore key off output_item.done for
+# completion, not off .completed.
 _REQUIRED_STREAM_EVENTS: tuple[str, ...] = (
     "response.created",
     "response.output_item.added",
     "response.image_generation_call.in_progress",
     "response.image_generation_call.generating",
-    "response.image_generation_call.completed",
+    "response.image_generation_call.partial_image",
     "response.output_item.done",
     "response.completed",
 )
@@ -232,15 +239,19 @@ class TestOpenAIImageGenerationGroundTruth:
             f"Artefacts in {tmp_path}"
         )
 
-        # Ordering: ig.in_progress < ig.generating < ig.completed < output_item.done (image_gen)
+        # Ordering invariant for the image_generation lifecycle:
+        #   ig.in_progress < ig.generating < ig.partial_image
+        #     < output_item.done(image_gen)
+        # There is no `image_generation_call.completed` in the real stream;
+        # the image item is finalized by the scoped `output_item.done`.
         ig_in_progress = first_idx("response.image_generation_call.in_progress")
         ig_generating = first_idx("response.image_generation_call.generating")
-        ig_completed = first_idx("response.image_generation_call.completed")
+        ig_partial = first_idx("response.image_generation_call.partial_image")
         img_done = first_img_envelope_idx("response.output_item.done")
-        assert ig_in_progress < ig_generating < ig_completed < img_done, (
+        assert ig_in_progress < ig_generating < ig_partial < img_done, (
             f"Event ordering invariant violated: "
             f"in_progress@{ig_in_progress} < generating@{ig_generating} < "
-            f"completed@{ig_completed} < output_item.done(img)@{img_done}"
+            f"partial_image@{ig_partial} < output_item.done(img)@{img_done}"
         )
 
         # Final response.output must carry the image_generation_call item with
