@@ -855,6 +855,22 @@ pub(super) fn handle_streaming_with_tool_interception(
                                 StreamAction::Buffer => {
                                     // Don't forward, just buffer
                                 }
+                                StreamAction::Drop => {
+                                    // R6.7c native passthrough: upstream
+                                    // emitted an `output_item.done` for a
+                                    // hosted tool-call item that we did
+                                    // NOT wrap as a function_call (and so
+                                    // did not track in `pending_calls`).
+                                    // The upstream envelope arrives
+                                    // mis-ordered BEFORE
+                                    // `response.<type>.completed`, so we
+                                    // drop it here to preserve the wire
+                                    // invariant that `output_item.done`
+                                    // is the LAST event for a given item.
+                                    // Unlike `ExecuteTools`, this does NOT
+                                    // kick the tool loop — there is no
+                                    // dispatched call to finish.
+                                }
                                 StreamAction::ExecuteTools {
                                     forward_triggering_event,
                                 } => {
