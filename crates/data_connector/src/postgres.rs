@@ -1011,14 +1011,10 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
         let hook_extra = current_extra_columns().unwrap_or_default();
         let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
 
-        let mut client = self
+        let client = self
             .store
             .pool
             .get()
-            .await
-            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
-        let transaction = client
-            .transaction()
             .await
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
 
@@ -1085,17 +1081,12 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
                 params.push(val);
             }
 
-            transaction
+            client
                 .execute(&sql, &params)
                 .await
                 .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
             inserted_ids.push(row.id.clone());
         }
-
-        transaction
-            .commit()
-            .await
-            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
 
         Ok(inserted_ids)
     }

@@ -1326,7 +1326,7 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
 
         self.store
             .execute(move |conn| {
-                conn.set_autocommit(false);
+                conn.set_autocommit(true);
 
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let s = &schema.conversation_memories;
@@ -1378,15 +1378,9 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
                         conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
                         inserted_ids.push(row.id.clone());
                     }
-
-                    conn.commit().map_err(map_oracle_error)?;
                     Ok(inserted_ids)
                 }));
 
-                if result.as_ref().map_or(true, |inner| inner.is_err()) {
-                    let _ = conn.rollback();
-                }
-                conn.set_autocommit(true);
                 match result {
                     Ok(result) => result,
                     Err(panic) => std::panic::resume_unwind(panic),

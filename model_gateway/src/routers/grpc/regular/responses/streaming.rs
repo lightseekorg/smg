@@ -23,11 +23,8 @@ use openai_protocol::{
         ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
         ChatCompletionStreamResponse,
     },
-    common::{FunctionCallResponse, ToolCall, Usage, UsageInfo},
-    responses::{
-        ResponseContentPart, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
-        ResponsesRequest, ResponsesResponse, ResponsesUsage,
-    },
+    common::{FunctionCallResponse, ToolCall, Usage},
+    responses::{ResponseOutputItem, ResponseStatus, ResponsesRequest},
 };
 use serde_json::{json, Value};
 use smg_data_connector::RequestContext as StorageRequestContext;
@@ -225,9 +222,7 @@ async fn process_and_transform_sse_stream(
 
     // Finalize accumulated response and kick off persistence before the
     // terminal SSE send so a disconnected client does not skip storage.
-    let mut final_response = accumulator.finalize();
-    final_response.id.clone_from(&event_emitter.response_id);
-    final_response.created_at = created_at as i64;
+    let final_response = event_emitter.finalize(accumulator.usage.clone());
     #[expect(
         clippy::disallowed_methods,
         reason = "response persistence should not delay the terminal SSE event"
@@ -264,13 +259,10 @@ struct StreamingResponseAccumulator {
     // Completion state
     finish_reason: Option<String>,
     usage: Option<Usage>,
-
-    // Original request for final response construction
-    original_request: ResponsesRequest,
 }
 
 impl StreamingResponseAccumulator {
-    fn new(original_request: &ResponsesRequest) -> Self {
+    fn new(_original_request: &ResponsesRequest) -> Self {
         Self {
             response_id: String::new(),
             model: String::new(),
@@ -280,7 +272,6 @@ impl StreamingResponseAccumulator {
             tool_calls: Vec::new(),
             finish_reason: None,
             usage: None,
-            original_request: original_request.clone(),
         }
     }
 
@@ -355,71 +346,6 @@ impl StreamingResponseAccumulator {
         if let Some(usage) = &chunk.usage {
             self.usage = Some(usage.clone());
         }
-    }
-
-    fn finalize(self) -> ResponsesResponse {
-        let mut output: Vec<ResponseOutputItem> = Vec::new();
-
-        // Add message content if present
-        if !self.content_buffer.is_empty() {
-            output.push(ResponseOutputItem::Message {
-                id: format!("msg_{}", self.response_id),
-                role: "assistant".to_string(),
-                content: vec![ResponseContentPart::OutputText {
-                    text: self.content_buffer,
-                    annotations: vec![],
-                    logprobs: None,
-                }],
-                status: "completed".to_string(),
-                phase: None,
-            });
-        }
-
-        // Add reasoning if present
-        if !self.reasoning_buffer.is_empty() {
-            output.push(ResponseOutputItem::new_reasoning(
-                format!("reasoning_{}", self.response_id),
-                vec![],
-                vec![ResponseReasoningContent::ReasoningText {
-                    text: self.reasoning_buffer,
-                }],
-                Some("completed".to_string()),
-            ));
-        }
-
-        // Add tool calls
-        output.extend(self.tool_calls);
-
-        // Determine final status
-        let status = match self.finish_reason.as_deref() {
-            Some("stop") | Some("length") => ResponseStatus::Completed,
-            Some("tool_calls") => ResponseStatus::InProgress,
-            Some("failed") | Some("error") => ResponseStatus::Failed,
-            _ => ResponseStatus::Completed,
-        };
-
-        // Convert usage
-        let usage = self.usage.as_ref().map(|u| {
-            let usage_info = UsageInfo {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-                reasoning_tokens: u
-                    .completion_tokens_details
-                    .as_ref()
-                    .and_then(|d| d.reasoning_tokens),
-                prompt_tokens_details: None,
-            };
-            ResponsesUsage::Classic(usage_info)
-        });
-
-        ResponsesResponse::builder(&self.response_id, &self.model)
-            .copy_from_request(&self.original_request)
-            .created_at(self.created_at)
-            .status(status)
-            .output(output)
-            .maybe_usage(usage)
-            .build()
     }
 }
 

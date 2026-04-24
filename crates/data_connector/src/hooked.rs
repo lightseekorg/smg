@@ -611,23 +611,6 @@ impl HookedConversationMemoryWriter {
     pub fn new(inner: Arc<dyn ConversationMemoryWriter>, hook: Arc<dyn StorageHook>) -> Self {
         Self { inner, hook }
     }
-
-    fn classify_bulk_extra_columns(extras: &[ExtraColumns]) -> BulkExtraColumns {
-        let Some(first) = extras.first() else {
-            return BulkExtraColumns::Shared(ExtraColumns::new());
-        };
-
-        if extras.iter().skip(1).any(|extra| extra != first) {
-            return BulkExtraColumns::PerRow;
-        }
-
-        BulkExtraColumns::Shared(first.clone())
-    }
-}
-
-enum BulkExtraColumns {
-    Shared(ExtraColumns),
-    PerRow,
 }
 
 #[async_trait]
@@ -664,14 +647,10 @@ impl ConversationMemoryWriter for HookedConversationMemoryWriter {
         &self,
         inputs: Vec<NewConversationMemory>,
     ) -> ConversationMemoryResult<Vec<ConversationMemoryId>> {
-        if inputs.is_empty() {
-            return Ok(Vec::new());
-        }
+        let mut results = Vec::with_capacity(inputs.len());
 
-        let mut payloads = Vec::with_capacity(inputs.len());
-        let mut extras = Vec::with_capacity(inputs.len());
-        for input in &inputs {
-            let payload = serde_json::to_value(input).unwrap_or_default();
+        for input in inputs {
+            let payload = serde_json::to_value(&input).unwrap_or_default();
             let extra = run_before(
                 &*self.hook,
                 StorageOperation::CreateMemory,
@@ -679,60 +658,21 @@ impl ConversationMemoryWriter for HookedConversationMemoryWriter {
                 ConversationMemoryStorageError::StorageError,
             )
             .await?;
-            payloads.push(payload);
-            extras.push(extra);
+
+            let result = with_extra_columns(extra.clone(), self.inner.create_memory(input)).await?;
+            let result_json = serde_json::to_value(&result).unwrap_or_default();
+            run_after(
+                &*self.hook,
+                StorageOperation::CreateMemory,
+                &payload,
+                &result_json,
+                &extra,
+            )
+            .await;
+            results.push(result);
         }
 
-        match Self::classify_bulk_extra_columns(&extras) {
-            BulkExtraColumns::Shared(bulk_extra) => {
-                let results =
-                    with_extra_columns(bulk_extra.clone(), self.inner.create_memories(inputs))
-                        .await?;
-                if results.len() != payloads.len() {
-                    return Err(ConversationMemoryStorageError::StorageError(
-                        "CreateMemory bulk insert returned an unexpected number of ids".to_string(),
-                    ));
-                }
-
-                for ((payload, extra), result) in
-                    payloads.iter().zip(extras.iter()).zip(results.iter())
-                {
-                    let result_json = serde_json::to_value(result).unwrap_or_default();
-                    run_after(
-                        &*self.hook,
-                        StorageOperation::CreateMemory,
-                        payload,
-                        &result_json,
-                        extra,
-                    )
-                    .await;
-                }
-
-                Ok(results)
-            }
-            BulkExtraColumns::PerRow => {
-                let mut results = Vec::with_capacity(payloads.len());
-
-                for ((input, payload), extra) in
-                    inputs.into_iter().zip(payloads.iter()).zip(extras.iter())
-                {
-                    let result =
-                        with_extra_columns(extra.clone(), self.inner.create_memory(input)).await?;
-                    let result_json = serde_json::to_value(&result).unwrap_or_default();
-                    run_after(
-                        &*self.hook,
-                        StorageOperation::CreateMemory,
-                        payload,
-                        &result_json,
-                        extra,
-                    )
-                    .await;
-                    results.push(result);
-                }
-
-                Ok(results)
-            }
-        }
+        Ok(results)
     }
 }
 

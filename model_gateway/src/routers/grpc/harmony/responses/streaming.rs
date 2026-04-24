@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
-use openai_protocol::responses::{ResponseStatus, ResponsesRequest};
+use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::{json, Value};
 use smg_mcp::{McpServerBinding, McpToolSession};
 use tokio::sync::mpsc;
@@ -312,15 +312,14 @@ async fn execute_mcp_tool_loop_streaming(
                         "output_tokens": usage.completion_tokens,
                         "total_tokens": usage.total_tokens,
                     });
-                    persist_streaming_response(
+                    spawn_persisted_streaming_response(
                         ctx,
                         memory_execution_context,
                         emitter,
                         Some(usage.clone()),
                         original_request,
                         Some(incomplete_details.clone()),
-                    )
-                    .await;
+                    );
                     let mut event = emitter.emit_completed(Some(&usage_json));
                     event["response"]["status"] = json!("incomplete");
                     event["response"]["incomplete_details"] = incomplete_details;
@@ -366,15 +365,14 @@ async fn execute_mcp_tool_loop_streaming(
                         "Function tool calls present - exiting MCP loop and emitting completion"
                     );
 
-                    persist_streaming_response(
+                    spawn_persisted_streaming_response(
                         ctx,
                         memory_execution_context,
                         emitter,
                         Some(usage.clone()),
                         original_request,
                         None,
-                    )
-                    .await;
+                    );
 
                     // Function tool calls were already emitted during streaming processing
                     // Just emit response.completed with usage
@@ -413,15 +411,12 @@ async fn execute_mcp_tool_loop_streaming(
                 // Finalize response from emitter's accumulated data
                 let final_response = emitter.finalize(Some(usage.clone()));
 
-                // Persist response to storage if store=true
-                persist_response_if_needed(
-                    &ctx.persistence,
-                    memory_execution_context.clone(),
-                    &final_response,
+                spawn_persisted_response(
+                    ctx,
+                    memory_execution_context,
+                    final_response,
                     original_request,
-                    ctx.request_context.clone(),
-                )
-                .await;
+                );
 
                 // Emit response.completed with usage
                 let mut usage_json = json!({
@@ -501,15 +496,12 @@ async fn execute_without_mcp_streaming(
     // Finalize response from emitter's accumulated data
     let final_response = emitter.finalize(Some(usage.clone()));
 
-    // Persist response to storage if store=true
-    persist_response_if_needed(
-        &ctx.persistence,
-        memory_execution_context.clone(),
-        &final_response,
+    spawn_persisted_response(
+        ctx,
+        memory_execution_context,
+        final_response,
         original_request,
-        ctx.request_context.clone(),
-    )
-    .await;
+    );
 
     // Emit response.completed with usage
     let mut usage_json = json!({
@@ -526,7 +518,7 @@ async fn execute_without_mcp_streaming(
     emitter.send_event_best_effort(&event, tx);
 }
 
-async fn persist_streaming_response(
+fn spawn_persisted_streaming_response(
     ctx: &ResponsesContext,
     memory_execution_context: &MemoryExecutionContext,
     emitter: &ResponseStreamEventEmitter,
@@ -539,12 +531,38 @@ async fn persist_streaming_response(
     if final_response.incomplete_details.is_some() {
         final_response.status = ResponseStatus::Incomplete;
     }
-    persist_response_if_needed(
-        &ctx.persistence,
-        memory_execution_context.clone(),
-        &final_response,
+
+    spawn_persisted_response(
+        ctx,
+        memory_execution_context,
+        final_response,
         original_request,
-        ctx.request_context.clone(),
-    )
-    .await;
+    );
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "response persistence should not delay terminal SSE delivery"
+)]
+fn spawn_persisted_response(
+    ctx: &ResponsesContext,
+    memory_execution_context: &MemoryExecutionContext,
+    final_response: ResponsesResponse,
+    original_request: &ResponsesRequest,
+) {
+    let persistence = ctx.persistence.clone();
+    let memory_execution_context = memory_execution_context.clone();
+    let original_request = original_request.clone();
+    let request_context = ctx.request_context.clone();
+
+    tokio::spawn(async move {
+        persist_response_if_needed(
+            &persistence,
+            memory_execution_context,
+            &final_response,
+            &original_request,
+            request_context,
+        )
+        .await;
+    });
 }
