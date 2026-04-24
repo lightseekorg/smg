@@ -321,21 +321,23 @@ impl ResponseTransformer {
         //    Both shapes are read so either style works interchangeably;
         //    first occurrence wins for each slot (matches the accumulator
         //    semantics in `update_fields`).
-        if result.is_array() {
-            for openai_response in extract_embedded_openai_responses(result) {
-                if let Some(obj) = openai_response.as_object() {
-                    update_fields(obj);
+        if let Some(text_blocks) = result.as_array() {
+            for item in text_blocks {
+                let Some(payload) = parse_text_block_payload(item) else {
+                    continue;
+                };
+                // First-occurrence-wins accumulation means the
+                // `openai_response`-wrapped shape keeps priority over the
+                // top-level shape when a single block carries both.
+                if let Some(inner) = payload
+                    .get("openai_response")
+                    .filter(|value| !value.is_null())
+                    .and_then(|value| value.as_object())
+                {
+                    update_fields(inner);
                 }
-            }
-
-            if let Some(text_blocks) = result.as_array() {
-                for item in text_blocks {
-                    let Some(payload) = parse_text_block_payload(item) else {
-                        continue;
-                    };
-                    if let Some(obj) = payload.as_object() {
-                        update_fields(obj);
-                    }
+                if let Some(obj) = payload.as_object() {
+                    update_fields(obj);
                 }
             }
         }
