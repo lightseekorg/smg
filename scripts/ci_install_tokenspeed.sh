@@ -49,20 +49,32 @@ fi
 echo "uv version: $(uv --version)"
 
 # ── CUDA runtime setup ─────────────────────────────────────────────────────
-# Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda.
-if [ -d "/usr/local/cuda-13.0" ]; then
-    export CUDA_HOME="/usr/local/cuda-13.0"
-else
-    export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+# Locate the CUDA toolkit by finding ``cuda_runtime.h`` — don't trust a
+# fixed path. On k8s-runner-gpu the full SDK lives at
+# /usr/local/cuda-13.0; /usr/local/cuda is sometimes a thin symlink
+# without all the headers, so ``[ -d /usr/local/cuda-13.0 ]`` + job-level
+# ``CUDA_HOME: /usr/local/cuda`` from the workflow aren't reliable.
+CUDA_HEADER=$(find /usr/local /opt -maxdepth 5 -name cuda_runtime.h 2>/dev/null | head -1)
+if [ -z "$CUDA_HEADER" ]; then
+    echo "FATAL: could not find cuda_runtime.h under /usr/local or /opt" >&2
+    ls -la /usr/local/ 2>&1 | head -20 >&2
+    exit 1
 fi
+CUDA_INCLUDE_DIR=$(dirname "$CUDA_HEADER")
+# ``include/cuda_runtime.h`` → CUDA_HOME is the parent of the include dir.
+CUDA_HOME=$(dirname "$CUDA_INCLUDE_DIR")
+export CUDA_HOME
+echo "Detected CUDA_HOME=$CUDA_HOME (from $CUDA_HEADER)"
+
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 # Torch's JIT cpp_extension builder compiles some TokenSpeed runtime
 # extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and doesn't
 # pass ``-I$CUDA_HOME/include``, so ``#include <cuda_runtime.h>`` fails even
-# when CUDA_HOME is set. Expose the headers via CPATH so g++ picks them up
-# without needing upstream to change their extension config.
-export CPATH="${CUDA_HOME}/include${CPATH:+:$CPATH}"
+# when CUDA_HOME is set. Expose the headers via CPATH / CPLUS_INCLUDE_PATH
+# so g++ picks them up without needing upstream to change their config.
+export CPATH="${CUDA_INCLUDE_DIR}${CPATH:+:$CPATH}"
+export CPLUS_INCLUDE_PATH="${CUDA_INCLUDE_DIR}${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
 if [ ! -d "$TOKENSPEED_DIR" ]; then
@@ -120,6 +132,7 @@ if [ -n "${GITHUB_ENV:-}" ]; then
     # See note above: needed so torch's JIT C++ extension builder sees
     # CUDA headers when it bypasses nvcc for .cpp sources.
     echo "CPATH=$CPATH" >> "$GITHUB_ENV"
+    echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH" >> "$GITHUB_ENV"
 fi
 if [ -n "${GITHUB_PATH:-}" ]; then
     # Make ``nvcc`` discoverable to downstream steps (pytest spawns the
