@@ -10,10 +10,13 @@ use openai_protocol::responses::{
 use serde_json::{json, Value};
 use smg_data_connector::{
     with_request_context, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationStorage, NewConversationItem,
+    ConversationItemStorage, ConversationMemoryStatus, ConversationMemoryType,
+    ConversationMemoryWriter, ConversationStorage, NewConversationItem, NewConversationMemory,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
+
+use crate::memory::MemoryExecutionContext;
 
 // ============================================================================
 // Constants
@@ -36,6 +39,12 @@ pub const ITEM_TYPE_FIELDS: &[(&str, &[&str])] = &[
     ("function_call", &["call_id", "name", "arguments", "output"]),
     ("function_call_output", &["call_id", "output"]),
 ];
+
+const STMO_FIRST_TURN: usize = 4;
+const STMO_TURN_INTERVAL: usize = 3;
+const STMO_CFG_KEY_CONDENSER_MODEL: &str = "condenser_model";
+const STMO_CFG_KEY_LAST_INDEX: &str = "last_index";
+const STMO_CFG_KEY_TARGET_ITEM_END: &str = "target_item_end";
 
 // ============================================================================
 // JSON Serialization
@@ -378,10 +387,16 @@ async fn link_items_to_conversation(
 /// 2. Extracts output items from the response
 /// 3. Stores ALL items in response storage (always)
 /// 4. If conversation provided, also links items to conversation
+#[expect(
+    clippy::too_many_arguments,
+    reason = "persistence call needs storage handles + memory scheduling context"
+)]
 pub async fn persist_conversation_items(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -390,6 +405,8 @@ pub async fn persist_conversation_items(
         conversation_storage,
         item_storage,
         response_storage,
+        conversation_memory_writer,
+        memory_execution_context,
         response_json,
         original_body,
     );
@@ -403,6 +420,8 @@ async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response_json: &Value,
     original_body: &ResponsesRequest,
 ) -> Result<(), String> {
@@ -463,6 +482,14 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
+        maybe_schedule_stmo_after_persist(
+            &item_storage,
+            &conversation_memory_writer,
+            &memory_execution_context,
+            &conv_id,
+            &response_id,
+        )
+        .await;
         info!(
             conversation_id = %conv_id.0,
             response_id = %response_id.0,
@@ -480,4 +507,201 @@ async fn persist_conversation_items_inner(
     }
 
     Ok(())
+}
+
+fn should_enqueue_stmo_for_current_turn(user_turns: usize) -> bool {
+    user_turns >= STMO_FIRST_TURN && (user_turns - 1).is_multiple_of(STMO_TURN_INTERVAL)
+}
+
+async fn maybe_schedule_stmo_after_persist(
+    item_storage: &Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: &ResponseId,
+) {
+    if !memory_execution_context.stm_enabled {
+        return;
+    }
+
+    let (total_items, user_turns) = match item_storage
+        .count_items_and_user_turns(conversation_id)
+        .await
+    {
+        Ok(counts) => counts,
+        Err(err) => {
+            warn!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                error = %err,
+                "Failed to count conversation items for STMO scheduling; skipping enqueue"
+            );
+            return;
+        }
+    };
+
+    if !should_enqueue_stmo_for_current_turn(user_turns) {
+        return;
+    }
+
+    let mut memory_config = serde_json::Map::new();
+    if let Some(condenser_model) = memory_execution_context.stm_condenser_model_id.as_deref() {
+        memory_config.insert(
+            STMO_CFG_KEY_CONDENSER_MODEL.to_string(),
+            Value::String(condenser_model.to_string()),
+        );
+    }
+    memory_config.insert(STMO_CFG_KEY_LAST_INDEX.to_string(), json!(user_turns));
+    memory_config.insert(STMO_CFG_KEY_TARGET_ITEM_END.to_string(), json!(total_items));
+
+    let row = NewConversationMemory {
+        conversation_id: conversation_id.clone(),
+        conversation_version: None,
+        response_id: Some(response_id.clone()),
+        memory_type: ConversationMemoryType::Stmo,
+        status: ConversationMemoryStatus::Ready,
+        attempt: 0,
+        owner_id: None,
+        next_run_at: Utc::now(),
+        lease_until: None,
+        content: None,
+        memory_config: Some(Value::Object(memory_config).to_string()),
+        scope_id: None,
+        error_msg: None,
+    };
+
+    if let Err(err) = conversation_memory_writer.create_memory(row).await {
+        warn!(
+            conversation_id = %conversation_id.0,
+            response_id = %response_id.0,
+            error = %err,
+            "Failed to enqueue STMO job (best-effort; request flow continues)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use smg_data_connector::{
+        ConversationId, ConversationItemStorage, ConversationMemoryId, ConversationMemoryResult,
+        ConversationMemoryWriter, MemoryConversationItemStorage, NewConversationItem,
+        NewConversationMemory, ResponseId,
+    };
+
+    use super::{maybe_schedule_stmo_after_persist, should_enqueue_stmo_for_current_turn};
+    use crate::memory::MemoryExecutionContext;
+
+    struct RecordingMemoryWriter {
+        rows: Mutex<Vec<NewConversationMemory>>,
+    }
+
+    impl RecordingMemoryWriter {
+        fn new() -> Self {
+            Self {
+                rows: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshot(&self) -> Vec<NewConversationMemory> {
+            self.rows.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ConversationMemoryWriter for RecordingMemoryWriter {
+        async fn create_memory(
+            &self,
+            input: NewConversationMemory,
+        ) -> ConversationMemoryResult<ConversationMemoryId> {
+            self.rows.lock().unwrap().push(input);
+            Ok(ConversationMemoryId::from("test_id"))
+        }
+    }
+
+    fn user_message_item() -> NewConversationItem {
+        NewConversationItem {
+            id: None,
+            response_id: None,
+            item_type: "message".to_string(),
+            role: Some("user".to_string()),
+            content: serde_json::json!([]),
+            status: Some("completed".to_string()),
+        }
+    }
+
+    #[test]
+    fn stmo_turn_boundary_matches_expected_sequence() {
+        let firing_turns: Vec<usize> = (1..=15)
+            .filter(|&t| should_enqueue_stmo_for_current_turn(t))
+            .collect();
+        assert_eq!(firing_turns, vec![4, 7, 10, 13]);
+    }
+
+    #[tokio::test]
+    async fn maybe_schedule_stmo_enqueues_on_turn_boundary() {
+        let item_storage = Arc::new(MemoryConversationItemStorage::new());
+        let writer = Arc::new(RecordingMemoryWriter::new());
+        let conv_id = ConversationId::from("conv_stmo_test");
+        let response_id = ResponseId::from("resp_01");
+        let ctx = MemoryExecutionContext {
+            stm_enabled: true,
+            stm_condenser_model_id: Some("condense-v1".to_string()),
+            ..MemoryExecutionContext::default()
+        };
+
+        // Link exactly 4 user turns — first STMO trigger boundary.
+        for _ in 0..4 {
+            let item = item_storage.create_item(user_message_item()).await.unwrap();
+            item_storage
+                .link_item(&conv_id, &item.id, Utc::now())
+                .await
+                .unwrap();
+        }
+
+        let item_storage_dyn = item_storage as Arc<dyn ConversationItemStorage>;
+        let writer_dyn = writer.clone() as Arc<dyn ConversationMemoryWriter>;
+
+        maybe_schedule_stmo_after_persist(
+            &item_storage_dyn,
+            &writer_dyn,
+            &ctx,
+            &conv_id,
+            &response_id,
+        )
+        .await;
+
+        let rows = writer.snapshot();
+        assert_eq!(rows.len(), 1, "expected exactly one STMO row");
+        assert_eq!(rows[0].conversation_id.0, "conv_stmo_test");
+        assert_eq!(
+            rows[0].response_id.as_ref().map(|r| r.0.as_str()),
+            Some("resp_01")
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_schedule_stmo_skips_when_stm_disabled() {
+        let item_storage =
+            Arc::new(MemoryConversationItemStorage::new()) as Arc<dyn ConversationItemStorage>;
+        let writer = Arc::new(RecordingMemoryWriter::new());
+        let writer_dyn = writer.clone() as Arc<dyn ConversationMemoryWriter>;
+        let conv_id = ConversationId::from("conv_stmo_disabled");
+        let response_id = ResponseId::from("resp_02");
+        let ctx = MemoryExecutionContext {
+            stm_enabled: false,
+            ..MemoryExecutionContext::default()
+        };
+
+        maybe_schedule_stmo_after_persist(&item_storage, &writer_dyn, &ctx, &conv_id, &response_id)
+            .await;
+
+        assert!(
+            writer.snapshot().is_empty(),
+            "no rows should be enqueued when stm disabled"
+        );
+    }
 }

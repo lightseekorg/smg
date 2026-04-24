@@ -164,15 +164,18 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id.as_deref(),
     );
 
-    if let (Some(conv_storage), Some(item_storage), Some(resp_storage)) = (
+    if let (Some(conv_storage), Some(item_storage), Some(resp_storage), Some(mem_writer)) = (
         ctx.components.conversation_storage(),
         ctx.components.conversation_item_storage(),
         ctx.components.response_storage(),
+        ctx.components.conversation_memory_writer(),
     ) {
         if let Err(err) = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
             resp_storage.clone(),
+            mem_writer.clone(),
+            ctx.memory_execution_context.clone(),
             &response_json,
             original_body,
             ctx.storage_request_context.clone(),
