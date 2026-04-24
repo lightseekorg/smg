@@ -37,6 +37,7 @@ use uuid::Uuid;
 
 use super::{
     common::{load_conversation_history, ResponsesCallContext},
+    content_parts::{conversion_error_to_response, preprocess_responses_input},
     conversions, non_streaming, streaming,
 };
 use crate::routers::{
@@ -112,7 +113,7 @@ async fn route_responses_streaming(
     params: ResponsesCallContext,
 ) -> Response {
     // 1. Load conversation history
-    let modified_request = match load_conversation_history(ctx, &request).await {
+    let mut modified_request = match load_conversation_history(ctx, &request).await {
         Ok(req) => req,
         Err(response) => return response, // Already a Response with proper status code
     };
@@ -136,17 +137,24 @@ async fn route_responses_streaming(
         );
     }
 
-    // 3. Convert ResponsesRequest → ChatCompletionRequest
+    // 3. Preprocess P1 content parts (input_image / input_file / refusal)
+    let media_connector = ctx
+        .components
+        .multimodal
+        .as_ref()
+        .map(|mm| &mm.media_connector);
+    if let Err(e) = preprocess_responses_input(&mut modified_request, media_connector).await {
+        return conversion_error_to_response(&e);
+    }
+
+    // 4. Convert ResponsesRequest → ChatCompletionRequest
     let chat_request = match conversions::responses_to_chat(&modified_request) {
         Ok(req) => Arc::new(req),
         Err(e) => {
-            return error::bad_request(
-                "convert_request_failed",
-                format!("Failed to convert request: {e}"),
-            );
+            return conversion_error_to_response(&e);
         }
     };
 
-    // 4. Execute chat pipeline and convert streaming format (no MCP tools)
+    // 5. Execute chat pipeline and convert streaming format (no MCP tools)
     streaming::convert_chat_stream_to_responses_stream(ctx, chat_request, params, &request).await
 }

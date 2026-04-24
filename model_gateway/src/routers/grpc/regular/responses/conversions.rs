@@ -9,7 +9,10 @@
 
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
-    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall, UsageInfo},
+    common::{
+        ContentPart, FunctionCallResponse, ImageUrl, JsonSchemaFormat, ResponseFormat, ToolCall,
+        UsageInfo,
+    },
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
         ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
@@ -19,6 +22,7 @@ use openai_protocol::{
 };
 use tracing::warn;
 
+use super::content_parts::ConversionError;
 use crate::routers::grpc::common::responses::utils::extract_tools_from_response_tools;
 
 /// Convert a ResponsesRequest to ChatCompletionRequest for processing through the chat pipeline
@@ -30,7 +34,18 @@ use crate::routers::grpc::common::responses::utils::extract_tools_from_response_
 /// - `tools` → function tools extracted from ResponseTools
 /// - `tool_choice` → passed through from request
 /// - Response-specific fields (previous_response_id, conversation) are handled by router
-pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletionRequest, String> {
+///
+/// Assumes the caller has already run
+/// [`super::content_parts::preprocess_responses_input`] so that every
+/// [`ResponseContentPart::InputImage`] carries an `image_url` (HTTP or
+/// `data:`) and every [`ResponseContentPart::InputFile`] has either been
+/// rewritten to `InputImage` or rejected. The only remaining branching in
+/// here is mapping `InputImage` to [`ContentPart::ImageUrl`] so the chat
+/// pipeline's existing [`crate::routers::grpc::multimodal`] integration
+/// picks it up automatically.
+pub(crate) fn responses_to_chat(
+    req: &ResponsesRequest,
+) -> Result<ChatCompletionRequest, ConversionError> {
     let mut messages = Vec::new();
 
     // 1. Add system message if instructions provided
@@ -55,31 +70,17 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
             for item in items {
                 match item {
                     ResponseInputOutputItem::SimpleInputMessage { content, role, .. } => {
-                        // Convert SimpleInputMessage to chat message
-                        let text = match content {
-                            StringOrContentParts::String(s) => s.clone(),
+                        let chat_content = match content {
+                            StringOrContentParts::String(s) => MessageContent::Text(s.clone()),
                             StringOrContentParts::Array(parts) => {
-                                // Extract text from content parts (only InputText supported)
-                                parts
-                                    .iter()
-                                    .filter_map(|part| match part {
-                                        ResponseContentPart::InputText { text } => {
-                                            Some(text.as_str())
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
+                                build_message_content(parts, role.as_str())?
                             }
                         };
-
-                        messages.push(role_to_chat_message(role.as_str(), text));
+                        messages.push(role_to_chat_message(role.as_str(), chat_content));
                     }
                     ResponseInputOutputItem::Message { role, content, .. } => {
-                        // Extract text from content parts
-                        let text = extract_text_from_content(content);
-
-                        messages.push(role_to_chat_message(role.as_str(), text));
+                        let chat_content = build_message_content(content, role.as_str())?;
+                        messages.push(role_to_chat_message(role.as_str(), chat_content));
                     }
                     ResponseInputOutputItem::FunctionToolCall {
                         id,
@@ -152,18 +153,24 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             function = "responses_to_chat",
                             "Approval item reached chat conversion"
                         );
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                     ResponseInputOutputItem::ImageGenerationCall { .. } => {
                         warn!(
                             function = "responses_to_chat",
                             "image_generation_call input item reached chat conversion"
                         );
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                     ResponseInputOutputItem::Compaction { .. }
                     | ResponseInputOutputItem::ItemReference { .. } => {
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                     ResponseInputOutputItem::CustomToolCall { .. }
                     | ResponseInputOutputItem::CustomToolCallOutput { .. } => {
@@ -171,7 +178,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             function = "responses_to_chat",
                             "Custom tool item reached chat conversion"
                         );
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                     ResponseInputOutputItem::ShellCall { .. }
                     | ResponseInputOutputItem::ShellCallOutput { .. } => {
@@ -179,7 +188,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             function = "responses_to_chat",
                             "Shell tool item reached chat conversion"
                         );
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                     ResponseInputOutputItem::ApplyPatchCall { .. }
                     | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {
@@ -187,12 +198,16 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             function = "responses_to_chat",
                             "apply_patch item reached chat conversion"
                         );
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                     // T5 schema-only: forced-cascade arm, no behavior.
                     ResponseInputOutputItem::LocalShellCall { .. }
                     | ResponseInputOutputItem::LocalShellCallOutput { .. } => {
-                        return Err("Unsupported input item type".to_string());
+                        return Err(ConversionError::UnsupportedContent(
+                            "Unsupported input item type".to_string(),
+                        ));
                     }
                 }
             }
@@ -201,7 +216,9 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
 
     // Ensure we have at least one message
     if messages.is_empty() {
-        return Err("Request must contain at least one message".to_string());
+        return Err(ConversionError::InvalidRequest(
+            "Request must contain at least one message".to_string(),
+        ));
     }
 
     // 3. Extract function tools from ResponseTools.
@@ -249,46 +266,145 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
     })
 }
 
-/// Extract text content from ResponseContentPart array. `Refusal` is
-/// losslessly representable as text and is preserved verbatim. Image / file
-/// parts are currently dropped; the gRPC regular path is text-only and
-/// relies on the multimodal pipeline for media handling (R1/R2/R3 will
-/// implement full media handling).
-fn extract_text_from_content(content: &[ResponseContentPart]) -> String {
-    content
+/// Build a chat [`MessageContent`] from a Responses-API content-part array.
+///
+/// Emits:
+/// - [`MessageContent::Text`] when the array is text-only (every `InputText`
+///   / `OutputText` / `Refusal` entry concatenated with empty separator to
+///   match the prior behavior).
+/// - [`MessageContent::Parts`] when any [`ContentPart::ImageUrl`] is present,
+///   interleaving text and image URLs so the chat multimodal pipeline
+///   (`grpc/multimodal.rs`) can extract them.
+///
+/// Assumes [`super::content_parts::preprocess_responses_input`] has already
+/// normalized `InputFile` → `InputImage` and rejected `InputImage.file_id` /
+/// input-role `Refusal`. The `role` argument is currently unused here
+/// (those checks live in `content_parts`) but is kept in the signature so
+/// future role-sensitive decisions (e.g. refusal-on-assistant emission)
+/// have a single plumbing point.
+fn build_message_content(
+    parts: &[ResponseContentPart],
+    _role: &str,
+) -> Result<MessageContent, ConversionError> {
+    // Any InputFile at this layer means preprocessing was skipped — refuse
+    // to silently drop it.
+    if parts
         .iter()
-        .filter_map(|part| match part {
-            ResponseContentPart::InputText { text } => Some(text.as_str()),
-            ResponseContentPart::OutputText { text, .. } => Some(text.as_str()),
-            ResponseContentPart::Refusal { refusal } => Some(refusal.as_str()),
-            // R1/R2/R3 will implement full media handling
-            ResponseContentPart::InputImage { .. } | ResponseContentPart::InputFile { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
+        .any(|p| matches!(p, ResponseContentPart::InputFile { .. }))
+    {
+        return Err(ConversionError::UnsupportedContent(
+            "input_file reached conversions.rs without preprocessing — \
+             this is a bug in the Responses router"
+                .to_string(),
+        ));
+    }
+
+    let has_image = parts
+        .iter()
+        .any(|p| matches!(p, ResponseContentPart::InputImage { .. }));
+
+    if !has_image {
+        let text = parts
+            .iter()
+            .filter_map(|part| match part {
+                ResponseContentPart::InputText { text }
+                | ResponseContentPart::OutputText { text, .. } => Some(text.as_str()),
+                ResponseContentPart::Refusal { refusal } => Some(refusal.as_str()),
+                ResponseContentPart::InputImage { .. } | ResponseContentPart::InputFile { .. } => {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        return Ok(MessageContent::Text(text));
+    }
+
+    let mut chat_parts: Vec<ContentPart> = Vec::with_capacity(parts.len());
+    for part in parts {
+        match part {
+            ResponseContentPart::InputText { text }
+            | ResponseContentPart::OutputText { text, .. } => {
+                if !text.is_empty() {
+                    chat_parts.push(ContentPart::Text { text: text.clone() });
+                }
+            }
+            ResponseContentPart::Refusal { refusal } => {
+                if !refusal.is_empty() {
+                    chat_parts.push(ContentPart::Text {
+                        text: refusal.clone(),
+                    });
+                }
+            }
+            ResponseContentPart::InputImage {
+                image_url, detail, ..
+            } => {
+                // preprocess_responses_input guarantees image_url is set and
+                // file_id is None. Keep the defensive check so an
+                // unpreprocessed input surfaces a typed error instead of
+                // silently dropping the image.
+                let url = image_url.clone().ok_or_else(|| {
+                    ConversionError::InvalidRequest(
+                        "input_image is missing image_url after preprocessing — this is a bug"
+                            .to_string(),
+                    )
+                })?;
+                chat_parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url,
+                        detail: detail.clone().map(detail_to_chat_string),
+                    },
+                });
+            }
+            ResponseContentPart::InputFile { .. } => {
+                // preprocess_responses_input must have rewritten this to an
+                // InputImage or rejected it. Anything still here is a bug.
+                return Err(ConversionError::UnsupportedContent(
+                    "input_file reached conversions.rs without preprocessing — \
+                     this is a bug in the Responses router"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(MessageContent::Parts(chat_parts))
 }
 
-/// Convert role and text to ChatMessage
-fn role_to_chat_message(role: &str, text: String) -> ChatMessage {
+/// Map the Responses-API [`Detail`] enum (low/high/auto/original) to the
+/// Chat-Completions `image_url.detail` string. The chat pipeline recognizes
+/// `"auto" | "low" | "high"` (see `multimodal::parse_detail`); unknown
+/// values are silently ignored downstream, so `Original` is passed through
+/// as its rename (`"original"`).
+fn detail_to_chat_string(detail: openai_protocol::common::Detail) -> String {
+    match detail {
+        openai_protocol::common::Detail::Low => "low".to_string(),
+        openai_protocol::common::Detail::High => "high".to_string(),
+        openai_protocol::common::Detail::Auto => "auto".to_string(),
+        openai_protocol::common::Detail::Original => "original".to_string(),
+    }
+}
+
+/// Convert role and content to ChatMessage
+fn role_to_chat_message(role: &str, content: MessageContent) -> ChatMessage {
     match role {
         "user" => ChatMessage::User {
-            content: MessageContent::Text(text),
+            content,
             name: None,
         },
         "assistant" => ChatMessage::Assistant {
-            content: Some(MessageContent::Text(text)),
+            content: Some(content),
             name: None,
             tool_calls: None,
             reasoning_content: None,
         },
         "system" => ChatMessage::System {
-            content: MessageContent::Text(text),
+            content,
             name: None,
         },
         _ => {
             // Unknown role, treat as user message
             ChatMessage::User {
-                content: MessageContent::Text(text),
+                content,
                 name: None,
             }
         }
@@ -575,7 +691,110 @@ mod tests {
         };
 
         let result = responses_to_chat(&req);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Unsupported input item type");
+        let err = result.expect_err("ImageGenerationCall input must be rejected");
+        assert_eq!(err.error_code(), "unsupported_content");
+        assert_eq!(err.message(), "Unsupported input item type");
+    }
+
+    #[test]
+    fn test_input_image_content_part_produces_chat_image_part() {
+        // After preprocessing, an InputImage with image_url (data URL or
+        // HTTP) flows through responses_to_chat and is emitted as a chat
+        // `MessageContent::Parts` entry with `ContentPart::ImageUrl`. The
+        // downstream multimodal pipeline then picks it up automatically.
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_1".to_string(),
+                role: "user".to_string(),
+                content: vec![
+                    ResponseContentPart::InputText {
+                        text: "describe this:".to_string(),
+                    },
+                    ResponseContentPart::InputImage {
+                        detail: Some(openai_protocol::common::Detail::High),
+                        file_id: None,
+                        image_url: Some(
+                            "data:image/jpeg;base64,AAAA".to_string(),
+                        ),
+                    },
+                ],
+                status: None,
+                phase: None,
+            }]),
+            ..Default::default()
+        };
+
+        let chat_req = responses_to_chat(&req).unwrap();
+        assert_eq!(chat_req.messages.len(), 1);
+        let user = &chat_req.messages[0];
+        let parts = match user {
+            ChatMessage::User {
+                content: MessageContent::Parts(parts),
+                ..
+            } => parts,
+            other => panic!("expected User message with Parts content, got {other:?}"),
+        };
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            ContentPart::Text { text } => assert_eq!(text, "describe this:"),
+            other => panic!("expected Text part first, got {other:?}"),
+        }
+        match &parts[1] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/jpeg;base64,AAAA");
+                assert_eq!(image_url.detail.as_deref(), Some("high"));
+            }
+            other => panic!("expected ImageUrl part second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_input_image_missing_url_errors_as_invalid_request() {
+        // If preprocessing ever misses an InputImage (no image_url), the
+        // conversion must surface a typed error rather than silently
+        // dropping the image.
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_1".to_string(),
+                role: "user".to_string(),
+                content: vec![ResponseContentPart::InputImage {
+                    detail: None,
+                    file_id: None,
+                    image_url: None,
+                }],
+                status: None,
+                phase: None,
+            }]),
+            ..Default::default()
+        };
+
+        let err = responses_to_chat(&req).expect_err("missing image_url must error");
+        assert_eq!(err.error_code(), "invalid_request");
+    }
+
+    #[test]
+    fn test_input_file_leaks_past_preprocess_errors() {
+        // Defensive contract: any InputFile reaching conversions is a bug,
+        // since preprocess_responses_input is expected to rewrite to
+        // InputImage or reject. Verify we surface a clear typed error.
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_1".to_string(),
+                role: "user".to_string(),
+                content: vec![ResponseContentPart::InputFile {
+                    detail: None,
+                    file_data: Some("AAAA".to_string()),
+                    file_id: None,
+                    file_url: None,
+                    filename: None,
+                }],
+                status: None,
+                phase: None,
+            }]),
+            ..Default::default()
+        };
+
+        let err = responses_to_chat(&req).expect_err("unpreprocessed InputFile must error");
+        assert_eq!(err.error_code(), "unsupported_content");
     }
 }

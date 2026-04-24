@@ -22,6 +22,7 @@ use super::{
         load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall,
         ResponsesCallContext, ToolLoopState,
     },
+    content_parts::{conversion_error_to_response, preprocess_responses_input},
     conversions,
 };
 use crate::{
@@ -86,17 +87,34 @@ pub(super) async fn execute_without_mcp(
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
+    // Preprocess P1 content parts (input_image / input_file / refusal)
+    // before conversion. `responses_to_chat` itself stays sync; network I/O
+    // for file_url downloads happens here.
+    let mut preprocessed = modified_request.clone();
+    let media_connector = ctx
+        .components
+        .multimodal
+        .as_ref()
+        .map(|mm| &mm.media_connector);
+    preprocess_responses_input(&mut preprocessed, media_connector)
+        .await
+        .map_err(|e| {
+            error!(
+                function = "execute_without_mcp",
+                error = %e,
+                "Rejected request during Responses content-part preprocessing"
+            );
+            conversion_error_to_response(&e)
+        })?;
+
     // Convert ResponsesRequest → ChatCompletionRequest
-    let chat_request = conversions::responses_to_chat(modified_request).map_err(|e| {
+    let chat_request = conversions::responses_to_chat(&preprocessed).map_err(|e| {
         error!(
             function = "execute_without_mcp",
             error = %e,
             "Failed to convert ResponsesRequest to ChatCompletionRequest"
         );
-        error::bad_request(
-            "convert_request_failed",
-            format!("Failed to convert request: {e}"),
-        )
+        conversion_error_to_response(&e)
     })?;
 
     // Execute chat pipeline (errors already have proper HTTP status codes)
@@ -169,6 +187,28 @@ pub(super) async fn execute_tool_loop(
     );
 
     loop {
+        // Preprocess content parts before each iteration: the tool loop can
+        // rebuild the request with different history, so any image/file
+        // handles in the fresh copy must be normalized. In practice most
+        // iterations after the first only add FunctionToolCall / Tool items
+        // with no media, so the walk is a cheap no-op.
+        let media_connector = ctx
+            .components
+            .multimodal
+            .as_ref()
+            .map(|mm| &mm.media_connector);
+        preprocess_responses_input(&mut current_request, media_connector)
+            .await
+            .map_err(|e| {
+                error!(
+                    function = "tool_loop",
+                    iteration = state.iteration,
+                    error = %e,
+                    "Rejected request during Responses content-part preprocessing"
+                );
+                conversion_error_to_response(&e)
+            })?;
+
         // Convert to chat request
         let mut chat_request = conversions::responses_to_chat(&current_request).map_err(|e| {
             error!(
@@ -177,10 +217,7 @@ pub(super) async fn execute_tool_loop(
                 error = %e,
                 "Failed to convert ResponsesRequest to ChatCompletionRequest in tool loop"
             );
-            error::bad_request(
-                "convert_request_failed",
-                format!("Failed to convert request: {e}"),
-            )
+            conversion_error_to_response(&e)
         })?;
 
         // Prepare tools and tool_choice for this iteration

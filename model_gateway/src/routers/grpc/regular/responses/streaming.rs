@@ -48,6 +48,7 @@ use super::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
         prepare_chat_tools_and_choice, ExtractedToolCall, ResponsesCallContext, ToolLoopState,
     },
+    content_parts::preprocess_responses_input,
     conversions,
 };
 use crate::{
@@ -563,6 +564,19 @@ async fn execute_tool_loop_streaming_internal(
             }
             mcp_list_tools_emitted = true;
         }
+
+        // Preprocess P1 content parts (input_image / input_file / refusal)
+        // — see content_parts.rs for rationale. This is a no-op on the
+        // common text-only path; on multimodal requests it normalizes file
+        // attachments into image data URLs or rejects them.
+        let media_connector = ctx
+            .components
+            .multimodal
+            .as_ref()
+            .map(|mm| &mm.media_connector);
+        preprocess_responses_input(&mut current_request, media_connector)
+            .await
+            .map_err(|e| format!("{e}"))?;
 
         // Convert to chat request
         let mut chat_request = conversions::responses_to_chat(&current_request)
