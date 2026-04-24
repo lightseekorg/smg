@@ -16,6 +16,7 @@ use super::{
         build_next_request_with_tools, load_previous_messages,
         strip_image_generation_from_request_tools, McpCallTracking,
     },
+    content_parts::validate_harmony_responses_input,
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
@@ -46,6 +47,16 @@ pub(crate) async fn serve_harmony_responses_stream(
     request: ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
 ) -> Response {
+    // R3: reject image/file/refusal content parts up-front. Same
+    // rationale as the non-streaming entry point — harmony has no
+    // multimodal wire and we must not silently drop those parts.
+    // Rejection happens *before* history load and SSE-channel setup so
+    // callers receive a plain HTTP 400 instead of an SSE stream that
+    // immediately closes.
+    if let Err(err_response) = validate_harmony_responses_input(&request) {
+        return err_response;
+    }
+
     // Load previous conversation history if previous_response_id is set
     let current_request = match load_previous_messages(ctx, request.clone()).await {
         Ok(req) => req,

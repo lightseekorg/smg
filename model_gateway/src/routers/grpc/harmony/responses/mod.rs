@@ -17,8 +17,11 @@
 //! - `streaming` - Streaming entry point and tool loop
 //! - `execution` - MCP tool execution logic
 //! - `common` - Shared helpers and state tracking
+//! - `content_parts` - R3 input content-part validation (reject
+//!   image/file/refusal parts the harmony backend cannot render)
 
 pub(crate) mod common;
+pub(crate) mod content_parts;
 pub(crate) mod execution;
 pub(crate) mod non_streaming;
 pub(crate) mod streaming;

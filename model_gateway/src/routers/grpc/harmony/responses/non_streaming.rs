@@ -23,6 +23,7 @@ use super::{
         build_next_request_with_tools, inject_mcp_metadata, load_previous_messages,
         strip_image_generation_from_request_tools, McpCallTracking,
     },
+    content_parts::validate_harmony_responses_input,
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
 use crate::{
@@ -56,6 +57,16 @@ pub(crate) async fn serve_harmony_responses(
     request: ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
 ) -> Result<ResponsesResponse, Response> {
+    // R3: reject image/file/refusal content parts up-front. The harmony
+    // pipeline renders prompts via `openai_harmony` and has no
+    // multimodal wire to the backend (chat harmony sends `None` for
+    // multimodal in request_building), so silently dropping these
+    // parts would lose data invisibly. Validate the caller's original
+    // input *before* we merge persisted history via
+    // `load_previous_messages` so stored assistant-role refusals keep
+    // replaying cleanly.
+    validate_harmony_responses_input(&request)?;
+
     // Clone request for persistence
     let original_request = request.clone();
 

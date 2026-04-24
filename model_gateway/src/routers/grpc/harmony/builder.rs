@@ -656,16 +656,23 @@ impl HarmonyBuilder {
                 };
 
                 // Extract text from content parts. `Refusal` is losslessly
-                // representable as text and is preserved verbatim. Image /
-                // file parts are currently dropped (R1/R2/R3 will implement
-                // full media handling).
+                // representable as text and is preserved verbatim (R3 only
+                // allows refusals on assistant-role messages; other roles
+                // are rejected at the router entry via
+                // `responses::content_parts::validate_harmony_responses_input`).
+                // Image / file parts are rejected by that same validator
+                // before reaching this builder — the `None` arms below are
+                // a defensive fallback so a future caller that skips the
+                // validator does not silently corrupt the prompt.
                 let text_parts: Vec<String> = content
                     .iter()
                     .filter_map(|part| match part {
                         ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                         ResponseContentPart::InputText { text } => Some(text.clone()),
                         ResponseContentPart::Refusal { refusal } => Some(refusal.clone()),
-                        // R1/R2/R3 will implement full media handling
+                        // Unreachable in practice: the Responses router
+                        // validator rejects these before dispatch. Kept
+                        // as a defensive fallback.
                         ResponseContentPart::InputImage { .. }
                         | ResponseContentPart::InputFile { .. } => None,
                     })
@@ -815,15 +822,19 @@ impl HarmonyBuilder {
                     StringOrContentParts::Array(parts) => {
                         // Extract text from content parts. `Refusal` is
                         // losslessly representable as text and is preserved
-                        // verbatim. Image / file parts are currently dropped
-                        // (R1/R2/R3 will implement full media handling).
+                        // verbatim. Image / file parts are rejected at the
+                        // router entry by
+                        // `responses::content_parts::validate_harmony_responses_input`;
+                        // the `None` arms below are a defensive fallback
+                        // so a future caller that skips the validator
+                        // cannot silently corrupt the prompt.
                         parts
                             .iter()
                             .filter_map(|part| match part {
                                 ResponseContentPart::OutputText { text, .. } => Some(text.clone()),
                                 ResponseContentPart::InputText { text } => Some(text.clone()),
                                 ResponseContentPart::Refusal { refusal } => Some(refusal.clone()),
-                                // R1/R2/R3 will implement full media handling
+                                // Unreachable in practice; see note above.
                                 ResponseContentPart::InputImage { .. }
                                 | ResponseContentPart::InputFile { .. } => None,
                             })
