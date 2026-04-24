@@ -560,9 +560,7 @@ impl HarmonyBuilder {
                             ResponseTool::Namespace(_) => "namespace",
                             ResponseTool::Shell(_) => "shell",
                             ResponseTool::ApplyPatch => "apply_patch",
-                            // T5 schema-only: forced-cascade arm, no behavior.
                             ResponseTool::LocalShell => "local_shell",
-                            // T10 schema-only: forced-cascade arm, no behavior.
                             ResponseTool::ToolSearch(_) => "tool_search",
                         })
                         .collect()
@@ -898,12 +896,10 @@ impl HarmonyBuilder {
                 );
                 Err("Unsupported input item type".to_string())
             }
-            // T5 schema-only: forced-cascade arm, no behavior.
             ResponseInputOutputItem::LocalShellCall { .. }
             | ResponseInputOutputItem::LocalShellCallOutput { .. } => {
                 Err("Unsupported input item type".to_string())
             }
-            // T10 schema-only: forced-cascade arm, no behavior.
             ResponseInputOutputItem::ToolSearchCall { .. }
             | ResponseInputOutputItem::ToolSearchOutput { .. } => {
                 Err("Unsupported input item type".to_string())

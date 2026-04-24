@@ -4125,16 +4125,10 @@ fn test_mcp_list_tools_input_item_with_error_round_trip() {
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
 
-// ---------------------------------------------------------------------------
-// T10: `tool_search` hosted / client-executed tool + call / output items
-//
-// Spec refs:
-//   .claude/_audit/openai-responses-api-spec.md L476 (ToolSearch tool),
-//   L188-191 (ToolSearchCall), L193-195 (ToolSearchOutput). `tools` inside
-//   ToolSearchOutput is a recursive use of the full Tool union, so the
-//   output-item test exercises `function`, `mcp`, and a nested
-//   `tool_search` element to pin the recursive surface.
-// ---------------------------------------------------------------------------
+// `tool_search` — hosted and client-executed tool + call / output items.
+// `tools` inside a `tool_search_output` is a recursive use of the full
+// Tool union, so the output-item test exercises `function`, `mcp`, and a
+// nested `tool_search` element to pin the recursive surface.
 
 /// `ResponseTool::ToolSearch` with `execution: "server"` and a non-trivial
 /// `parameters` payload round-trips. Spec

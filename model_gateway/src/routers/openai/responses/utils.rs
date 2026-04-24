@@ -263,9 +263,7 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         ResponseTool::Shell(_) => serde_json::to_value(tool).ok(),
         ResponseTool::ApplyPatch => serde_json::to_value(tool).ok(),
         ResponseTool::Function(_) => None,
-        // T5 schema-only: forced-cascade arm, no behavior.
         ResponseTool::LocalShell => serde_json::to_value(tool).ok(),
-        // T10 schema-only: forced-cascade arm, no behavior.
         ResponseTool::ToolSearch(_) => serde_json::to_value(tool).ok(),
     }
 }

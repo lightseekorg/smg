@@ -3264,7 +3264,6 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::LocalShellCallOutput { .. }
                         | ResponseInputOutputItem::McpCall { .. }
                         | ResponseInputOutputItem::McpListTools { .. }
-                        // T10 schema-only: forced-cascade arm, no behavior.
                         | ResponseInputOutputItem::ToolSearchCall { .. }
                         | ResponseInputOutputItem::ToolSearchOutput { .. } => {}
                     }
@@ -3600,11 +3599,10 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // error absent) can round-trip cleanly.
         ResponseInputOutputItem::McpCall { .. } => {}
         ResponseInputOutputItem::McpListTools { .. } => {}
-        // T10 schema-only: `tool_search_call` / `tool_search_output` input
-        // items replayed for stateless multi-turn. `arguments` is
-        // `serde_json::Value` (spec: `unknown`) and `tools` is the recursive
-        // `ResponseTool` union, so content-level validation is deferred to
-        // a future R task — mirrors the treatment of `CustomToolCall`
+        // `tool_search_call.arguments` is `serde_json::Value` (spec:
+        // `unknown`) and `tool_search_output.tools` is the recursive
+        // `ResponseTool` union — content-level validation is deferred to
+        // the router transformer, matching how `CustomToolCall` is handled
         // above.
         ResponseInputOutputItem::ToolSearchCall { .. } => {}
         ResponseInputOutputItem::ToolSearchOutput { .. } => {}
