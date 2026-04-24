@@ -40,7 +40,7 @@ use smg_mcp::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 use uuid::Uuid;
 
 use super::{
@@ -507,7 +507,28 @@ async fn execute_tool_loop_streaming_internal(
     mcp_servers: Vec<McpServerBinding>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
-    let mut state = ToolLoopState::new(original_request.input.clone());
+    // Preprocess P1 content parts ONCE upfront. Subsequent iterations
+    // call `build_next_request` which restores input from
+    // `state.original_input`, so the normalized input must live there —
+    // otherwise every streaming turn would re-download `file_url` bytes
+    // and short-lived signed URLs would fail after iteration 0.
+    let media_connector = ctx
+        .components
+        .multimodal
+        .as_ref()
+        .map(|mm| &mm.media_connector);
+    preprocess_responses_input(&mut current_request, media_connector)
+        .await
+        .map_err(|e| {
+            error!(
+                function = "streaming_tool_loop",
+                error = %e,
+                "Rejected request during Responses content-part preprocessing"
+            );
+            format!("{e}")
+        })?;
+
+    let mut state = ToolLoopState::new(current_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     // Generate response ID first so we can use it for both emitter and session
@@ -565,20 +586,10 @@ async fn execute_tool_loop_streaming_internal(
             mcp_list_tools_emitted = true;
         }
 
-        // Preprocess P1 content parts (input_image / input_file / refusal)
-        // — see content_parts.rs for rationale. This is a no-op on the
-        // common text-only path; on multimodal requests it normalizes file
-        // attachments into image data URLs or rejects them.
-        let media_connector = ctx
-            .components
-            .multimodal
-            .as_ref()
-            .map(|mm| &mm.media_connector);
-        preprocess_responses_input(&mut current_request, media_connector)
-            .await
-            .map_err(|e| format!("{e}"))?;
-
-        // Convert to chat request
+        // Convert to chat request. Content-part preprocessing ran once
+        // before the loop; subsequent iterations are rebuilt by
+        // `build_next_request` from the normalized `state.original_input`,
+        // so no per-iteration download work happens here.
         let mut chat_request = conversions::responses_to_chat(&current_request)
             .map_err(|e| format!("Failed to convert request: {e}"))?;
 

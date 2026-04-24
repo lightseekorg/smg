@@ -62,8 +62,11 @@ pub(super) async fn route_responses_internal(
         // Execute with MCP tool loop
         execute_tool_loop(ctx, modified_request, &request, &params, mcp_servers).await?
     } else {
-        // No MCP tools - execute without MCP (may have function tools or no tools)
-        execute_without_mcp(ctx, &modified_request, &request, params).await?
+        // No MCP tools - execute without MCP (may have function tools or no tools).
+        // Pass `modified_request` by value so preprocessing can mutate it in
+        // place instead of cloning the (potentially large) conversation
+        // history just to satisfy `&mut`.
+        execute_without_mcp(ctx, modified_request, &request, params).await?
     };
 
     // 5. Persist response to storage if store=true
@@ -83,20 +86,19 @@ pub(super) async fn route_responses_internal(
 /// Execute request without MCP tool loop (simple pipeline execution)
 pub(super) async fn execute_without_mcp(
     ctx: &ResponsesContext,
-    modified_request: &ResponsesRequest,
+    mut modified_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // Preprocess P1 content parts (input_image / input_file / refusal)
     // before conversion. `responses_to_chat` itself stays sync; network I/O
     // for file_url downloads happens here.
-    let mut preprocessed = modified_request.clone();
     let media_connector = ctx
         .components
         .multimodal
         .as_ref()
         .map(|mm| &mm.media_connector);
-    preprocess_responses_input(&mut preprocessed, media_connector)
+    preprocess_responses_input(&mut modified_request, media_connector)
         .await
         .map_err(|e| {
             error!(
@@ -108,7 +110,7 @@ pub(super) async fn execute_without_mcp(
         })?;
 
     // Convert ResponsesRequest → ChatCompletionRequest
-    let chat_request = conversions::responses_to_chat(&preprocessed).map_err(|e| {
+    let chat_request = conversions::responses_to_chat(&modified_request).map_err(|e| {
         error!(
             function = "execute_without_mcp",
             error = %e,
@@ -159,7 +161,31 @@ pub(super) async fn execute_tool_loop(
     params: &ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Result<ResponsesResponse, Response> {
-    let mut state = ToolLoopState::new(original_request.input.clone());
+    // Preprocess P1 content parts ONCE upfront. Subsequent iterations
+    // call `build_next_request` which restores input from
+    // `state.original_input`, so the normalized input must be captured
+    // there — otherwise every turn would re-download `file_url` bytes
+    // (expensive on large payloads, and broken for short-lived signed URLs
+    // that expire after the first fetch).
+    let media_connector = ctx
+        .components
+        .multimodal
+        .as_ref()
+        .map(|mm| &mm.media_connector);
+    preprocess_responses_input(&mut current_request, media_connector)
+        .await
+        .map_err(|e| {
+            error!(
+                function = "tool_loop",
+                error = %e,
+                "Rejected request during Responses content-part preprocessing"
+            );
+            conversion_error_to_response(&e)
+        })?;
+
+    // Use the normalized input as the basis for every subsequent
+    // iteration's build_next_request.
+    let mut state = ToolLoopState::new(current_request.input.clone());
 
     // Configuration: max iterations as safety limit
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
@@ -187,29 +213,10 @@ pub(super) async fn execute_tool_loop(
     );
 
     loop {
-        // Preprocess content parts before each iteration: the tool loop can
-        // rebuild the request with different history, so any image/file
-        // handles in the fresh copy must be normalized. In practice most
-        // iterations after the first only add FunctionToolCall / Tool items
-        // with no media, so the walk is a cheap no-op.
-        let media_connector = ctx
-            .components
-            .multimodal
-            .as_ref()
-            .map(|mm| &mm.media_connector);
-        preprocess_responses_input(&mut current_request, media_connector)
-            .await
-            .map_err(|e| {
-                error!(
-                    function = "tool_loop",
-                    iteration = state.iteration,
-                    error = %e,
-                    "Rejected request during Responses content-part preprocessing"
-                );
-                conversion_error_to_response(&e)
-            })?;
-
-        // Convert to chat request
+        // Convert to chat request. `current_request` was preprocessed
+        // before the loop and subsequent iterations are rebuilt by
+        // `build_next_request` from the normalized `state.original_input`,
+        // so no per-iteration download work happens here.
         let mut chat_request = conversions::responses_to_chat(&current_request).map_err(|e| {
             error!(
                 function = "tool_loop",

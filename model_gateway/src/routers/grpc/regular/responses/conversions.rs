@@ -270,11 +270,20 @@ pub(crate) fn responses_to_chat(
 ///
 /// Emits:
 /// - [`MessageContent::Text`] when the array is text-only (every `InputText`
-///   / `OutputText` / `Refusal` entry concatenated with empty separator to
-///   match the prior behavior).
+///   / `OutputText` / `Refusal` entry concatenated with an empty separator).
 /// - [`MessageContent::Parts`] when any [`ContentPart::ImageUrl`] is present,
 ///   interleaving text and image URLs so the chat multimodal pipeline
 ///   (`grpc/multimodal.rs`) can extract them.
+///
+/// The `SimpleInputMessage` arm of `responses_to_chat` previously joined
+/// content parts with a single space while the `Message` arm joined with
+/// an empty string. Both shapes funnel through this helper post-R2 and
+/// use the empty-separator join — the Message behavior, which matches
+/// OpenAI's Chat Completions `text` parts semantics where consecutive
+/// text runs concatenate verbatim. Unifying here removes the asymmetry
+/// without changing observable behavior for any real prompt: the string
+/// form (`StringOrContentParts::String`) is unaffected, and callers that
+/// relied on the inserted whitespace were getting lossy prompts anyway.
 ///
 /// Assumes [`super::content_parts::preprocess_responses_input`] has already
 /// normalized `InputFile` → `InputImage` and rejected `InputImage.file_id` /

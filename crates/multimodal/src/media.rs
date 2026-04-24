@@ -143,8 +143,15 @@ impl MediaConnector {
         })?;
 
         let resp = resp.error_for_status()?;
+        // Re-validate the allowlist against the post-redirect URL:
+        // reqwest follows redirects by default, so a request starting
+        // on an allowed domain could otherwise land on a disallowed
+        // origin without us noticing. Return the resolved URL so
+        // callers log / cache the actual source rather than the input.
+        let final_url = resp.url().clone();
+        self.ensure_domain_allowed(&final_url)?;
         let bytes = resp.bytes().await?;
-        Ok((bytes, parsed.to_string()))
+        Ok((bytes, final_url.to_string()))
     }
 
     async fn fetch_data_url(

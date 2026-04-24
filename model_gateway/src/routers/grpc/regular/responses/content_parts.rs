@@ -34,7 +34,7 @@ use openai_protocol::responses::{
     ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest,
     StringOrContentParts,
 };
-use tracing::warn;
+use tracing::debug;
 
 /// Typed error returned by preprocessing and
 /// [`super::conversions::responses_to_chat`]. Callers map each variant to an
@@ -185,12 +185,14 @@ async fn normalize_one(
             file_id,
             file_url,
             filename,
-            detail: _,
+            detail,
         } => {
-            if let Some(name) = filename.as_deref() {
-                // Filename is informational metadata. Log but do not fail,
-                // since the spec treats it as a hint not a handle.
-                warn!(filename = %name, "input_file filename is informational — ignored");
+            if filename.is_some() {
+                // Filename is informational metadata. The spec treats it as
+                // a hint not a handle, and it's user-provided data, so log
+                // only that one was present (never the raw value) at debug
+                // level to avoid leaking sensitive PII into server logs.
+                debug!("input_file filename metadata provided; ignored");
             }
 
             if file_id.is_some() {
@@ -201,13 +203,20 @@ async fn normalize_one(
                 ));
             }
 
+            // Map `FileDetail::{Low,High}` to the corresponding image
+            // `Detail` so caller-selected fidelity survives the rewrite —
+            // otherwise file-backed images would silently fall back to
+            // the downstream default and lose the cost / quality hint the
+            // client asked for.
+            let carried_detail = file_detail_to_image_detail(detail.as_ref());
+
             if let Some(data) = file_data.take() {
                 let bytes = BASE64_STANDARD.decode(data.as_bytes()).map_err(|e| {
                     ConversionError::InvalidRequest(format!(
                         "input_file.file_data is not valid base64: {e}"
                     ))
                 })?;
-                let normalized = sniff_and_build_image_part(&bytes)?;
+                let normalized = sniff_and_build_image_part(&bytes, carried_detail)?;
                 *part = normalized;
                 return Ok(());
             }
@@ -225,7 +234,7 @@ async fn normalize_one(
                         "failed to download input_file.file_url: {e}"
                     ))
                 })?;
-                let normalized = sniff_and_build_image_part(bytes.as_ref())?;
+                let normalized = sniff_and_build_image_part(bytes.as_ref(), carried_detail)?;
                 *part = normalized;
                 return Ok(());
             }
@@ -240,12 +249,20 @@ async fn normalize_one(
 /// Classify a byte payload by its file signature and build the matching
 /// content part. Images become `InputImage` with a `data:` URL; PDFs are
 /// rejected pending R4; everything else is rejected as `unsupported_content`.
-fn sniff_and_build_image_part(bytes: &[u8]) -> Result<ResponseContentPart, ConversionError> {
+///
+/// `carried_detail` is the caller's fidelity hint from the originating
+/// `InputFile.detail` (mapped to the image-side `Detail` enum). It is
+/// threaded through so the downstream multimodal preprocessor honors
+/// `low` / `high` tiers rather than falling back to its own default.
+fn sniff_and_build_image_part(
+    bytes: &[u8],
+    carried_detail: Option<openai_protocol::common::Detail>,
+) -> Result<ResponseContentPart, ConversionError> {
     match sniff_media_kind(bytes) {
         MediaKind::Image(mime) => {
             let encoded = BASE64_STANDARD.encode(bytes);
             Ok(ResponseContentPart::InputImage {
-                detail: None,
+                detail: carried_detail,
                 file_id: None,
                 image_url: Some(format!("data:{mime};base64,{encoded}")),
             })
@@ -258,6 +275,19 @@ fn sniff_and_build_image_part(bytes: &[u8]) -> Result<ResponseContentPart, Conve
             "input_file payload is not a recognized image (jpeg/png/webp/gif) or PDF".to_string(),
         )),
     }
+}
+
+/// Map an optional `FileDetail` (spec: `"low" | "high"`) to the broader
+/// `Detail` enum used by `InputImage` (`"low" | "high" | "auto" | "original"`).
+/// `None` stays `None` so downstream pipeline defaults still apply.
+fn file_detail_to_image_detail(
+    detail: Option<&openai_protocol::responses::FileDetail>,
+) -> Option<openai_protocol::common::Detail> {
+    use openai_protocol::{common::Detail, responses::FileDetail};
+    detail.map(|d| match d {
+        FileDetail::Low => Detail::Low,
+        FileDetail::High => Detail::High,
+    })
 }
 
 /// Minimal magic-byte classifier covering every MIME type the downstream
@@ -369,7 +399,7 @@ mod tests {
     #[test]
     fn build_image_part_from_jpeg_bytes() {
         let bytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
-        let part = sniff_and_build_image_part(&bytes).expect("jpeg must be accepted");
+        let part = sniff_and_build_image_part(&bytes, None).expect("jpeg must be accepted");
         match part {
             ResponseContentPart::InputImage {
                 image_url: Some(url),
@@ -389,9 +419,27 @@ mod tests {
     }
 
     #[test]
+    fn build_image_part_threads_detail_into_rewritten_input_image() {
+        // FileDetail::High must become Detail::High on the rewritten
+        // InputImage so downstream multimodal preprocessing honors the
+        // caller's fidelity hint instead of falling back to auto.
+        use openai_protocol::common::Detail;
+        let bytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
+        let part = sniff_and_build_image_part(&bytes, Some(Detail::High))
+            .expect("jpeg with detail must be accepted");
+        match part {
+            ResponseContentPart::InputImage {
+                detail: Some(Detail::High),
+                ..
+            } => {}
+            other => panic!("expected InputImage detail=High, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_image_part_rejects_pdf_pending_r4() {
         let bytes = b"%PDF-1.4\n%\xc7\xec\x8f\xa2\n";
-        let err = sniff_and_build_image_part(bytes).expect_err("PDF must be rejected");
+        let err = sniff_and_build_image_part(bytes, None).expect_err("PDF must be rejected");
         assert_eq!(err.error_code(), "unsupported_content");
         assert!(
             err.message().contains("R4"),
@@ -402,7 +450,8 @@ mod tests {
 
     #[test]
     fn build_image_part_rejects_unknown_bytes() {
-        let err = sniff_and_build_image_part(b"garbage").expect_err("unknown kind must reject");
+        let err =
+            sniff_and_build_image_part(b"garbage", None).expect_err("unknown kind must reject");
         assert_eq!(err.error_code(), "unsupported_content");
     }
 
@@ -522,6 +571,41 @@ mod tests {
                 assert_eq!(decoded, jpeg_bytes);
             }
             other => panic!("expected InputImage after rewrite, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn preprocess_preserves_file_detail_when_rewriting_input_file() {
+        // Caller sends input_file with detail=high; after normalization
+        // the rewritten input_image must carry detail=Detail::High so the
+        // chat pipeline's `image_url.detail` ends up "high" instead of
+        // defaulting to auto (which changes cost / quality downstream).
+        use openai_protocol::{common::Detail, responses::FileDetail};
+        let jpeg_bytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A];
+        let file_data = BASE64_STANDARD.encode(jpeg_bytes);
+        let mut req = user_message_with_parts(vec![ResponseContentPart::InputFile {
+            detail: Some(FileDetail::High),
+            file_data: Some(file_data),
+            file_id: None,
+            file_url: None,
+            filename: None,
+        }]);
+
+        preprocess_responses_input(&mut req, None).await.unwrap();
+
+        let parts = match &req.input {
+            ResponseInput::Items(items) => match &items[0] {
+                ResponseInputOutputItem::Message { content, .. } => content,
+                other => panic!("unexpected item: {other:?}"),
+            },
+            ResponseInput::Text(_) => panic!("unexpected text input"),
+        };
+        match &parts[0] {
+            ResponseContentPart::InputImage {
+                detail: Some(Detail::High),
+                ..
+            } => {}
+            other => panic!("expected InputImage detail=High, got {other:?}"),
         }
     }
 
