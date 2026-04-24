@@ -266,8 +266,16 @@ const PDF_SNIFF_DECODED_LEN: usize = PDF_SNIFF_BASE64_LEN / 4 * 3;
 /// because the router's default `max_payload_size` permits multi-hundred
 /// megabyte `file_data` inputs that would otherwise be fully decoded
 /// just to be rejected.
+///
+/// Leading-whitespace skipping is bounded to
+/// [`PDF_SNIFF_WHITESPACE_BUDGET`] bytes so an adversarial payload
+/// consisting of many megabytes of spaces cannot turn the sniff into an
+/// O(n) walk: realistic clients do not prefix base64 payloads with more
+/// than a few control characters, so any larger leading-whitespace run
+/// falls through to the generic "file_data unsupported" message.
 fn looks_like_pdf(file_data: &str) -> bool {
-    let payload = strip_data_url_prefix(file_data).trim_start();
+    let payload = strip_data_url_prefix(file_data);
+    let payload = skip_leading_whitespace_bounded(payload, PDF_SNIFF_WHITESPACE_BUDGET);
     let Some(prefix) = payload.get(..PDF_SNIFF_BASE64_LEN) else {
         // Input shorter than the sniff window — safe to fall through
         // to the generic "file_data unsupported" message. An 8-byte
@@ -282,6 +290,37 @@ fn looks_like_pdf(file_data: &str) -> bool {
     };
     decoded[..len].starts_with(PDF_MAGIC)
 }
+
+/// Skip at most `budget` leading ASCII-whitespace bytes from `input`.
+/// Returns the suffix starting at the first non-whitespace byte, or an
+/// empty slice if `budget` is exhausted — in which case the caller
+/// treats the input as unsniffable and falls through to the generic
+/// rejection path. `str::trim_start` has no allocation but does walk
+/// the full run; capping avoids a DoS-adjacent full-payload scan on
+/// malicious inputs.
+fn skip_leading_whitespace_bounded(input: &str, budget: usize) -> &str {
+    let bytes = input.as_bytes();
+    let inspect = budget.min(bytes.len());
+    let mut skipped = 0usize;
+    while skipped < inspect && bytes[skipped].is_ascii_whitespace() {
+        skipped += 1;
+    }
+    if skipped == inspect && inspect < bytes.len() && bytes[skipped].is_ascii_whitespace() {
+        // Budget exhausted with more whitespace still queued: give the
+        // caller an empty string so the subsequent `.get(..PREFIX_LEN)`
+        // short-circuits to `None` and falls through.
+        return "";
+    }
+    &input[skipped..]
+}
+
+/// Upper bound on leading whitespace the PDF sniffer will traverse
+/// before giving up. A handful of bytes covers any realistic payload
+/// (legitimate senders rarely pad more than a trailing newline or two);
+/// anything beyond this is treated as unsniffable so a hostile client
+/// cannot force an O(n) walk over a multi-hundred-megabyte `file_data`
+/// payload made entirely of spaces.
+const PDF_SNIFF_WHITESPACE_BUDGET: usize = 64;
 
 /// Strip a `data:<mime>;base64,` prefix from `input` if present, returning
 /// the remainder; otherwise return the input unchanged. Case-insensitive
@@ -305,18 +344,39 @@ fn strip_data_url_prefix(input: &str) -> &str {
 
 /// Locate the `;base64,` separator inside a data URL, matching
 /// case-insensitively. Uses a byte-window walk (no allocation) bounded
-/// to the first [`DATA_URL_HEADER_SCAN_LIMIT`] bytes so the hot path
-/// stays allocation- *and* CPU-free even on adversarial large payloads:
-/// a malformed `data:` string without an early separator would otherwise
-/// force a full linear scan over hundreds of megabytes (the router
-/// permits up to `max_payload_size` in
-/// `model_gateway/src/config/types.rs`), which would be a CPU-sink for
-/// what is otherwise a fast-path 400 rejection.
+/// to the first [`DATA_URL_HEADER_SCAN_LIMIT`] bytes *and* truncated at
+/// the RFC 2397 metadata-header boundary (the first `,`) so the hot
+/// path stays allocation- *and* CPU-free even on adversarial payloads:
+///
+/// - The header cap prevents a malformed `data:` string without an
+///   early separator from forcing a full linear scan over hundreds of
+///   megabytes (the router permits up to `max_payload_size` in
+///   `model_gateway/src/config/types.rs`).
+/// - The first-comma truncation prevents a spurious match inside the
+///   *payload* body — a non-base64 `data:text/plain,...;base64,...`
+///   string would otherwise be mis-routed into the PDF-specific branch
+///   because the `;base64,` substring appears after the metadata
+///   boundary. RFC 2397 §3 defines the metadata header as the bytes up
+///   to (and including) the separating `,`, so the scan must reach the
+///   comma but not walk past it — the comma is the terminating byte of
+///   the legitimate `;base64,` needle itself.
 fn find_base64_separator(input: &str) -> Option<usize> {
     const NEEDLE: &[u8] = b";base64,";
-    let header = input
+    let capped = input
         .as_bytes()
         .get(..DATA_URL_HEADER_SCAN_LIMIT.min(input.len()))?;
+    // Include the first `,` inside the scan window so the legitimate
+    // `;base64,` needle (which ends with `,`) can still match. Anything
+    // beyond that first comma is payload, never metadata, so excluding
+    // it eliminates the false-positive case where `;base64,` bytes
+    // appear inside the body of a non-base64 `data:text/plain,...`
+    // payload.
+    let header_end = capped
+        .iter()
+        .position(|&b| b == b',')
+        .map(|idx| idx + 1)
+        .unwrap_or(capped.len());
+    let header = &capped[..header_end];
     header
         .windows(NEEDLE.len())
         .position(|window| window.eq_ignore_ascii_case(NEEDLE))
@@ -743,6 +803,70 @@ mod tests {
         assert!(
             !message.contains("R4"),
             "bounded scan must not claim PDF identification when the separator is beyond the cap; got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn data_url_separator_search_ignores_matches_after_first_comma() {
+        // Adversarial case: a valid `data:` URL's metadata header ends
+        // at the first `,` (RFC 2397). If `;base64,` appears inside
+        // the *payload* region (e.g. text/plain payload with literal
+        // `;base64,` bytes), the separator scan must NOT match it —
+        // otherwise we would mis-route the request into the
+        // PDF-specific branch and claim PDF identification on data
+        // that never even base64-decodes.
+        //
+        // Payload below: `data:text/plain,hello ;base64, world` — the
+        // header is `text/plain`, the body is everything after the
+        // first comma. No `;base64,` inside the header, so the
+        // sniffer must fall through to the generic file-data rejection.
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some("data:text/plain,hello ;base64, world".to_string()),
+                file_id: None,
+                file_url: None,
+                filename: None,
+            }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("non-base64 data URL must still be rejected");
+        let message = error_message(err).await;
+        assert!(
+            !message.contains("R4"),
+            "payload-region `;base64,` must not trigger the PDF branch; got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_sniff_whitespace_skip_is_bounded() {
+        // Adversarial case: a payload consisting of many bytes of
+        // leading whitespace must not force the sniffer into a full
+        // walk. We construct a payload with 64 KiB of leading spaces
+        // followed by what would otherwise be a valid PDF-magic
+        // prefix. The whitespace-budget cap kicks in long before
+        // reaching the real bytes, so the sniffer falls through to
+        // the generic file-data rejection.
+        //
+        // This is the symmetric DoS guard to the header-scan cap; the
+        // budget is small enough (64 B) that `trim_start` can never be
+        // weaponized into an O(n) walk over a multi-hundred-megabyte
+        // payload.
+        let mut payload = " ".repeat(65_536);
+        payload.push_str("JVBERi0x"); // real PDF magic after the budget
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some(payload),
+                file_id: None,
+                file_url: None,
+                filename: None,
+            }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("over-padded file_data must still be rejected");
+        let message = error_message(err).await;
+        assert!(
+            !message.contains("R4"),
+            "whitespace budget must stop the sniffer before it reaches buried magic bytes; got: {message}"
         );
     }
 
