@@ -54,7 +54,10 @@ HEALTH_CHECK_TIMEOUT = int(os.getenv("TOKENSPEED_HEALTH_CHECK_TIMEOUT", "20"))
 # Logs at WARNING level so ``--log-level warning`` workers still surface it.
 _DEBUG_OUTPUT = os.getenv("TOKENSPEED_DEBUG_OUTPUT", "").lower() in ("1", "true", "yes")
 _DEBUG_OUTPUT_MAX_REQUESTS = int(os.getenv("TOKENSPEED_DEBUG_OUTPUT_MAX", "3"))
+_DEBUG_OUTPUT_MAX_CHUNKS = int(os.getenv("TOKENSPEED_DEBUG_OUTPUT_MAX_CHUNKS", "30"))
 _debug_output_seen_rids: set[str] = set()
+_debug_chunk_seen_rids: set[str] = set()
+_debug_chunk_counts: dict[str, int] = {}
 
 
 def _lazy_generate_req_input():
@@ -597,6 +600,41 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             trimmed,
         )
 
+    def _maybe_dump_chunk(
+        self, rid: str, output: dict, reason_dict: dict | None, trimmed: list[int]
+    ) -> None:
+        """Dump each streaming chunk's raw vs trimmed tokens for the first
+        request only (cap at ``TOKENSPEED_DEBUG_OUTPUT_MAX_CHUNKS``). Lets us
+        see whether ``output_ids`` is cumulative or incremental — if the
+        chunk's trimmed body is longer than its predecessor, the router
+        sees ``{"name": "add"...{"name": "add"...{"name": "add"...`` piled
+        up, which breaks the streaming tool-call parser's buffer model.
+        """
+        if not _DEBUG_OUTPUT:
+            return
+        # Only track first rid we see in chunks — avoids n>1 interleave noise.
+        if not _debug_chunk_seen_rids:
+            _debug_chunk_seen_rids.add(rid)
+        if rid not in _debug_chunk_seen_rids:
+            return
+        count = _debug_chunk_counts.get(rid, 0)
+        if count >= _DEBUG_OUTPUT_MAX_CHUNKS:
+            return
+        _debug_chunk_counts[rid] = count + 1
+        raw = list(output.get("output_ids") or [])
+        meta = output.get("meta_info", {}) or {}
+        logger.warning(
+            "TS_DEBUG_CHUNK rid=%s seq=%d raw_len=%d completion_tokens=%s "
+            "trimmed_len=%d trimmed_head=%s trimmed_tail=%s",
+            rid,
+            count,
+            len(raw),
+            meta.get("completion_tokens"),
+            len(trimmed),
+            trimmed[:5],
+            trimmed[-5:],
+        )
+
     def _generated_output_ids(self, output: dict, reason_dict: dict | None) -> list[int]:
         """Return just the newly-generated tokens from a TokenSpeed output dict.
 
@@ -647,6 +685,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     ) -> tokenspeed_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
         token_ids = self._generated_output_ids(output, reason_dict)
+        self._maybe_dump_chunk(rid, output, reason_dict, token_ids)
         return tokenspeed_scheduler_pb2.GenerateResponse(
             request_id=rid,
             chunk=tokenspeed_scheduler_pb2.GenerateStreamChunk(
