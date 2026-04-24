@@ -601,13 +601,17 @@ async fn test_deepseek_dsml_v4_streaming_bpe_chunked_opener() {
     let tools = create_test_tools();
     let mut parser = DeepSeekDsmlParser::v4();
 
-    // BPE-sized chunks matching live model output.
+    // BPE-sized chunks modelled on live backend output. The `<｜DSML｜`
+    // sentinel is its own atomic token; the surrounding characters arrive as
+    // small sub-word pieces. The exact sub-word split is not load-bearing —
+    // what matters is that the outer opener is fragmented across chunks.
     let chunks = [
         "\n\n",
         "<｜DSML｜",
         "tool",
         "_c",
-        "alls",
+        "all",
+        "s",
         ">\n",
         "<｜DSML｜",
         "inv",
@@ -639,7 +643,8 @@ async fn test_deepseek_dsml_v4_streaming_bpe_chunked_opener() {
         "</｜DSML｜",
         "tool",
         "_c",
-        "alls",
+        "all",
+        "s",
         ">",
     ];
 
@@ -686,7 +691,8 @@ async fn test_deepseek_dsml_v32_streaming_bpe_chunked_opener() {
         "<｜DSML｜",
         "function",
         "_c",
-        "alls",
+        "all",
+        "s",
         ">\n",
         "<｜DSML｜",
         "invoke",

@@ -296,7 +296,8 @@ impl ToolParser for DeepSeekDsmlParser {
         // so real streams deliver it atomically. We flag the stream as DSML as
         // soon as the sentinel appears anywhere in the buffer — we don't wait
         // for a complete outer `<｜DSML｜{function,tool}_calls>` opener, because
-        // live backends chunk the opener as `<｜DSML｜` + `tool` + `_c` + `alls` + `>`.
+        // live backends chunk the opener into per-token pieces after the
+        // sentinel (e.g. `<｜DSML｜` + `tool` + `_c` + `all` + `s` + `>`).
         // Without this, chunk 2 of a live stream would flush the buffer on the
         // passthrough path and lose the sentinel, turning every subsequent
         // chunk into plain text. (See regression test
