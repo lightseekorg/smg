@@ -4,7 +4,10 @@
 //! into a [`StorageHook`] implementation, allowing WASM guests to intercept
 //! storage operations with custom before/after logic.
 
-use std::sync::Once;
+use std::{
+    collections::HashSet,
+    sync::{LazyLock, Mutex},
+};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -25,7 +28,8 @@ use crate::storage_spec::{
     StorageHook as StorageHookBindings,
 };
 
-static CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE: Once = Once::new();
+static UNMAPPED_WIT_OPERATIONS_LOGGED: LazyLock<Mutex<HashSet<StorageOperation>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// WASI state for storage hook WASM execution.
 struct StorageHookWasiState {
@@ -168,6 +172,22 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
+fn log_unmapped_wit_operation_once(operation: StorageOperation, phase: &'static str) {
+    let should_log = {
+        let mut logged = UNMAPPED_WIT_OPERATIONS_LOGGED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        logged.insert(operation)
+    };
+
+    if should_log {
+        tracing::debug!(
+            "skipping WASM storage-hook {phase}() for {:?} until WIT supports it",
+            operation
+        );
+    }
+}
+
 // ── StorageHook implementation ───────────────────────────────────────────
 
 #[async_trait]
@@ -179,11 +199,7 @@ impl StorageHook for WasmStorageHook {
         payload: &Value,
     ) -> Result<BeforeHookResult, HookError> {
         let Some(wit_op) = to_wit_operation(operation) else {
-            CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE.call_once(|| {
-                tracing::debug!(
-                    "skipping WASM storage-hook before() for CreateMemory until WIT supports it"
-                );
-            });
+            log_unmapped_wit_operation_once(operation, "before");
             return Ok(BeforeHookResult::Continue(ExtraColumns::new()));
         };
 
@@ -237,11 +253,7 @@ impl StorageHook for WasmStorageHook {
         extra: &ExtraColumns,
     ) -> Result<ExtraColumns, HookError> {
         let Some(wit_op) = to_wit_operation(operation) else {
-            CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE.call_once(|| {
-                tracing::debug!(
-                    "skipping WASM storage-hook after() for CreateMemory until WIT supports it"
-                );
-            });
+            log_unmapped_wit_operation_once(operation, "after");
             return Ok(extra.clone());
         };
 

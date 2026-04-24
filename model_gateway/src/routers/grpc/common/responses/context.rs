@@ -12,6 +12,38 @@ use smg_mcp::McpOrchestrator;
 
 use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
 
+/// Shared persistence backends used by Responses API handlers.
+#[derive(Clone)]
+pub(crate) struct PersistenceHandles {
+    /// Response storage backend
+    pub response_storage: Arc<dyn ResponseStorage>,
+
+    /// Conversation storage backend
+    pub conversation_storage: Arc<dyn ConversationStorage>,
+
+    /// Conversation item storage backend
+    pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
+
+    /// Conversation memory writer (can be NoOp depending on backend)
+    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+}
+
+impl PersistenceHandles {
+    pub fn new(
+        response_storage: Arc<dyn ResponseStorage>,
+        conversation_storage: Arc<dyn ConversationStorage>,
+        conversation_item_storage: Arc<dyn ConversationItemStorage>,
+        conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    ) -> Self {
+        Self {
+            response_storage,
+            conversation_storage,
+            conversation_item_storage,
+            conversation_memory_writer,
+        }
+    }
+}
+
 /// Context for /v1/responses endpoint
 ///
 /// Used by both regular and harmony implementations.
@@ -24,17 +56,8 @@ pub(crate) struct ResponsesContext {
     /// Shared components (tokenizer, parsers)
     pub components: Arc<SharedComponents>,
 
-    /// Response storage backend
-    pub response_storage: Arc<dyn ResponseStorage>,
-
-    /// Conversation storage backend
-    pub conversation_storage: Arc<dyn ConversationStorage>,
-
-    /// Conversation item storage backend
-    pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-
-    /// Conversation memory writer (can be NoOp depending on backend)
-    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    /// Shared persistence backends used by responses handlers
+    pub persistence: PersistenceHandles,
 
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
@@ -45,27 +68,17 @@ pub(crate) struct ResponsesContext {
 
 impl ResponsesContext {
     /// Create a new responses context.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "responses context assembles shared pipeline + storage handles in one place"
-    )]
     pub fn new(
         pipeline: Arc<RequestPipeline>,
         components: Arc<SharedComponents>,
-        response_storage: Arc<dyn ResponseStorage>,
-        conversation_storage: Arc<dyn ConversationStorage>,
-        conversation_item_storage: Arc<dyn ConversationItemStorage>,
-        conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+        persistence: PersistenceHandles,
         mcp_orchestrator: Arc<McpOrchestrator>,
         request_context: Option<StorageRequestContext>,
     ) -> Self {
         Self {
             pipeline,
             components,
-            response_storage,
-            conversation_storage,
-            conversation_item_storage,
-            conversation_memory_writer,
+            persistence,
             mcp_orchestrator,
             request_context,
         }

@@ -30,10 +30,7 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, Value};
-use smg_data_connector::{
-    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
-    RequestContext as StorageRequestContext, ResponseStorage,
-};
+use smg_data_connector::RequestContext as StorageRequestContext;
 use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -56,7 +53,7 @@ use crate::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
                 streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
-                ResponsesContext,
+                PersistenceHandles, ResponsesContext,
             },
             utils,
         },
@@ -104,10 +101,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 
     // Spawn background task to transform stream
     let original_request_clone = original_request.clone();
-    let response_storage = ctx.response_storage.clone();
-    let conversation_storage = ctx.conversation_storage.clone();
-    let conversation_item_storage = ctx.conversation_item_storage.clone();
-    let conversation_memory_writer = ctx.conversation_memory_writer.clone();
+    let persistence = ctx.persistence.clone();
     let request_context = ctx.request_context.clone();
 
     #[expect(
@@ -118,10 +112,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
         if let Err(e) = process_and_transform_sse_stream(
             body,
             original_request_clone,
-            response_storage,
-            conversation_storage,
-            conversation_item_storage,
-            conversation_memory_writer,
+            persistence,
             memory_execution_context,
             request_context,
             tx.clone(),
@@ -141,17 +132,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 }
 
 /// Process chat SSE stream and transform to responses format
-#[expect(
-    clippy::too_many_arguments,
-    reason = "streaming transformation keeps explicit handles to avoid additional heap boxing on hot path"
-)]
 async fn process_and_transform_sse_stream(
     body: Body,
     original_request: ResponsesRequest,
-    response_storage: Arc<dyn ResponseStorage>,
-    conversation_storage: Arc<dyn ConversationStorage>,
-    conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    persistence: PersistenceHandles,
     memory_execution_context: MemoryExecutionContext,
     request_context: Option<StorageRequestContext>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
@@ -236,22 +220,26 @@ async fn process_and_transform_sse_stream(
         usage_obj
     });
 
-    // Finalize and persist accumulated response
+    // Finalize accumulated response and kick off persistence before the
+    // terminal SSE send so a disconnected client does not skip storage.
     let final_response = accumulator.finalize();
-    persist_response_if_needed(
-        conversation_storage,
-        conversation_item_storage,
-        response_storage,
-        conversation_memory_writer,
-        memory_execution_context,
-        &final_response,
-        &original_request,
-        request_context,
-    )
-    .await;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "response persistence should not delay the terminal SSE event"
+    )]
+    tokio::spawn(async move {
+        persist_response_if_needed(
+            &persistence,
+            memory_execution_context,
+            &final_response,
+            &original_request,
+            request_context,
+        )
+        .await;
+    });
 
     let completed_event = event_emitter.emit_completed(usage_json.as_ref());
-    event_emitter.send_event(&completed_event, &tx)?;
+    event_emitter.send_event_best_effort(&completed_event, &tx);
 
     Ok(())
 }
@@ -518,7 +506,7 @@ async fn execute_tool_loop_streaming_internal(
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
-    let memory_execution_context = params.memory_execution_context.clone();
+    let mut memory_execution_context = Some(params.memory_execution_context.clone());
 
     // Generate response ID first so we can use it for both emitter and session
     let response_id = format!("resp_{}", Uuid::now_v7());
@@ -646,7 +634,7 @@ async fn execute_tool_loop_streaming_internal(
                 });
                 persist_streaming_response(
                     ctx,
-                    &memory_execution_context,
+                    take_memory_execution_context(&mut memory_execution_context)?,
                     &emitter,
                     accumulated_response.usage.clone(),
                     original_request,
@@ -907,22 +895,14 @@ async fn execute_tool_loop_streaming_internal(
                 // Break loop to return response to caller
                 persist_streaming_response(
                     ctx,
-                    &memory_execution_context,
+                    take_memory_execution_context(&mut memory_execution_context)?,
                     &emitter,
                     accumulated_response.usage.clone(),
                     original_request,
                     None,
                 )
                 .await;
-                let usage_json = accumulated_response.usage.as_ref().map(|u| {
-                    json!({
-                        "input_tokens": u.prompt_tokens,
-                        "output_tokens": u.completion_tokens,
-                        "total_tokens": u.total_tokens
-                    })
-                });
-                let event = emitter.emit_completed(usage_json.as_ref());
-                emitter.send_event(&event, &tx)?;
+                emit_terminal_completed(&mut emitter, accumulated_response.usage.as_ref(), &tx)?;
                 break;
             }
 
@@ -951,25 +931,16 @@ async fn execute_tool_loop_streaming_internal(
         // Text message events already emitted naturally by process_chunk during stream processing
         // (OpenAI router approach - text only appears on final iteration when no tool calls)
 
-        // Emit final response.completed event
-        let usage_json = accumulated_response.usage.as_ref().map(|u| {
-            json!({
-                "input_tokens": u.prompt_tokens,
-                "output_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens
-            })
-        });
         persist_streaming_response(
             ctx,
-            &memory_execution_context,
+            take_memory_execution_context(&mut memory_execution_context)?,
             &emitter,
             accumulated_response.usage.clone(),
             original_request,
             None,
         )
         .await;
-        let event = emitter.emit_completed(usage_json.as_ref());
-        emitter.send_event(&event, &tx)?;
+        emit_terminal_completed(&mut emitter, accumulated_response.usage.as_ref(), &tx)?;
 
         break;
     }
@@ -977,9 +948,33 @@ async fn execute_tool_loop_streaming_internal(
     Ok(())
 }
 
+fn emit_terminal_completed(
+    emitter: &mut ResponseStreamEventEmitter,
+    usage: Option<&Usage>,
+    tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+) -> Result<(), String> {
+    let usage_json = usage.map(|u| {
+        json!({
+            "input_tokens": u.prompt_tokens,
+            "output_tokens": u.completion_tokens,
+            "total_tokens": u.total_tokens
+        })
+    });
+    let event = emitter.emit_completed(usage_json.as_ref());
+    emitter.send_event(&event, tx)
+}
+
+fn take_memory_execution_context(
+    memory_execution_context: &mut Option<MemoryExecutionContext>,
+) -> Result<MemoryExecutionContext, String> {
+    memory_execution_context.take().ok_or_else(|| {
+        "memory execution context was already consumed on a terminal streaming path".to_string()
+    })
+}
+
 async fn persist_streaming_response(
     ctx: &ResponsesContext,
-    memory_execution_context: &MemoryExecutionContext,
+    memory_execution_context: MemoryExecutionContext,
     emitter: &ResponseStreamEventEmitter,
     usage: Option<Usage>,
     original_request: &ResponsesRequest,
@@ -991,11 +986,8 @@ async fn persist_streaming_response(
         final_response.status = ResponseStatus::Incomplete;
     }
     persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.response_storage.clone(),
-        ctx.conversation_memory_writer.clone(),
-        memory_execution_context.clone(),
+        &ctx.persistence,
+        memory_execution_context,
         &final_response,
         original_request,
         ctx.request_context.clone(),

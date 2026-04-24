@@ -201,6 +201,7 @@ pub(super) async fn load_previous_messages(
 
     // Load response chain from storage
     let chain = match ctx
+        .persistence
         .response_storage
         .get_response_chain(&prev_id, None)
         .await

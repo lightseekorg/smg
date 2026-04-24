@@ -402,10 +402,7 @@ async fn execute_mcp_tool_loop_streaming(
 
                 // Persist response to storage if store=true
                 persist_response_if_needed(
-                    ctx.conversation_storage.clone(),
-                    ctx.conversation_item_storage.clone(),
-                    ctx.response_storage.clone(),
-                    ctx.conversation_memory_writer.clone(),
+                    &ctx.persistence,
                     memory_execution_context.clone(),
                     &final_response,
                     original_request,
@@ -493,10 +490,7 @@ async fn execute_without_mcp_streaming(
 
     // Persist response to storage if store=true
     persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.response_storage.clone(),
-        ctx.conversation_memory_writer.clone(),
+        &ctx.persistence,
         memory_execution_context.clone(),
         &final_response,
         original_request,
@@ -533,10 +527,7 @@ async fn persist_streaming_response(
         final_response.status = ResponseStatus::Incomplete;
     }
     persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.response_storage.clone(),
-        ctx.conversation_memory_writer.clone(),
+        &ctx.persistence,
         memory_execution_context.clone(),
         &final_response,
         original_request,

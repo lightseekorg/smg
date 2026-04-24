@@ -14,7 +14,8 @@ use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
+        handlers::cancel_response_impl, utils::validate_worker_availability, PersistenceHandles,
+        ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -147,10 +148,12 @@ impl GrpcRouter {
             ResponsesContext::new(
                 Arc::new(pipeline.clone()),
                 shared_components.clone(),
-                ctx.response_storage.clone(),
-                ctx.conversation_storage.clone(),
-                ctx.conversation_item_storage.clone(),
-                ctx.conversation_memory_writer.clone(),
+                PersistenceHandles::new(
+                    ctx.response_storage.clone(),
+                    ctx.conversation_storage.clone(),
+                    ctx.conversation_item_storage.clone(),
+                    ctx.conversation_memory_writer.clone(),
+                ),
                 mcp_orchestrator.clone(),
                 storage_request_context.clone(),
             )
