@@ -88,6 +88,78 @@ def _image_generation_mcp_config(mock_mcp_url: str) -> dict:
     }
 
 
+def _web_search_mcp_config(mock_mcp_url: str) -> dict:
+    """Build an MCP config that routes ``web_search_preview`` through the mock.
+
+    Same shape as ``_image_generation_mcp_config``. ``builtin_type:
+    web_search_preview`` makes the gateway route any
+    ``{"type": "web_search_preview"}`` tool request through this server, and
+    ``response_format: web_search_call`` tells the transformer to shape the
+    MCP tool result into a Responses API ``web_search_call`` output item.
+
+    Note that ``{"type": "web_search"}`` (the non-preview hosted tool) is
+    not routed through MCP-builtin in the current code path
+    (``model_gateway/src/routers/common/mcp_utils.rs::extract_builtin_types``
+    only forwards ``WebSearchPreview``, not ``WebSearch``); requests with
+    that tool type fall through to the upstream model directly.
+    """
+    return {
+        "servers": [
+            {
+                "name": "mock-web-search",
+                "protocol": "streamable",
+                "url": mock_mcp_url,
+                "builtin_type": "web_search_preview",
+                "builtin_tool_name": "web_search",
+                "tools": {
+                    "web_search": {
+                        "response_format": "web_search_call",
+                    }
+                },
+            }
+        ]
+    }
+
+
+def _code_interpreter_mcp_config(mock_mcp_url: str) -> dict:
+    """Build an MCP config that routes ``code_interpreter`` through the mock.
+
+    Mirrors the other builders. ``builtin_type: code_interpreter`` routes
+    ``{"type": "code_interpreter"}`` tool requests through the mock and
+    ``response_format: code_interpreter_call`` asks the transformer to
+    produce a ``code_interpreter_call`` output item. The transformer reads
+    ``code`` / ``container_id`` / ``outputs`` from the MCP result.
+    """
+    return {
+        "servers": [
+            {
+                "name": "mock-code-interpreter",
+                "protocol": "streamable",
+                "url": mock_mcp_url,
+                "builtin_type": "code_interpreter",
+                "builtin_tool_name": "code_interpreter",
+                "tools": {
+                    "code_interpreter": {
+                        "response_format": "code_interpreter_call",
+                    }
+                },
+            }
+        ]
+    }
+
+
+def _write_mcp_config_yaml(config: dict, prefix: str) -> str:
+    """Write an MCP config dict to a fresh tempfile and return its path.
+
+    Caller is responsible for removing the file. Centralised so each
+    per-builtin config fixture below stays a single ``yield`` line.
+    """
+    fd, path = tempfile.mkstemp(suffix=".yaml", prefix=prefix)
+    with os.fdopen(fd, "w") as f:
+        yaml.dump(config, f)
+    return path
+
+
 @pytest.fixture(scope="session")
 def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # noqa: F811
     """Write the MCP config YAML to a tempfile and yield its path.
@@ -100,12 +172,46 @@ def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # no
     discovers the fixture in this module; using the name as a parameter
     here is exactly the pattern that triggers F811.
     """
-    config = _image_generation_mcp_config(mock_mcp_server.url)
-    fd, path = tempfile.mkstemp(suffix=".yaml", prefix="mock_mcp_image_gen_")
+    path = _write_mcp_config_yaml(
+        _image_generation_mcp_config(mock_mcp_server.url),
+        prefix="mock_mcp_image_gen_",
+    )
     try:
-        with os.fdopen(fd, "w") as f:
-            yaml.dump(config, f)
         logger.info("MCP config for mock image_generation at %s", path)
+        yield path
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+@pytest.fixture(scope="session")
+def mock_mcp_config_file_web_search(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+) -> Iterator[str]:
+    """Session-scoped MCP config file for the ``web_search_preview`` builtin."""
+    path = _write_mcp_config_yaml(
+        _web_search_mcp_config(mock_mcp_server.url),
+        prefix="mock_mcp_web_search_",
+    )
+    try:
+        logger.info("MCP config for mock web_search at %s", path)
+        yield path
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+@pytest.fixture(scope="session")
+def mock_mcp_config_file_code_interpreter(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+) -> Iterator[str]:
+    """Session-scoped MCP config file for the ``code_interpreter`` builtin."""
+    path = _write_mcp_config_yaml(
+        _code_interpreter_mcp_config(mock_mcp_server.url),
+        prefix="mock_mcp_code_interpreter_",
+    )
+    try:
+        logger.info("MCP config for mock code_interpreter at %s", path)
         yield path
     finally:
         if os.path.exists(path):
@@ -137,6 +243,46 @@ def image_gen_tool_args() -> dict:
 # =============================================================================
 
 
+def _start_cloud_gateway_with_mcp(
+    *,
+    mock_mcp_server: MockMcpServer,
+    mcp_config_file: str,
+    skip_label: str,
+):
+    """Common cloud-gateway launch helper shared by the per-builtin fixtures.
+
+    Skips (rather than fails) when ``OPENAI_API_KEY`` is absent so the
+    cloud-only lanes can be skipped without polluting the rest of the
+    matrix. ``skip_label`` names the builtin tool the caller is testing for
+    a friendly skip message. Returns ``(gateway, client)``.
+    """
+    api_key_env = "OPENAI_API_KEY"
+    if not os.environ.get(api_key_env):
+        pytest.skip(f"{api_key_env} not set — {skip_label} cloud lane needs OpenAI")
+
+    logger.info(
+        "Launching OpenAI cloud gateway for %s with mock MCP config (url=%s, config=%s)",
+        skip_label,
+        mock_mcp_server.url,
+        mcp_config_file,
+    )
+    gateway = launch_cloud_gateway(
+        "openai",
+        history_backend="memory",
+        extra_args=["--mcp-config-path", mcp_config_file],
+    )
+    try:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=os.environ[api_key_env],
+        )
+    except Exception:
+        gateway.shutdown()
+        raise
+
+    return gateway, client
+
+
 @pytest.fixture(scope="class")
 def gateway_with_mock_mcp_cloud(
     mock_mcp_server: MockMcpServer,  # noqa: F811
@@ -147,34 +293,57 @@ def gateway_with_mock_mcp_cloud(
     Yields ``(gateway, client, mock_mcp_server, model)``. Skips when
     ``OPENAI_API_KEY`` is absent.
     """
-    api_key_env = "OPENAI_API_KEY"
-    if not os.environ.get(api_key_env):
-        pytest.skip(f"{api_key_env} not set — image_generation cloud lane needs OpenAI")
-
-    logger.info(
-        "Launching OpenAI cloud gateway with mock MCP config (url=%s, config=%s)",
-        mock_mcp_server.url,
-        mock_mcp_config_file,
+    gateway, client = _start_cloud_gateway_with_mcp(
+        mock_mcp_server=mock_mcp_server,
+        mcp_config_file=mock_mcp_config_file,
+        skip_label="image_generation",
     )
-    gateway = launch_cloud_gateway(
-        "openai",
-        history_backend="memory",
-        extra_args=["--mcp-config-path", mock_mcp_config_file],
-    )
-
-    try:
-        client = openai.OpenAI(
-            base_url=f"{gateway.base_url}/v1",
-            api_key=os.environ[api_key_env],
-        )
-    except Exception:
-        gateway.shutdown()
-        raise
-
     # ``gpt-5-nano`` is the model configured for the ``openai`` cloud
     # entry in ``e2e_test/infra/model_specs.py::THIRD_PARTY_MODELS``; keep
     # the literal pinned in the fixture so ``_ImageGenerationAssertions``
     # doesn't have to reach into infra.
+    try:
+        yield gateway, client, mock_mcp_server, "gpt-5-nano"
+    finally:
+        gateway.shutdown()
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_web_search_cloud(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file_web_search: str,
+) -> Iterator[tuple]:
+    """Launch an OpenAI cloud gateway wired to the mock ``web_search`` server.
+
+    Yields ``(gateway, client, mock_mcp_server, model)``. Skips when
+    ``OPENAI_API_KEY`` is absent.
+    """
+    gateway, client = _start_cloud_gateway_with_mcp(
+        mock_mcp_server=mock_mcp_server,
+        mcp_config_file=mock_mcp_config_file_web_search,
+        skip_label="web_search_preview",
+    )
+    try:
+        yield gateway, client, mock_mcp_server, "gpt-5-nano"
+    finally:
+        gateway.shutdown()
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_code_interpreter_cloud(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file_code_interpreter: str,
+) -> Iterator[tuple]:
+    """Launch an OpenAI cloud gateway wired to the mock ``code_interpreter``.
+
+    Yields ``(gateway, client, mock_mcp_server, model)``. Skips when
+    ``OPENAI_API_KEY`` is absent.
+    """
+    gateway, client = _start_cloud_gateway_with_mcp(
+        mock_mcp_server=mock_mcp_server,
+        mcp_config_file=mock_mcp_config_file_code_interpreter,
+        skip_label="code_interpreter",
+    )
     try:
         yield gateway, client, mock_mcp_server, "gpt-5-nano"
     finally:
@@ -263,6 +432,54 @@ def gateway_with_mock_mcp_grpc_sglang(
         engine="sglang",
         model_id="openai/gpt-oss-20b",
         mcp_config_file=mock_mcp_config_file,
+    )
+    try:
+        yield gateway, client, mock_mcp_server, model_path
+    finally:
+        from infra.worker import stop_workers
+
+        gateway.shutdown()
+        stop_workers(workers)
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_web_search_grpc_sglang(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file_web_search: str,
+) -> Iterator[tuple]:
+    """Local SGLang gRPC gateway wired to the mock ``web_search`` server.
+
+    Uses gpt-oss-20b through the harmony path. Skips when the worker can't
+    start (no GPU, missing weights) rather than hard-failing.
+    """
+    gateway, client, workers, model_path = _start_local_grpc_gateway_with_mcp(
+        engine="sglang",
+        model_id="openai/gpt-oss-20b",
+        mcp_config_file=mock_mcp_config_file_web_search,
+    )
+    try:
+        yield gateway, client, mock_mcp_server, model_path
+    finally:
+        from infra.worker import stop_workers
+
+        gateway.shutdown()
+        stop_workers(workers)
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_code_interpreter_grpc_sglang(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file_code_interpreter: str,
+) -> Iterator[tuple]:
+    """Local SGLang gRPC gateway wired to the mock ``code_interpreter`` server.
+
+    Uses gpt-oss-20b through the harmony path. Skips when the worker can't
+    start.
+    """
+    gateway, client, workers, model_path = _start_local_grpc_gateway_with_mcp(
+        engine="sglang",
+        model_id="openai/gpt-oss-20b",
+        mcp_config_file=mock_mcp_config_file_code_interpreter,
     )
     try:
         yield gateway, client, mock_mcp_server, model_path

@@ -77,6 +77,36 @@ IMAGE_GENERATION_PNG_BASE64 = (
 )
 
 
+# Deterministic ``web_search`` results. Shape mirrors the embedded
+# ``openai_response`` payload that ``ResponseTransformer::extract_web_sources``
+# walks through to populate the ``web_search_call.action.sources`` field.
+# Hard-coded so tests can byte-compare URLs / titles without depending on a
+# live search backend.
+WEB_SEARCH_RESULTS = [
+    {
+        "title": "Mock weather report",
+        "url": "https://example.com/mock-weather",
+        "snippet": "Deterministic mock snippet for weather.",
+    },
+    {
+        "title": "Mock secondary result",
+        "url": "https://example.com/mock-secondary",
+        "snippet": "Deterministic mock snippet for follow-up.",
+    },
+]
+
+
+# Deterministic ``code_interpreter`` payload. ``code`` is a tiny self-contained
+# expression so a non-zero string survives the gateway's transformer (it
+# unconditionally forwards ``code`` from the MCP result onto the
+# ``code_interpreter_call.code`` field). ``outputs`` uses the typed
+# ``{type: "logs", logs: ...}`` shape that ``extract_code_outputs`` recognises.
+CODE_INTERPRETER_CODE = "print('hi')"
+CODE_INTERPRETER_OUTPUTS = [
+    {"type": "logs", "logs": "hi\n"},
+]
+
+
 # =============================================================================
 # Mock server
 # =============================================================================
@@ -148,9 +178,17 @@ class MockMcpServer:
         # and the gateway's MCP client is configured with the same path.
         self._mount_path = "/mcp"
 
-        # Public conveniences — let tests read the deterministic payload without
-        # reaching into module-level constants.
+        # Public conveniences — let tests read the deterministic payloads
+        # without reaching into module-level constants. ``copy.deepcopy`` so
+        # callers that mutate (e.g., set a per-test ``user`` field on a
+        # captured arg dict) cannot leak back into the module-level state and
+        # break a later test that imports the constant directly.
         self.image_generation_png_base64 = IMAGE_GENERATION_PNG_BASE64
+        self.web_search_results: list[dict[str, str]] = copy.deepcopy(WEB_SEARCH_RESULTS)
+        self.code_interpreter_code = CODE_INTERPRETER_CODE
+        self.code_interpreter_outputs: list[dict[str, Any]] = copy.deepcopy(
+            CODE_INTERPRETER_OUTPUTS
+        )
 
     # ------------------------------------------------------------------
     # Public URL / port
@@ -366,6 +404,9 @@ class MockMcpServer:
         """
         record_call = self._record_call
         deterministic_image = self.image_generation_png_base64
+        deterministic_search = self.web_search_results
+        deterministic_code = self.code_interpreter_code
+        deterministic_code_outputs = self.code_interpreter_outputs
 
         @fastmcp.tool(
             name="image_generation",
@@ -380,7 +421,13 @@ class MockMcpServer:
             quality: str = "standard",
             moderation: str = "auto",
             output_format: str = "png",
+            user: str | None = None,
         ) -> dict[str, str]:
+            # ``user`` is declared explicitly so a forward-compatible
+            # gateway change that propagates the request-level ``user`` field
+            # into MCP dispatch arguments (currently a separate work item)
+            # does not have its dispatch rejected by FastMCP's schema
+            # validation. The field is recorded so tests can assert it.
             record_call(
                 {
                     "tool": "image_generation",
@@ -390,6 +437,7 @@ class MockMcpServer:
                         "quality": quality,
                         "moderation": moderation,
                         "output_format": output_format,
+                        "user": user,
                     },
                 }
             )
@@ -399,33 +447,66 @@ class MockMcpServer:
                 "status": "completed",
             }
 
+        # ``web_search`` is the underlying MCP tool name bound to the
+        # OpenAI ``web_search_preview`` built-in via
+        # ``builtin_type: web_search_preview`` in the gateway config.
+        # ``count`` mirrors the optional ``num_results`` knob OpenAI surfaces
+        # on the public preview tool.
+        @fastmcp.tool(
+            name="web_search",
+            description=(
+                "Mock web_search tool. Returns a deterministic, byte-stable "
+                "result list shaped like the embedded openai_response payload "
+                "the gateway transformer extracts from real Brave / OpenAI MCP "
+                "results. Never calls out of process."
+            ),
+        )
+        def web_search(query: str, count: int = 3) -> dict[str, Any]:
+            record_call(
+                {
+                    "tool": "web_search",
+                    "arguments": {"query": query, "count": count},
+                }
+            )
+            return {
+                "query": query,
+                "queries": [query],
+                "status": "completed",
+                "results": deterministic_search,
+            }
+
+        # ``code_interpreter`` mirrors the field shape the transformer reads
+        # from MCP results: top-level ``code`` plus a ``container_id`` so the
+        # gateway emits a ``code_interpreter_call`` output item with both
+        # populated. ``outputs`` is an array of ``{type, ...}`` objects, which
+        # ``ResponseTransformer::extract_code_outputs`` walks to build the
+        # protocol-level ``CodeInterpreterOutput`` enum.
+        @fastmcp.tool(
+            name="code_interpreter",
+            description=(
+                "Mock code_interpreter tool. Returns deterministic code, "
+                "container id, and a single logs output. Never calls out of "
+                "process."
+            ),
+        )
+        def code_interpreter(code: str) -> dict[str, Any]:
+            record_call(
+                {
+                    "tool": "code_interpreter",
+                    "arguments": {"code": code},
+                }
+            )
+            return {
+                "code": deterministic_code,
+                "container_id": "cntr_mock_e2e",
+                "outputs": deterministic_code_outputs,
+                "status": "completed",
+            }
+
         # -----------------------------------------------------------------
-        # TODO(R6.x follow-ups): uncomment these stubs as each built-in tool
-        # gets its own e2e coverage. The signatures match the OpenAI
-        # built-in tool contracts documented in the audit (§R6).
+        # ``file_search`` is intentionally not registered yet — the OpenAI
+        # built-in maps to a vector store on the upstream side, and the
+        # gateway's MCP-builtin lane needs that provisioning hook before a
+        # mock can be exercised end-to-end. Add it alongside a fixture once
+        # the vector-store stubbing is wired up.
         # -----------------------------------------------------------------
-        #
-        # @fastmcp.tool(name="web_search", description="Mock web_search tool.")
-        # def web_search(query: str, count: int = 3) -> dict[str, list[dict]]:
-        #     record_call({"tool": "web_search", "arguments": {"query": query, "count": count}})
-        #     return {
-        #         "results": [
-        #             {
-        #                 "title": f"Mock result for {query}",
-        #                 "url": "https://example.com/mock",
-        #                 "snippet": "Deterministic mock snippet.",
-        #             }
-        #         ]
-        #     }
-        #
-        # @fastmcp.tool(name="file_search", description="Mock file_search tool.")
-        # def file_search(query: str, max_results: int = 3) -> dict[str, list[dict]]:
-        #     record_call({"tool": "file_search",
-        #                  "arguments": {"query": query, "max_results": max_results}})
-        #     return {"results": [{"file_id": "file_mock_1", "score": 1.0,
-        #                          "content": [{"type": "text", "text": "mock"}]}]}
-        #
-        # @fastmcp.tool(name="code_interpreter", description="Mock code_interpreter tool.")
-        # def code_interpreter(code: str) -> dict[str, str]:
-        #     record_call({"tool": "code_interpreter", "arguments": {"code": code}})
-        #     return {"stdout": "mock stdout", "stderr": "", "status": "completed"}

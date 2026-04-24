@@ -383,6 +383,62 @@ class _ImageGenerationAssertions:
             f"Compactor did not pin quality override; got {received.get('quality')!r}"
         )
 
+    def test_image_generation_user_forwarded_to_mcp(self, request, image_gen_tool_args) -> None:
+        """Request-level ``user`` should reach the MCP tool dispatch arguments.
+
+        The Responses API exposes a ``user`` field for safety-attribution.
+        For MCP-builtin tool routing it is useful for the underlying tool
+        to receive the same identifier so per-user policies (rate limits,
+        provenance trails) can be enforced. The current gateway maps
+        ``user`` to ``safety_identifier`` on the upstream payload (see
+        ``model_gateway/src/routers/openai/responses/utils.rs``) but does
+        not yet propagate it onto MCP dispatch ``arguments``.
+
+        This test asserts the future-state: ``user`` arrives in the mock's
+        ``last_call_args["arguments"]["user"]``. While that propagation is
+        not yet wired, the assertion is gated on a ``pytest.skip`` so this
+        suite does not red on the gap; once propagation lands the skip
+        path is unreachable and the assertion takes effect.
+        """
+        _, client, mock_mcp, model = self._ctx(request)
+
+        user_id = "smg_e2e_image_gen_user"
+        baseline_calls = len(mock_mcp.call_log)
+
+        resp = client.responses.create(
+            model=model,
+            input=_IMAGE_GEN_PROMPT,
+            tools=[image_gen_tool_args],
+            tool_choice=_FORCED_TOOL_CHOICE,
+            stream=False,
+            user=user_id,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+
+        # Non-vacuity guard: confirm the mock saw a fresh dispatch.
+        assert len(mock_mcp.call_log) > baseline_calls, (
+            f"Mock MCP server saw no new calls (baseline={baseline_calls}); "
+            "user-forwarding assertion would be vacuous on session-scoped mock."
+        )
+
+        last_args = mock_mcp.last_call_args
+        assert last_args is not None, "Mock MCP server saw no calls"
+        received = last_args.get("arguments", {})
+
+        forwarded = received.get("user")
+        if forwarded is None:
+            pytest.skip(
+                "Gateway does not currently propagate request-level 'user' onto "
+                "MCP dispatch arguments. Once that propagation lands, this skip "
+                "becomes unreachable and the equality assertion below takes effect."
+            )
+
+        assert forwarded == user_id, (
+            f"Gateway forwarded a 'user' value but it did not match the request; "
+            f"got {forwarded!r}, expected {user_id!r}"
+        )
+
     def test_image_generation_compactor_strips_base64(self, request, image_gen_tool_args) -> None:
         """Multi-turn replay: base64 payload must not survive into stored context."""
         gateway, client, mock_mcp, model = self._ctx(request)

@@ -40,7 +40,14 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
 from .gpu_monitor import GPUMonitor
 from .gpu_monitor import should_monitor as should_monitor_gpu
-from .mock_mcp import IMAGE_GENERATION_PNG_BASE64, MockMcpServer, mock_mcp_server
+from .mock_mcp import (
+    CODE_INTERPRETER_CODE,
+    CODE_INTERPRETER_OUTPUTS,
+    IMAGE_GENERATION_PNG_BASE64,
+    WEB_SEARCH_RESULTS,
+    MockMcpServer,
+    mock_mcp_server,
+)
 from .model_specs import (  # Default model paths; Model groups
     CHAT_MODELS,
     DEFAULT_EMBEDDING_MODEL_PATH,
@@ -136,6 +143,9 @@ __all__ = [
     "MockMcpServer",
     "mock_mcp_server",
     "IMAGE_GENERATION_PNG_BASE64",
+    "WEB_SEARCH_RESULTS",
+    "CODE_INTERPRETER_CODE",
+    "CODE_INTERPRETER_OUTPUTS",
     # Default model paths
     "DEFAULT_MODEL_PATH",
     "DEFAULT_SMALL_MODEL_PATH",

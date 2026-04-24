@@ -32,7 +32,13 @@ from collections.abc import Iterator
 
 import pytest
 
-from .mock_mcp_server import IMAGE_GENERATION_PNG_BASE64, MockMcpServer
+from .mock_mcp_server import (
+    CODE_INTERPRETER_CODE,
+    CODE_INTERPRETER_OUTPUTS,
+    IMAGE_GENERATION_PNG_BASE64,
+    WEB_SEARCH_RESULTS,
+    MockMcpServer,
+)
 
 
 @pytest.fixture(scope="session")
@@ -47,7 +53,10 @@ def mock_mcp_server() -> Iterator[MockMcpServer]:
 
 
 __all__ = [
+    "CODE_INTERPRETER_CODE",
+    "CODE_INTERPRETER_OUTPUTS",
     "IMAGE_GENERATION_PNG_BASE64",
+    "WEB_SEARCH_RESULTS",
     "MockMcpServer",
     "mock_mcp_server",
 ]
