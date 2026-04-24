@@ -63,100 +63,106 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     };
 
     // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+    let mcp_resolution = if let Some(tools) = original_body.tools.as_deref() {
         ensure_request_mcp_client(mcp_orchestrator, tools).await
     } else {
-        None
+        Ok(None)
     };
 
     let mut response_json: Value;
 
-    if let Some(mcp_servers) = mcp_servers {
-        let session_request_id = original_body
-            .request_id
-            .clone()
-            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
-        let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
-        let mut session = McpToolSession::new_with_headers(
-            mcp_orchestrator,
-            mcp_servers,
-            &session_request_id,
-            forwarded_headers,
-        );
-        if let Some(tools) = original_body.tools.as_deref() {
-            session.configure_response_tools_approval(tools);
+    match mcp_resolution {
+        Ok(Some(mcp_servers)) => {
+            let session_request_id = original_body
+                .request_id
+                .clone()
+                .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+            let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
+            let mut session = McpToolSession::new_with_headers(
+                mcp_orchestrator,
+                mcp_servers,
+                &session_request_id,
+                forwarded_headers,
+            );
+            if let Some(tools) = original_body.tools.as_deref() {
+                session.configure_response_tools_approval(tools);
+            }
+            prepare_mcp_tools_as_functions(&mut payload, &session);
+
+            match execute_tool_loop(
+                ctx.components.client(),
+                &url,
+                ctx.headers(),
+                worker.api_key(),
+                payload,
+                ToolLoopExecutionContext {
+                    original_body,
+                    existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
+                    session: &session,
+                },
+            )
+            .await
+            {
+                Ok(resp) => {
+                    worker.record_outcome(200);
+                    response_json = resp;
+                }
+                Err(err) => {
+                    worker.record_outcome(502);
+                    return error::internal_error("upstream_error", err);
+                }
+            }
+
+            restore_original_tools(&mut response_json, original_body, Some(&session));
         }
-        prepare_mcp_tools_as_functions(&mut payload, &session);
+        Ok(None) => {
+            let mut request_builder = ctx.components.client().post(&url).json(&payload);
+            let provider = ApiProvider::from_url(&url);
+            let auth_header = provider.extract_auth_header(ctx.headers(), worker.api_key());
+            request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
 
-        match execute_tool_loop(
-            ctx.components.client(),
-            &url,
-            ctx.headers(),
-            worker.api_key(),
-            payload,
-            ToolLoopExecutionContext {
-                original_body,
-                existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
-                session: &session,
-            },
-        )
-        .await
-        {
-            Ok(resp) => {
-                worker.record_outcome(200);
-                response_json = resp;
+            let response = match request_builder.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    worker.record_outcome(502);
+                    tracing::error!(
+                        url = %url,
+                        error = %e,
+                        "Failed to forward request to OpenAI"
+                    );
+                    return error::bad_gateway(
+                        "upstream_error",
+                        format!("Failed to forward request to OpenAI: {e}"),
+                    );
+                }
+            };
+
+            let status = response.status();
+            worker.record_outcome(status.as_u16());
+
+            if !status.is_success() {
+                let status = StatusCode::from_u16(status.as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let body = response.text().await.unwrap_or_default();
+                let body = error::sanitize_error_body(&body);
+                return (status, body).into_response();
             }
-            Err(err) => {
-                worker.record_outcome(502);
-                return error::internal_error("upstream_error", err);
-            }
+
+            response_json = match response.json::<Value>().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return error::internal_error(
+                        "parse_error",
+                        format!("Failed to parse upstream response: {e}"),
+                    );
+                }
+            };
+
+            restore_original_tools(&mut response_json, original_body, None);
         }
-
-        restore_original_tools(&mut response_json, original_body, Some(&session));
-    } else {
-        let mut request_builder = ctx.components.client().post(&url).json(&payload);
-        let provider = ApiProvider::from_url(&url);
-        let auth_header = provider.extract_auth_header(ctx.headers(), worker.api_key());
-        request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
-
-        let response = match request_builder.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                worker.record_outcome(502);
-                tracing::error!(
-                    url = %url,
-                    error = %e,
-                    "Failed to forward request to OpenAI"
-                );
-                return error::bad_gateway(
-                    "upstream_error",
-                    format!("Failed to forward request to OpenAI: {e}"),
-                );
-            }
-        };
-
-        let status = response.status();
-        worker.record_outcome(status.as_u16());
-
-        if !status.is_success() {
-            let status =
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let body = response.text().await.unwrap_or_default();
-            let body = error::sanitize_error_body(&body);
-            return (status, body).into_response();
+        Err(message) => {
+            return error::failed_dependency("http_error", message);
         }
-
-        response_json = match response.json::<Value>().await {
-            Ok(r) => r,
-            Err(e) => {
-                return error::internal_error(
-                    "parse_error",
-                    format!("Failed to parse upstream response: {e}"),
-                );
-            }
-        };
-
-        restore_original_tools(&mut response_json, original_body, None);
     }
     patch_response_with_request_metadata(
         &mut response_json,

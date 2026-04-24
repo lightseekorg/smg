@@ -13,7 +13,9 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import openai
 import pytest
+import smg_client
 from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -132,10 +134,19 @@ BRAVE_MCP_TOOL_REQUIRE_APPROVAL_ALWAYS = {
     "require_approval": "always",
 }
 
+BROKEN_MCP_TOOL = {
+    "type": "mcp",
+    "server_label": "broken",
+    "server_url": "http://127.0.0.1:1/mcp",
+    "require_approval": "never",
+}
+
 MCP_TEST_PROMPT = (
     "Search the web for 'Python programming language'. Set count to 1 to "
     "get only one result and return one sentence response."
 )
+
+MCP_FAILURE_TEST_PROMPT = "Use the available MCP tools and answer briefly."
 
 
 # =============================================================================
@@ -349,11 +360,42 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
     assert mcp_list_tools_labels(completed_events[0].response.output) == ["deepwiki"]
 
 
+def assert_explicit_mcp_failure(model, api_client, *, stream):
+    """Assert that any explicit MCP connection failure fails the whole request."""
+
+    with pytest.raises(Exception) as exc_info:
+        response = api_client.responses.create(
+            model=model,
+            input=MCP_FAILURE_TEST_PROMPT,
+            tools=[BRAVE_MCP_TOOL, BROKEN_MCP_TOOL],
+            stream=stream,
+            reasoning={"effort": "low"},
+        )
+        if stream:
+            list(response)
+
+    exc = exc_info.value
+    assert isinstance(exc, (openai.APIStatusError, smg_client.ApiError))
+    assert exc.status_code == 424
+    assert exc.code == "http_error"
+    assert "Error retrieving tool list from MCP server: 'broken'" in str(exc)
+
+
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestToolCallingCloud:
     """Tool calling tests against cloud APIs."""
+
+    def test_mcp_multi_server_fails_if_any_server_is_unreachable(self, model, api_client):
+        """Test explicit MCP requests fail when any declared server cannot connect."""
+
+        assert_explicit_mcp_failure(model, api_client, stream=False)
+
+    def test_mcp_multi_server_streaming_fails_if_any_server_is_unreachable(self, model, api_client):
+        """Test streaming explicit MCP requests fail before execution if any server cannot connect."""
+
+        assert_explicit_mcp_failure(model, api_client, stream=True)
 
     def test_basic_function_call(self, model, api_client):
         """Test basic function calling workflow."""
@@ -773,6 +815,16 @@ class TestToolCallingCloud:
 class TestToolChoiceGptOss:
     """Tool choice tests against local gRPC backend with Harmony model."""
 
+    def test_mcp_multi_server_fails_if_any_server_is_unreachable(self, model, api_client):
+        """Test explicit MCP requests fail when any declared server cannot connect."""
+
+        assert_explicit_mcp_failure(model, api_client, stream=False)
+
+    def test_mcp_multi_server_streaming_fails_if_any_server_is_unreachable(self, model, api_client):
+        """Test streaming explicit MCP requests fail before execution if any server cannot connect."""
+
+        assert_explicit_mcp_failure(model, api_client, stream=True)
+
     def test_tool_choice_auto(self, model, api_client):
         """Test tool_choice="auto" allows model to decide whether to use tools."""
 
@@ -1137,6 +1189,16 @@ class TestToolChoiceGptOss:
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceLocal:
     """Tool choice tests against local gRPC backend with Qwen model."""
+
+    def test_mcp_multi_server_fails_if_any_server_is_unreachable(self, model, api_client):
+        """Test explicit MCP requests fail when any declared server cannot connect."""
+
+        assert_explicit_mcp_failure(model, api_client, stream=False)
+
+    def test_mcp_multi_server_streaming_fails_if_any_server_is_unreachable(self, model, api_client):
+        """Test streaming explicit MCP requests fail before execution if any server cannot connect."""
+
+        assert_explicit_mcp_failure(model, api_client, stream=True)
 
     def test_tool_choice_auto(self, model, api_client):
         """Test tool_choice="auto" allows model to decide whether to use tools."""

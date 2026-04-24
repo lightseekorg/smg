@@ -49,7 +49,7 @@ use crate::{
             header_utils::{
                 extract_forwardable_request_headers, preserve_response_headers, ApiProvider,
             },
-            mcp_utils::DEFAULT_MAX_ITERATIONS,
+            mcp_utils::{ensure_request_mcp_client, DEFAULT_MAX_ITERATIONS},
             persistence_utils::persist_conversation_items,
         },
         error,
@@ -1062,8 +1062,6 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::common::mcp_utils::ensure_request_mcp_client;
-
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
@@ -1085,10 +1083,15 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     // Check for MCP tools and create request context if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+    let mcp_resolution = if let Some(tools) = original_body.tools.as_deref() {
         ensure_request_mcp_client(&mcp_orchestrator, tools).await
     } else {
-        None
+        Ok(None)
+    };
+
+    let mcp_servers = match mcp_resolution {
+        Err(message) => return error::failed_dependency("http_error", message),
+        Ok(servers) => servers,
     };
 
     let client = ctx.components.client().clone();
