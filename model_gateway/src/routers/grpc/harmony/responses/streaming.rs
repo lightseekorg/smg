@@ -1,15 +1,12 @@
 //! Streaming Harmony Responses API implementation
 
-use std::{
-    collections::HashSet,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
 use serde_json::json;
-use smg_mcp::{McpServerBinding, McpToolSession};
+use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -17,7 +14,7 @@ use uuid::Uuid;
 use super::{
     common::{
         build_next_request_with_tools, load_previous_messages,
-        strip_image_generation_from_request_tools, McpCallTracking,
+        strip_image_generation_from_request_tools, McpCallTracking, McpLoopInputs,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
@@ -105,9 +102,11 @@ pub(crate) async fn serve_harmony_responses_stream(
                 ctx,
                 current_request,
                 &request,
-                tenant_request_meta.clone(),
-                mcp_servers,
-                existing_mcp_list_tools_labels,
+                McpLoopInputs {
+                    tenant_request_meta: tenant_request_meta.clone(),
+                    mcp_servers,
+                    existing_mcp_list_tools_labels,
+                },
                 &mut emitter,
                 &tx,
             )
@@ -141,12 +140,16 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    tenant_request_meta: TenantRequestMeta,
-    mcp_servers: Vec<McpServerBinding>,
-    existing_mcp_list_tools_labels: HashSet<String>,
+    inputs: McpLoopInputs,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
+    let McpLoopInputs {
+        tenant_request_meta,
+        mcp_servers,
+        existing_mcp_list_tools_labels,
+    } = inputs;
+
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Note: For streaming, the emitter's original_request (set before spawn) preserves

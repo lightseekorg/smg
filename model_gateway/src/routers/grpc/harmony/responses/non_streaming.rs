@@ -1,7 +1,6 @@
 //! Non-streaming Harmony Responses API implementation
 
 use std::{
-    collections::HashSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,13 +15,13 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, to_string};
-use smg_mcp::{McpServerBinding, McpToolSession};
+use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 
 use super::{
     common::{
         build_next_request_with_tools, inject_mcp_metadata, load_previous_messages,
-        strip_image_generation_from_request_tools, McpCallTracking,
+        strip_image_generation_from_request_tools, McpCallTracking, McpLoopInputs,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
@@ -73,9 +72,11 @@ pub(crate) async fn serve_harmony_responses(
         execute_with_mcp_loop(
             ctx,
             current_request,
-            tenant_request_meta.clone(),
-            mcp_servers,
-            existing_mcp_list_tools_labels,
+            McpLoopInputs {
+                tenant_request_meta: tenant_request_meta.clone(),
+                mcp_servers,
+                existing_mcp_list_tools_labels,
+            },
         )
         .await?
     } else {
@@ -103,10 +104,14 @@ pub(crate) async fn serve_harmony_responses(
 async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
-    tenant_request_meta: TenantRequestMeta,
-    mcp_servers: Vec<McpServerBinding>,
-    existing_mcp_list_tools_labels: HashSet<String>,
+    inputs: McpLoopInputs,
 ) -> Result<ResponsesResponse, Response> {
+    let McpLoopInputs {
+        tenant_request_meta,
+        mcp_servers,
+        existing_mcp_list_tools_labels,
+    } = inputs;
+
     let mut iteration_count = 0;
 
     let mut mcp_tracking = McpCallTracking::new();

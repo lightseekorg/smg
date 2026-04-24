@@ -13,15 +13,18 @@ use openai_protocol::{
 };
 use serde_json::{from_value, to_string, Value};
 use smg_data_connector::{ResponseId, ResponseStorageError};
-use smg_mcp::{McpToolSession, ResponseFormat};
+use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::routers::{
-    common::mcp_utils::{extract_mcp_list_tools_labels, inject_mcp_output_items},
-    error,
-    grpc::common::responses::ResponsesContext,
+use crate::{
+    middleware::TenantRequestMeta,
+    routers::{
+        common::mcp_utils::{extract_mcp_list_tools_labels, inject_mcp_output_items},
+        error,
+        grpc::common::responses::ResponsesContext,
+    },
 };
 
 /// Record of a single MCP tool call execution
@@ -46,6 +49,12 @@ pub(super) struct McpCallTracking {
 
 pub(super) struct LoadedResponsesHistory {
     pub request: ResponsesRequest,
+    pub existing_mcp_list_tools_labels: HashSet<String>,
+}
+
+pub(super) struct McpLoopInputs {
+    pub tenant_request_meta: TenantRequestMeta,
+    pub mcp_servers: Vec<McpServerBinding>,
     pub existing_mcp_list_tools_labels: HashSet<String>,
 }
 
