@@ -452,7 +452,17 @@ impl PolicyConfig {
     }
 }
 
-/// Service discovery configuration
+/// Service discovery configuration.
+///
+/// `selectors` / `prefill_selectors` / `decode_selectors` each hold a **list of
+/// pools**: a pod is included if it matches *any* pool, and each pool still
+/// AND's its own key/value pairs. This lets a single router serve engines that
+/// carry different labels — e.g. an LWS-deployed model alongside a plain
+/// Deployment — by declaring one pool per engine type.
+///
+/// For backward compatibility, `selector` / `prefill_selector` / `decode_selector`
+/// (singular, a bare map) are accepted in YAML/JSON and treated as a single-pool
+/// list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryConfig {
     pub enabled: bool,
@@ -460,12 +470,27 @@ pub struct DiscoveryConfig {
     pub namespace: Option<String>,
     pub port: u16,
     pub check_interval_secs: u64,
-    /// Regular mode
-    pub selector: HashMap<String, String>,
-    /// PD mode prefill
-    pub prefill_selector: HashMap<String, String>,
-    /// PD mode decode
-    pub decode_selector: HashMap<String, String>,
+    /// Regular mode — list of label-selector pools (pod matches if it matches any pool).
+    #[serde(
+        default,
+        alias = "selector",
+        deserialize_with = "deserialize_selector_pools"
+    )]
+    pub selectors: Vec<HashMap<String, String>>,
+    /// PD mode prefill — list of label-selector pools.
+    #[serde(
+        default,
+        alias = "prefill_selector",
+        deserialize_with = "deserialize_selector_pools"
+    )]
+    pub prefill_selectors: Vec<HashMap<String, String>>,
+    /// PD mode decode — list of label-selector pools.
+    #[serde(
+        default,
+        alias = "decode_selector",
+        deserialize_with = "deserialize_selector_pools"
+    )]
+    pub decode_selectors: Vec<HashMap<String, String>>,
     pub bootstrap_port_annotation: String,
     /// Router node discovery for HA (Kubernetes label selector)
     #[serde(default)]
@@ -482,6 +507,28 @@ fn default_router_mesh_port_annotation() -> String {
     "sglang.ai/mesh-port".to_string()
 }
 
+/// Accept either a single `HashMap<String,String>` (legacy singular field) or
+/// `Vec<HashMap<String,String>>` (new plural field). An empty map deserializes
+/// to an empty list so defaults remain meaningful.
+fn deserialize_selector_pools<'de, D>(
+    deserializer: D,
+) -> Result<Vec<HashMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(HashMap<String, String>),
+        Many(Vec<HashMap<String, String>>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(map) if map.is_empty() => Vec::new(),
+        OneOrMany::One(map) => vec![map],
+        OneOrMany::Many(pools) => pools.into_iter().filter(|p| !p.is_empty()).collect(),
+    })
+}
+
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
@@ -489,9 +536,9 @@ impl Default for DiscoveryConfig {
             namespace: None,
             port: 8000,
             check_interval_secs: 120,
-            selector: HashMap::new(),
-            prefill_selector: HashMap::new(),
-            decode_selector: HashMap::new(),
+            selectors: Vec::new(),
+            prefill_selectors: Vec::new(),
+            decode_selectors: Vec::new(),
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: default_router_mesh_port_annotation(),
@@ -1155,9 +1202,9 @@ stream_retention_secs: 3600
         assert!(config.namespace.is_none());
         assert_eq!(config.port, 8000);
         assert_eq!(config.check_interval_secs, 120);
-        assert!(config.selector.is_empty());
-        assert!(config.prefill_selector.is_empty());
-        assert!(config.decode_selector.is_empty());
+        assert!(config.selectors.is_empty());
+        assert!(config.prefill_selectors.is_empty());
+        assert!(config.decode_selectors.is_empty());
         assert_eq!(config.bootstrap_port_annotation, "sglang.ai/bootstrap-port");
     }
 
@@ -1172,9 +1219,9 @@ stream_retention_secs: 3600
             namespace: Some("default".to_string()),
             port: 9000,
             check_interval_secs: 30,
-            selector: selector.clone(),
-            prefill_selector: selector.clone(),
-            decode_selector: selector.clone(),
+            selectors: vec![selector.clone()],
+            prefill_selectors: vec![selector.clone()],
+            decode_selectors: vec![selector.clone()],
             bootstrap_port_annotation: "custom.io/port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
@@ -1184,8 +1231,48 @@ stream_retention_secs: 3600
         assert!(config.enabled);
         assert_eq!(config.namespace, Some("default".to_string()));
         assert_eq!(config.port, 9000);
-        assert_eq!(config.selector.len(), 2);
-        assert_eq!(config.selector.get("app"), Some(&"sglang".to_string()));
+        assert_eq!(config.selectors.len(), 1);
+        assert_eq!(config.selectors[0].len(), 2);
+        assert_eq!(config.selectors[0].get("app"), Some(&"sglang".to_string()));
+    }
+
+    #[test]
+    fn test_discovery_config_accepts_legacy_singular_selector_yaml() {
+        let yaml = r#"
+enabled: true
+namespace: default
+port: 9000
+check_interval_secs: 30
+selector:
+  app: sglang
+  role: worker
+bootstrap_port_annotation: "sglang.ai/bootstrap-port"
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).expect("YAML should parse");
+        assert_eq!(cfg.selectors.len(), 1);
+        assert_eq!(cfg.selectors[0].get("app"), Some(&"sglang".to_string()));
+        assert_eq!(cfg.selectors[0].get("role"), Some(&"worker".to_string()));
+    }
+
+    #[test]
+    fn test_discovery_config_accepts_plural_selectors_yaml() {
+        let yaml = r#"
+enabled: true
+namespace: default
+port: 9000
+check_interval_secs: 30
+selectors:
+  - { app: sglang, role: worker }
+  - { engine: deepseek-v4-pro, role: leader }
+bootstrap_port_annotation: "sglang.ai/bootstrap-port"
+"#;
+        let cfg: DiscoveryConfig = serde_yaml::from_str(yaml).expect("YAML should parse");
+        assert_eq!(cfg.selectors.len(), 2);
+        assert_eq!(cfg.selectors[0].get("app"), Some(&"sglang".to_string()));
+        assert_eq!(
+            cfg.selectors[1].get("engine"),
+            Some(&"deepseek-v4-pro".to_string())
+        );
     }
 
     #[test]
@@ -1414,7 +1501,7 @@ stream_retention_secs: 3600
                 namespace: None,
                 port: 8080,
                 check_interval_secs: 45,
-                selector,
+                selectors: vec![selector],
                 ..Default::default()
             })
             .metrics_config(MetricsConfig::default())
@@ -1451,9 +1538,9 @@ stream_retention_secs: 3600
                 namespace: Some("production".to_string()),
                 port: 8443,
                 check_interval_secs: 120,
-                selector: selectors.clone(),
-                prefill_selector: selectors.clone(),
-                decode_selector: selectors,
+                selectors: vec![selectors.clone()],
+                prefill_selectors: vec![selectors.clone()],
+                decode_selectors: vec![selectors],
                 bootstrap_port_annotation: "mycompany.io/bootstrap".to_string(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),

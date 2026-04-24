@@ -564,17 +564,16 @@ impl ConfigValidator {
 
         match mode {
             RoutingMode::Regular { .. } => {
-                if discovery.selector.is_empty() {
+                if discovery.selectors.is_empty() {
                     return Err(ConfigError::ValidationFailed {
-                        reason: "Regular mode with service discovery requires a non-empty selector"
-                            .to_string(),
+                        reason: "Regular mode with service discovery requires at least one non-empty selector pool".to_string(),
                     });
                 }
             }
             RoutingMode::PrefillDecode { .. } => {
-                if discovery.prefill_selector.is_empty() && discovery.decode_selector.is_empty() {
+                if discovery.prefill_selectors.is_empty() && discovery.decode_selectors.is_empty() {
                     return Err(ConfigError::ValidationFailed {
-                        reason: "PD mode with service discovery requires at least one non-empty selector (prefill or decode)".to_string(),
+                        reason: "PD mode with service discovery requires at least one non-empty selector pool (prefill or decode)".to_string(),
                     });
                 }
             }
@@ -925,9 +924,9 @@ mod tests {
         // Enable service discovery
         config.discovery = Some(DiscoveryConfig {
             enabled: true,
-            selector: vec![("app".to_string(), "test".to_string())]
+            selectors: vec![vec![("app".to_string(), "test".to_string())]
                 .into_iter()
-                .collect(),
+                .collect()],
             ..Default::default()
         });
 

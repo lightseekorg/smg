@@ -242,9 +242,19 @@ struct CliArgs {
     )]
     service_discovery: bool,
 
-    /// Label selector for Kubernetes service discovery (format: key=value)
+    /// Label selector for Kubernetes service discovery (format: key=value). All
+    /// pairs are AND-combined into a single pool. For multiple independent
+    /// pools (e.g. different engine labels across LWS and non-LWS deployments),
+    /// use --selector-pool instead.
     #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
     selector: Vec<String>,
+
+    /// Additional selector pool (format: "k1=v1,k2=v2"). May be repeated; each
+    /// occurrence defines one pool. A pod is included if it matches any pool.
+    /// Use this alongside (or instead of) --selector to discover engines that
+    /// carry different labels.
+    #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
+    selector_pool: Vec<String>,
 
     /// Port to use for discovered worker pods
     #[arg(
@@ -258,13 +268,21 @@ struct CliArgs {
     #[arg(long, help_heading = "Service Discovery (Kubernetes)")]
     service_discovery_namespace: Option<String>,
 
-    /// Label selector for prefill server pods in PD mode
+    /// Label selector for prefill server pods in PD mode (single-pool sugar).
     #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
     prefill_selector: Vec<String>,
 
-    /// Label selector for decode server pods in PD mode
+    /// Additional prefill selector pool (format: "k1=v1,k2=v2"), repeatable.
+    #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
+    prefill_selector_pool: Vec<String>,
+
+    /// Label selector for decode server pods in PD mode (single-pool sugar).
     #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
     decode_selector: Vec<String>,
+
+    /// Additional decode selector pool (format: "k1=v1,k2=v2"), repeatable.
+    #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
+    decode_selector_pool: Vec<String>,
 
     /// Label selector for router pod discovery in HA mesh mode (format: key=value)
     #[arg(long, num_args = 0.., help_heading = "Service Discovery (Kubernetes)")]
@@ -829,6 +847,46 @@ impl CliArgs {
         map
     }
 
+    /// Parse a list of `--selector-pool` CLI values into a list of pools.
+    ///
+    /// Each CLI value defines one pool as a comma-separated list of
+    /// `key=value` pairs, e.g. `engine=sglang,role=worker`.
+    fn parse_selector_pools(pool_list: &[String]) -> Vec<HashMap<String, String>> {
+        pool_list
+            .iter()
+            .filter_map(|raw| {
+                let mut pool = HashMap::new();
+                for pair in raw.split(',') {
+                    let pair = pair.trim();
+                    if pair.is_empty() {
+                        continue;
+                    }
+                    if let Some(eq_pos) = pair.find('=') {
+                        pool.insert(
+                            pair[..eq_pos].trim().to_string(),
+                            pair[eq_pos + 1..].trim().to_string(),
+                        );
+                    }
+                }
+                (!pool.is_empty()).then_some(pool)
+            })
+            .collect()
+    }
+
+    /// Combine the legacy single-pool flag (a flat list of `k=v` strings) with
+    /// one or more `--selector-pool` values into the canonical pool list.
+    /// The single-pool flag contributes at most one additional pool, which is
+    /// prepended if non-empty.
+    fn combine_selector_pools(single: &[String], pools: &[String]) -> Vec<HashMap<String, String>> {
+        let mut out = Vec::new();
+        let single_pool = Self::parse_selector(single);
+        if !single_pool.is_empty() {
+            out.push(single_pool);
+        }
+        out.extend(Self::parse_selector_pools(pools));
+        out
+    }
+
     fn parse_mesh_socket_addr(
         host: &str,
         port: u16,
@@ -1118,9 +1176,15 @@ impl CliArgs {
                 namespace: self.service_discovery_namespace.clone(),
                 port: self.service_discovery_port,
                 check_interval_secs: 60,
-                selector: Self::parse_selector(&self.selector),
-                prefill_selector: Self::parse_selector(&self.prefill_selector),
-                decode_selector: Self::parse_selector(&self.decode_selector),
+                selectors: Self::combine_selector_pools(&self.selector, &self.selector_pool),
+                prefill_selectors: Self::combine_selector_pools(
+                    &self.prefill_selector,
+                    &self.prefill_selector_pool,
+                ),
+                decode_selectors: Self::combine_selector_pools(
+                    &self.decode_selector,
+                    &self.decode_selector_pool,
+                ),
                 bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
                 router_selector: Self::parse_selector(&self.router_selector),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
@@ -1306,13 +1370,19 @@ impl CliArgs {
 
             Some(ServiceDiscoveryConfig {
                 enabled: true,
-                selector: Self::parse_selector(&self.selector),
+                selectors: Self::combine_selector_pools(&self.selector, &self.selector_pool),
                 check_interval: std::time::Duration::from_secs(60),
                 port: self.service_discovery_port,
                 namespace: self.service_discovery_namespace.clone(),
                 pd_mode: self.pd_disaggregation,
-                prefill_selector: Self::parse_selector(&self.prefill_selector),
-                decode_selector: Self::parse_selector(&self.decode_selector),
+                prefill_selectors: Self::combine_selector_pools(
+                    &self.prefill_selector,
+                    &self.prefill_selector_pool,
+                ),
+                decode_selectors: Self::combine_selector_pools(
+                    &self.decode_selector,
+                    &self.decode_selector_pool,
+                ),
                 bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
                 router_selector,
                 router_mesh_port_annotation,
