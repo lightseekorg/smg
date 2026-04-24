@@ -382,51 +382,6 @@ impl schemars::JsonSchema for SkillVersionRef {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "Skill resolution lands in follow-up PRs, but these internal protocol-side types stay crate-private now"
-)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ResolvedSkillRef {
-    pub(crate) public_skill_id: String,
-    pub(crate) origin: SkillOrigin,
-    pub(crate) requested_version: Option<SkillVersionRef>,
-    pub(crate) pinned: Option<PinnedSkillVersion>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PinnedSkillVersion {
-    pub(crate) version: String,
-    pub(crate) version_number: u32,
-}
-
-#[expect(
-    dead_code,
-    reason = "Skill resolution lands in follow-up PRs, but origin tracking belongs with the other crate-private resolver types"
-)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SkillOrigin {
-    AnthropicProvider {
-        skill_id: String,
-        raw_version: Option<String>,
-    },
-    OpenAIProvider {
-        skill_id: String,
-        raw_version: Option<String>,
-    },
-    OpenAIOpaquePassThrough {
-        raw: Value,
-    },
-    SmgStorage {
-        skill_id: String,
-    },
-    ClientLocalPath {
-        name: String,
-        description: String,
-        path: String,
-    },
-}
-
 fn matches_typed_responses_skill_ref(value: &Map<String, Value>) -> bool {
     // Keep this tag/field matching in sync with ResponsesSkillRef's
     // `#[serde(rename = "...")]` values and allowed field sets.

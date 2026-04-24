@@ -2,6 +2,7 @@
 
 use std::{net::IpAddr, sync::Arc};
 
+use axum::http::Extensions;
 use uuid::Uuid;
 
 pub const DEFAULT_TENANT_HEADER_NAME: &str = "x-smg-tenant-id";
@@ -86,10 +87,11 @@ impl DataPlaneCaller {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RouteRequestMeta {
     pub tenant_key: TenantKey,
     pub request_charge_id: Uuid,
+    extensions: Extensions,
 }
 
 impl RouteRequestMeta {
@@ -98,6 +100,7 @@ impl RouteRequestMeta {
         Self {
             tenant_key,
             request_charge_id: Uuid::now_v7(),
+            extensions: Extensions::new(),
         }
     }
 
@@ -110,7 +113,32 @@ impl RouteRequestMeta {
     pub fn request_charge_id(&self) -> Uuid {
         self.request_charge_id
     }
+
+    #[must_use]
+    pub fn with_extension<T>(mut self, value: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.extensions.insert(value);
+        self
+    }
+
+    #[must_use]
+    pub fn extension<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.get::<T>()
+    }
 }
+
+impl PartialEq for RouteRequestMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.tenant_key == other.tenant_key && self.request_charge_id == other.request_charge_id
+    }
+}
+
+impl Eq for RouteRequestMeta {}
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum TenantResolutionError {

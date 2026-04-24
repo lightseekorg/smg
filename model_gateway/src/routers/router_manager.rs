@@ -36,6 +36,7 @@ use openai_protocol::{
     transcription::TranscriptionRequest,
 };
 use serde_json::Value;
+use smg_skills::SkillService;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -43,7 +44,10 @@ use crate::{
     config::RoutingMode,
     middleware::TenantRequestMeta,
     routers::{
-        common::header_utils::apply_provider_headers,
+        common::{
+            header_utils::apply_provider_headers,
+            skill_resolution::{resolve_messages_skill_manifest, resolve_responses_skill_manifest},
+        },
         factory::{router_ids, RouterId},
         AudioFile, RouterFactory, RouterTrait,
     },
@@ -58,6 +62,7 @@ pub struct RouterManager {
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
     routers_snapshot: ArcSwap<Vec<Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
+    skill_service: Option<Arc<SkillService>>,
     enable_igw: bool,
 }
 
@@ -70,6 +75,7 @@ impl RouterManager {
             routers: Arc::new(DashMap::new()),
             routers_snapshot: ArcSwap::from_pointee(Vec::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
+            skill_service: None,
             enable_igw: false, // Will be set properly in from_config
         }
     }
@@ -101,6 +107,7 @@ impl RouterManager {
             app_context.client.clone(),
         );
         manager.enable_igw = config.router_config.enable_igw;
+        manager.skill_service.clone_from(&app_context.skill_service);
         manager
             .gateway_api_key
             .clone_from(&config.router_config.api_key);
@@ -584,8 +591,23 @@ impl RouterTrait for RouterManager {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
+            let skill_manifest = match resolve_messages_skill_manifest(
+                self.skill_service.as_deref(),
+                tenant_meta.tenant_key(),
+                body,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(error) => return error.into_response(),
+            };
+            let tenant_meta = if skill_manifest.is_empty() {
+                tenant_meta.clone()
+            } else {
+                tenant_meta.clone().with_extension(skill_manifest)
+            };
             router
-                .route_messages(headers, tenant_meta, body, model_id)
+                .route_messages(headers, &tenant_meta, body, model_id)
                 .await
         } else {
             (
@@ -606,8 +628,23 @@ impl RouterTrait for RouterManager {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
+            let skill_manifest = match resolve_responses_skill_manifest(
+                self.skill_service.as_deref(),
+                tenant_meta.tenant_key(),
+                body,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(error) => return error.into_response(),
+            };
+            let tenant_meta = if skill_manifest.is_empty() {
+                tenant_meta.clone()
+            } else {
+                tenant_meta.clone().with_extension(skill_manifest)
+            };
             router
-                .route_responses(headers, tenant_meta, body, model_id)
+                .route_responses(headers, &tenant_meta, body, model_id)
                 .await
         } else {
             (
