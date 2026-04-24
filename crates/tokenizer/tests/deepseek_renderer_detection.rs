@@ -222,6 +222,51 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_renderers_honor_thinking_kwarg_only() {
+        // `thinking: true` → prompt ends with <think> (thinking mode).
+        // `enable_thinking: true` alone → ignored (chat mode), matching
+        // `thinking_key_name() == Some(Thinking)` and sglang's DeepSeek path.
+        for arch in &["DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"] {
+            let (_tmp, tok) = write_dir(Some(&[*arch]));
+            let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+            let messages = vec![json!({ "role": "user", "content": "Hi" })];
+
+            let mut thinking_kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+            thinking_kwargs.insert("thinking".to_string(), serde_json::Value::Bool(true));
+            let out_thinking = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        template_kwargs: Some(&thinking_kwargs),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(
+                out_thinking.ends_with("<think>"),
+                "{arch}: thinking=true should enter thinking mode: {out_thinking}"
+            );
+
+            let mut enable_thinking_kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+            enable_thinking_kwargs
+                .insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+            let out_enable = tokenizer
+                .apply_chat_template(
+                    &messages,
+                    ChatTemplateParams {
+                        template_kwargs: Some(&enable_thinking_kwargs),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(
+                out_enable.ends_with("</think>"),
+                "{arch}: enable_thinking alone must NOT enter thinking mode: {out_enable}"
+            );
+        }
+    }
+
+    #[test]
     fn deepseek_v4_renderer_passes_reasoning_effort() {
         let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
         let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();

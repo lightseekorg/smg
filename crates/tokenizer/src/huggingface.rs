@@ -486,24 +486,16 @@ fn detect_renderer_from_config(dir: &std::path::Path) -> Renderer {
 // ---------------------------------------------------------------------------
 // DeepSeek V3.2 / V4 dispatch shims
 // ---------------------------------------------------------------------------
-/// Derive the V3.2 / V4 thinking mode from `template_kwargs`.
-///
-/// Mirrors vllm's `vllm/tokenizers/deepseek_v32.py`: thinking is ON if
-/// either `thinking` or `enable_thinking` is truthy in the kwargs map.
+/// Derive the V3.2 / V4 thinking mode from `template_kwargs`. Only the
+/// `thinking` key is honored, matching sglang's DeepSeek serving path and
+/// the `ThinkingKeyName::Thinking` contract reported by this tokenizer.
 fn derive_thinking_mode(params: &ChatTemplateParams) -> deepseek_v32::ThinkingMode {
-    let kwargs = match params.template_kwargs {
-        Some(k) => k,
-        None => return deepseek_v32::ThinkingMode::Chat,
-    };
-    let thinking = kwargs
-        .get("thinking")
+    let enabled = params
+        .template_kwargs
+        .and_then(|k| k.get("thinking"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let enable_thinking = kwargs
-        .get("enable_thinking")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    if thinking || enable_thinking {
+    if enabled {
         deepseek_v32::ThinkingMode::Thinking
     } else {
         deepseek_v32::ThinkingMode::Chat
