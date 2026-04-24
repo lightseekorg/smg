@@ -11,8 +11,8 @@ use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
 use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
-    ToolExecutionInput,
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, inject_user_into_hosted_tool_args,
+    resolve_response_format, McpServerBinding, McpToolSession, ToolExecutionInput,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -342,7 +342,12 @@ pub(super) async fn execute_tool_loop(
             // hosted-tool config from `original_request.tools` into dispatch args.
             // Non-object model payloads coerce to `{}` so the merge actually
             // applies instead of silently dropping the caller's config.
+            //
+            // R7: resolve the response format by combining session state with
+            // request-side hosted-tool declarations and also forward the caller's
+            // `user` into the dispatch payload for hosted tools.
             let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
+            let request_user = original_request.user.as_deref();
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
                 .map(|tc| {
@@ -351,19 +356,27 @@ pub(super) async fn execute_tool_loop(
                             Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
                             _ => json!({}),
                         };
-                    if let Some(kind) = session
-                        .tool_response_format(&tc.name)
-                        .to_builtin_tool_type()
-                    {
+                    let resolved_format = resolve_response_format(
+                        session.tool_response_format(&tc.name),
+                        request_tools,
+                        &tc.name,
+                    );
+                    if let Some(kind) = resolved_format.to_builtin_tool_type() {
                         if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind)
                         {
                             apply_hosted_tool_overrides(&mut arguments, &overrides);
                         }
                     }
+                    inject_user_into_hosted_tool_args(
+                        &mut arguments,
+                        &resolved_format,
+                        request_user,
+                    );
                     ToolExecutionInput {
                         call_id: tc.call_id,
                         tool_name: tc.name,
                         arguments,
+                        response_format_override: Some(resolved_format),
                     }
                 })
                 .collect();

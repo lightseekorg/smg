@@ -204,7 +204,7 @@ impl ToolCallResult {
 ///
 /// This is a simplified input format that allows routers to batch
 /// multiple tool calls without worrying about the underlying execution details.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolExecutionInput {
     /// Unique identifier for this tool call (from LLM response).
     pub call_id: String,
@@ -212,6 +212,16 @@ pub struct ToolExecutionInput {
     pub tool_name: String,
     /// Tool arguments as JSON.
     pub arguments: Value,
+    /// Optional runtime override for the response format applied to the
+    /// output item transformation.
+    ///
+    /// When `Some`, this replaces the session-resolved `ResponseFormat` on the
+    /// resulting [`ToolExecutionOutput`]. The canonical producer is
+    /// [`crate::core::session::resolve_response_format`], which combines the
+    /// session's configured format with hosted-tool declarations from the
+    /// caller's `tools` list. Leaving this as `None` preserves the legacy
+    /// behavior (session state is authoritative).
+    pub response_format_override: Option<ResponseFormat>,
 }
 
 /// Output from batch tool execution.
@@ -1017,6 +1027,7 @@ impl McpOrchestrator {
 
         let qualified = QualifiedToolName::new(server_key, &input.tool_name);
         let entry = self.tool_inventory.get_entry(server_key, &input.tool_name);
+        let format_override = input.response_format_override;
 
         match entry {
             Some(entry) => match self
@@ -1029,6 +1040,9 @@ impl McpOrchestrator {
                     output.server_key = server_key.to_string();
                     output.server_label = server_label.to_string();
                     output.arguments_str = arguments_str;
+                    if let Some(override_format) = format_override {
+                        output.response_format = override_format;
+                    }
                     ToolExecutionResult::Executed(output)
                 }
                 ToolExecutionResult::PendingApproval(mut pending) => {
@@ -1037,6 +1051,9 @@ impl McpOrchestrator {
                     pending.server_key = server_key.to_string();
                     pending.server_label = server_label.to_string();
                     pending.arguments_str = arguments_str;
+                    if let Some(override_format) = format_override {
+                        pending.response_format = override_format;
+                    }
                     ToolExecutionResult::PendingApproval(pending)
                 }
             },
@@ -1054,7 +1071,7 @@ impl McpOrchestrator {
                     output: serde_json::json!({ "error": &err }),
                     is_error: true,
                     error_message: Some(err),
-                    response_format: ResponseFormat::Passthrough,
+                    response_format: format_override.unwrap_or(ResponseFormat::Passthrough),
                     duration: start.elapsed(),
                 })
             }

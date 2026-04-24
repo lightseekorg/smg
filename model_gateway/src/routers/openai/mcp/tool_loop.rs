@@ -22,8 +22,9 @@ use openai_protocol::{
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
     apply_hosted_tool_overrides, extract_embedded_openai_responses, extract_hosted_tool_overrides,
-    mcp_response_item_id, McpServerBinding, McpToolSession, ResponseFormat, ResponseTransformer,
-    ToolExecutionInput, ToolExecutionResult,
+    inject_user_into_hosted_tool_args, mcp_response_item_id, resolve_response_format,
+    McpServerBinding, McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput,
+    ToolExecutionResult,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -153,9 +154,15 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
 ///
 /// `request_tools` carries the caller-declared `tools` list from the original
 /// request so per-kind hosted-tool overrides can be merged into dispatch args
-/// before [`McpToolSession::execute_tool`].
+/// before [`McpToolSession::execute_tool`]. `request_user` carries the
+/// caller's top-level `user` identifier so hosted-tool dispatches can mirror
+/// it into their args (R7 Fix B).
 ///
 /// Returns false if client disconnected during execution
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming dispatch intentionally threads request-scoped state (tools, user, session, emitter, metrics model id) without an intermediate struct; the alternative is a one-call-site wrapper struct that obscures the signature for no ergonomic gain"
+)]
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
     session: &McpToolSession<'_>,
@@ -164,6 +171,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     sequence_number: &mut u64,
     model_id: &str,
     request_tools: &[ResponseTool],
+    request_user: Option<&str>,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -185,7 +193,13 @@ pub(crate) async fn execute_streaming_tool_calls(
             &call.arguments_buffer
         };
 
-        let response_format = session.tool_response_format(&call.name);
+        // R7: resolve the format first so both event emission (below) and
+        // dispatch (override on ToolExecutionInput) use the same shape.
+        let response_format = resolve_response_format(
+            session.tool_response_format(&call.name),
+            request_tools,
+            &call.name,
+        );
         let server_label = session.resolve_tool_server_label(&call.name);
 
         let mut arguments: Value = match serde_json::from_str(args_str) {
@@ -247,6 +261,9 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         }
 
+        // R7: forward caller's top-level `user` into hosted-tool dispatch args.
+        inject_user_into_hosted_tool_args(&mut arguments, &response_format, request_user);
+
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
         debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
@@ -255,6 +272,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                 call_id: call.call_id.clone(),
                 tool_name: call.name.clone(),
                 arguments,
+                response_format_override: Some(response_format.clone()),
             })
             .await;
 
@@ -876,12 +894,21 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
+            // R7: resolve the format up-front so the error-handling branch and
+            // the dispatch branch agree on the output shape. The resolved format
+            // is then threaded through `response_format_override` so
+            // `ToolExecutionOutput::to_response_item` emits the correct item
+            // type even when the MCP server lacks an explicit `builtin_type`.
+            let response_format = resolve_response_format(
+                session.tool_response_format(&call.name),
+                original_body.tools.as_deref().unwrap_or(&[]),
+                &call.name,
+            );
             let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
                     let error_output = format!("Invalid tool arguments: {e}");
-                    let response_format = session.tool_response_format(&call.name);
                     let server_label = session.resolve_tool_server_label(&call.name);
                     let tool_item_id =
                         non_streaming_tool_item_id_source(&call.item_id, &response_format);
@@ -922,7 +949,6 @@ pub(crate) async fn execute_tool_loop(
             // Merge caller-declared hosted-tool configuration into dispatch args
             // for this tool's hosted-tool kind, if any. `original_body.tools` is
             // the caller's tool declarations; empty / None = no-op.
-            let response_format = session.tool_response_format(&call.name);
             if let Some(kind) = response_format.to_builtin_tool_type() {
                 if let Some(overrides) = extract_hosted_tool_overrides(
                     original_body.tools.as_deref().unwrap_or(&[]),
@@ -931,6 +957,15 @@ pub(crate) async fn execute_tool_loop(
                     apply_hosted_tool_overrides(&mut arguments, &overrides);
                 }
             }
+
+            // R7: forward caller's top-level `user` into hosted-tool dispatch
+            // args so MCP proxies can attribute usage per-user. No-op for
+            // non-hosted function tools.
+            inject_user_into_hosted_tool_args(
+                &mut arguments,
+                &response_format,
+                original_body.user.as_deref(),
+            );
 
             // Serialize the post-merge args once so downstream logging + the
             // approval payload show the effective (dispatched) payload rather
@@ -947,6 +982,7 @@ pub(crate) async fn execute_tool_loop(
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
                     arguments,
+                    response_format_override: Some(response_format.clone()),
                 })
                 .await;
 

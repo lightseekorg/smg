@@ -280,6 +280,7 @@ impl<'a> McpToolSession<'a> {
                         call_id: input.call_id,
                         tool_name: resolved_tool_name.clone(),
                         arguments: input.arguments,
+                        response_format_override: input.response_format_override,
                     },
                     &binding.server_key,
                     &binding.server_label,
@@ -314,7 +315,9 @@ impl<'a> McpToolSession<'a> {
                 output: serde_json::json!({ "error": &err }),
                 is_error: true,
                 error_message: Some(err),
-                response_format: ResponseFormat::Passthrough,
+                response_format: input
+                    .response_format_override
+                    .unwrap_or(ResponseFormat::Passthrough),
                 duration: std::time::Duration::default(),
             })
         }
@@ -893,6 +896,146 @@ impl<'a> McpToolSession<'a> {
     }
 }
 
+/// Canonical hosted-tool name that identifies a dispatched `image_generation` call.
+///
+/// R7: callers declare `tools: [{"type": "image_generation", ...}]`, but the
+/// MCP server may expose the tool under an alias or a synonym. This constant
+/// pins the set of aliases we treat as "this call is an image_generation
+/// hosted-tool call" for the purpose of inferring the response format when
+/// the server has no `builtin_type` config. Keep this list narrow — broader
+/// matching belongs in the MCP config's alias/tool_config mechanism, not
+/// here.
+const HOSTED_IMAGE_GENERATION_NAMES: &[&str] = &["image_generation"];
+
+/// Canonical hosted-tool name for `web_search_preview` dispatches.
+const HOSTED_WEB_SEARCH_PREVIEW_NAMES: &[&str] = &["web_search_preview", "web_search"];
+
+/// Canonical hosted-tool name for `code_interpreter` dispatches.
+const HOSTED_CODE_INTERPRETER_NAMES: &[&str] = &["code_interpreter"];
+
+/// Canonical hosted-tool name for `file_search` dispatches.
+const HOSTED_FILE_SEARCH_NAMES: &[&str] = &["file_search"];
+
+/// Resolve the response format for a dispatched tool call.
+///
+/// # Contract
+///
+/// * If the session already classifies the tool as a hosted format (i.e. the
+///   MCP server was explicitly tagged with `builtin_type` in its config),
+///   the session's format wins — explicit server-side configuration is
+///   authoritative.
+/// * Otherwise, if the caller's `tools` list contains a hosted-tool
+///   declaration AND the dispatched `tool_name` matches that hosted tool's
+///   canonical name (or a known alias), the resolved format is the hosted
+///   format for that declaration.
+/// * Otherwise, the session format is returned unchanged (typically
+///   `Passthrough`, which surfaces the call as a generic `mcp_call` item).
+///
+/// # Why this exists
+///
+/// OpenAI's Responses API says the CLIENT's `tools: [{"type": "..."}]`
+/// declaration determines the shape of the matching output item. The MCP
+/// server's `builtin_type` is an SMG-specific routing hint; it should not be
+/// the sole gate on whether we emit an `image_generation_call` (or similar)
+/// output item.
+///
+/// This function is intentionally pure (no session state other than the
+/// already-resolved `session_format`) so all router dispatch paths can share
+/// one source of truth for the "which output item shape?" decision.
+pub fn resolve_response_format(
+    session_format: ResponseFormat,
+    request_tools: &[ResponseTool],
+    tool_name: &str,
+) -> ResponseFormat {
+    // Explicit server configuration always wins.
+    if !matches!(session_format, ResponseFormat::Passthrough) {
+        return session_format;
+    }
+
+    for tool in request_tools {
+        match tool {
+            ResponseTool::ImageGeneration(_) if is_canonical_name(tool_name, HOSTED_IMAGE_GENERATION_NAMES) => {
+                return ResponseFormat::ImageGenerationCall;
+            }
+            ResponseTool::WebSearchPreview(_)
+                if is_canonical_name(tool_name, HOSTED_WEB_SEARCH_PREVIEW_NAMES) =>
+            {
+                return ResponseFormat::WebSearchCall;
+            }
+            ResponseTool::WebSearch(_)
+                if is_canonical_name(tool_name, HOSTED_WEB_SEARCH_PREVIEW_NAMES) =>
+            {
+                return ResponseFormat::WebSearchCall;
+            }
+            ResponseTool::CodeInterpreter(_)
+                if is_canonical_name(tool_name, HOSTED_CODE_INTERPRETER_NAMES) =>
+            {
+                return ResponseFormat::CodeInterpreterCall;
+            }
+            ResponseTool::FileSearch(_)
+                if is_canonical_name(tool_name, HOSTED_FILE_SEARCH_NAMES) =>
+            {
+                return ResponseFormat::FileSearchCall;
+            }
+            _ => {}
+        }
+    }
+
+    session_format
+}
+
+fn is_canonical_name(tool_name: &str, canonical_names: &[&str]) -> bool {
+    canonical_names.contains(&tool_name)
+}
+
+/// Inject the caller's `user` field into a hosted-tool dispatch args object.
+///
+/// # Contract
+///
+/// * Only hosted tools (those whose resolved format is non-passthrough) get
+///   the injection — plain MCP function tools are left alone to avoid
+///   surprising a tool schema that doesn't expect a `user` key.
+/// * `arguments` must be an object; non-object payloads are no-ops.
+/// * If the caller's `user` is empty or `None`, this is a no-op.
+/// * If the args already contain a `user` key, we preserve the model-supplied
+///   value and emit a `debug!` log rather than overwriting.
+///
+/// # Why this exists
+///
+/// OpenAI's spec for hosted tools (image_generation, etc.) does NOT list
+/// `user` as a declarable field on the tool config — it lives on the top-level
+/// request. But the MCP server often proxies for an upstream API that already
+/// expects `user` at the dispatch level for per-user quotas and moderation
+/// attribution. Mirroring the top-level `user` into the dispatch args keeps
+/// that attribution intact without requiring every MCP tool schema to grow a
+/// `user` field.
+pub fn inject_user_into_hosted_tool_args(
+    arguments: &mut serde_json::Value,
+    resolved_format: &ResponseFormat,
+    user: Option<&str>,
+) {
+    if matches!(resolved_format, ResponseFormat::Passthrough) {
+        return;
+    }
+    let Some(user_value) = user.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let serde_json::Value::Object(args_map) = arguments else {
+        return;
+    };
+    if args_map.contains_key("user") {
+        tracing::debug!(
+            %user_value,
+            "Hosted-tool dispatch args already contain `user`; preserving model-supplied value",
+        );
+        return;
+    }
+    args_map.insert(
+        "user".to_string(),
+        serde_json::Value::String(user_value.to_string()),
+    );
+}
+
 fn sanitize_tool_token(input: &str) -> String {
     let mut out = String::with_capacity(input.len().max(1));
     for ch in input.chars() {
@@ -1063,6 +1206,7 @@ mod tests {
                 call_id: "call-1".to_string(),
                 tool_name: "test_tool".to_string(),
                 arguments: json!({"hello": "world"}),
+                response_format_override: None,
             })
             .await;
 
@@ -1799,5 +1943,201 @@ mod tests {
             request_ctx.forwarded_headers.get("opc-request-id"),
             Some(&"req-123".to_string())
         );
+    }
+
+    // ---------------------------------------------------------------
+    // R7: resolve_response_format + inject_user_into_hosted_tool_args
+    // ---------------------------------------------------------------
+
+    fn default_image_generation_tool() -> ResponseTool {
+        ResponseTool::ImageGeneration(
+            openai_protocol::responses::ImageGenerationTool::default(),
+        )
+    }
+
+    fn default_web_search_preview_tool() -> ResponseTool {
+        ResponseTool::WebSearchPreview(
+            openai_protocol::responses::WebSearchPreviewTool::default(),
+        )
+    }
+
+    fn default_file_search_tool() -> ResponseTool {
+        ResponseTool::FileSearch(openai_protocol::responses::FileSearchTool {
+            vector_store_ids: vec![],
+            filters: None,
+            max_num_results: None,
+            ranking_options: None,
+        })
+    }
+
+    fn default_code_interpreter_tool() -> ResponseTool {
+        ResponseTool::CodeInterpreter(
+            openai_protocol::responses::CodeInterpreterTool::default(),
+        )
+    }
+
+    #[test]
+    fn test_resolve_response_format_session_passthrough_no_declaration() {
+        // Without any hosted-tool declaration on the request, Passthrough
+        // survives — plain mcp_call shape is correct for generic MCP tools.
+        let format = resolve_response_format(ResponseFormat::Passthrough, &[], "brave_web_search");
+        assert_eq!(format, ResponseFormat::Passthrough);
+    }
+
+    #[test]
+    fn test_resolve_response_format_session_passthrough_with_image_generation_declaration() {
+        // Server is untagged (Passthrough) but the request declares
+        // image_generation and the dispatched tool name matches. This is the
+        // exact reviewer-reported bug scenario; the resolver promotes the
+        // format so the output item is an image_generation_call.
+        let tools = vec![default_image_generation_tool()];
+        let format = resolve_response_format(
+            ResponseFormat::Passthrough,
+            &tools,
+            "image_generation",
+        );
+        assert_eq!(format, ResponseFormat::ImageGenerationCall);
+    }
+
+    #[test]
+    fn test_resolve_response_format_session_format_wins_over_request() {
+        // Server-tagged format must win even if the request also declares a
+        // hosted tool: explicit configuration is authoritative.
+        let tools = vec![default_web_search_preview_tool()];
+        let format = resolve_response_format(
+            ResponseFormat::ImageGenerationCall,
+            &tools,
+            "image_generation",
+        );
+        assert_eq!(format, ResponseFormat::ImageGenerationCall);
+    }
+
+    #[test]
+    fn test_resolve_response_format_tool_name_must_match() {
+        // Request declares image_generation but dispatched tool is some other
+        // name — don't promote the format; that would be incorrect for a
+        // generic MCP tool that happens to run in the same session.
+        let tools = vec![default_image_generation_tool()];
+        let format = resolve_response_format(
+            ResponseFormat::Passthrough,
+            &tools,
+            "some_unrelated_mcp_tool",
+        );
+        assert_eq!(format, ResponseFormat::Passthrough);
+    }
+
+    #[test]
+    fn test_resolve_response_format_file_search_declaration() {
+        let tools = vec![default_file_search_tool()];
+        let format =
+            resolve_response_format(ResponseFormat::Passthrough, &tools, "file_search");
+        assert_eq!(format, ResponseFormat::FileSearchCall);
+    }
+
+    #[test]
+    fn test_resolve_response_format_code_interpreter_declaration() {
+        let tools = vec![default_code_interpreter_tool()];
+        let format =
+            resolve_response_format(ResponseFormat::Passthrough, &tools, "code_interpreter");
+        assert_eq!(format, ResponseFormat::CodeInterpreterCall);
+    }
+
+    #[test]
+    fn test_resolve_response_format_web_search_preview_declaration() {
+        let tools = vec![default_web_search_preview_tool()];
+        let format =
+            resolve_response_format(ResponseFormat::Passthrough, &tools, "web_search_preview");
+        assert_eq!(format, ResponseFormat::WebSearchCall);
+    }
+
+    #[test]
+    fn test_resolve_response_format_multiple_declarations_first_match_wins() {
+        // The resolver matches on (declaration kind, tool_name) pair, so the
+        // dispatched tool name alone picks the correct declaration even when
+        // several kinds are declared.
+        let tools = vec![
+            default_file_search_tool(),
+            default_image_generation_tool(),
+        ];
+        let format = resolve_response_format(
+            ResponseFormat::Passthrough,
+            &tools,
+            "image_generation",
+        );
+        assert_eq!(format, ResponseFormat::ImageGenerationCall);
+    }
+
+    #[test]
+    fn test_inject_user_skipped_for_passthrough() {
+        let mut args = serde_json::json!({"prompt": "hello"});
+        inject_user_into_hosted_tool_args(
+            &mut args,
+            &ResponseFormat::Passthrough,
+            Some("user-abc"),
+        );
+        assert_eq!(args, serde_json::json!({"prompt": "hello"}));
+    }
+
+    #[test]
+    fn test_inject_user_skipped_for_empty_user() {
+        let mut args = serde_json::json!({"prompt": "hello"});
+        inject_user_into_hosted_tool_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some(""),
+        );
+        assert_eq!(args, serde_json::json!({"prompt": "hello"}));
+    }
+
+    #[test]
+    fn test_inject_user_skipped_for_none_user() {
+        let mut args = serde_json::json!({"prompt": "hello"});
+        inject_user_into_hosted_tool_args(&mut args, &ResponseFormat::ImageGenerationCall, None);
+        assert_eq!(args, serde_json::json!({"prompt": "hello"}));
+    }
+
+    #[test]
+    fn test_inject_user_injected_for_hosted_tool() {
+        let mut args = serde_json::json!({"prompt": "hello"});
+        inject_user_into_hosted_tool_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("user-abc"),
+        );
+        assert_eq!(
+            args,
+            serde_json::json!({"prompt": "hello", "user": "user-abc"})
+        );
+    }
+
+    #[test]
+    fn test_inject_user_preserves_existing_user_key() {
+        // If the model (or earlier override merge) already populated `user`,
+        // keep it — overwriting the model-supplied value would be a nasty
+        // surprise. Debug log only (verified at the call site manually).
+        let mut args = serde_json::json!({"prompt": "hello", "user": "model-user"});
+        inject_user_into_hosted_tool_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("request-user"),
+        );
+        assert_eq!(
+            args,
+            serde_json::json!({"prompt": "hello", "user": "model-user"})
+        );
+    }
+
+    #[test]
+    fn test_inject_user_noop_on_non_object_args() {
+        // apply_hosted_tool_overrides coerces non-objects to `{}` before this
+        // runs in practice, but defend-in-depth: a non-object payload should
+        // not panic or silently turn into an object.
+        let mut args = serde_json::Value::String("scalar".to_string());
+        inject_user_into_hosted_tool_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("user-abc"),
+        );
+        assert_eq!(args, serde_json::Value::String("scalar".to_string()));
     }
 }

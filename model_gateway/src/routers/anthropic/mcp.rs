@@ -222,6 +222,7 @@ async fn execute_mcp_tool_calls(
             call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
             arguments: tool_call.input.clone(),
+            response_format_override: None,
         };
 
         let output = session.execute_tool(input).await;

@@ -28,12 +28,13 @@ pub mod responses_bridge;
 pub use core::{config, pool as connection_pool};
 // Re-export from core
 pub use core::{
-    ArgMappingConfig, BuiltinToolType, ConfigValidationError, HandlerRequestContext,
-    LatencySnapshot, McpConfig, McpMetrics, McpOrchestrator, McpRequestContext, McpServerBinding,
-    McpServerConfig, McpToolSession, McpTransport, MetricsSnapshot, PendingToolExecution,
-    PolicyConfig, PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig,
-    ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput,
-    ToolExecutionOutput, ToolExecutionResult, TrustLevelConfig, DEFAULT_SERVER_LABEL,
+    inject_user_into_hosted_tool_args, resolve_response_format, ArgMappingConfig, BuiltinToolType,
+    ConfigValidationError, HandlerRequestContext, LatencySnapshot, McpConfig, McpMetrics,
+    McpOrchestrator, McpRequestContext, McpServerBinding, McpServerConfig, McpToolSession,
+    McpTransport, MetricsSnapshot, PendingToolExecution, PolicyConfig, PolicyDecisionConfig,
+    PoolKey, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig, SmgClientHandler, Tool,
+    ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput, ToolExecutionResult,
+    TrustLevelConfig, DEFAULT_SERVER_LABEL,
 };
 
 // Re-export shared types

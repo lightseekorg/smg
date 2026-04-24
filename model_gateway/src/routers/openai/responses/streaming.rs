@@ -26,7 +26,8 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_mcp::{
-    mcp_response_item_id, McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat,
+    mcp_response_item_id, resolve_response_format, McpOrchestrator, McpServerBinding, McpToolSession,
+    ResponseFormat,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -147,7 +148,14 @@ pub(super) fn apply_event_transformations_inplace(
                         if let Some(session) =
                             ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
                         {
-                            let response_format = session.tool_response_format(&tool_name);
+                            // R7: resolve the format using the client's request-side
+                            // tool declaration so plain (un-tagged) MCP servers still
+                            // produce the correct streaming event shape.
+                            let response_format = resolve_response_format(
+                                session.tool_response_format(&tool_name),
+                                ctx.original_request.tools.as_deref().unwrap_or(&[]),
+                                &tool_name,
+                            );
 
                             // Determine item type and ID prefix based on response_format
                             let (new_type, id_prefix) = match response_format {
@@ -1011,7 +1019,9 @@ pub(super) fn handle_streaming_with_tool_interception(
 
             // Execute all pending tool calls. Pass the caller-declared tools so
             // hosted-tool overrides (e.g. image_generation size/quality) are
-            // merged into dispatch args before MCP execution.
+            // merged into dispatch args before MCP execution. Also forward
+            // `original_request.user` so hosted-tool dispatch args get the
+            // top-level user identifier (R7 Fix B).
             if !execute_streaming_tool_calls(
                 pending_calls,
                 &session,
@@ -1020,6 +1030,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &mut sequence_number,
                 &original_request.model,
                 original_request.tools.as_deref().unwrap_or(&[]),
+                original_request.user.as_deref(),
             )
             .await
             {

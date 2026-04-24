@@ -35,8 +35,8 @@ use smg_data_connector::{
     ResponseStorage,
 };
 use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
-    ResponseFormat, ToolExecutionInput,
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, inject_user_into_hosted_tool_args,
+    resolve_response_format, McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -640,8 +640,16 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.call_id
                 );
 
-                // Look up response_format for this tool
-                let response_format = session.tool_response_format(&tool_call.name);
+                // Resolve response_format for this tool. R7: prefer the session's
+                // explicit hosted format; otherwise fall back to the caller's
+                // request-side tool declaration. This guarantees streaming
+                // events match the client-declared hosted-tool shape even when
+                // the MCP server itself has no `builtin_type` config.
+                let response_format = resolve_response_format(
+                    session.tool_response_format(&tool_call.name),
+                    original_request.tools.as_deref().unwrap_or(&[]),
+                    &tool_call.name,
+                );
 
                 // Use emitter helpers to determine correct type and allocate index
                 let item_type =
@@ -725,13 +733,25 @@ async fn execute_tool_loop_streaming_internal(
                     }
                 }
 
+                // R7: forward the caller's top-level `user` into hosted-tool
+                // dispatch args so MCP proxies can attribute usage per-user.
+                inject_user_into_hosted_tool_args(
+                    &mut arguments,
+                    &response_format,
+                    original_request.user.as_deref(),
+                );
+
                 // Execute the single tool via the normalized MCP execution API.
                 // This avoids custom serialization and manual re-transformation in streaming paths.
+                // The resolved format flows through the override so
+                // `ToolExecutionOutput::to_response_item` emits the correct shape
+                // (R7 Fix A).
                 let tool_output = session
                     .execute_tool(ToolExecutionInput {
                         call_id: tool_call.call_id.clone(),
                         tool_name: tool_call.name.clone(),
                         arguments,
+                        response_format_override: Some(response_format.clone()),
                     })
                     .await;
 

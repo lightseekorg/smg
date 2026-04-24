@@ -27,4 +27,7 @@ pub use orchestrator::{
 };
 pub use pool::{McpConnectionPool, PoolKey};
 pub use reconnect::ReconnectionManager;
-pub use session::{McpServerBinding, McpToolSession, DEFAULT_SERVER_LABEL};
+pub use session::{
+    inject_user_into_hosted_tool_args, resolve_response_format, McpServerBinding, McpToolSession,
+    DEFAULT_SERVER_LABEL,
+};

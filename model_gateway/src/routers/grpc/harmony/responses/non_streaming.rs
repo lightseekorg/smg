@@ -259,7 +259,9 @@ async fn execute_with_mcp_loop(
 
                 // Execute MCP tools (if any). Caller-declared hosted-tool overrides
                 // live on `original_tools` (pre-MCP-injection), so we thread those
-                // into dispatch — `execute_mcp_tools` merges per-kind.
+                // into dispatch — `execute_mcp_tools` merges per-kind. The
+                // caller's top-level `user` is also forwarded so hosted-tool
+                // MCP proxies can attribute usage per-user (R7 Fix B).
                 let mcp_results = if mcp_tool_calls.is_empty() {
                     Vec::new()
                 } else {
@@ -269,6 +271,7 @@ async fn execute_with_mcp_loop(
                         &mut mcp_tracking,
                         &current_request.model,
                         original_tools.as_deref().unwrap_or(&[]),
+                        current_request.user.as_deref(),
                     )
                     .await?
                 };
