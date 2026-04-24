@@ -118,38 +118,37 @@ impl ResponseStreamEventEmitter {
         self.original_request = Some(request);
     }
 
-    /// Update tool call output items with tool execution results
+    /// Update tool call output items with tool execution results.
     ///
-    /// After MCP tools are executed, this updates the stored output items
-    /// to include the output field from the tool results.
-    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
+    /// Replaces each matched item's stored payload with the authoritative
+    /// `ResponseOutputItem` produced by `ResponseTransformer::transform`
+    /// (carried on `ToolResult::output_item`). That transformer is the
+    /// single source of truth for per-tool shape — e.g. `mcp_call`
+    /// receives `output: string`, `web_search_call` receives
+    /// `{status, action, ...}`, and `image_generation_call` receives
+    /// `result: base64`. The streaming emitter's initial
+    /// `output_item.added` carries a partial stub (tool-call id + arguments);
+    /// this call overwrites that stub once the MCP result is in hand, so
+    /// `response.completed.response.output` sees the same item a
+    /// non-streaming response would emit.
+    ///
+    /// Matching is by the original `call_id` the stub stored, since that
+    /// is the only identifier common to every tool-call item type.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
-            // Find the output item with matching call_id
+            let Ok(item_value) = serde_json::to_value(&tool_result.output_item) else {
+                warn!(
+                    call_id = %tool_result.call_id,
+                    "Failed to serialize transformed tool output item; keeping streaming stub"
+                );
+                continue;
+            };
             for item_state in &mut self.output_items {
                 if let Some(ref mut item_data) = item_state.item_data {
-                    // Check if this is a tool call item with matching call_id
-                    let item_type = item_data.get("type").and_then(|t| t.as_str());
-                    let is_tool_call = matches!(
-                        item_type,
-                        Some("mcp_call")
-                            | Some("web_search_call")
-                            | Some("code_interpreter_call")
-                            | Some("file_search_call")
-                    );
-                    if is_tool_call
-                        && item_data.get("call_id").and_then(|c| c.as_str())
-                            == Some(&tool_result.call_id)
+                    if item_data.get("call_id").and_then(|c| c.as_str())
+                        == Some(&tool_result.call_id)
                     {
-                        // Add output field
-                        let output_str = serde_json::to_string(&tool_result.output)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        item_data["output"] = json!(output_str);
-
-                        // Update status based on success
-                        if tool_result.is_error {
-                            item_data["status"] = json!("failed");
-                        }
+                        *item_data = item_value;
                         break;
                     }
                 }

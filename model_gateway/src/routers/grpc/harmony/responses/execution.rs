@@ -1,7 +1,10 @@
 //! MCP tool execution logic for Harmony Responses
 
 use axum::response::Response;
-use openai_protocol::{common::ToolCall, responses::ResponseTool};
+use openai_protocol::{
+    common::ToolCall,
+    responses::{ResponseOutputItem, ResponseTool},
+};
 use serde_json::{from_str, json, Value};
 use smg_mcp::{
     apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpToolSession, ToolExecutionInput,
@@ -24,6 +27,15 @@ pub(crate) struct ToolResult {
 
     /// Whether this is an error result
     pub is_error: bool,
+
+    /// Correctly-typed output item for the Responses API, produced by
+    /// `ResponseTransformer::transform` (via
+    /// `ToolExecutionOutput::to_response_item`). Carries the per-tool
+    /// shape — e.g. `McpCall { output }`, `WebSearchCall { .. }`,
+    /// `ImageGenerationCall { result }` — so downstream code can
+    /// serialize the authoritative item rather than re-deriving fields
+    /// from `output`.
+    pub output_item: ResponseOutputItem,
 }
 
 /// Execute MCP tools and collect results
@@ -120,6 +132,7 @@ pub(super) async fn execute_mcp_tools(
             ToolResult {
                 call_id: output.call_id,
                 output: output.output,
+                output_item,
                 is_error: output.is_error,
             }
         })
