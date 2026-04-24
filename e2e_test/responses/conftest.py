@@ -91,17 +91,17 @@ def _image_generation_mcp_config(mock_mcp_url: str) -> dict:
 def _plain_mcp_config(mock_mcp_url: str) -> dict:
     """Build an MCP config that registers the mock server WITHOUT builtin_type.
 
-    This mirrors the deployment the external reviewer hit in R7: a plain MCP
+    This mirrors the deployment the external reviewer hit: a plain MCP
     server that happens to expose an ``image_generation`` tool, but whose YAML
     config does NOT tag the server with ``builtin_type: image_generation`` or
     ``response_format: image_generation_call``.
 
     With this shape, the gateway's session-side response format for the tool
-    resolves to ``Passthrough``. The R7 runtime override must then promote
+    resolves to ``Passthrough``. The runtime override must then promote
     the format to ``ImageGenerationCall`` based on the client-declared
     ``tools: [{"type": "image_generation", ...}]`` in the Responses API
     request. This fixture is what proves the bug the reviewer reported is
-    fixed — the original R6.5 fixture pre-matched both sides, which is why
+    fixed — the original fixture pre-matched both sides, which is why
     the bug slipped past the test suite.
     """
     return {
@@ -143,7 +143,7 @@ def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # no
 def mock_mcp_config_file_plain(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # noqa: F811
     """Write the plain (no ``builtin_type``) MCP config YAML to a tempfile.
 
-    Counterpart to ``mock_mcp_config_file`` for R7 regression coverage. The
+    Counterpart to ``mock_mcp_config_file`` for regression coverage. The
     mock MCP server is the same (``image_generation`` tool still reachable)
     but the gateway config leaves ``builtin_type`` / ``response_format``
     unset, forcing the runtime override path to decide the output shape
@@ -243,13 +243,13 @@ def gateway_with_mock_mcp_plain_cloud(
 ) -> Iterator[tuple]:
     """Launch an OpenAI cloud gateway wired to a PLAIN MCP server (no ``builtin_type``).
 
-    R7 regression fixture. Same mock MCP server as
+    regression fixture. Same mock MCP server as
     ``gateway_with_mock_mcp_cloud`` (so the underlying ``image_generation``
     tool behaves identically), but the gateway's MCP config deliberately
     does NOT tag the server with ``builtin_type: image_generation`` or a
     per-tool ``response_format``. The client is still expected to declare
     ``tools: [{"type": "image_generation", ...}]`` on the request — that
-    declaration is what the R7 runtime override uses to shape the output
+    declaration is what the runtime override uses to shape the output
     item.
 
     Skips when ``OPENAI_API_KEY`` is absent, same as the matched cloud

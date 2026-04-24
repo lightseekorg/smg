@@ -313,7 +313,7 @@ async fn execute_mcp_tool_loop_streaming(
                 // caller-declared tool list (hosted-tool config lives there);
                 // `execute_mcp_tools` merges the per-kind overrides into dispatch
                 // args. The caller's top-level `user` rides through so hosted-tool
-                // MCP proxies can attribute usage per-user (R7 Fix B).
+                // MCP proxies can attribute usage per-user.
                 let mcp_results = if mcp_tool_calls.is_empty() {
                     Vec::new()
                 } else {

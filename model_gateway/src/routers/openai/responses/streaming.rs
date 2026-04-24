@@ -148,7 +148,7 @@ pub(super) fn apply_event_transformations_inplace(
                         if let Some(session) =
                             ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
                         {
-                            // R7: resolve the format using the client's request-side
+                            // Resolve the format using the client's request-side
                             // tool declaration so plain (un-tagged) MCP servers still
                             // produce the correct streaming event shape.
                             let response_format = resolve_response_format(
@@ -1021,7 +1021,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             // hosted-tool overrides (e.g. image_generation size/quality) are
             // merged into dispatch args before MCP execution. Also forward
             // `original_request.user` so hosted-tool dispatch args get the
-            // top-level user identifier (R7 Fix B).
+            // top-level user identifier.
             if !execute_streaming_tool_calls(
                 pending_calls,
                 &session,

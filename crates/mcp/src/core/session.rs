@@ -896,15 +896,10 @@ impl<'a> McpToolSession<'a> {
     }
 }
 
-/// Canonical hosted-tool name that identifies a dispatched `image_generation` call.
-///
-/// R7: callers declare `tools: [{"type": "image_generation", ...}]`, but the
-/// MCP server may expose the tool under an alias or a synonym. This constant
-/// pins the set of aliases we treat as "this call is an image_generation
-/// hosted-tool call" for the purpose of inferring the response format when
-/// the server has no `builtin_type` config. Keep this list narrow — broader
-/// matching belongs in the MCP config's alias/tool_config mechanism, not
-/// here.
+/// Aliases we treat as an `image_generation` hosted-tool call for the
+/// purpose of inferring the response format when the MCP server has no
+/// `builtin_type` config. Keep this list narrow — broader matching belongs
+/// in the MCP config's alias/tool_config mechanism, not here.
 const HOSTED_IMAGE_GENERATION_NAMES: &[&str] = &["image_generation"];
 
 /// Canonical hosted-tool name for `web_search_preview` dispatches.
@@ -1946,7 +1941,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // R7: resolve_response_format + inject_user_into_hosted_tool_args
+    // resolve_response_format + inject_user_into_hosted_tool_args
     // ---------------------------------------------------------------
 
     fn default_image_generation_tool() -> ResponseTool {

@@ -156,7 +156,7 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
 /// request so per-kind hosted-tool overrides can be merged into dispatch args
 /// before [`McpToolSession::execute_tool`]. `request_user` carries the
 /// caller's top-level `user` identifier so hosted-tool dispatches can mirror
-/// it into their args (R7 Fix B).
+/// it into their args.
 ///
 /// Returns false if client disconnected during execution
 #[expect(
@@ -193,7 +193,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             &call.arguments_buffer
         };
 
-        // R7: resolve the format first so both event emission (below) and
+        // Resolve the format first so both event emission (below) and
         // dispatch (override on ToolExecutionInput) use the same shape.
         let response_format = resolve_response_format(
             session.tool_response_format(&call.name),
@@ -261,7 +261,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         }
 
-        // R7: forward caller's top-level `user` into hosted-tool dispatch args.
+        // Forward caller's top-level `user` into hosted-tool dispatch args.
         inject_user_into_hosted_tool_args(&mut arguments, &response_format, request_user);
 
         // Log the effective (post-merge) args so the log reflects what the
@@ -894,7 +894,7 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
-            // R7: resolve the format up-front so the error-handling branch and
+            // Resolve the format up-front so the error-handling branch and
             // the dispatch branch agree on the output shape. The resolved format
             // is then threaded through `response_format_override` so
             // `ToolExecutionOutput::to_response_item` emits the correct item
@@ -958,7 +958,7 @@ pub(crate) async fn execute_tool_loop(
                 }
             }
 
-            // R7: forward caller's top-level `user` into hosted-tool dispatch
+            // Forward caller's top-level `user` into hosted-tool dispatch
             // args so MCP proxies can attribute usage per-user. No-op for
             // non-hosted function tools.
             inject_user_into_hosted_tool_args(

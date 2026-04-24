@@ -60,7 +60,7 @@ pub(super) async fn execute_mcp_tools(
     // Non-object model payloads coerce to `{}` so the override merge actually
     // applies rather than silently dropping the caller's declared config.
     //
-    // R7: `resolve_response_format` combines the session's format with a
+    // `resolve_response_format` combines the session's format with the
     // request-side hosted-tool declaration so the MCP server doesn't need
     // `builtin_type` config for the client's `tools: [{"type": "..."}]`
     // to shape the output item correctly. The resolved format flows into

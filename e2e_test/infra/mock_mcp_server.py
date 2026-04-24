@@ -383,7 +383,7 @@ class MockMcpServer:
             user: str | None = None,
         ) -> dict[str, str]:
             # ``user`` is forwarded by the gateway when the client sets the
-            # top-level ``user`` field on the Responses request (R7 Fix B).
+            # top-level ``user`` field on the Responses request .
             # The OpenAI spec does not list ``user`` as an
             # ``ImageGenerationTool`` field, but the gateway injects it into
             # hosted-tool dispatch args so MCP proxies can attribute usage

@@ -6,7 +6,7 @@ tool result is transformed into an ``image_generation_call`` output item, the
 argument compactor applies size/quality overrides correctly, and multi-turn
 replay strips the base64 payload from stored conversation context.
 
-Also covers R7 regression surfaces:
+Also covers Regression surfaces:
 
 * ``TestImageGenerationClientDeclaredServerPlain`` exercises a plain MCP
   server (no ``builtin_type`` on the config) so the runtime response-format
@@ -35,7 +35,7 @@ Engine matrix
   backend. Validates the OpenAI-compat router (R6.2).
 * **openai** cloud, plain MCP server (``TestImageGenerationClientDeclaredServerPlain``) —
   forces the runtime response-format override to make the decision
-  (R7 Fix A).
+  .
 * **sglang** + gpt-oss-20b via harmony (``TestImageGenerationGrpc``,
   engine=sglang) — validates the gRPC-harmony path (R6.3).
 * **vllm** + Llama-3.1-8B-Instruct via regular (``TestImageGenerationGrpc``,
@@ -451,7 +451,7 @@ class _ImageGenerationAssertions:
 
 
 # =============================================================================
-# R7: user-forwarding mix-in
+# User-forwarding mix-in
 # =============================================================================
 
 
@@ -459,7 +459,7 @@ class _UserForwardingAssertions:
     """Test body that asserts ``request.user`` reaches the MCP dispatch args.
 
     Shared by the plain-MCP cloud class AND the original cloud class so we
-    exercise R7 Fix B on both server configurations. The OpenAI spec does
+    exercise  on both server configurations. The OpenAI spec does
     NOT list ``user`` as a field on ``ImageGeneration`` tool config, so the
     gateway injects it into the dispatch args payload directly (mirroring
     what OpenAI's own hosted image-generation backend does via the
@@ -475,7 +475,7 @@ class _UserForwardingAssertions:
         return request.getfixturevalue(self._fixture_name)
 
     def test_image_generation_forwards_user_to_mcp(self, request, image_gen_tool_args) -> None:
-        """R7: top-level ``user`` must reach MCP dispatch arguments.
+        """Top-level ``user`` must reach MCP dispatch arguments.
 
         The reviewer-reported bug was: ``ResponsesRequest.user`` is only
         mirrored into ``safety_identifier`` for OpenAI cloud, never into the
@@ -530,7 +530,7 @@ class _UserForwardingAssertions:
 class TestImageGenerationCloud(_ImageGenerationAssertions, _UserForwardingAssertions):
     """``image_generation`` tool against the OpenAI cloud backend (R6.2).
 
-    Extended for R7 to also exercise ``user`` forwarding on the
+    Extended to also exercise ``user`` forwarding on the
     ``builtin_type``-tagged server config (the most common production
     deployment).
     """
@@ -543,19 +543,19 @@ class TestImageGenerationCloud(_ImageGenerationAssertions, _UserForwardingAssert
 class TestImageGenerationClientDeclaredServerPlain(
     _ImageGenerationAssertions, _UserForwardingAssertions
 ):
-    """R7 regression: the MCP server config has no ``builtin_type``.
+    """the MCP server config has no ``builtin_type``.
 
     The reviewer's deployment doesn't tag the MCP server with
     ``builtin_type: image_generation`` and doesn't set a per-tool
-    ``response_format``. Before R7, the session-side format resolved to
+    ``response_format``. Before this fix, the session-side format resolved to
     ``Passthrough`` and ``ResponseTransformer::transform`` emitted an
     ``mcp_call`` item with ``output`` + ``arguments`` fields — wrong for a
-    hosted image_generation call. The R7 runtime override rescues the
+    hosted image_generation call. The runtime override rescues the
     output shape using the client-declared ``tools: [{"type":
     "image_generation"}]`` on the request.
 
     Every assertion in ``_ImageGenerationAssertions`` must pass against
-    this fixture, same as the original cloud class. If R7 Fix A
+    this fixture, same as the original cloud class. If 
     regresses, the non-streaming test fails first (output item type +
     field names), followed by the streaming envelope (wrong event types).
     """

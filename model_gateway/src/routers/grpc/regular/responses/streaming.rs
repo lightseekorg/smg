@@ -640,7 +640,7 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.call_id
                 );
 
-                // Resolve response_format for this tool. R7: prefer the session's
+                // Resolve response_format for this tool: prefer the session's
                 // explicit hosted format; otherwise fall back to the caller's
                 // request-side tool declaration. This guarantees streaming
                 // events match the client-declared hosted-tool shape even when
@@ -733,7 +733,7 @@ async fn execute_tool_loop_streaming_internal(
                     }
                 }
 
-                // R7: forward the caller's top-level `user` into hosted-tool
+                // Forward the caller's top-level `user` into hosted-tool
                 // dispatch args so MCP proxies can attribute usage per-user.
                 inject_user_into_hosted_tool_args(
                     &mut arguments,
@@ -744,8 +744,7 @@ async fn execute_tool_loop_streaming_internal(
                 // Execute the single tool via the normalized MCP execution API.
                 // This avoids custom serialization and manual re-transformation in streaming paths.
                 // The resolved format flows through the override so
-                // `ToolExecutionOutput::to_response_item` emits the correct shape
-                // (R7 Fix A).
+                // `ToolExecutionOutput::to_response_item` emits the correct shape.
                 let tool_output = session
                     .execute_tool(ToolExecutionInput {
                         call_id: tool_call.call_id.clone(),

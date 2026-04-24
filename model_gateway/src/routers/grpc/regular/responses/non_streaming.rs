@@ -343,7 +343,7 @@ pub(super) async fn execute_tool_loop(
             // Non-object model payloads coerce to `{}` so the merge actually
             // applies instead of silently dropping the caller's config.
             //
-            // R7: resolve the response format by combining session state with
+            // Resolve the response format by combining session state with
             // request-side hosted-tool declarations and also forward the caller's
             // `user` into the dispatch payload for hosted tools.
             let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
