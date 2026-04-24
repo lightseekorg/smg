@@ -75,12 +75,12 @@ pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> 
 /// call, ignored advertisement, or garbled output). Instead, the
 /// [`ToolLike`] impl for [`ResponseTool::ImageGeneration`] renders the
 /// hosted tool as a *function tool* in the developer-message
-/// custom-tool section (R6.8): gpt-oss sees `image_generation` as a
-/// callable function, emits a plain function call with a `prompt`
-/// argument, and the downstream MCP dispatch path — keyed on the
-/// exposed function-tool name — routes the call to the registered
-/// `image_generation` MCP server and materializes the response as an
-/// `image_generation_call` output item.
+/// custom-tool section: gpt-oss sees `image_generation` as a callable
+/// function, emits a plain function call with a `prompt` argument, and
+/// the downstream MCP dispatch path — keyed on the exposed function-tool
+/// name — routes the call to the registered `image_generation` MCP
+/// server and materializes the response as an `image_generation_call`
+/// output item.
 const BUILTIN_TOOLS: &[&str] = &[
     "web_search_preview",
     "web_search",
@@ -145,7 +145,7 @@ impl ToolLike for ResponseTool {
         // was not trained to emit `image_generation_call` as a builtin
         // channel tag; instead, the gateway advertises it in the custom-tool
         // section and routes the resulting function call through MCP
-        // dispatch. See [`BUILTIN_TOOLS`] above and the R6.8 commit body.
+        // dispatch. See [`BUILTIN_TOOLS`] above.
         matches!(
             self,
             ResponseTool::Function(_) | ResponseTool::ImageGeneration(_)
@@ -477,7 +477,7 @@ impl HarmonyBuilder {
         // `harmony/responses/non_streaming.rs`). When the caller's
         // original request also declared a hosted tool that the MCP
         // server resolves by the same name — most notably
-        // `image_generation` via the R6.8 synthesized schema — we would
+        // `image_generation` via the synthesized schema — we would
         // otherwise emit two identically-named entries inside
         // `namespace functions { … }` and confuse gpt-oss about which
         // signature to follow. Keeping the first occurrence (the
@@ -1162,18 +1162,17 @@ impl Default for HarmonyBuilder {
 
 #[cfg(test)]
 mod tests {
-    //! R6.8 regression coverage for the `image_generation` → function-tool
+    //! Regression coverage for the `image_generation` → function-tool
     //! translation gpt-oss needs via the harmony pipeline.
     //!
-    //! Before R6.8 the harmony builder silently dropped
-    //! `ResponseTool::ImageGeneration` — it classified as a builtin (via
-    //! the historical `BUILTIN_TOOLS` membership) but gpt-oss was never
-    //! trained to emit `image_generation_call` as a builtin channel tag.
-    //! Net effect: the model saw no tool at all, emitted a
-    //! reasoning + message pair, and the registered `image_generation`
-    //! MCP server received zero dispatches.
+    //! Classifying `ResponseTool::ImageGeneration` as a builtin made the
+    //! harmony builder silently drop it — gpt-oss was never trained to
+    //! emit `image_generation_call` as a builtin channel tag, so the
+    //! model saw no tool at all, emitted a reasoning + message pair, and
+    //! the registered `image_generation` MCP server received zero
+    //! dispatches.
     //!
-    //! These tests lock in the new contract:
+    //! These tests lock in the contract:
     //!   1. `image_generation` is NOT in `BUILTIN_TOOLS`.
     //!   2. `ResponseTool::ImageGeneration` is treated as a *custom* tool
     //!      by the harmony `ToolLike` impl.
@@ -1189,8 +1188,8 @@ mod tests {
 
     use super::*;
 
-    /// PR #1353's invariant: `image_generation` must never be advertised
-    /// as a gpt-oss native builtin tool. If a future change re-adds it,
+    /// Invariant: `image_generation` must never be advertised as a
+    /// gpt-oss native builtin tool. If a future change re-adds it,
     /// gpt-oss's behavior becomes undefined (hallucinated tool call
     /// shape, ignored advertisement, or garbled output) because the
     /// model was not trained on that channel tag. Keep this guard until
@@ -1200,7 +1199,7 @@ mod tests {
         assert!(
             !BUILTIN_TOOLS.contains(&"image_generation"),
             "image_generation must not be advertised as a gpt-oss builtin; \
-             it is rendered as a function tool instead (R6.8)",
+             it is rendered as a function tool instead",
         );
     }
 

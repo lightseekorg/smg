@@ -234,8 +234,7 @@ impl StreamingToolHandler {
                 // directly (not wrapped as function_call), the upstream
                 // umbrella `output_item.done` fires BEFORE
                 // `<type>.completed`, and forwarding it breaks the spec
-                // ordering invariant. See PR #1365 CI failure log for
-                // image_generation_call evidence.
+                // ordering invariant.
                 let is_tool_call_done = parsed
                     .get("item")
                     .and_then(|item| item.get("type"))
@@ -445,8 +444,8 @@ impl StreamingToolHandler {
 
 #[cfg(test)]
 mod tests {
-    //! Regression tests for R6.7 Gap B — streaming event ordering for
-    //! image-generation-style built-in tool calls.
+    //! Regression tests for streaming event ordering on image-generation-
+    //! style built-in tool calls.
     //!
     //! The bug: when the upstream signalled tool completion with a direct
     //! `response.output_item.done` event (no preceding
@@ -487,7 +486,7 @@ mod tests {
 
     #[test]
     fn output_item_done_triggers_execute_tools_without_forwarding() {
-        // Gap B: when the upstream signals tool-call completion via
+        // When the upstream signals tool-call completion via
         // `output_item.done` for a function_call item (no preceding
         // `function_call_arguments.done`), the handler must ask the
         // caller NOT to forward the triggering event — the tool loop
@@ -524,12 +523,11 @@ mod tests {
 
     /// Assert that an `output_item.done` for `item_type` is suppressed (the
     /// gate returns `ExecuteTools { forward_triggering_event: false }`) when
-    /// a tool call is already pending. This is the R6.7b regression: R6.7's
-    /// original gate only matched `function_call`/`function_tool_call`, so
-    /// OpenAI cloud passthrough of native hosted tools (which emits the
-    /// item directly with its hosted-tool type) slipped through and the
-    /// duplicate umbrella event reached the wire. See PR #1365 CI log for
-    /// the `image_generation_call` reproduction.
+    /// a tool call is already pending. The gate must match every hosted
+    /// tool-call item type — OpenAI cloud passthrough of native hosted
+    /// tools (which emits the item directly with its hosted-tool type) would
+    /// otherwise slip through and send a duplicate umbrella event to the
+    /// wire.
     fn assert_output_item_done_suppressed_for_hosted_tool(item_type: &str) {
         let mut handler = StreamingToolHandler::with_starting_index(0);
         bootstrap_function_call_added(&mut handler);
@@ -561,19 +559,17 @@ mod tests {
 
     #[test]
     fn output_item_done_suppressed_for_image_generation_call() {
-        // R6.7b: OpenAI cloud passthrough emits the `image_generation_call`
-        // item directly — the umbrella `output_item.done` that upstream
-        // sends before `response.image_generation_call.completed` must be
-        // suppressed so the tool loop's umbrella lands at the right spot
-        // (see PR #1365 CI failure: `completed` at index 9, `output_item.done`
-        // at index 3).
+        // OpenAI cloud passthrough emits the `image_generation_call` item
+        // directly — the umbrella `output_item.done` that upstream sends
+        // before `response.image_generation_call.completed` must be
+        // suppressed so the tool loop's umbrella lands at the right spot.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::IMAGE_GENERATION_CALL);
     }
 
     #[test]
     fn output_item_done_suppressed_for_web_search_call() {
-        // R6.7b: hosted `web_search_call` items emitted directly by
-        // upstream must also trigger suppression — the tool loop emits
+        // Hosted `web_search_call` items emitted directly by upstream
+        // must also trigger suppression — the tool loop emits
         // `response.web_search_call.completed` followed by its own
         // `output_item.done` at the correct position.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::WEB_SEARCH_CALL);
@@ -581,30 +577,29 @@ mod tests {
 
     #[test]
     fn output_item_done_suppressed_for_code_interpreter_call() {
-        // R6.7b: hosted `code_interpreter_call` items share the ordering
+        // Hosted `code_interpreter_call` items share the ordering
         // contract with the other tool-call item types.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::CODE_INTERPRETER_CALL);
     }
 
     #[test]
     fn output_item_done_suppressed_for_file_search_call() {
-        // R6.7b: hosted `file_search_call` items share the ordering
-        // contract with the other tool-call item types.
+        // Hosted `file_search_call` items share the ordering contract
+        // with the other tool-call item types.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::FILE_SEARCH_CALL);
     }
 
     #[test]
     fn output_item_done_for_unregistered_hosted_tool_output_index_forwards() {
-        // R6.7b Claude-review follow-up: the gate must also match the
-        // done event's `output_index` to a pending call. Without this
-        // guard a mixed stream where a function_call (intercepted) and
-        // a native hosted-tool item (NOT intercepted because
-        // `handle_output_item_added` only registers function_call
-        // types) live at different output indices would see the
-        // hosted-tool's `output_item.done` incorrectly suppressed —
-        // and the tool loop only re-emits umbrellas for items it
-        // actually executed, so the hosted-tool's umbrella would be
-        // permanently lost from the wire.
+        // The gate must also match the done event's `output_index` to a
+        // pending call. Without this guard a mixed stream where a
+        // function_call (intercepted) and a native hosted-tool item
+        // (NOT intercepted because `handle_output_item_added` only
+        // registers function_call types) live at different output
+        // indices would see the hosted-tool's `output_item.done`
+        // incorrectly suppressed — and the tool loop only re-emits
+        // umbrellas for items it actually executed, so the hosted-tool's
+        // umbrella would be permanently lost from the wire.
         let mut handler = StreamingToolHandler::with_starting_index(0);
         // Pending function_call at output_index 0.
         bootstrap_function_call_added(&mut handler);

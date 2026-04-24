@@ -165,7 +165,7 @@ async fn execute_mcp_tool_loop_streaming(
         );
     }
 
-    // R6.8: once the MCP loop has taken ownership of image_generation
+    // Once the MCP loop has taken ownership of image_generation
     // dispatch, drop the hosted-tool descriptor so the harmony builder
     // advertises only the MCP-exposed function-tool name (which
     // `has_exposed_tool` actually recognizes for dispatch). See the

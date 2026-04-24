@@ -43,13 +43,14 @@ pub(crate) async fn ensure_mcp_connection(
 
     // Check for builtin tools that MAY have MCP routing configured.
     //
-    // `ImageGeneration` is included here (R6.8) because gpt-oss via the
+    // `ImageGeneration` is included here because gpt-oss via the
     // harmony pipeline, and Qwen/Llama via the regular pipeline, both
     // dispatch hosted `image_generation` calls through the same MCP
     // routing path — the only difference is how the tool is advertised in
-    // the prompt. Without this arm, the short-circuit below returned
-    // `(false, Vec::new())`, the MCP loop was never entered, and the
-    // registered `image_generation` MCP server received zero dispatches.
+    // the prompt. Without this arm, the short-circuit below would return
+    // `(false, Vec::new())`, the MCP loop would never be entered, and the
+    // registered `image_generation` MCP server would receive zero
+    // dispatches.
     let has_builtin_tools = tools
         .map(|t| {
             t.iter().any(|tool| {
