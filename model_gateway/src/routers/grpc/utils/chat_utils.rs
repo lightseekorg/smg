@@ -88,32 +88,74 @@ pub(crate) fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), 
     //   {% if ... is string %}{{ args }}{% else %}{{ args | tojson }}{% endif %}
     // Keeping strings preserves original formatting (e.g. spacing),
     // matching the behavior of Python/TGL which passes arguments through as-is.
-    for msg in messages {
+    //
+    // Also rewrites tool_call IDs to `functions.NAME:INDEX` format. Some chat
+    // templates (Kimi K2) pass the raw ID through to the model prompt. When
+    // users send IDs like `call_1`, the model continues the pattern (`call_2`)
+    // instead of using the expected `functions.NAME:INDEX` format, causing the
+    // tool parser to fail.
+
+    // First pass: rewrite assistant tool_call IDs and collect old→new mapping.
+    let mut id_rewrites: HashMap<String, String> = HashMap::new();
+
+    for msg in messages.iter_mut() {
         let role = msg.get("role").and_then(|v| v.as_str());
         if role != Some("assistant") {
             continue;
         }
 
-        let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) else {
+        let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) else {
             continue;
         };
 
-        for call in tool_calls {
-            let Some(function) = call.get("function") else {
-                continue;
-            };
-            let Some(args) = function.get("arguments") else {
-                continue;
-            };
-            let Some(args_str) = args.as_str() else {
-                continue;
-            };
+        for (index, call) in tool_calls.iter_mut().enumerate() {
+            // Validate arguments JSON
+            if let Some(args_str) = call
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+            {
+                if serde_json::from_str::<Value>(args_str).is_err() {
+                    return Err(format!("Invalid JSON in tool call arguments: '{args_str}'"));
+                }
+            }
 
-            if serde_json::from_str::<Value>(args_str).is_err() {
-                return Err(format!("Invalid JSON in tool call arguments: '{args_str}'"));
+            // Rewrite ID to functions.NAME:INDEX if not already in that format
+            let func_name = call
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str());
+            let old_id = call.get("id").and_then(|v| v.as_str());
+
+            if let (Some(name), Some(old)) = (func_name, old_id) {
+                let canonical = format!("functions.{name}:{index}");
+                if old != canonical {
+                    id_rewrites.insert(old.to_string(), canonical.clone());
+                    if let Some(obj) = call.as_object_mut() {
+                        obj.insert("id".to_string(), Value::String(canonical));
+                    }
+                }
             }
         }
     }
+
+    // Second pass: rewrite tool message tool_call_ids to match
+    if !id_rewrites.is_empty() {
+        for msg in messages.iter_mut() {
+            let role = msg.get("role").and_then(|v| v.as_str());
+            if role != Some("tool") {
+                continue;
+            }
+            if let Some(old_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                if let Some(new_id) = id_rewrites.get(old_id) {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.insert("tool_call_id".to_string(), Value::String(new_id.clone()));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
