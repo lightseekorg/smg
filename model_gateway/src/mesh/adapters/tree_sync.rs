@@ -2,25 +2,26 @@
 //! distributed prefix tree.
 //!
 //! Current scope: tenant-delta fast path + inbound hash resolution
-//! via an injected [`LocalHashResolver`]. The adapter holds no
-//! tree-membership state of its own — the tree-owning component
-//! (`CacheAwarePolicy` in production) is the single source of truth,
-//! implemented behind the trait so this adapter can test and evolve
-//! without a circular dependency on the policy.
+//! via [`crate::policies::cache_aware::TreeHandle`]. The adapter
+//! holds no tree-membership state of its own — the tree-owning
+//! component (`CacheAwarePolicy` in production) exposes the handle
+//! and the adapter queries through it. This keeps the dependency
+//! direction adapter → policy; the policy never imports from this
+//! module.
 //!
 //! - Outbound: `on_local_insert` buffers per-model `TreeDelta`
 //!   entries. The mesh drain callback, called once per gossip round,
 //!   batches each model's buffer into a single `td:{model_id}`
 //!   stream entry (bincode-serialised `Vec<TreeDelta>`).
 //! - Inbound: a spawned task subscribes to `td:` and decodes
-//!   incoming batches. For each delta, the adapter asks the
-//!   resolver "do you have this node locally?" — known hashes log
+//!   incoming batches. For each delta, the adapter asks the tree
+//!   handle "do you have this node locally?" — known hashes log
 //!   at trace (the apply sink lands in the next slice), unknown
 //!   hashes log at debug (the repair request lands in the slice
 //!   after).
 //!
 //! Repair sessions and the apply sink are deliberately not in this
-//! file yet so the resolver contract can soak on its own.
+//! file yet so the handle contract can soak on its own.
 
 use std::sync::{Arc, OnceLock};
 
@@ -30,16 +31,9 @@ use serde::{Deserialize, Serialize};
 use smg_mesh::{DrainHandle, StreamNamespace};
 use tracing::{debug, trace, warn};
 
-const PREFIX: &str = "td:";
+use crate::policies::{TreeHandle, TreeKind};
 
-/// Which local tree a delta originated from. String and token trees
-/// have disjoint hash spaces, so the adapter keeps them separate
-/// across every data path (hash index, repair sessions, apply logic).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TreeKind {
-    String,
-    Token,
-}
+const PREFIX: &str = "td:";
 
 /// One prefix-tree change observed on a producing node.
 ///
@@ -62,48 +56,19 @@ pub struct TreeDelta {
     pub epoch: u64,
 }
 
-/// Answers "do we have this node in our local tree?" for incoming
-/// tenant deltas. Implemented by the tree-owning component
-/// (`CacheAwarePolicy` in production); injected into the adapter at
-/// construction so the adapter holds no tree-membership state of
-/// its own.
-///
-/// Why a trait here instead of a concrete handle:
-///
-/// - **Single source of truth.** `CacheAwarePolicy` already
-///   maintains `path_hash_index` for the string tree and will grow
-///   an equivalent for the token tree. Duplicating that state
-///   inside the adapter forces two parallel membership maps with
-///   lockstep sync discipline — and the wrong answer on a missed
-///   sync (false "unknown") routes to unnecessary repair.
-/// - **Multi-tenant correctness.** Tree nodes are shared across
-///   tenants; the policy's tree already knows whether any tenant
-///   still holds a node. The adapter can't reconstruct that from
-///   per-tenant event notifications without refcounting, which just
-///   shifts the same bookkeeping into the wrong module.
-/// - **Testability.** Tests use a trivial mock implementation of
-///   this trait without pulling in the full policy.
-///
-/// Implementors must be cheap on the read path — the adapter calls
-/// `contains_hash` once per incoming delta. A DashMap / HashSet
-/// lookup is appropriate; network or disk I/O is not.
-pub trait LocalHashResolver: Send + Sync + std::fmt::Debug {
-    /// Returns `true` if the local tree for `model_id` has a node
-    /// matching `node_hash` under the given `tree_kind`. String and
-    /// token trees have disjoint hash spaces — the implementer must
-    /// not conflate them.
-    fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool;
-}
-
 /// Bridge between the `td:` broadcast stream namespace and the
 /// gateway's per-model tenant buffers.
+///
+/// The adapter holds no tree-membership state of its own. The
+/// tree-owning component (`CacheAwarePolicy` in production) exposes
+/// a [`TreeHandle`] and the adapter queries through it. Layering
+/// flows: `adapter → policies::cache_aware::TreeHandle ←
+/// CacheAwarePolicy`, so the policy never imports from this module.
 pub struct TreeSyncAdapter {
     tenant_deltas: Arc<StreamNamespace>,
     pending_deltas: DashMap<String, Vec<TreeDelta>>,
-    /// Hash-membership oracle provided by the tree owner. See the
-    /// [`LocalHashResolver`] docs for why this lives outside the
-    /// adapter.
-    resolver: Arc<dyn LocalHashResolver>,
+    /// Hash-membership oracle provided by the tree owner.
+    tree: Arc<dyn TreeHandle>,
     node_name: String,
     /// Keeps the drain registration alive for the adapter's lifetime.
     /// Dropping the handle unregisters from the mesh drain registry;
@@ -128,7 +93,7 @@ impl TreeSyncAdapter {
     /// of fanning deltas into the wrong stream.
     pub fn new(
         tenant_deltas: Arc<StreamNamespace>,
-        resolver: Arc<dyn LocalHashResolver>,
+        tree: Arc<dyn TreeHandle>,
         node_name: String,
     ) -> Arc<Self> {
         assert_eq!(
@@ -143,7 +108,7 @@ impl TreeSyncAdapter {
         Arc::new(Self {
             tenant_deltas,
             pending_deltas: DashMap::new(),
-            resolver,
+            tree,
             node_name,
             drain_handle: OnceLock::new(),
         })
@@ -293,7 +258,7 @@ impl TreeSyncAdapter {
         );
         for delta in &batch {
             if self
-                .resolver
+                .tree
                 .contains_hash(model_id, delta.tree_kind, delta.node_hash)
             {
                 // Hash is locally known. Applying the tenant to the
@@ -305,7 +270,7 @@ impl TreeSyncAdapter {
                     hash = delta.node_hash,
                     worker_url = %delta.worker_url,
                     epoch = delta.epoch,
-                    "resolved remote tenant delta against local resolver",
+                    "resolved remote tenant delta against local tree handle",
                 );
             } else {
                 // Unknown hash — the repair-request slice will turn
@@ -350,17 +315,17 @@ mod tests {
         }
     }
 
-    /// Test-only implementation of [`LocalHashResolver`]. Keyed by
+    /// Test-only implementation of [`TreeHandle`]. Keyed by
     /// `(model_id, TreeKind)` with a set of known hashes. The real
-    /// resolver will live on `CacheAwarePolicy` and be backed by the
-    /// policy's `path_hash_index` / token-tree index — this mock
-    /// only needs to answer the contract, not mirror the policy.
+    /// handle lives on `CacheAwarePolicy` and is backed by the
+    /// policy's `path_hash_index` / `token_path_hash_index` — this
+    /// mock only answers the contract, not the full policy.
     #[derive(Debug, Default)]
-    struct MockResolver {
+    struct MockTreeHandle {
         known: DashMap<(String, TreeKind), DashMap<u64, ()>>,
     }
 
-    impl MockResolver {
+    impl MockTreeHandle {
         fn insert(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) {
             self.known
                 .entry((model_id.to_string(), tree_kind))
@@ -369,7 +334,7 @@ mod tests {
         }
     }
 
-    impl LocalHashResolver for MockResolver {
+    impl TreeHandle for MockTreeHandle {
         fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool {
             self.known
                 .get(&(model_id.to_string(), tree_kind))
@@ -377,14 +342,14 @@ mod tests {
         }
     }
 
-    fn empty_resolver() -> Arc<MockResolver> {
-        Arc::new(MockResolver::default())
+    fn empty_handle() -> Arc<MockTreeHandle> {
+        Arc::new(MockTreeHandle::default())
     }
 
-    fn adapter_with_empty_resolver(mesh: &MeshKV, node_name: &str) -> Arc<TreeSyncAdapter> {
+    fn adapter_with_empty_handle(mesh: &MeshKV, node_name: &str) -> Arc<TreeSyncAdapter> {
         let ns = td_namespace(mesh);
-        let resolver: Arc<dyn LocalHashResolver> = empty_resolver();
-        TreeSyncAdapter::new(ns, resolver, node_name.into())
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        TreeSyncAdapter::new(ns, tree, node_name.into())
     }
 
     #[tokio::test]
@@ -411,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn on_local_insert_buffers_per_model() {
         let mesh = MeshKV::new("node-a".into());
-        let adapter = adapter_with_empty_resolver(&mesh, "node-a");
+        let adapter = adapter_with_empty_handle(&mesh, "node-a");
 
         adapter.on_local_insert("model-1", delta(1, "http://w1"));
         adapter.on_local_insert("model-1", delta(2, "http://w1"));
@@ -424,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn drain_batches_per_model_and_clears_buffer() {
         let mesh = MeshKV::new("node-a".into());
-        let adapter = adapter_with_empty_resolver(&mesh, "node-a");
+        let adapter = adapter_with_empty_handle(&mesh, "node-a");
 
         adapter.on_local_insert("model-1", delta(1, "http://w1"));
         adapter.on_local_insert("model-1", delta(2, "http://w1"));
@@ -453,7 +418,7 @@ mod tests {
         // and then clears a model, the next drain must not emit an
         // empty batch (empty batches would burn gossip bandwidth).
         let mesh = MeshKV::new("node-a".into());
-        let adapter = adapter_with_empty_resolver(&mesh, "node-a");
+        let adapter = adapter_with_empty_handle(&mesh, "node-a");
 
         adapter
             .pending_deltas
@@ -468,7 +433,7 @@ mod tests {
         // Exercise the end-to-end outbound path: start() → drain
         // registration → mesh.collect_round_batch() pulls our entries.
         let mesh = MeshKV::new("node-a".into());
-        let adapter = adapter_with_empty_resolver(&mesh, "node-a");
+        let adapter = adapter_with_empty_handle(&mesh, "node-a");
         adapter.start();
 
         adapter.on_local_insert("model-1", delta(10, "http://w1"));
@@ -488,7 +453,7 @@ mod tests {
         // through the DrainRegistry would keep the adapter alive
         // until MeshKV drop. Verify via a `Weak::upgrade` check.
         let mesh = MeshKV::new("node-a".into());
-        let adapter = adapter_with_empty_resolver(&mesh, "node-a");
+        let adapter = adapter_with_empty_handle(&mesh, "node-a");
         adapter.start();
 
         let weak = Arc::downgrade(&adapter);
@@ -510,28 +475,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_incoming_batch_consults_resolver() {
+    async fn handle_incoming_batch_consults_tree() {
         // Inbound deltas must be classified via the injected
-        // resolver. Hashes the resolver knows are "resolved"; those
-        // it doesn't are "unknown". The resolver itself is untouched
+        // tree. Hashes the tree handle knows are "resolved"; those
+        // it doesn't are "unknown". The tree handle itself is untouched
         // — `handle_incoming_batch` is read-only on membership.
         let mesh = MeshKV::new("node-a".into());
         let ns = td_namespace(&mesh);
-        let resolver = Arc::new(MockResolver::default());
-        resolver.insert("model-1", TreeKind::String, 42);
-        let adapter_resolver: Arc<dyn LocalHashResolver> = resolver.clone();
-        let adapter = TreeSyncAdapter::new(ns, adapter_resolver, "node-a".into());
+        let tree = Arc::new(MockTreeHandle::default());
+        tree.insert("model-1", TreeKind::String, 42);
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let adapter = TreeSyncAdapter::new(ns, adapter_tree, "node-a".into());
 
         let batch = vec![
             TreeDelta {
                 tree_kind: TreeKind::String,
-                node_hash: 42, // known per resolver
+                node_hash: 42, // known per tree handle
                 worker_url: "http://w1".into(),
                 epoch: 1,
             },
             TreeDelta {
                 tree_kind: TreeKind::String,
-                node_hash: 99, // unknown per resolver
+                node_hash: 99, // unknown per tree handle
                 worker_url: "http://w2".into(),
                 epoch: 1,
             },
@@ -545,21 +510,21 @@ mod tests {
         let bytes = Bytes::from(bincode::serialize(&batch).unwrap());
         adapter.handle_incoming_batch("model-1", &[bytes]);
 
-        // Adapter neither mutates the resolver nor caches membership.
-        assert!(resolver.contains_hash("model-1", TreeKind::String, 42));
-        assert!(!resolver.contains_hash("model-1", TreeKind::String, 99));
-        assert!(!resolver.contains_hash("model-1", TreeKind::Token, 42));
+        // Adapter neither mutates the tree handle nor caches membership.
+        assert!(tree.contains_hash("model-1", TreeKind::String, 42));
+        assert!(!tree.contains_hash("model-1", TreeKind::String, 99));
+        assert!(!tree.contains_hash("model-1", TreeKind::Token, 42));
     }
 
     #[tokio::test]
     async fn handle_incoming_batch_ignores_malformed_payload() {
         // A corrupt batch must not propagate any state and must not
-        // panic. The resolver should never be queried since decode
+        // panic. The tree handle should never be queried since decode
         // fails before the per-delta loop.
         let mesh = MeshKV::new("node-a".into());
         let ns = td_namespace(&mesh);
-        let resolver: Arc<dyn LocalHashResolver> = Arc::new(MockResolver::default());
-        let adapter = TreeSyncAdapter::new(ns, resolver, "node-a".into());
+        let tree: Arc<dyn TreeHandle> = Arc::new(MockTreeHandle::default());
+        let adapter = TreeSyncAdapter::new(ns, tree, "node-a".into());
 
         adapter.handle_incoming_batch("model-1", &[Bytes::from_static(b"not-bincode")]);
     }
@@ -575,8 +540,8 @@ mod tests {
                 routing: StreamRouting::Targeted,
             },
         );
-        let resolver: Arc<dyn LocalHashResolver> = empty_resolver();
-        let _ = TreeSyncAdapter::new(ns, resolver, "node-a".into());
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        let _ = TreeSyncAdapter::new(ns, tree, "node-a".into());
     }
 
     #[tokio::test]
@@ -584,8 +549,8 @@ mod tests {
     async fn new_rejects_empty_node_name() {
         let mesh = MeshKV::new("node-a".into());
         let ns = td_namespace(&mesh);
-        let resolver: Arc<dyn LocalHashResolver> = empty_resolver();
-        let _ = TreeSyncAdapter::new(ns, resolver, String::new());
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        let _ = TreeSyncAdapter::new(ns, tree, String::new());
     }
 
     #[tokio::test]
@@ -596,7 +561,7 @@ mod tests {
         // loudly rather than register a phantom drain that the
         // OnceLock silently drops.
         let mesh = MeshKV::new("node-a".into());
-        let adapter = adapter_with_empty_resolver(&mesh, "node-a");
+        let adapter = adapter_with_empty_handle(&mesh, "node-a");
         adapter.start();
         adapter.start();
     }
