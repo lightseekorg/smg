@@ -293,8 +293,16 @@ impl StreamingToolHandler {
                 // item. Unlike the MCP-dispatch arm, this path does NOT
                 // kick the tool loop (there is nothing to dispatch — the
                 // item was not intercepted).
-                let is_native_passthrough_item = done_output_index
-                    .is_some_and(|idx| self.native_passthrough_tool_call_indices.contains(&idx));
+                //
+                // We `take()` the index out of the set (via `remove`) so
+                // that only the FIRST `output_item.done` for a
+                // passthrough item is dropped. Upstream re-emits a
+                // correctly-ordered umbrella after `<type>.completed`,
+                // and that second envelope must be forwarded so the
+                // client sees the terminal `output_item.done`. Without
+                // this one-shot behaviour both envelopes would be
+                // dropped and the client would never receive a final
+                // umbrella for the passthrough item.
                 if is_tool_call_done && belongs_to_pending_call && self.has_complete_calls() {
                     // MCP-dispatch path (R6.7b): suppress the upstream
                     // umbrella event and kick the tool loop — it will emit
@@ -303,12 +311,18 @@ impl StreamingToolHandler {
                     StreamAction::ExecuteTools {
                         forward_triggering_event: false,
                     }
-                } else if is_tool_call_done && is_native_passthrough_item {
+                } else if is_tool_call_done
+                    && done_output_index.is_some_and(|idx| {
+                        self.native_passthrough_tool_call_indices.remove(&idx)
+                    })
+                {
                     // Native passthrough path (R6.7c): drop the upstream
                     // umbrella without running the tool loop. The
                     // downstream `<type>.completed` event still reaches
-                    // the client, and upstream re-emits the umbrella in
-                    // the correct position later in the stream.
+                    // the client, and upstream's subsequent
+                    // correctly-ordered `output_item.done` is forwarded
+                    // (the index was removed above so this branch will
+                    // not match a second time for the same item).
                     StreamAction::Drop
                 } else {
                     StreamAction::Forward
@@ -1011,6 +1025,57 @@ mod tests {
         assert!(
             matches!(action, StreamAction::Forward),
             "native passthrough output_item.added must still forward; got {action:?}"
+        );
+    }
+
+    #[test]
+    fn native_passthrough_second_output_item_done_forwards_after_first_dropped() {
+        // R6.7c one-shot invariant (CodeRabbit P1 fix): the first
+        // (mis-ordered) upstream `output_item.done` for a native
+        // passthrough item is dropped, but upstream then re-emits a
+        // correctly-ordered `output_item.done` after
+        // `response.<type>.completed`. That second envelope MUST be
+        // forwarded so the client sees the terminal umbrella for the
+        // item — otherwise the spec's "output_item.done is the LAST
+        // event" invariant fails on the client side.
+        //
+        // The implementation removes the passthrough index from
+        // `native_passthrough_tool_call_indices` on the first drop, so
+        // the second done falls through to the `Forward` arm.
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        bootstrap_native_hosted_tool_added(
+            &mut handler,
+            ItemType::IMAGE_GENERATION_CALL,
+            0,
+            "ig_native",
+        );
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "type": "image_generation_call",
+            "id": "ig_native",
+            "status": "completed"
+          }
+        }"#;
+
+        // First done (mis-ordered, arrives BEFORE `<type>.completed`) —
+        // must be dropped.
+        let first_action = handler.process_event(Some("response.output_item.done"), done_event);
+        assert!(
+            matches!(first_action, StreamAction::Drop),
+            "first output_item.done for native passthrough must Drop; got {first_action:?}"
+        );
+
+        // Second done (correctly-ordered, arrives AFTER
+        // `<type>.completed`) — must be forwarded so the client sees
+        // the terminal umbrella.
+        let second_action = handler.process_event(Some("response.output_item.done"), done_event);
+        assert!(
+            matches!(second_action, StreamAction::Forward),
+            "second output_item.done for native passthrough must Forward after the first \
+             dropped envelope consumed the passthrough-index entry; got {second_action:?}"
         );
     }
 }
