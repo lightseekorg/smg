@@ -286,16 +286,6 @@ class _ImageGenerationAssertions:
             expected_base64=mock_mcp.image_generation_png_base64,
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "R6.7b: router's output_item.done suppression gate in tool_handler.rs "
-            "is scoped to function_call items only. For image_generation_call, "
-            "response.output_item.done fires before response.image_generation_call.completed, "
-            "violating the documented envelope order. Fix tracked in R6.7b PR; when that merges "
-            "this marker will XPASS and CI will require its removal."
-        ),
-    )
     def test_image_generation_streaming(self, request, image_gen_tool_args) -> None:
         """Streaming: assert the full envelope sequence and field payload."""
         _, client, mock_mcp, model = self._ctx(request)
