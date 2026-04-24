@@ -708,10 +708,14 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.name,
                     tool_call.arguments
                 );
-                // Parse arguments to Value, merging caller-declared hosted-tool
-                // config from `original_request.tools` for the matching kind.
-                let mut arguments: Value =
-                    serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
+                // Parse arguments to Value, coercing scalar/array/null payloads
+                // to an empty object so hosted-tool override merge can actually
+                // apply. `apply_hosted_tool_overrides` is a no-op on non-objects;
+                // silently dropping caller-declared config would be surprising.
+                let mut arguments = match serde_json::from_str::<Value>(&tool_call.arguments) {
+                    Ok(Value::Object(map)) => Value::Object(map),
+                    _ => json!({}),
+                };
                 if let Some(kind) = response_format.to_builtin_tool_type() {
                     if let Some(overrides) = extract_hosted_tool_overrides(
                         original_request.tools.as_deref().unwrap_or(&[]),

@@ -340,12 +340,17 @@ pub(super) async fn execute_tool_loop(
 
             // Convert tool calls to execution inputs, merging caller-declared
             // hosted-tool config from `original_request.tools` into dispatch args.
+            // Non-object model payloads coerce to `{}` so the merge actually
+            // applies instead of silently dropping the caller's config.
             let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
                 .map(|tc| {
-                    let mut arguments: serde_json::Value =
-                        serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
+                    let mut arguments =
+                        match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                            Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+                            _ => json!({}),
+                        };
                     if let Some(kind) = session
                         .tool_response_format(&tc.name)
                         .to_builtin_tool_type()

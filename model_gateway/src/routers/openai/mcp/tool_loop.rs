@@ -233,6 +233,12 @@ pub(crate) async fn execute_streaming_tool_calls(
             return false;
         }
 
+        // Coerce non-object payloads to `{}` before merging overrides — the
+        // merge is a no-op on scalars/arrays and we don't want to silently
+        // drop caller-declared hosted-tool config.
+        if !matches!(arguments, Value::Object(_)) {
+            arguments = json!({});
+        }
         // Merge caller-declared hosted-tool configuration (e.g. `size`, `quality`
         // on image_generation) into dispatch args. No-op for non-hosted tools.
         if let Some(kind) = response_format.to_builtin_tool_type() {
@@ -241,7 +247,9 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         }
 
-        debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
+        // Log the effective (post-merge) args so the log reflects what the
+        // MCP server actually receives, not the pre-merge string from the model.
+        debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -905,6 +913,12 @@ pub(crate) async fn execute_tool_loop(
                 }
             };
 
+            // Coerce non-object payloads to `{}` before merging overrides —
+            // the merge is a no-op on scalars/arrays and we don't want to
+            // silently drop caller-declared hosted-tool config.
+            if !matches!(arguments, Value::Object(_)) {
+                arguments = json!({});
+            }
             // Merge caller-declared hosted-tool configuration into dispatch args
             // for this tool's hosted-tool kind, if any. `original_body.tools` is
             // the caller's tool declarations; empty / None = no-op.
@@ -918,9 +932,15 @@ pub(crate) async fn execute_tool_loop(
                 }
             }
 
+            // Serialize the post-merge args once so downstream logging + the
+            // approval payload show the effective (dispatched) payload rather
+            // than the pre-merge string the model emitted.
+            let effective_arguments =
+                serde_json::to_string(&arguments).unwrap_or_else(|_| call.arguments.clone());
+
             debug!(
                 "Calling MCP tool '{}' with args: {}",
-                call.name, call.arguments
+                call.name, effective_arguments
             );
             let tool_result = session
                 .execute_tool_result(ToolExecutionInput {
@@ -940,7 +960,7 @@ pub(crate) async fn execute_tool_loop(
                     let approval_item = build_mcp_approval_request_item(
                         &approval_request_id,
                         &pending.tool_name,
-                        &call.arguments,
+                        &effective_arguments,
                         &server_label,
                     );
                     return build_approval_response(
