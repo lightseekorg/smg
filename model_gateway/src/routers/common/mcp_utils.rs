@@ -343,8 +343,7 @@ pub async fn ensure_request_mcp_client(
     }
 
     let builtin_types = extract_builtin_types(tools);
-    if let Some(builtin_servers) = ensure_mcp_servers(mcp_orchestrator, &[], &builtin_types).await
-    {
+    if let Some(builtin_servers) = ensure_mcp_servers(mcp_orchestrator, &[], &builtin_types).await {
         for binding in builtin_servers {
             if !mcp_servers
                 .iter()
@@ -826,6 +825,8 @@ mod tests {
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             }),
             ResponseTool::Mcp(McpTool {
                 server_url: Some("http://127.0.0.1:1/mcp".to_string()),
@@ -835,6 +836,8 @@ mod tests {
                 server_description: None,
                 require_approval: None,
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             }),
         ];
 
