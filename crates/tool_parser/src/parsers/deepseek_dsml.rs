@@ -127,8 +127,12 @@ impl DeepSeekDsmlParser {
         )
         .expect("Valid regex pattern");
 
+        // `[^"]*` (not `+`) so a malformed `name=""` still matches and can be
+        // advanced past by the empty/invalid-name handling in `parse_incremental`.
+        // Without this, a bad `name=""` invoke would stall the buffer forever
+        // and suppress every subsequent delta in the same stream.
         let invoke_regex =
-            Regex::new(r#"(?s)<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)(</｜DSML｜invoke>|$)"#)
+            Regex::new(r#"(?s)<｜DSML｜invoke\s+name="([^"]*)"\s*>(.*?)(</｜DSML｜invoke>|$)"#)
                 .expect("Valid regex pattern");
 
         Self {
@@ -212,10 +216,7 @@ impl DeepSeekDsmlParser {
                 // Strip EOS before trimming — `strip_dsml_trailing` above only
                 // handles `</｜DSML｜parameter>` prefixes, so a truncated turn
                 // with `value<EOS>` would otherwise stream EOS as arg bytes.
-                let value = cap
-                    .get(3)
-                    .map_or("", |m| m.as_str())
-                    .replace(EOS_TOKEN, "");
+                let value = cap.get(3).map_or("", |m| m.as_str()).replace(EOS_TOKEN, "");
                 let value = value.trim();
 
                 // Only add if we have actual content and this param isn't already complete
@@ -343,8 +344,14 @@ impl ToolParser for DeepSeekDsmlParser {
             let match_end = captures.get(0).map(|m| m.end());
             drop(captures);
 
-            // Skip if tool name is not in provided tools list
-            if !func_name.is_empty() && !tool_indices.contains_key(func_name.as_str()) {
+            // Skip if tool name is absent or not in the provided tools list.
+            // Empty names reach this branch because `invoke_regex` allows
+            // `name=""` (quantifier `*` not `+`); the loosened regex + this
+            // guard together ensure a malformed `name=""` block is advanced
+            // past instead of trapping the buffer forever.
+            let name_invalid =
+                func_name.is_empty() || !tool_indices.contains_key(func_name.as_str());
+            if name_invalid {
                 tracing::debug!("Invalid tool name '{}' - skipping", func_name);
                 if is_complete {
                     // Complete invalid invoke — advance buffer past it and try next

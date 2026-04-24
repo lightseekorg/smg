@@ -532,3 +532,79 @@ async fn test_deepseek_dsml_v4_streaming_strips_eos_from_partial_parameter() {
         "EOS must not leak into V4 streamed argument bytes, got: {collected_args:?}"
     );
 }
+
+/// A malformed complete invoke with `name=""` must not stall the buffer.
+/// Previously the streaming `invoke_regex` required `[^"]+` so `name=""`
+/// never matched, leaving the bad block stuck at the head of the buffer —
+/// `has_dsml` then stayed true forever and every subsequent delta was
+/// suppressed. After the fix, the regex allows empty names and the
+/// invalid-name guard advances the buffer past the bad invoke, so the
+/// next valid invoke is emitted normally.
+#[tokio::test]
+async fn test_deepseek_dsml_streaming_malformed_empty_name_does_not_trap_buffer() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeekDsmlParser::v32();
+
+    let chunks = [
+        "<｜DSML｜function_calls>\n",
+        // Malformed complete invoke (name=""). Must be advanced past, not stuck.
+        "<｜DSML｜invoke name=\"\">junk</｜DSML｜invoke>\n",
+        // Valid invoke after it — parser must still emit this one.
+        "<｜DSML｜invoke name=\"search\">\n",
+        "<｜DSML｜parameter name=\"query\" string=\"true\">foo</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "</｜DSML｜function_calls>",
+    ];
+
+    let mut tool_names: Vec<String> = Vec::new();
+    let mut collected_args = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                tool_names.push(name);
+            }
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert_eq!(
+        tool_names,
+        vec!["search"],
+        "valid invoke after malformed name=\"\" must still be emitted"
+    );
+    assert!(
+        collected_args.contains("foo"),
+        "argument bytes from the valid invoke must be emitted, got: {collected_args:?}"
+    );
+}
+
+/// Same scenario against V4 — proves the fix applies to both block names.
+#[tokio::test]
+async fn test_deepseek_dsml_v4_streaming_malformed_empty_name_does_not_trap_buffer() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeekDsmlParser::v4();
+
+    let chunks = [
+        "<｜DSML｜tool_calls>\n",
+        "<｜DSML｜invoke name=\"\">junk</｜DSML｜invoke>\n",
+        "<｜DSML｜invoke name=\"search\">\n",
+        "<｜DSML｜parameter name=\"query\" string=\"true\">bar</｜DSML｜parameter>\n",
+        "</｜DSML｜invoke>\n",
+        "</｜DSML｜tool_calls>",
+    ];
+
+    let mut tool_names: Vec<String> = Vec::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                tool_names.push(name);
+            }
+        }
+    }
+
+    assert_eq!(tool_names, vec!["search"]);
+}
