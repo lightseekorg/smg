@@ -366,6 +366,13 @@ impl RouterConfigBuilder {
         self
     }
 
+    // ==================== LOGGING ====================
+
+    pub fn enable_message_hash(mut self, enable: bool) -> Self {
+        self.config.enable_message_hash = enable;
+        self
+    }
+
     // ==================== WASM ====================
 
     pub fn enable_wasm(mut self, enable: bool) -> Self {

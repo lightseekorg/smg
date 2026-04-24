@@ -102,6 +102,9 @@ pub struct RouterConfig {
     /// Loaded from skills_config_path during config creation.
     #[serde(skip)]
     pub skills: Option<SkillsConfig>,
+    /// Compute per-message SHA-256 hashes for session reconstruction logging
+    #[serde(default)]
+    pub enable_message_hash: bool,
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,
@@ -582,6 +585,7 @@ impl Default for RouterConfig {
             mcp_config: None,
             skills_enabled: false,
             skills: None,
+            enable_message_hash: false,
             enable_wasm: false,
             storage_hook_wasm_path: None,
             server_cert: None,
