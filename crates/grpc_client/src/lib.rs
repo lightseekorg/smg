@@ -25,9 +25,9 @@ pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
 // workloads. The client wraps that wire and translates to/from SGLang-shaped
 // types at the boundary so the router's dispatch enums don't proliferate.
 pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
+use tonic::metadata::MetadataMap;
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
 pub use vllm_engine::{proto as vllm_proto, VllmEngineClient};
-use tonic::metadata::MetadataMap;
 
 /// Shared `get_tokenizer()` implementation for all engine clients.
 ///
