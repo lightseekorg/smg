@@ -302,11 +302,40 @@ impl ResponseTransformer {
             update_fields(obj);
         }
 
-        // 2) Embedded openai_response payloads inside MCP text blocks.
+        // 2) Array of MCP text blocks. An MCP server returning a JSON-shaped
+        //    tool result is serialized by `call_result_to_json` as an array
+        //    of text blocks (`[{"type":"text","text":"{...}"}, ...]`). Two
+        //    text-block shapes are accepted:
+        //
+        //    a) `{"openai_response": {"result": ..., "revised_prompt": ...}}`
+        //       (internal convention used by web_search_call and other
+        //       SMG-authored MCP servers).
+        //    b) Top-level fields: `{"result": ..., "revised_prompt": ...}`.
+        //       This is the natural shape produced by servers that return
+        //       a plain `dict` from their tool handler (e.g. FastMCP's
+        //       `@tool` decorator wrapping a `dict` return value — see
+        //       `e2e_test/infra/mock_mcp_server.py`). It also covers any
+        //       third-party MCP server that emits the OpenAI Images API
+        //       shape directly.
+        //
+        //    Both shapes are read so either style works interchangeably;
+        //    first occurrence wins for each slot (matches the accumulator
+        //    semantics in `update_fields`).
         if result.is_array() {
             for openai_response in extract_embedded_openai_responses(result) {
                 if let Some(obj) = openai_response.as_object() {
                     update_fields(obj);
+                }
+            }
+
+            if let Some(text_blocks) = result.as_array() {
+                for item in text_blocks {
+                    let Some(payload) = parse_text_block_payload(item) else {
+                        continue;
+                    };
+                    if let Some(obj) = payload.as_object() {
+                        update_fields(obj);
+                    }
                 }
             }
         }
@@ -1070,6 +1099,77 @@ mod tests {
             } => {
                 assert_eq!(result, "EMBEDDED_BYTES");
                 assert_eq!(revised_prompt, Some("tweaked prompt".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_text_block_top_level_fields() {
+        // MCP servers authored against the FastMCP SDK (and any server that
+        // returns a plain `dict` from its tool handler) emit a single text
+        // block whose JSON body has `result` / `revised_prompt` at the TOP
+        // level — there is no `openai_response` wrapper. This is the shape
+        // produced by the R6.5 in-process mock and is equally valid per the
+        // MCP spec. The extractor must read those top-level fields the same
+        // way it reads direct-object and embedded-openai_response payloads.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "result": "TOP_LEVEL_BYTES",
+                  "revised_prompt": "a happy cat",
+                  "status": "completed"
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-toplevel",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "TOP_LEVEL_BYTES");
+                assert_eq!(revised_prompt, Some("a happy cat".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_text_block_b64_json_alias() {
+        // Alias check: when a text-block payload uses `b64_json` (the OpenAI
+        // Images API field name) instead of `result`, the extractor must
+        // still pick it up.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{"b64_json": "ALIAS_BYTES"}"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-alias",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { result, .. } => {
+                assert_eq!(result, "ALIAS_BYTES");
             }
             _ => panic!("Expected ImageGenerationCall"),
         }
