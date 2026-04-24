@@ -171,8 +171,12 @@ async fn normalize_one(
                 ));
             }
             if image_url.is_none() {
+                // `file_id` is rejected separately above with
+                // `unsupported_content`, so don't list it here — the
+                // two error messages would otherwise contradict each
+                // other for a client staring at both paths.
                 return Err(ConversionError::InvalidRequest(
-                    "input_image requires either image_url or file_id".to_string(),
+                    "input_image requires image_url".to_string(),
                 ));
             }
             // image_url (HTTP or data URL) passes through — the chat pipeline
@@ -208,7 +212,7 @@ async fn normalize_one(
             // otherwise file-backed images would silently fall back to
             // the downstream default and lose the cost / quality hint the
             // client asked for.
-            let carried_detail = file_detail_to_image_detail(detail.as_ref());
+            let carried_detail = Some(file_detail_to_image_detail(detail.as_ref()));
 
             if let Some(data) = file_data.take() {
                 let bytes = BASE64_STANDARD.decode(data.as_bytes()).map_err(|e| {
@@ -239,8 +243,11 @@ async fn normalize_one(
                 return Ok(());
             }
 
+            // `file_id` is rejected separately above with
+            // `unsupported_content`, so only list the shapes that this
+            // router actually resolves.
             Err(ConversionError::InvalidRequest(
-                "input_file requires one of file_data, file_url, or file_id".to_string(),
+                "input_file requires file_data (base64) or file_url".to_string(),
             ))
         }
     }
@@ -251,9 +258,10 @@ async fn normalize_one(
 /// rejected pending R4; everything else is rejected as `unsupported_content`.
 ///
 /// `carried_detail` is the caller's fidelity hint from the originating
-/// `InputFile.detail` (mapped to the image-side `Detail` enum). It is
-/// threaded through so the downstream multimodal preprocessor honors
-/// `low` / `high` tiers rather than falling back to its own default.
+/// `InputFile.detail` (mapped to the image-side `Detail` enum, with spec
+/// default `Low` substituted for an absent value). It is threaded through
+/// so the downstream multimodal preprocessor honors `low` / `high` tiers
+/// rather than falling back to its own default.
 fn sniff_and_build_image_part(
     bytes: &[u8],
     carried_detail: Option<openai_protocol::common::Detail>,
@@ -279,15 +287,22 @@ fn sniff_and_build_image_part(
 
 /// Map an optional `FileDetail` (spec: `"low" | "high"`) to the broader
 /// `Detail` enum used by `InputImage` (`"low" | "high" | "auto" | "original"`).
-/// `None` stays `None` so downstream pipeline defaults still apply.
+///
+/// Spec pins `FileDetail`'s default to `low`, so a missing `input_file.detail`
+/// must become `Detail::Low` — not `None` — on the rewritten `InputImage`.
+/// Leaving it `None` would let the downstream multimodal tracker fall back
+/// to `auto` (via `detail.unwrap_or_default()` which resolves to
+/// `ImageDetail::Auto`), silently promoting the request's fidelity tier
+/// and changing model behavior / cost. The caller wraps the result in
+/// `Some(..)` when constructing the rewritten `InputImage`.
 fn file_detail_to_image_detail(
     detail: Option<&openai_protocol::responses::FileDetail>,
-) -> Option<openai_protocol::common::Detail> {
+) -> openai_protocol::common::Detail {
     use openai_protocol::{common::Detail, responses::FileDetail};
-    detail.map(|d| match d {
-        FileDetail::Low => Detail::Low,
-        FileDetail::High => Detail::High,
-    })
+    match detail {
+        Some(FileDetail::High) => Detail::High,
+        Some(FileDetail::Low) | None => Detail::Low,
+    }
 }
 
 /// Minimal magic-byte classifier covering every MIME type the downstream
@@ -571,6 +586,42 @@ mod tests {
                 assert_eq!(decoded, jpeg_bytes);
             }
             other => panic!("expected InputImage after rewrite, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn preprocess_defaults_omitted_file_detail_to_low() {
+        // Spec pins FileDetail default to "low", so a missing
+        // input_file.detail must become Detail::Low on the rewritten
+        // input_image — otherwise the multimodal tracker's
+        // `unwrap_or_default() → ImageDetail::Auto` silently promotes
+        // fidelity.
+        use openai_protocol::common::Detail;
+        let jpeg_bytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A];
+        let file_data = BASE64_STANDARD.encode(jpeg_bytes);
+        let mut req = user_message_with_parts(vec![ResponseContentPart::InputFile {
+            detail: None,
+            file_data: Some(file_data),
+            file_id: None,
+            file_url: None,
+            filename: None,
+        }]);
+
+        preprocess_responses_input(&mut req, None).await.unwrap();
+
+        let parts = match &req.input {
+            ResponseInput::Items(items) => match &items[0] {
+                ResponseInputOutputItem::Message { content, .. } => content,
+                other => panic!("unexpected item: {other:?}"),
+            },
+            ResponseInput::Text(_) => panic!("unexpected text input"),
+        };
+        match &parts[0] {
+            ResponseContentPart::InputImage {
+                detail: Some(Detail::Low),
+                ..
+            } => {}
+            other => panic!("expected InputImage detail=Low, got {other:?}"),
         }
     }
 
