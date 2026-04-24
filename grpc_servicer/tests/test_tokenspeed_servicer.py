@@ -23,7 +23,7 @@ pytest.importorskip(
     reason="smg-grpc-proto must be installed to test the servicer",
 )
 
-from smg_grpc_proto import sglang_scheduler_pb2  # noqa: E402
+from smg_grpc_proto.generated import tokenspeed_scheduler_pb2  # noqa: E402
 from smg_grpc_servicer.tokenspeed import servicer as _servicer_module  # noqa: E402
 from smg_grpc_servicer.tokenspeed.servicer import (  # noqa: E402
     TokenSpeedSchedulerServicer,
@@ -33,9 +33,10 @@ from smg_grpc_servicer.tokenspeed.servicer import (  # noqa: E402
 )
 
 # ---------------------------------------------------------------------------
-# Stub request classes. The servicer lazily imports ``GenerateReqInput`` and
-# ``EmbeddingReqInput`` so tests can substitute minimal local stand-ins
-# without pulling in TokenSpeed's full scheduler graph.
+# Stub request class. The servicer lazily imports ``GenerateReqInput`` so
+# tests can substitute a minimal local stand-in without pulling in
+# TokenSpeed's full scheduler graph. (No ``EmbeddingReqInput`` — the slim
+# TokenSpeed proto removed the Embed RPC.)
 # ---------------------------------------------------------------------------
 
 
@@ -45,7 +46,7 @@ class _StubReq:
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
-        # Allow later attribute assignment for rid / text / bootstrap_*.
+        # Allow later attribute assignment for rid / text.
         self.rid = None
         self.text = None
 
@@ -54,17 +55,10 @@ class StubGenerateReqInput(_StubReq):
     pass
 
 
-class StubEmbeddingReqInput(_StubReq):
-    pass
-
-
 @pytest.fixture(autouse=True)
 def _stub_request_inputs(monkeypatch):
-    """Redirect the servicer's lazy imports to the local stubs."""
+    """Redirect the servicer's lazy GenerateReqInput import to a local stub."""
     monkeypatch.setattr(_servicer_module, "_lazy_generate_req_input", lambda: StubGenerateReqInput)
-    monkeypatch.setattr(
-        _servicer_module, "_lazy_embedding_req_input", lambda: StubEmbeddingReqInput
-    )
     yield
 
 
@@ -324,7 +318,7 @@ class TestMakeJsonSerializable:
 
 class TestSamplingParamsConversion:
     def test_defaults_not_forwarded(self):
-        params = sglang_scheduler_pb2.SamplingParams()
+        params = tokenspeed_scheduler_pb2.SamplingParams()
         out = TokenSpeedSchedulerServicer._sampling_params_from_proto(params)
         # proto3 defaults (0 / False / "") should not end up as TokenSpeed
         # overrides — only the always-forwarded bool fields appear.
@@ -335,11 +329,10 @@ class TestSamplingParamsConversion:
         # always-forwarded bools
         assert out["skip_special_tokens"] is False
         assert out["spaces_between_special_tokens"] is False
-        assert out["no_stop_trim"] is False
         assert out["ignore_eos"] is False
 
     def test_numeric_fields_forwarded(self):
-        params = sglang_scheduler_pb2.SamplingParams(
+        params = tokenspeed_scheduler_pb2.SamplingParams(
             temperature=0.7,
             top_p=0.9,
             top_k=50,
@@ -362,7 +355,7 @@ class TestSamplingParamsConversion:
         assert out["min_new_tokens"] == 4
 
     def test_stop_lists_and_logit_bias(self):
-        params = sglang_scheduler_pb2.SamplingParams(
+        params = tokenspeed_scheduler_pb2.SamplingParams(
             stop=["\n\n", "</s>"],
             stop_token_ids=[2, 0],
             logit_bias={"100": -10.0, "200": 10.0},
@@ -382,7 +375,7 @@ class TestSamplingParamsConversion:
         ],
     )
     def test_constraints(self, setter, key, value):
-        params = sglang_scheduler_pb2.SamplingParams()
+        params = tokenspeed_scheduler_pb2.SamplingParams()
         setter(params)
         out = TokenSpeedSchedulerServicer._sampling_params_from_proto(params)
         assert out[key] == value
@@ -399,16 +392,16 @@ def _make_generate_request(
     input_ids: list[int] | None = None,
     stream: bool = False,
     max_new_tokens: int = 16,
-) -> sglang_scheduler_pb2.GenerateRequest:
-    return sglang_scheduler_pb2.GenerateRequest(
+) -> tokenspeed_scheduler_pb2.GenerateRequest:
+    return tokenspeed_scheduler_pb2.GenerateRequest(
         request_id=request_id,
-        tokenized=sglang_scheduler_pb2.TokenizedInput(
+        tokenized=tokenspeed_scheduler_pb2.TokenizedInput(
             # Preserve explicit empty-list inputs (for "rejects empty ids" test);
             # only fall back to the default if the caller didn't supply any.
             input_ids=(input_ids if input_ids is not None else [1, 2, 3, 4]),
             original_text="hello",
         ),
-        sampling_params=sglang_scheduler_pb2.SamplingParams(
+        sampling_params=tokenspeed_scheduler_pb2.SamplingParams(
             temperature=0.0,
             max_new_tokens=max_new_tokens,
         ),
@@ -674,43 +667,12 @@ async def _drain(async_gen):
 # ---------------------------------------------------------------------------
 
 
-class TestEmbed:
-    @pytest.mark.asyncio
-    async def test_embed_ok(self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer):
-        fake_engine.is_generation = False
-        fake_engine.outputs = [
-            {
-                "embedding": [0.1, 0.2, 0.3],
-                "meta_info": {"prompt_tokens": 5},
-            }
-        ]
-        ctx = _make_context()
-        request = sglang_scheduler_pb2.EmbedRequest(
-            request_id="e-1",
-            tokenized=sglang_scheduler_pb2.TokenizedInput(
-                input_ids=[4, 5, 6, 7, 8],
-                original_text="x",
-            ),
-        )
-        resp = await servicer.Embed(request, ctx)
-        assert resp is not None
-        assert list(resp.embedding) == pytest.approx([0.1, 0.2, 0.3])
-        assert resp.embedding_dim == 3
-        assert resp.prompt_tokens == 5
-
-    @pytest.mark.asyncio
-    async def test_embed_missing_tokenized_aborts(
-        self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
-    ):
-        ctx = _make_context()
-        request = sglang_scheduler_pb2.EmbedRequest(request_id="e-1")
-        with pytest.raises(_FakeAbortError) as exc:
-            await servicer.Embed(request, ctx)
-        assert exc.value.code == grpc.StatusCode.INVALID_ARGUMENT
-
-
 # ---------------------------------------------------------------------------
 # Abort / HealthCheck / GetModelInfo / GetServerInfo / GetLoads
+#
+# Note: TokenSpeed's slim proto removes Embed / GetTokenizer / SubscribeKvEvents
+# entirely, so there are no tests for them — the methods aren't on the
+# servicer surface.
 # ---------------------------------------------------------------------------
 
 
@@ -721,7 +683,7 @@ class TestAbortRpc:
     ):
         fake_engine.rid_to_state["rid-1"] = _FakeState()
         resp = await servicer.Abort(
-            sglang_scheduler_pb2.AbortRequest(request_id="rid-1"),
+            tokenspeed_scheduler_pb2.AbortRequest(request_id="rid-1"),
             _make_context(),
         )
         assert resp.success is True
@@ -732,7 +694,7 @@ class TestAbortRpc:
         self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
     ):
         resp = await servicer.Abort(
-            sglang_scheduler_pb2.AbortRequest(request_id="missing"),
+            tokenspeed_scheduler_pb2.AbortRequest(request_id="missing"),
             _make_context(),
         )
         assert resp.success is False
@@ -752,7 +714,7 @@ class TestAbortRpc:
         fake_engine.rid_to_state["unrelated-rid"] = _FakeState()
 
         resp = await servicer.Abort(
-            sglang_scheduler_pb2.AbortRequest(request_id="rid-1"),
+            tokenspeed_scheduler_pb2.AbortRequest(request_id="rid-1"),
             _make_context(),
         )
         assert resp.success is True
@@ -770,7 +732,7 @@ class TestHealthCheck:
     ):
         fake_engine.gracefully_exit = True
         resp = await servicer.HealthCheck(
-            sglang_scheduler_pb2.HealthCheckRequest(), _make_context()
+            tokenspeed_scheduler_pb2.HealthCheckRequest(), _make_context()
         )
         assert resp.healthy is False
         assert "shutting down" in resp.message.lower()
@@ -789,7 +751,7 @@ class TestHealthCheck:
             }
         ]
         resp = await servicer.HealthCheck(
-            sglang_scheduler_pb2.HealthCheckRequest(), _make_context()
+            tokenspeed_scheduler_pb2.HealthCheckRequest(), _make_context()
         )
         assert resp.healthy is True
 
@@ -800,10 +762,9 @@ class TestGetModelInfo:
         self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
     ):
         resp = await servicer.GetModelInfo(
-            sglang_scheduler_pb2.GetModelInfoRequest(), _make_context()
+            tokenspeed_scheduler_pb2.GetModelInfoRequest(), _make_context()
         )
         assert resp.model_path == "fake-model"
-        assert resp.is_generation is True
         assert resp.vocab_size == 32000
         assert resp.max_context_length == 8192
         assert list(resp.eos_token_ids) == [2]
@@ -819,11 +780,11 @@ class TestGetServerInfo:
         fake_engine.rid_to_state["a"] = _FakeState()
         fake_engine.rid_to_state["b"] = _FakeState()
         resp = await servicer.GetServerInfo(
-            sglang_scheduler_pb2.GetServerInfoRequest(), _make_context()
+            tokenspeed_scheduler_pb2.GetServerInfoRequest(), _make_context()
         )
         assert resp.active_requests == 2
-        assert resp.server_type == "grpc"
         assert resp.max_total_num_tokens == 100000
+        assert resp.tokenspeed_version
 
     @pytest.mark.asyncio
     async def test_uses_tokenspeed_service_bases(self, servicer: TokenSpeedSchedulerServicer):
@@ -845,13 +806,13 @@ class TestGetLoads:
     async def test_stub_returns_empty(
         self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
     ):
-        resp = await servicer.GetLoads(sglang_scheduler_pb2.GetLoadsRequest(), _make_context())
+        resp = await servicer.GetLoads(tokenspeed_scheduler_pb2.GetLoadsRequest(), _make_context())
         assert resp.dp_rank_count == 0
         assert resp.version == "tokenspeed"
 
 
 # ---------------------------------------------------------------------------
-# _build_generate_req semantics (pre-tokenized input, disagg params)
+# _build_generate_req semantics (pre-tokenized input)
 # ---------------------------------------------------------------------------
 
 
@@ -864,17 +825,7 @@ class TestBuildGenerateReq:
         assert obj.stream is True
         assert obj.sampling_params["max_new_tokens"] == 16
 
-    def test_disaggregated_params(self, servicer: TokenSpeedSchedulerServicer):
-        req = _make_generate_request()
-        req.disaggregated_params.bootstrap_host = "10.0.0.1"
-        req.disaggregated_params.bootstrap_port = 23456
-        req.disaggregated_params.bootstrap_room = 0  # valid room id even at 0
-        obj = servicer._build_generate_req(req)
-        assert obj.bootstrap_host == "10.0.0.1"
-        assert obj.bootstrap_port == 23456
-        assert obj.bootstrap_room == 0
-
     def test_rejects_missing_tokenized(self, servicer: TokenSpeedSchedulerServicer):
-        req = sglang_scheduler_pb2.GenerateRequest(request_id="x")
+        req = tokenspeed_scheduler_pb2.GenerateRequest(request_id="x")
         with pytest.raises(ValueError, match="tokenized"):
             servicer._build_generate_req(req)
