@@ -25,11 +25,14 @@ pub struct HealthCheckResponse {
 
 /// Polymorphic gRPC client that wraps SGLang, vLLM, TensorRT-LLM, MLX, or TokenSpeed.
 ///
-/// ``TokenSpeed`` speaks its own gRPC service (``tokenspeed.grpc.scheduler``) but
-/// currently reuses the SGLang message types for every RPC; the variant distinction
-/// exists so worker metadata, metrics, and traces show the correct runtime identity
-/// — they won't reliably diverge at the message layer yet but they will, and the
-/// plumbing is ready for that.
+/// ``TokenSpeed`` speaks its own gRPC service (``tokenspeed.grpc.scheduler``) and
+/// has a fully independent wire definition with intentionally trimmed messages
+/// (no Embed / GetTokenizer / SubscribeKvEvents / multimodal / disagg / LoRA /
+/// hidden states). The Rust client translates SGLang-shaped requests / responses
+/// at the wire boundary so the router's dispatch enums (``ProtoGenerateRequest``,
+/// ``ProtoGenerateResponse``, etc.) only need a separate ``ProtoStream`` variant —
+/// not a parallel set of TokenSpeed-typed accessors. RPCs that don't exist on
+/// TokenSpeed's wire return ``Status::unimplemented`` from this enum.
 #[derive(Clone)]
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),
@@ -234,9 +237,11 @@ impl GrpcClient {
             Self::Vllm(client) => Ok(ModelInfo::Vllm(client.get_model_info().await?)),
             Self::Trtllm(client) => Ok(ModelInfo::Trtllm(client.get_model_info().await?)),
             Self::Mlx(client) => Ok(ModelInfo::Mlx(client.get_model_info().await?)),
-            // TokenSpeed reuses the SGLang ``GetModelInfoResponse`` message
-            // type on the wire today, so the variant wrapper is the same.
-            // Split into ``ModelInfo::TokenSpeed`` when the two diverge.
+            // TokenSpeed translates its slimmer wire response into the
+            // SGLang-shaped struct at the boundary (see
+            // ``tokenspeed_scheduler::translate::model_info``), so the
+            // wrapper variant is the same and the router doesn't need a
+            // dedicated ``ModelInfo::TokenSpeed``.
             Self::TokenSpeed(client) => {
                 Ok(ModelInfo::Sglang(Box::new(client.get_model_info().await?)))
             }
@@ -261,7 +266,10 @@ impl GrpcClient {
         }
     }
 
-    /// Subscribe to KV cache events (all backends).
+    /// Subscribe to KV cache events (SGLang / vLLM / TRT-LLM only).
+    ///
+    /// MLX never had it; TokenSpeed dropped it from its wire (top-tier LLM
+    /// serving doesn't need the KV-aware router today).
     pub async fn subscribe_kv_events(
         &self,
         start_seq: u64,
@@ -270,9 +278,11 @@ impl GrpcClient {
             Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
             Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
             Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
-            Self::TokenSpeed(client) => client.subscribe_kv_events(start_seq).await,
             Self::Mlx(_) => Err(tonic::Status::unimplemented(
                 "SubscribeKvEvents RPC not supported for MLX backend",
+            )),
+            Self::TokenSpeed(_) => Err(tonic::Status::unimplemented(
+                "SubscribeKvEvents RPC not supported for TokenSpeed backend",
             )),
         }
     }
@@ -285,8 +295,9 @@ impl GrpcClient {
             Self::Vllm(client) => Ok(ServerInfo::Vllm(client.get_server_info().await?)),
             Self::Trtllm(client) => Ok(ServerInfo::Trtllm(client.get_server_info().await?)),
             Self::Mlx(client) => Ok(ServerInfo::Mlx(client.get_server_info().await?)),
-            // TokenSpeed's ``GetServerInfoResponse`` is the SGLang message
-            // type (see ``proto/tokenspeed_scheduler.proto``), so the wrapper
+            // TokenSpeed translates its ``GetServerInfoResponse`` into the
+            // SGLang-shaped struct at the wire boundary (see
+            // ``tokenspeed_scheduler::translate::server_info``); the wrapper
             // variant matches SGLang's.
             Self::TokenSpeed(client) => Ok(ServerInfo::Sglang(Box::new(
                 client.get_server_info().await?,
@@ -303,7 +314,12 @@ impl GrpcClient {
             Self::Vllm(client) => client.get_tokenizer().await,
             Self::Trtllm(client) => client.get_tokenizer().await,
             Self::Mlx(client) => client.get_tokenizer().await,
-            Self::TokenSpeed(client) => client.get_tokenizer().await,
+            // TokenSpeed dropped the GetTokenizer RPC from its wire — it
+            // serves text-only LLMs and the Python servicer constructs its
+            // own HF tokenizer locally; the router doesn't need to fetch it.
+            Self::TokenSpeed(_) => {
+                return Err("TokenSpeed backend does not support GetTokenizer RPC".into());
+            }
         }?;
 
         tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
@@ -342,15 +358,15 @@ impl GrpcClient {
                 Ok(ProtoStream::Mlx(stream))
             }
             // TokenSpeed ships over its own service (``tokenspeed.grpc.scheduler``)
-            // but reuses SGLang's ``GenerateRequest`` / ``GenerateResponse``
-            // message types today — the builder methods return the SGLang
-            // variant, and the returned stream decodes into the same
-            // ``proto::GenerateResponse`` type. When the two diverge, split
-            // into a dedicated ``ProtoGenerateRequest::TokenSpeed`` /
-            // ``ProtoStream::TokenSpeed``.
+            // and its own slimmer wire types. The builder methods produce
+            // SGLang-shaped requests for symmetry with the dispatch path, and
+            // the client translates to TokenSpeed shape internally; the
+            // returned stream is ``tokenspeed_scheduler::AbortOnDropStream``
+            // which yields SGLang-shaped responses, hence the dedicated
+            // ``ProtoStream::TokenSpeed`` variant.
             (Self::TokenSpeed(client), ProtoGenerateRequest::Sglang(boxed_req)) => {
                 let stream = client.generate(*boxed_req).await?;
-                Ok(ProtoStream::Sglang(stream))
+                Ok(ProtoStream::TokenSpeed(stream))
             }
             #[expect(
                 clippy::panic,
@@ -373,12 +389,11 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedComplete::Vllm(resp))
             }
-            // See `generate` above — TokenSpeed uses SGLang's EmbedRequest /
-            // EmbedResponse types; only the service path differs on the wire.
-            (Self::TokenSpeed(client), ProtoEmbedRequest::Sglang(boxed_req)) => {
-                let resp = client.embed(*boxed_req).await?;
-                Ok(ProtoEmbedComplete::Sglang(resp))
-            }
+            // TokenSpeed dropped the Embed RPC from its wire — top-tier
+            // LLMs aren't embedding models, so the proto doesn't carry one.
+            (Self::TokenSpeed(_), _) => Err(tonic::Status::unimplemented(
+                "TokenSpeed backend does not support embedding",
+            )),
             (Self::Mlx(_), _) => Err(tonic::Status::unimplemented(
                 "MLX backend does not support embedding",
             )),
@@ -460,22 +475,20 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
-            // TokenSpeed shares SGLang's wire proto today, so multimodal
-            // inputs arrive in the ``MultimodalData::Sglang`` variant and
-            // the produced request wears the same ``ProtoGenerateRequest::Sglang``
-            // tag — GrpcClient::generate dispatches on the client variant,
-            // not on the request variant.
+            // TokenSpeed's wire intentionally has no multimodal fields
+            // (top-tier LLMs are text-only today). Reject if the assembly
+            // stage produced any — that's a router-config bug.
             Self::TokenSpeed(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| match mm {
-                    MultimodalData::Sglang(data) => data.into_proto(),
-                    _ => unreachable!("caller guarantees matching variant"),
-                });
+                if multimodal_inputs.is_some() {
+                    return Err(
+                        "TokenSpeed backend does not support multimodal inputs".to_string()
+                    );
+                }
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
-                    sglang_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
@@ -553,17 +566,18 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
+            // TokenSpeed: text-only on the wire — see ``build_chat_request``.
             Self::TokenSpeed(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| match mm {
-                    MultimodalData::Sglang(data) => data.into_proto(),
-                    _ => unreachable!("caller guarantees matching variant"),
-                });
+                if multimodal_inputs.is_some() {
+                    return Err(
+                        "TokenSpeed backend does not support multimodal inputs".to_string()
+                    );
+                }
                 let req = client.build_generate_request_from_messages(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
-                    sglang_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))

@@ -277,10 +277,11 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
-            // TokenSpeed shares SGLang's wire proto today, so the builder
-            // signatures + produced ``GenerateRequest`` match SGLang's exactly.
-            // We still dispatch via the TokenSpeed client variant so the
-            // request goes to the TokenSpeed service, not SGLang's.
+            // TokenSpeed: builder produces an SGLang-shaped request so the
+            // ``ProtoGenerateRequest::Sglang`` plumbing carries it; the
+            // wire-side translation to TokenSpeed shape happens inside the
+            // client's ``generate()``. Multimodal is intentionally not
+            // supported here — the harmony path is text-only today.
             GrpcClient::TokenSpeed(tokenspeed_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
@@ -291,7 +292,6 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 token_ids,
-                                None,
                                 tool_constraints,
                             )
                             .map_err(|e| {

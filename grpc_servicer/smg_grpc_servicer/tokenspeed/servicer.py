@@ -6,41 +6,36 @@ on top of TokenSpeed's :class:`tokenspeed.runtime.engine.async_llm.AsyncLLM` —
 the main-process async frontend that replaced ``TokenizerManager`` in the
 AsyncLLM refactor.
 
-Wire identity & message sharing
+Wire identity & message catalog
 -------------------------------
-TokenSpeed ships its own proto (``proto/tokenspeed_scheduler.proto``) with a
-distinct package/service name so the Rust gateway's ``DetectBackendStep``
-identifies the worker natively — no SGLang-look-alike hack, no runtime marker
-probe. The proto *imports* SGLang message types today because the two
-backends happen to share the same tokenized-request / sampling-param /
-output-dict shape; any future divergence should land as a dedicated
-TokenSpeed message rather than a field added to the shared SGLang message.
-See ``docs/architecture.md`` (TODO) for the detailed field correspondence.
+TokenSpeed ships a fully independent proto (``proto/tokenspeed_scheduler.proto``)
+with a distinct package, service, and message catalog. The Rust gateway's
+``DetectBackendStep`` identifies the worker natively from the service name —
+no SGLang-look-alike hack, no runtime marker probe. The proto's field set is
+intentionally minimal (top-tier LLM serving only): no Embed, no
+GetTokenizer, no SubscribeKvEvents, no multimodal, no PD-disaggregated
+serving, no LoRA, no hidden-state forwarding, no classifier outputs.
+Anything in that list has to be added to the proto first; it doesn't ride
+on a shared SGLang message anymore.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import hashlib
 import logging
 import os
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import grpc
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
-from smg_grpc_proto import (
-    sglang_scheduler_pb2,
-    tokenspeed_scheduler_pb2_grpc,
-)
-from smg_grpc_proto.generated import common_pb2
+from smg_grpc_proto import tokenspeed_scheduler_pb2_grpc
+from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
 
-from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
 
 if TYPE_CHECKING:
@@ -64,13 +59,6 @@ def _lazy_generate_req_input():
     from tokenspeed.runtime.engine.io_struct import GenerateReqInput
 
     return GenerateReqInput
-
-
-def _lazy_embedding_req_input():
-    """Late import for ``tokenspeed.runtime.engine.io_struct.EmbeddingReqInput``."""
-    from tokenspeed.runtime.engine.io_struct import EmbeddingReqInput
-
-    return EmbeddingReqInput
 
 
 def _finish_reason_to_dict(reason: Any) -> dict | None:
@@ -102,7 +90,7 @@ def _finish_reason_to_dict(reason: Any) -> dict | None:
 
 
 class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerServicer):
-    """gRPC servicer exposing TokenSpeed's AsyncLLM over the SGLang proto."""
+    """gRPC servicer exposing TokenSpeed's AsyncLLM over the dedicated TokenSpeed proto."""
 
     def __init__(
         self,
@@ -130,9 +118,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     async def Generate(
         self,
-        request: sglang_scheduler_pb2.GenerateRequest,
+        request: tokenspeed_scheduler_pb2.GenerateRequest,
         context: grpc.aio.ServicerContext,
-    ) -> AsyncIterator[sglang_scheduler_pb2.GenerateResponse]:
+    ) -> AsyncIterator[tokenspeed_scheduler_pb2.GenerateResponse]:
         rid = request.request_id
         logger.info("Generate request %s (stream=%s)", rid, request.stream)
 
@@ -219,81 +207,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                         self.async_llm.abort_request(r)
 
     # ------------------------------------------------------------------
-    # Embed (unary)
-    # ------------------------------------------------------------------
-
-    async def Embed(
-        self,
-        request: sglang_scheduler_pb2.EmbedRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> sglang_scheduler_pb2.EmbedResponse:
-        rid = request.request_id
-        logger.info("Embed request %s", rid)
-
-        if not request.HasField("tokenized"):
-            await context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                "EmbedRequest requires tokenized input",
-            )
-            return
-
-        EmbeddingReqInput = _lazy_embedding_req_input()
-        obj = EmbeddingReqInput(
-            input_ids=list(request.tokenized.input_ids),
-        )
-        obj.rid = rid
-        # Preserve any original_text the router sent along so logs are useful.
-        if request.tokenized.original_text:
-            obj.text = request.tokenized.original_text
-
-        aborted = False
-        try:
-            embedding: list[float] | None = None
-            prompt_tokens = 0
-            async for output in self.async_llm.generate_request(obj):
-                # EmbeddingReqInput is non-streaming: the loop yields exactly
-                # one dict at finish, carrying the embedding vector.
-                embedding = output.get("embedding")
-                prompt_tokens = output.get("meta_info", {}).get("prompt_tokens", 0)
-
-            if embedding is None:
-                await context.abort(grpc.StatusCode.INTERNAL, "Empty embedding result")
-                return
-
-            return sglang_scheduler_pb2.EmbedResponse(
-                embedding=list(embedding),
-                prompt_tokens=prompt_tokens,
-                embedding_dim=len(embedding),
-            )
-        except asyncio.CancelledError:
-            # Client disconnected mid-embedding — drop the request so its
-            # rid doesn't leak in rid_to_state.
-            aborted = True
-            self.async_llm.abort_request(rid)
-            raise
-        except grpc.aio.AbortError:
-            raise
-        except ValueError as e:
-            logger.warning("Embed invalid request %s: %s", rid, e)
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
-        except Exception as e:
-            logger.exception("Embed failed for request %s", rid)
-            await context.abort(grpc.StatusCode.INTERNAL, str(e))
-        finally:
-            if not aborted:
-                state = self.async_llm.rid_to_state.get(rid)
-                if state is not None and not getattr(state, "finished", False):
-                    self.async_llm.abort_request(rid)
-
-    # ------------------------------------------------------------------
     # HealthCheck (unary)
     # ------------------------------------------------------------------
 
     async def HealthCheck(
         self,
-        request: sglang_scheduler_pb2.HealthCheckRequest,
+        request: tokenspeed_scheduler_pb2.HealthCheckRequest,
         context: grpc.aio.ServicerContext,
-    ) -> sglang_scheduler_pb2.HealthCheckResponse:
+    ) -> tokenspeed_scheduler_pb2.HealthCheckResponse:
         """Deep health probe — sends a 1-token generation to the scheduler.
 
         Mirrors SGLang's contract exactly: if the scheduler pushes *any*
@@ -305,23 +226,18 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         rid = f"HEALTH_CHECK_{time.time()}"
 
         if self.async_llm.gracefully_exit:
-            return sglang_scheduler_pb2.HealthCheckResponse(
+            return tokenspeed_scheduler_pb2.HealthCheckResponse(
                 healthy=False, message="Server is shutting down"
             )
 
-        is_generation = bool(self.async_llm.is_generation)
-
-        if is_generation:
-            GenerateReqInput = _lazy_generate_req_input()
-            probe = GenerateReqInput(
-                input_ids=[0],
-                sampling_params={"max_new_tokens": 1, "temperature": 0.0},
-                log_metrics=False,
-            )
-        else:
-            EmbeddingReqInput = _lazy_embedding_req_input()
-            probe = EmbeddingReqInput(input_ids=[0])
-            probe.log_metrics = False
+        # TokenSpeed only serves generative LLMs at this layer (the proto
+        # has no Embed RPC), so the probe is always a 1-token generate.
+        GenerateReqInput = _lazy_generate_req_input()
+        probe = GenerateReqInput(
+            input_ids=[0],
+            sampling_params={"max_new_tokens": 1, "temperature": 0.0},
+            log_metrics=False,
+        )
         probe.rid = rid
 
         tic = time.time()
@@ -341,12 +257,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 await asyncio.sleep(0.5)
                 # Any scheduler push after we started counts as healthy.
                 if self.async_llm.last_receive_tstamp > tic:
-                    return sglang_scheduler_pb2.HealthCheckResponse(
+                    return tokenspeed_scheduler_pb2.HealthCheckResponse(
                         healthy=True,
                         message="Health check passed",
                     )
                 if task.done():
-                    return sglang_scheduler_pb2.HealthCheckResponse(
+                    return tokenspeed_scheduler_pb2.HealthCheckResponse(
                         healthy=bool(task.result()),
                         message=(
                             "Health check passed"
@@ -360,7 +276,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             # Best-effort cleanup: the probe rid shouldn't linger.
             self.async_llm.abort_request(rid)
 
-        return sglang_scheduler_pb2.HealthCheckResponse(
+        return tokenspeed_scheduler_pb2.HealthCheckResponse(
             healthy=False,
             message=f"Health check timeout after {HEALTH_CHECK_TIMEOUT}s",
         )
@@ -371,9 +287,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     async def Abort(
         self,
-        request: sglang_scheduler_pb2.AbortRequest,
+        request: tokenspeed_scheduler_pb2.AbortRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> sglang_scheduler_pb2.AbortResponse:
+    ) -> tokenspeed_scheduler_pb2.AbortResponse:
         """Abort the request + any per-choice expansions from n>1.
 
         Generate rewrites ``n>1`` requests into a list of rids
@@ -394,7 +310,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             for r in targets:
                 self.async_llm.abort_request(r)
             known = bool(targets)
-            return sglang_scheduler_pb2.AbortResponse(
+            return tokenspeed_scheduler_pb2.AbortResponse(
                 success=known,
                 message=(
                     f"Aborted {len(targets)} request(s) for {rid}"
@@ -404,7 +320,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             )
         except Exception as e:
             logger.exception("Abort failed for %s", rid)
-            return sglang_scheduler_pb2.AbortResponse(success=False, message=str(e))
+            return tokenspeed_scheduler_pb2.AbortResponse(success=False, message=str(e))
 
     # ------------------------------------------------------------------
     # GetModelInfo (unary)
@@ -412,9 +328,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     async def GetModelInfo(
         self,
-        _request: sglang_scheduler_pb2.GetModelInfoRequest,
+        _request: tokenspeed_scheduler_pb2.GetModelInfoRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> sglang_scheduler_pb2.GetModelInfoResponse:
+    ) -> tokenspeed_scheduler_pb2.GetModelInfoResponse:
         model_config = self.async_llm.model_config
         hf_config = getattr(model_config, "hf_config", None)
 
@@ -430,16 +346,19 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             self.async_llm.max_req_input_len or 0
         )
 
-        return sglang_scheduler_pb2.GetModelInfoResponse(
+        # TokenSpeed's GetModelInfoResponse intentionally drops
+        # ``is_generation`` (always true), ``supports_vision`` (always false),
+        # and ``id2label_json`` / ``num_labels`` (not a classifier serving
+        # path). The Rust client fills those slots back in when translating
+        # to its SGLang-shaped wrapper.
+        return tokenspeed_scheduler_pb2.GetModelInfoResponse(
             model_path=self.server_args.model_path,
             tokenizer_path=self.server_args.tokenizer_path or "",
-            is_generation=bool(self.async_llm.is_generation),
             preferred_sampling_params=self.server_args.preferred_sampling_params or "",
             weight_version="",
             served_model_name=(self.server_args.served_model_name or self.server_args.model_path),
             max_context_length=int(self.async_llm.context_len),
             vocab_size=int(model_config.vocab_size),
-            supports_vision=bool(getattr(model_config, "is_multimodal", False)),
             model_type=(getattr(hf_config, "model_type", "") or "") if hf_config else "",
             architectures=(getattr(hf_config, "architectures", []) or []) if hf_config else [],
             eos_token_ids=eos_token_ids,
@@ -454,9 +373,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     async def GetServerInfo(
         self,
-        _request: sglang_scheduler_pb2.GetServerInfoRequest,
+        _request: tokenspeed_scheduler_pb2.GetServerInfoRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> sglang_scheduler_pb2.GetServerInfoResponse:
+    ) -> tokenspeed_scheduler_pb2.GetServerInfoResponse:
         # TokenSpeed's ``ServerArgs`` is a dataclass, but tests sometimes pass
         # a plain namespace. Fall back to ``__dict__`` so both shapes work.
         if dataclasses.is_dataclass(self.server_args) and not isinstance(self.server_args, type):
@@ -480,15 +399,13 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         except Exception:  # noqa: BLE001 — fall back gracefully.
             version = "unknown"
 
-        return sglang_scheduler_pb2.GetServerInfoResponse(
+        return tokenspeed_scheduler_pb2.GetServerInfoResponse(
             server_args=server_args_struct,
             scheduler_info=scheduler_info_struct,
             active_requests=len(self.async_llm.rid_to_state),
             is_paused=False,
-            last_receive_timestamp=float(self.async_llm.last_receive_tstamp),
             uptime_seconds=float(uptime),
-            sglang_version=version,  # proto field name — content is tokenspeed's
-            server_type="grpc",
+            tokenspeed_version=version,
             start_time=start_timestamp,
             max_total_num_tokens=int(self.scheduler_info.get("max_total_num_tokens", 0)),
         )
@@ -499,72 +416,17 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
     async def GetLoads(
         self,
-        _request: sglang_scheduler_pb2.GetLoadsRequest,
+        _request: tokenspeed_scheduler_pb2.GetLoadsRequest,
         _context: grpc.aio.ServicerContext,
-    ) -> sglang_scheduler_pb2.GetLoadsResponse:
+    ) -> tokenspeed_scheduler_pb2.GetLoadsResponse:
         # TokenSpeed doesn't yet expose a get-loads communicator; return an
         # empty response that still round-trips through the SGLang client's
         # load-metrics aggregator without breaking downstream label extraction.
-        return sglang_scheduler_pb2.GetLoadsResponse(
+        return tokenspeed_scheduler_pb2.GetLoadsResponse(
             timestamp=datetime.now(timezone.utc).isoformat(),
             version="tokenspeed",
             dp_rank_count=0,
         )
-
-    # ------------------------------------------------------------------
-    # GetTokenizer (server-streaming)
-    # ------------------------------------------------------------------
-
-    async def GetTokenizer(
-        self,
-        _request: common_pb2.GetTokenizerRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> AsyncIterator[common_pb2.GetTokenizerChunk]:
-        tokenizer_path = self.server_args.tokenizer_path or self.server_args.model_path
-        if not tokenizer_path:
-            await context.abort(
-                grpc.StatusCode.FAILED_PRECONDITION,
-                "Tokenizer path is not configured on this server.",
-            )
-            return
-
-        try:
-            zip_buffer = build_tokenizer_zip(Path(tokenizer_path))
-        except Exception as e:  # noqa: BLE001 — surface as gRPC INTERNAL.
-            logger.exception("Failed to build tokenizer ZIP")
-            await context.abort(grpc.StatusCode.INTERNAL, str(e))
-            return
-
-        zip_data = zip_buffer.getbuffer()
-        sha256 = hashlib.sha256(zip_data).hexdigest()
-
-        offset = 0
-        total = len(zip_data)
-        while offset < total:
-            end = min(offset + CHUNK_SIZE, total)
-            is_last = end == total
-            yield common_pb2.GetTokenizerChunk(
-                data=bytes(zip_data[offset:end]),
-                sha256=sha256 if is_last else "",
-            )
-            offset = end
-
-    # ------------------------------------------------------------------
-    # SubscribeKvEvents — not supported in this runtime
-    # ------------------------------------------------------------------
-
-    async def SubscribeKvEvents(
-        self,
-        _request: common_pb2.SubscribeKvEventsRequest,
-        context: grpc.aio.ServicerContext,
-    ) -> AsyncIterator[common_pb2.KvEventBatch]:
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED,
-            "KV cache events are not exposed by the TokenSpeed gRPC backend.",
-        )
-        # Required for the async-generator contract, even after abort.
-        return  # noqa: B901 — intentional
-        yield  # pragma: no cover
 
     # ------------------------------------------------------------------
     # Helpers
@@ -576,7 +438,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if self.health_servicer:
             self.health_servicer.set_not_serving()
 
-    def _build_generate_req(self, request: sglang_scheduler_pb2.GenerateRequest):
+    def _build_generate_req(self, request: tokenspeed_scheduler_pb2.GenerateRequest):
         """Translate proto GenerateRequest → TokenSpeed GenerateReqInput.
 
         Keeps the router's pre-tokenized inputs intact (``input_ids`` set,
@@ -605,11 +467,10 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             token_ids_logprob=(
                 list(request.token_ids_logprob) if request.token_ids_logprob else None
             ),
-            return_hidden_states=bool(request.return_hidden_states),
-            # ``log_metrics`` on the proto is a plain bool3 scalar — there's
-            # no unset/zero-default distinction. Leaving tokenspeed's default
-            # (True) in place matches SGLang's behaviour where the router
-            # never opts out of metrics at this layer.
+            # Hidden-state forwarding, multimodal inputs, PD-disaggregated
+            # serving, LoRA hot-swap and ``log_metrics`` are intentionally
+            # absent from TokenSpeed's wire — leaving the engine defaults in
+            # place keeps the call shape simple.
         )
         # Older tokenspeed's ``normalize_batch_and_arguments`` treats n>1 as
         # batched and asserts ``rid`` is a list in that case. One gRPC
@@ -627,17 +488,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if request.tokenized.original_text:
             obj.text = request.tokenized.original_text
 
-        if request.HasField("disaggregated_params"):
-            p = request.disaggregated_params
-            obj.bootstrap_host = p.bootstrap_host or None
-            obj.bootstrap_port = p.bootstrap_port or None
-            obj.bootstrap_room = p.bootstrap_room  # 0 is a valid room id
-
         return obj
 
     @staticmethod
     def _sampling_params_from_proto(
-        params: sglang_scheduler_pb2.SamplingParams,
+        params: tokenspeed_scheduler_pb2.SamplingParams,
     ) -> dict[str, Any]:
         """Build the dict that ``GenerateReqInput.sampling_params`` expects.
 
@@ -680,17 +535,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if params.stop_token_ids:
             out["stop_token_ids"] = list(params.stop_token_ids)
 
-        # Bools (always forwarded — matches SGLang)
+        # Bools (always forwarded)
         out["skip_special_tokens"] = bool(params.skip_special_tokens)
         out["spaces_between_special_tokens"] = bool(params.spaces_between_special_tokens)
-        out["no_stop_trim"] = bool(params.no_stop_trim)
         out["ignore_eos"] = bool(params.ignore_eos)
 
-        # Optional: n (OpenAI-compat, passthrough)
+        # n (OpenAI-compat, passthrough)
         if params.n:
             out["n"] = params.n
-        if params.HasField("stream_interval"):
-            out["stream_interval"] = params.stream_interval
         if params.logit_bias:
             out["logit_bias"] = dict(params.logit_bias)
 
@@ -753,12 +605,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         output: dict,
         reason_dict: dict | None,
         choice_index: int = 0,
-    ) -> sglang_scheduler_pb2.GenerateResponse:
+    ) -> tokenspeed_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
         token_ids = self._generated_output_ids(output, reason_dict)
-        return sglang_scheduler_pb2.GenerateResponse(
+        return tokenspeed_scheduler_pb2.GenerateResponse(
             request_id=rid,
-            chunk=sglang_scheduler_pb2.GenerateStreamChunk(
+            chunk=tokenspeed_scheduler_pb2.GenerateStreamChunk(
                 token_ids=token_ids,
                 prompt_tokens=int(meta.get("prompt_tokens", 0)),
                 completion_tokens=int(meta.get("completion_tokens", len(token_ids))),
@@ -773,7 +625,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         output: dict,
         reason_dict: dict | None,
         choice_index: int = 0,
-    ) -> sglang_scheduler_pb2.GenerateResponse:
+    ) -> tokenspeed_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
         token_ids = self._generated_output_ids(output, reason_dict)
 
@@ -791,9 +643,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             elif isinstance(matched, str):
                 matched_kwargs["matched_stop_str"] = matched
 
-        return sglang_scheduler_pb2.GenerateResponse(
+        return tokenspeed_scheduler_pb2.GenerateResponse(
             request_id=rid,
-            complete=sglang_scheduler_pb2.GenerateComplete(
+            complete=tokenspeed_scheduler_pb2.GenerateComplete(
                 output_ids=token_ids,
                 finish_reason=finish_reason,
                 prompt_tokens=int(meta.get("prompt_tokens", 0)),

@@ -20,8 +20,11 @@ use std::sync::Arc;
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
 use tonic::metadata::MetadataMap;
-// TokenSpeed reuses ``sglang_proto`` for message types today; the module
-// below owns the ``tokenspeed.grpc.scheduler`` service stub and its client.
+// TokenSpeed has a fully independent wire definition (see
+// ``proto/tokenspeed_scheduler.proto``) — distinct service, distinct
+// messages with intentionally trimmed field sets aimed at top-tier LLM
+// workloads. The client wraps that wire and translates to/from SGLang-shaped
+// types at the boundary so the router's dispatch enums don't proliferate.
 pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
 pub use vllm_engine::{proto as vllm_proto, VllmEngineClient};
