@@ -49,52 +49,41 @@ fi
 echo "uv version: $(uv --version)"
 
 # ── CUDA runtime setup ─────────────────────────────────────────────────────
-# The k8s-runner-gpu runners are runtime-only: they have the NVIDIA
-# driver + CUDA runtime libraries, but NOT the SDK headers in
-# /usr/local/cuda*. Finding the toolkit requires a broader search —
-# headers may live under /usr/include/cuda, inside a Python-installed
-# nvidia-cuda-runtime-cu13 wheel, or anywhere else.
-find_cuda_header() {
-    # 1. Standard /usr/local/cuda* and /opt
-    local h
-    h=$(find /usr/local /opt -maxdepth 5 -name cuda_runtime.h 2>/dev/null | head -1)
-    [ -n "$h" ] && { echo "$h"; return; }
-    # 2. System apt-installed paths
-    h=$(find /usr/include /usr/lib /usr/share -maxdepth 4 -name cuda_runtime.h 2>/dev/null | head -1)
-    [ -n "$h" ] && { echo "$h"; return; }
-    # 3. pip/uv-installed nvidia-cuda-runtime wheels (torch's default dep)
-    h=$(python3 -c '
-import glob, os, sys
-for d in sys.path:
-    for p in glob.glob(os.path.join(d, "nvidia", "cuda_runtime", "include", "cuda_runtime.h")):
-        print(p); sys.exit(0)
-' 2>/dev/null)
-    [ -n "$h" ] && { echo "$h"; return; }
-}
-CUDA_HEADER=$(find_cuda_header)
-if [ -z "$CUDA_HEADER" ]; then
-    echo "FATAL: could not locate cuda_runtime.h anywhere" >&2
-    echo "--- /usr/local ---" >&2; ls -la /usr/local/ 2>&1 | head -20 >&2
-    echo "--- nvcc ---" >&2; which nvcc 2>&1 >&2
-    echo "--- nvidia-smi ---" >&2; nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>&1 >&2
-    echo "--- apt packages ---" >&2; dpkg -l 2>/dev/null | grep -iE "cuda|nvidia" | head -20 >&2
-    exit 1
+# k8s-runner-gpu ships the NVIDIA driver + CUDA runtime libs but not the
+# SDK (nvcc, headers). Install them on demand — same approach as
+# ``ci_install_sglang.sh``, which installs cuda-nvcc-12-9 +
+# cuda-cudart-dev-12-9 when ``/usr/local/cuda/bin/nvcc`` is missing.
+# TokenSpeed's Dockerfile targets CUDA 13.0, so install the matching
+# toolkit packages here.
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
+    echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
+    curl -fsSL -o /tmp/cuda-keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+    sudo dpkg -i /tmp/cuda-keyring.deb
+    rm /tmp/cuda-keyring.deb
+    sudo apt-get update -qq
+    # cuda-nvcc-13-0:       provides nvcc + cuda_runtime_api.h
+    # cuda-cudart-dev-13-0: provides cuda_runtime.h + libcudart headers
+    sudo apt-get install -y --no-install-recommends cuda-nvcc-13-0 cuda-cudart-dev-13-0
+    # apt installs under /usr/local/cuda-13.0; expose the /usr/local/cuda
+    # alias the job-level ``CUDA_HOME: /usr/local/cuda`` env expects.
+    if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-13.0/bin" ]; then
+        sudo ln -sfn /usr/local/cuda-13.0 "${CUDA_HOME}"
+    fi
+    echo "nvcc installed: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
+else
+    echo "nvcc already available: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
 fi
-CUDA_INCLUDE_DIR=$(dirname "$CUDA_HEADER")
-# ``include/cuda_runtime.h`` → CUDA_HOME is the parent of the include dir.
-CUDA_HOME=$(dirname "$CUDA_INCLUDE_DIR")
 export CUDA_HOME
-echo "Detected CUDA_HOME=$CUDA_HOME (from $CUDA_HEADER)"
-
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 # Torch's JIT cpp_extension builder compiles some TokenSpeed runtime
-# extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and doesn't
-# pass ``-I$CUDA_HOME/include``, so ``#include <cuda_runtime.h>`` fails even
-# when CUDA_HOME is set. Expose the headers via CPATH / CPLUS_INCLUDE_PATH
-# so g++ picks them up without needing upstream to change their config.
-export CPATH="${CUDA_INCLUDE_DIR}${CPATH:+:$CPATH}"
-export CPLUS_INCLUDE_PATH="${CUDA_INCLUDE_DIR}${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+# extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and
+# doesn't pass ``-I$CUDA_HOME/include``; expose the headers via CPATH /
+# CPLUS_INCLUDE_PATH so the compile picks them up.
+export CPATH="${CUDA_HOME}/include${CPATH:+:$CPATH}"
+export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
 if [ ! -d "$TOKENSPEED_DIR" ]; then
