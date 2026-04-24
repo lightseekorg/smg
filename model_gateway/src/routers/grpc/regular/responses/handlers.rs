@@ -40,6 +40,7 @@ use super::{
     conversions, non_streaming, streaming,
 };
 use crate::routers::{
+    common::background::create::{handle_background_create, BackgroundCreateDeps},
     error,
     grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
 };
@@ -54,14 +55,16 @@ pub(crate) async fn route_responses(
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
-    // BGM-PR-04 replaces this with delegation to routers/common/background/
-    // when ctx.app_context.background_repository is Some.
     let is_background = request.background.unwrap_or(false);
     if is_background {
-        return error::bad_request(
-            "unsupported_parameter",
-            "Background mode is not supported. Please set 'background' to false or omit it.",
-        );
+        let deps = BackgroundCreateDeps {
+            repository: ctx.background_repository.as_ref(),
+            response_storage: ctx.response_storage.as_ref(),
+            conversation_storage: ctx.conversation_storage.as_ref(),
+            conversation_item_storage: ctx.conversation_item_storage.as_ref(),
+            background_config: ctx.background_config.as_ref(),
+        };
+        return handle_background_create(deps, &request, &model_id).await;
     }
 
     // 2. Route based on execution mode

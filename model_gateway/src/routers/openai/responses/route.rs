@@ -26,6 +26,7 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         common::{
+            background::create::{handle_background_create, BackgroundCreateDeps},
             header_utils::extract_conversation_memory_config,
             worker_selection::{SelectWorkerRequest, WorkerSelector},
         },
@@ -49,6 +50,17 @@ pub(in crate::routers::openai) async fn route_responses(
     body: &ResponsesRequest,
     model_id: &str,
 ) -> Response {
+    if body.background.unwrap_or(false) {
+        let bg_deps = BackgroundCreateDeps {
+            repository: deps.responses_components.background_repository.as_ref(),
+            response_storage: deps.responses_components.response_storage.as_ref(),
+            conversation_storage: deps.responses_components.conversation_storage.as_ref(),
+            conversation_item_storage: deps.responses_components.conversation_item_storage.as_ref(),
+            background_config: &deps.responses_components.shared.router_config.background,
+        };
+        return handle_background_create(bg_deps, body, model_id).await;
+    }
+
     let start = Instant::now();
     let model = model_id;
     let streaming = body.stream.unwrap_or(false);

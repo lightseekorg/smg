@@ -100,6 +100,7 @@ impl OpenAIRouter {
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),
             conversation_memory_writer: ctx.conversation_memory_writer.clone(),
+            background_repository: ctx.background_repository.clone(),
         });
 
         Ok(Self {

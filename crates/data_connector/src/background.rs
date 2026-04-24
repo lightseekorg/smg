@@ -357,10 +357,17 @@ pub enum DeleteResult {
 pub trait BackgroundResponseRepository: Send + Sync {
     /// Insert a new response + queue row atomically, transitioning
     /// `status='queued'`.
+    ///
+    /// When `max_queue_depth` is `Some(limit)` the implementation MUST count
+    /// current queued rows and reject with
+    /// [`BackgroundRepositoryError::QueueFull`] when that count is already at
+    /// or above the limit, under the same lock / transaction as the insert so
+    /// the check is atomic with the write. `None` disables the cap.
     async fn enqueue(
         &self,
         req: EnqueueRequest,
         request_context: Option<RequestContext>,
+        max_queue_depth: Option<u64>,
     ) -> BackgroundRepositoryResult<QueuedResponse>;
 
     /// Claim the next runnable queue row using `FOR UPDATE SKIP LOCKED` (or the

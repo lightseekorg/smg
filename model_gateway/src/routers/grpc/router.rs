@@ -140,6 +140,7 @@ impl GrpcRouter {
         // Capture storage request context from middleware task-local (before any spawn)
         let storage_request_context = smg_data_connector::current_request_context();
 
+        let background_config = Arc::new(ctx.router_config.background.clone());
         // Helper closure to create responses context with a given pipeline
         let create_responses_context = |pipeline: &RequestPipeline| {
             ResponsesContext::new(
@@ -151,6 +152,8 @@ impl GrpcRouter {
                 ctx.conversation_memory_writer.clone(),
                 mcp_orchestrator.clone(),
                 storage_request_context.clone(),
+                ctx.background_repository.clone(),
+                background_config.clone(),
             )
         };
 
@@ -344,6 +347,8 @@ impl GrpcRouter {
                     .clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
                 smg_data_connector::current_request_context(),
+                self.harmony_responses_context.background_repository.clone(),
+                self.harmony_responses_context.background_config.clone(),
             );
 
             if body.stream.unwrap_or(false) {
