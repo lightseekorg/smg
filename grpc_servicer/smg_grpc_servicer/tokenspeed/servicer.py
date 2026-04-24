@@ -566,7 +566,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         return out
 
-    def _maybe_dump_output(self, rid: str, output: dict, reason_dict: dict | None, trimmed: list[int]) -> None:
+    def _maybe_dump_output(
+        self, rid: str, output: dict, reason_dict: dict | None, trimmed: list[int]
+    ) -> None:
         """Emit a one-shot WARNING-level dump of TokenSpeed's raw output for
         the first N requests when ``TOKENSPEED_DEBUG_OUTPUT=1``.
 
