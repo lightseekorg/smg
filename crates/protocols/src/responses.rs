@@ -450,6 +450,78 @@ pub enum ResponseTool {
     /// matching `local_shell_call_output` item.
     #[serde(rename = "local_shell")]
     LocalShell,
+
+    /// Hosted / client-executed `tool_search` tool — `{ type: "tool_search",
+    /// description?, execution?, parameters? }`.
+    ///
+    /// Spec (openai-responses-api-spec.md §tools L476): `ToolSearch { type:
+    /// "tool_search", description?, execution?: "server"|"client",
+    /// parameters? }`. The tool lets the model discover additional tool
+    /// definitions at inference time; `execution` controls whether the
+    /// platform (`server`) or the calling client (`client`) runs the
+    /// lookup. The model emits a matching [`ResponseInputOutputItem::ToolSearchCall`]
+    /// carrying the query payload, and the resolver replies with
+    /// [`ResponseInputOutputItem::ToolSearchOutput`] carrying the discovered
+    /// tool set (a recursive use of the full [`ResponseTool`] union).
+    #[serde(rename = "tool_search")]
+    ToolSearch(ToolSearchTool),
+}
+
+/// Payload carried by [`ResponseTool::ToolSearch`].
+///
+/// All three fields are optional per spec (openai-responses-api-spec.md
+/// §tools L476). `execution` is pinned to [`ToolSearchExecution`] so
+/// unknown values fail closed rather than silently degrading to default
+/// behaviour; `parameters` is kept as an opaque [`serde_json::Value`] so
+/// arbitrary search-parameter schemas (string queries, filters, etc.) pass
+/// through unchanged — mirroring the spec wording of `parameters?: any`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSearchTool {
+    /// Optional human-readable description surfaced alongside the tool.
+    pub description: Option<String>,
+    /// Optional execution mode — controls whether the platform (`server`)
+    /// or the caller (`client`) resolves the search. Absent ⇒ provider
+    /// default.
+    pub execution: Option<ToolSearchExecution>,
+    /// Opaque parameter payload forwarded to the resolver. Typed as
+    /// [`serde_json::Value`] to match the spec's `parameters?: any`.
+    pub parameters: Option<Value>,
+}
+
+/// Execution surface for [`ToolSearchTool::execution`] /
+/// [`ResponseInputOutputItem::ToolSearchCall::execution`] /
+/// [`ResponseInputOutputItem::ToolSearchOutput::execution`].
+///
+/// Spec (openai-responses-api-spec.md §tools L476 +
+/// §ToolSearchCall L191): `execution: optional "server" | "client"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSearchExecution {
+    /// Platform resolves the search upstream of the client.
+    Server,
+    /// Caller resolves the search and replies with discovered tools.
+    Client,
+}
+
+/// Status for [`ResponseInputOutputItem::ToolSearchCall`] /
+/// [`ResponseInputOutputItem::ToolSearchOutput`].
+///
+/// Spec (openai-responses-api-spec.md §ToolSearchCall L188 +
+/// §ToolSearchOutput L193): `status: optional "in_progress" | "completed"
+/// | "incomplete"`. Defined as a dedicated enum (instead of reusing a
+/// sibling like [`ShellCallStatus`]) so doc links and future evolution
+/// stay tied to the tool_search surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSearchStatus {
+    /// `in_progress` — the search is still running.
+    InProgress,
+    /// `completed` — the resolver returned a final tool list.
+    Completed,
+    /// `incomplete` — the resolver aborted or failed to complete.
+    Incomplete,
 }
 
 /// Payload carried by [`ResponseTool::Namespace`].
@@ -1931,6 +2003,48 @@ pub enum ResponseInputOutputItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// `type: "tool_search_call"` — emitted when the model invokes the
+    /// hosted / client-executed `tool_search` tool. Spec
+    /// (openai-responses-api-spec.md §ToolSearchCall L188-191):
+    /// `{ arguments, type, id?, call_id?, execution?, status? }`. `arguments`
+    /// is typed as [`serde_json::Value`] to match the spec's
+    /// `arguments: unknown`. `id` / `call_id` / `execution` / `status` are
+    /// modelled as `Option<_>` so newly-minted client-side calls can omit
+    /// them; they are populated on items round-tripped from a previous
+    /// response.
+    #[serde(rename = "tool_search_call")]
+    ToolSearchCall {
+        arguments: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution: Option<ToolSearchExecution>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ToolSearchStatus>,
+    },
+    /// `type: "tool_search_output"` — carries the tool definitions
+    /// discovered by a prior [`Self::ToolSearchCall`]. Spec
+    /// (openai-responses-api-spec.md §ToolSearchOutput L193-195):
+    /// `{ tools, type, id?, call_id?, execution?, status? }`. `tools` is the
+    /// full recursive [`ResponseTool`] union — including `tool_search`
+    /// itself — so discovered tools can themselves surface a `tool_search`
+    /// capability. Optionality of `id` / `call_id` / `execution` / `status`
+    /// mirrors [`Self::ToolSearchCall`] so client-authored replays can omit
+    /// them.
+    #[serde(rename = "tool_search_output")]
+    ToolSearchOutput {
+        tools: Vec<ResponseTool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution: Option<ToolSearchExecution>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ToolSearchStatus>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -3149,7 +3263,10 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::LocalShellCall { .. }
                         | ResponseInputOutputItem::LocalShellCallOutput { .. }
                         | ResponseInputOutputItem::McpCall { .. }
-                        | ResponseInputOutputItem::McpListTools { .. } => {}
+                        | ResponseInputOutputItem::McpListTools { .. }
+                        // T10 schema-only: forced-cascade arm, no behavior.
+                        | ResponseInputOutputItem::ToolSearchCall { .. }
+                        | ResponseInputOutputItem::ToolSearchOutput { .. } => {}
                     }
                 }
 
@@ -3483,6 +3600,14 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // error absent) can round-trip cleanly.
         ResponseInputOutputItem::McpCall { .. } => {}
         ResponseInputOutputItem::McpListTools { .. } => {}
+        // T10 schema-only: `tool_search_call` / `tool_search_output` input
+        // items replayed for stateless multi-turn. `arguments` is
+        // `serde_json::Value` (spec: `unknown`) and `tools` is the recursive
+        // `ResponseTool` union, so content-level validation is deferred to
+        // a future R task — mirrors the treatment of `CustomToolCall`
+        // above.
+        ResponseInputOutputItem::ToolSearchCall { .. } => {}
+        ResponseInputOutputItem::ToolSearchOutput { .. } => {}
     }
     Ok(())
 }

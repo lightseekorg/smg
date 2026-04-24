@@ -85,6 +85,9 @@ fn extract_text_for_routing_old(req: &ResponsesRequest) -> String {
                 // T11 schema-only: forced-cascade arm, no behavior.
                 ResponseInputOutputItem::McpCall { .. }
                 | ResponseInputOutputItem::McpListTools { .. } => None,
+                // T10 schema-only: forced-cascade arm, no behavior.
+                ResponseInputOutputItem::ToolSearchCall { .. }
+                | ResponseInputOutputItem::ToolSearchOutput { .. } => None,
             })
             .collect::<Vec<String>>()
             .join(" "),

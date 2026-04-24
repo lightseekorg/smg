@@ -4124,3 +4124,294 @@ fn test_mcp_list_tools_input_item_with_error_round_trip() {
 
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
 }
+
+// ---------------------------------------------------------------------------
+// T10: `tool_search` hosted / client-executed tool + call / output items
+//
+// Spec refs:
+//   .claude/_audit/openai-responses-api-spec.md L476 (ToolSearch tool),
+//   L188-191 (ToolSearchCall), L193-195 (ToolSearchOutput). `tools` inside
+//   ToolSearchOutput is a recursive use of the full Tool union, so the
+//   output-item test exercises `function`, `mcp`, and a nested
+//   `tool_search` element to pin the recursive surface.
+// ---------------------------------------------------------------------------
+
+/// `ResponseTool::ToolSearch` with `execution: "server"` and a non-trivial
+/// `parameters` payload round-trips. Spec
+/// (openai-responses-api-spec.md §tools L476): `{ type: "tool_search",
+/// description?, execution?: "server"|"client", parameters? }`.
+#[test]
+fn test_tool_search_tool_server_execution_round_trip() {
+    let payload = json!({
+        "type": "tool_search",
+        "description": "Discover additional tools at inference time",
+        "execution": "server",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    });
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("tool_search tool with server execution should deserialize");
+    match &tool {
+        ResponseTool::ToolSearch(ts) => {
+            assert_eq!(
+                ts.description.as_deref(),
+                Some("Discover additional tools at inference time")
+            );
+            assert_eq!(ts.execution, Some(ToolSearchExecution::Server));
+            let params = ts.parameters.as_ref().expect("parameters should be present");
+            assert_eq!(params["required"], json!(["query"]));
+        }
+        other => panic!("expected ResponseTool::ToolSearch, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&tool).expect("serialize"), payload);
+}
+
+/// `ResponseTool::ToolSearch` with `execution: "client"` round-trips.
+#[test]
+fn test_tool_search_tool_client_execution_round_trip() {
+    let payload = json!({
+        "type": "tool_search",
+        "execution": "client",
+    });
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("tool_search tool with client execution should deserialize");
+    match &tool {
+        ResponseTool::ToolSearch(ts) => {
+            assert_eq!(ts.description, None);
+            assert_eq!(ts.execution, Some(ToolSearchExecution::Client));
+            assert_eq!(ts.parameters, None);
+        }
+        other => panic!("expected ResponseTool::ToolSearch, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&tool).expect("serialize"), payload);
+}
+
+/// `ResponseTool::ToolSearch` with all optional fields absent ( `execution`
+/// omitted entirely) round-trips — the minimum spec shape.
+#[test]
+fn test_tool_search_tool_minimal_round_trip() {
+    let payload = json!({"type": "tool_search"});
+    let tool: ResponseTool = serde_json::from_value(payload.clone())
+        .expect("bare tool_search tool should deserialize");
+    match &tool {
+        ResponseTool::ToolSearch(ts) => {
+            assert_eq!(ts.description, None);
+            assert_eq!(ts.execution, None);
+            assert_eq!(ts.parameters, None);
+        }
+        other => panic!("expected ResponseTool::ToolSearch, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&tool).expect("serialize"), payload);
+}
+
+/// Unknown `execution` values must fail closed rather than silently
+/// degrading — `ToolSearchExecution` is a closed enum so an unknown variant
+/// surfaces as a serde error.
+#[test]
+fn test_tool_search_tool_rejects_unknown_execution() {
+    let err = serde_json::from_value::<ResponseTool>(json!({
+        "type": "tool_search",
+        "execution": "local", // not in {server, client}
+    }))
+    .expect_err("unknown execution value must not deserialize");
+    assert!(!err.to_string().is_empty());
+}
+
+/// `ResponseInputOutputItem::ToolSearchCall` with all optional fields
+/// populated round-trips. Spec
+/// (openai-responses-api-spec.md §ToolSearchCall L188-191):
+/// `{ arguments, type, id?, call_id?, execution?, status? }`.
+#[test]
+fn test_tool_search_call_input_item_full_round_trip() {
+    let payload = json!({
+        "type": "tool_search_call",
+        "id": "ts_call_1",
+        "call_id": "call_ts_1",
+        "arguments": {"q": "image editing"},
+        "execution": "server",
+        "status": "in_progress",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("tool_search_call with all fields should deserialize");
+    match &item {
+        ResponseInputOutputItem::ToolSearchCall {
+            arguments,
+            id,
+            call_id,
+            execution,
+            status,
+        } => {
+            assert_eq!(id.as_deref(), Some("ts_call_1"));
+            assert_eq!(call_id.as_deref(), Some("call_ts_1"));
+            assert_eq!(arguments["q"], json!("image editing"));
+            assert_eq!(*execution, Some(ToolSearchExecution::Server));
+            assert_eq!(*status, Some(ToolSearchStatus::InProgress));
+        }
+        other => panic!("expected ToolSearchCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// `ResponseInputOutputItem::ToolSearchCall` with only the required
+/// `arguments` field — `id`/`call_id`/`execution`/`status` absent so the
+/// client-authored minimum replay form stays lossless.
+#[test]
+fn test_tool_search_call_input_item_minimal_round_trip() {
+    let payload = json!({
+        "type": "tool_search_call",
+        "arguments": "raw-string-is-fine-too",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("minimal tool_search_call should deserialize");
+    match &item {
+        ResponseInputOutputItem::ToolSearchCall {
+            arguments,
+            id,
+            call_id,
+            execution,
+            status,
+        } => {
+            assert_eq!(arguments, &json!("raw-string-is-fine-too"));
+            assert_eq!(id, &None);
+            assert_eq!(call_id, &None);
+            assert_eq!(*execution, None);
+            assert_eq!(*status, None);
+        }
+        other => panic!("expected ToolSearchCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// `ResponseInputOutputItem::ToolSearchOutput` carries the full recursive
+/// [`ResponseTool`] union — verified here with `function`, `mcp`, and a
+/// nested `tool_search` element. Spec
+/// (openai-responses-api-spec.md §ToolSearchOutput L193-195):
+/// `{ tools, type, id?, call_id?, execution?, status? }` where `tools` is
+/// the recursive tool union.
+#[test]
+fn test_tool_search_output_input_item_recursive_tools_round_trip() {
+    let payload = json!({
+        "type": "tool_search_output",
+        "id": "ts_out_1",
+        "call_id": "call_ts_1",
+        "execution": "client",
+        "status": "completed",
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup_doc",
+                "description": "Fetch a doc by id",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                },
+                "strict": true
+            },
+            {
+                "type": "mcp",
+                "server_label": "deepwiki",
+                "server_url": "https://example.invalid/mcp",
+            },
+            // Recursive case: tool_search discovered by a prior tool_search.
+            {
+                "type": "tool_search",
+                "description": "nested",
+                "execution": "server",
+            },
+        ],
+    });
+
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("tool_search_output with recursive tools should deserialize");
+
+    match &item {
+        ResponseInputOutputItem::ToolSearchOutput {
+            tools,
+            id,
+            call_id,
+            execution,
+            status,
+        } => {
+            assert_eq!(id.as_deref(), Some("ts_out_1"));
+            assert_eq!(call_id.as_deref(), Some("call_ts_1"));
+            assert_eq!(*execution, Some(ToolSearchExecution::Client));
+            assert_eq!(*status, Some(ToolSearchStatus::Completed));
+            assert_eq!(tools.len(), 3);
+            match &tools[0] {
+                ResponseTool::Function(ft) => {
+                    assert_eq!(ft.function.name, "lookup_doc");
+                    assert_eq!(ft.function.strict, Some(true));
+                }
+                other => panic!("expected tools[0] = Function, got {other:?}"),
+            }
+            match &tools[1] {
+                ResponseTool::Mcp(m) => {
+                    assert_eq!(m.server_label, "deepwiki");
+                    assert_eq!(
+                        m.server_url.as_deref(),
+                        Some("https://example.invalid/mcp")
+                    );
+                }
+                other => panic!("expected tools[1] = Mcp, got {other:?}"),
+            }
+            match &tools[2] {
+                ResponseTool::ToolSearch(ts) => {
+                    assert_eq!(ts.description.as_deref(), Some("nested"));
+                    assert_eq!(ts.execution, Some(ToolSearchExecution::Server));
+                }
+                other => panic!("expected tools[2] = ToolSearch, got {other:?}"),
+            }
+        }
+        other => panic!("expected ToolSearchOutput, got {other:?}"),
+    }
+
+    // Byte-for-byte round-trip: recursive shape preserves structure exactly.
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// `ResponseInputOutputItem::ToolSearchOutput` with an empty `tools: []`
+/// and no optional metadata — the minimum replayable shape for a resolver
+/// that found nothing.
+#[test]
+fn test_tool_search_output_input_item_minimal_round_trip() {
+    let payload = json!({
+        "type": "tool_search_output",
+        "tools": [],
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("minimal tool_search_output should deserialize");
+    match &item {
+        ResponseInputOutputItem::ToolSearchOutput {
+            tools,
+            id,
+            call_id,
+            execution,
+            status,
+        } => {
+            assert!(tools.is_empty());
+            assert_eq!(id, &None);
+            assert_eq!(call_id, &None);
+            assert_eq!(*execution, None);
+            assert_eq!(*status, None);
+        }
+        other => panic!("expected ToolSearchOutput, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// Unknown `status` values on `tool_search_call` fail closed rather than
+/// silently degrading — `ToolSearchStatus` is a closed enum.
+#[test]
+fn test_tool_search_call_rejects_unknown_status() {
+    let err = serde_json::from_value::<ResponseInputOutputItem>(json!({
+        "type": "tool_search_call",
+        "arguments": {},
+        "status": "pending", // not in {in_progress, completed, incomplete}
+    }))
+    .expect_err("unknown status value must not deserialize");
+    assert!(!err.to_string().is_empty());
+}
