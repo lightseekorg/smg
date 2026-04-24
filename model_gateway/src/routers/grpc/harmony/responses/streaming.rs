@@ -63,6 +63,17 @@ pub(crate) async fn serve_harmony_responses_stream(
         Err(err_response) => return err_response,
     };
 
+    // R3: re-validate after history merge. Stored threads may contain
+    // image/file content parts persisted by a sibling router that
+    // *does* support multimodal (e.g. the OpenAI-compat passthrough);
+    // replaying such a thread through the harmony backend would hit
+    // the same silent-drop regression this validator exists to close.
+    // The validator accepts assistant-role refusal replays, so
+    // legitimate multi-turn history passes through unchanged.
+    if let Err(err_response) = validate_harmony_responses_input(&current_request) {
+        return err_response;
+    }
+
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,

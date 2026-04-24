@@ -63,8 +63,9 @@ pub(crate) async fn serve_harmony_responses(
     // multimodal in request_building), so silently dropping these
     // parts would lose data invisibly. Validate the caller's original
     // input *before* we merge persisted history via
-    // `load_previous_messages` so stored assistant-role refusals keep
-    // replaying cleanly.
+    // `load_previous_messages` so fresh-input issues are reported as
+    // the caller's problem rather than appearing to come from the
+    // stored chain.
     validate_harmony_responses_input(&request)?;
 
     // Clone request for persistence
@@ -72,6 +73,15 @@ pub(crate) async fn serve_harmony_responses(
 
     // Load previous conversation history if previous_response_id is set
     let current_request = load_previous_messages(ctx, request).await?;
+
+    // R3: re-validate after history merge. Stored threads may contain
+    // image/file content parts persisted by a sibling router that
+    // *does* support multimodal (e.g. the OpenAI-compat passthrough);
+    // replaying such a thread through the harmony backend would hit
+    // the same silent-drop regression this validator exists to close.
+    // The validator accepts assistant-role refusal replays, so
+    // legitimate multi-turn history passes through unchanged.
+    validate_harmony_responses_input(&current_request)?;
 
     // Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =

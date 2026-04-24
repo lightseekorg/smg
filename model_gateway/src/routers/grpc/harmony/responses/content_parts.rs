@@ -303,7 +303,7 @@ mod tests {
     //! backend cannot execute — so the silent-drop regression that R3
     //! fixed cannot quietly come back.
 
-    use axum::http::StatusCode;
+    use axum::{body::to_bytes, http::StatusCode};
     use openai_protocol::{
         common::Detail,
         responses::{
@@ -311,9 +311,31 @@ mod tests {
             ResponsesRequest, StringOrContentParts,
         },
     };
+    use serde_json::Value;
 
     use super::*;
     use crate::routers::error::HEADER_X_SMG_ERROR_CODE;
+
+    /// Extract the JSON error message body from a validation error
+    /// response. Tests use this instead of only checking status +
+    /// `X-SMG-Error-Code` so that PDF-specific and generic rejections
+    /// are distinguishable at the message-body level — otherwise both
+    /// shapes satisfy the same status/code assertion and the
+    /// R4-specific path would be untested.
+    async fn error_message(response: Response) -> String {
+        let (_parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX)
+            .await
+            .expect("error body fits in memory");
+        let value: Value =
+            serde_json::from_slice(&bytes).expect("error body is always valid JSON");
+        value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .map(str::to_owned)
+            .expect("error.message is always present on a bad_request response")
+    }
 
     fn request_with_items(items: Vec<ResponseInputOutputItem>) -> ResponsesRequest {
         ResponsesRequest {
@@ -413,11 +435,13 @@ mod tests {
         assert_is_unsupported(err);
     }
 
-    #[test]
-    fn input_file_pdf_magic_bytes_are_rejected_with_r4_message() {
+    #[tokio::test]
+    async fn input_file_pdf_magic_bytes_are_rejected_with_r4_message() {
         // `%PDF-1.4\n` base64-encodes to `JVBERi0xLjQK`. Asserts the
         // PDF-specific error path so callers know the gap is tracked
-        // under R4 rather than a blanket rejection.
+        // under R4 rather than a blanket rejection. We assert on the
+        // message body (not just status/code) so the PDF-specific
+        // branch is distinguishable from a generic file-data rejection.
         let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
             detail: Some(FileDetail::High),
             file_data: Some("JVBERi0xLjQK".to_string()),
@@ -427,14 +451,27 @@ mod tests {
         }])]);
         let err =
             validate_harmony_responses_input(&request).expect_err("PDF file_data must be rejected");
-        assert_is_unsupported(err);
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.headers()
+                .get(HEADER_X_SMG_ERROR_CODE)
+                .and_then(|h| h.to_str().ok()),
+            Some("unsupported_content"),
+        );
+        let message = error_message(err).await;
+        assert!(
+            message.contains("PDF") && message.contains("R4"),
+            "PDF rejections must cite R4 so callers can correlate the paused task; got: {message}"
+        );
     }
 
-    #[test]
-    fn input_file_non_pdf_file_data_is_rejected() {
+    #[tokio::test]
+    async fn input_file_non_pdf_file_data_is_rejected() {
         // A JPEG magic-byte prefix (FFD8FFE0 ... base64 `/9j/4A==`) is
         // not a PDF; it must still be rejected because the harmony
         // pipeline cannot route it — but *not* with the R4 message.
+        // Asserts the generic file-data branch is taken so we do not
+        // misdirect clients to the paused R4 task.
         let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
             detail: None,
             file_data: Some("/9j/4AAQSkZJRg==".to_string()),
@@ -444,7 +481,15 @@ mod tests {
         }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("JPEG file_data must be rejected");
-        assert_is_unsupported(err);
+        let message = error_message(err).await;
+        assert!(
+            !message.contains("R4"),
+            "non-PDF file_data must not cite R4; got: {message}"
+        );
+        assert!(
+            message.contains("file_data"),
+            "generic file-data rejections must mention file_data; got: {message}"
+        );
     }
 
     #[test]
@@ -539,8 +584,8 @@ mod tests {
             .expect("SimpleInputMessage.String must pass unchanged");
     }
 
-    #[test]
-    fn data_url_prefix_pdf_magic_still_rejected_with_r4_message() {
+    #[tokio::test]
+    async fn data_url_prefix_pdf_magic_still_rejected_with_r4_message() {
         // Robustness: if a client wraps the base64 payload in a
         // `data:application/pdf;base64,` envelope inside `file_data`
         // (non-canonical but observed in the wild), the magic-byte
@@ -555,11 +600,15 @@ mod tests {
         }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("data-URL-wrapped PDF file_data must be rejected");
-        assert_is_unsupported(err);
+        let message = error_message(err).await;
+        assert!(
+            message.contains("PDF") && message.contains("R4"),
+            "data-URL-wrapped PDF must reach the R4-specific message; got: {message}"
+        );
     }
 
-    #[test]
-    fn data_url_prefix_is_case_insensitive_on_base64_separator() {
+    #[tokio::test]
+    async fn data_url_prefix_is_case_insensitive_on_base64_separator() {
         // `is_data_url` matches `data:` case-insensitively, so
         // `strip_data_url_prefix` must match `;base64,` with the same
         // flexibility. Before the R3 follow-up both `Data:` and
@@ -575,11 +624,15 @@ mod tests {
         }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("mixed-case data-URL wrapper must still reach the PDF sniffer");
-        assert_is_unsupported(err);
+        let message = error_message(err).await;
+        assert!(
+            message.contains("PDF") && message.contains("R4"),
+            "mixed-case data-URL wrapper must reach the R4-specific message; got: {message}"
+        );
     }
 
-    #[test]
-    fn pdf_sniff_decodes_only_magic_prefix_not_full_payload() {
+    #[tokio::test]
+    async fn pdf_sniff_decodes_only_magic_prefix_not_full_payload() {
         // Regression guard for the bounded-decode path: a large PDF
         // `file_data` must still route to the R4-specific message
         // without the validator materializing the entire payload. We
@@ -600,6 +653,27 @@ mod tests {
         }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("large PDF file_data must still be rejected with the R4 message");
-        assert_is_unsupported(err);
+        let message = error_message(err).await;
+        assert!(
+            message.contains("PDF") && message.contains("R4"),
+            "bounded-decode path must still emit the R4-specific message; got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_role_rejection_cites_assistant_exception() {
+        // The non-assistant refusal branch has a distinct
+        // human-readable message; lock it in so future refactors do
+        // not regress the rationale the caller sees.
+        let request = request_with_items(vec![user_message(vec![ResponseContentPart::Refusal {
+            refusal: "I cannot process that.".to_string(),
+        }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("user-role refusals must be rejected");
+        let message = error_message(err).await;
+        assert!(
+            message.contains("refusal") && message.contains("assistant"),
+            "refusal rejection must name the assistant-role exception; got: {message}"
+        );
     }
 }
