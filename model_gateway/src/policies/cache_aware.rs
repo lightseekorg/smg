@@ -55,8 +55,6 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-#[cfg(test)]
-use crate::worker::UNKNOWN_MODEL_ID;
 use crate::worker::{KvEventMonitor, Worker};
 
 /// Cache-aware routing policy
@@ -1031,7 +1029,7 @@ mod tests {
     use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
-    use crate::worker::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType, UNKNOWN_MODEL_ID};
 
     fn no_health_check() -> HealthCheckConfig {
         HealthCheckConfig {
