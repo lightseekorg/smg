@@ -444,9 +444,8 @@ mod tests {
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool,
-            ResponseOutputItem, ResponseTool,
-            WebSearchPreviewTool,
+            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseOutputItem,
+            ResponseTool, WebSearchPreviewTool,
         },
     };
     use serde_json::json;
