@@ -312,9 +312,8 @@ impl StreamingToolHandler {
                         forward_triggering_event: false,
                     }
                 } else if is_tool_call_done
-                    && done_output_index.is_some_and(|idx| {
-                        self.native_passthrough_tool_call_indices.remove(&idx)
-                    })
+                    && done_output_index
+                        .is_some_and(|idx| self.native_passthrough_tool_call_indices.remove(&idx))
                 {
                     // Native passthrough path (R6.7c): drop the upstream
                     // umbrella without running the tool loop. The
@@ -929,8 +928,7 @@ mod tests {
             "status": "completed"
           }
         }"#;
-        let action =
-            handler.process_event(Some("response.output_item.done"), passthrough_done);
+        let action = handler.process_event(Some("response.output_item.done"), passthrough_done);
         assert!(
             matches!(action, StreamAction::Drop),
             "native passthrough hosted-tool done must Drop; got {action:?}"
@@ -951,8 +949,7 @@ mod tests {
             "status": "completed"
           }
         }"#;
-        let action =
-            handler.process_event(Some("response.output_item.done"), function_call_done);
+        let action = handler.process_event(Some("response.output_item.done"), function_call_done);
         match action {
             StreamAction::ExecuteTools {
                 forward_triggering_event,
@@ -977,12 +974,7 @@ mod tests {
         // fires.
         let mut handler = StreamingToolHandler::with_starting_index(0);
         bootstrap_function_call_added(&mut handler); // complete pending call @ idx 0
-        bootstrap_native_hosted_tool_added(
-            &mut handler,
-            ItemType::WEB_SEARCH_CALL,
-            2,
-            "ws_native",
-        );
+        bootstrap_native_hosted_tool_added(&mut handler, ItemType::WEB_SEARCH_CALL, 2, "ws_native");
 
         let done_event = r#"{
           "type": "response.output_item.done",
