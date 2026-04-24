@@ -87,6 +87,7 @@ pub struct AppState {
     pub concurrency_queue_tx: Option<mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
+    pub api_port: u16,
 }
 
 async fn parse_function_call(
@@ -161,8 +162,100 @@ async fn health(_state: State<Arc<AppState>>) -> Response {
     liveness().await
 }
 
-async fn health_generate(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    state.router.health_generate(req).await
+async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> Response {
+    use std::time::Instant;
+
+    let registry = &state.context.worker_registry;
+    let workers = registry.get_all();
+    if workers.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "No workers registered").into_response();
+    }
+
+    let healthy: Vec<_> = workers.iter().filter(|w| w.is_healthy()).collect();
+    if healthy.is_empty() {
+        let info: Vec<_> = workers.iter().map(|w| format!("{} ({})", w.model_id(), w.url())).collect();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("0/{} workers healthy: {}", workers.len(), info.join(", ")),
+        ).into_response();
+    }
+
+    let model_id = healthy[0].model_id().to_string();
+    let probe_url = format!("http://127.0.0.1:{}/v1/chat/completions", state.api_port);
+    let probe_body = serde_json::json!({
+        "model": model_id,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": false,
+        "temperature": 0
+    });
+
+    info!(
+        target: "smg::health",
+        model = %model_id,
+        probe_url = %probe_url,
+        max_tokens = 1,
+        "health_generate: sending real inference probe"
+    );
+
+    let start = Instant::now();
+    let probe_result = state.context.client
+        .post(&probe_url)
+        .json(&probe_body)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await;
+    let duration_ms = start.elapsed().as_millis();
+
+    match probe_result {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                target: "smg::health",
+                model = %model_id,
+                duration_ms = %duration_ms,
+                workers = healthy.len(),
+                "health_generate: probe succeeded"
+            );
+            (
+                StatusCode::OK,
+                format!(
+                    "OK - {} workers healthy, probe succeeded in {}ms (model: {})",
+                    healthy.len(), duration_ms, model_id
+                ),
+            ).into_response()
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!(
+                target: "smg::health",
+                model = %model_id,
+                status = %status,
+                duration_ms = %duration_ms,
+                "health_generate: probe failed (backend error)"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Probe failed: backend returned {} in {}ms — {}",
+                    status, duration_ms, body
+                ),
+            ).into_response()
+        }
+        Err(e) => {
+            warn!(
+                target: "smg::health",
+                model = %model_id,
+                error = %e,
+                duration_ms = %duration_ms,
+                "health_generate: probe failed (transport error)"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Probe failed: {} in {}ms", e, duration_ms),
+            ).into_response()
+        }
+    }
 }
 
 async fn engine_metrics(State(state): State<Arc<AppState>>) -> Response {
@@ -1372,6 +1465,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         concurrency_queue_tx: limiter.queue_tx.clone(),
         router_manager: Some(router_manager),
         mesh_handler,
+        api_port: config.port,
     });
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {
