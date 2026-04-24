@@ -354,17 +354,44 @@ impl CacheAwarePolicy {
             .or_insert_with(|| Arc::new(TokenTree::new()))
             .clone();
 
-        Self::apply_insert_to_trees(&string_tree, &token_tree, insert_op);
+        self.apply_insert_to_trees(model_id, &string_tree, &token_tree, insert_op);
     }
 
+    /// Apply a tree insert and populate the model-scoped hash
+    /// index alongside it. Remote-replay paths
+    /// (`apply_remote_tree_operation`, `restore_tree_state_from_mesh`)
+    /// funnel here, so `TreeHandle::contains_hash` reflects nodes
+    /// learned from gossip — not just locally-routed inserts.
+    /// Without this, replayed prefixes would be misclassified as
+    /// unknown and trigger unnecessary repair once the adapter is
+    /// wired up. The string-side value is the full `text` (not a
+    /// matched prefix) because remote apply doesn't compute a
+    /// match; `apply_tenant_delta` re-inserts whatever string is
+    /// stored.
     fn apply_insert_to_trees(
+        &self,
+        model_id: &str,
         string_tree: &Arc<Tree>,
         token_tree: &Arc<TokenTree>,
         insert_op: &TreeInsertOp,
     ) {
         match &insert_op.key {
-            TreeKey::Text(text) => string_tree.insert_text(text, &insert_op.tenant),
-            TreeKey::Tokens(tokens) => token_tree.insert_tokens(tokens, &insert_op.tenant),
+            TreeKey::Text(text) => {
+                string_tree.insert_text(text, &insert_op.tenant);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .string_tree
+                    .insert(smg_mesh::hash_node_path(text), text.clone());
+            }
+            TreeKey::Tokens(tokens) => {
+                token_tree.insert_tokens(tokens, &insert_op.tenant);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .token_tree
+                    .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
+            }
         }
     }
 
