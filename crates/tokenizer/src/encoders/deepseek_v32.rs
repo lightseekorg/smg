@@ -499,7 +499,7 @@ pub fn encode_messages(
         full_messages = drop_thinking_messages(&full_messages);
     }
 
-    for idx in 0..messages.len() {
+    for idx in 0..full_messages.len() {
         prompt.push_str(&render_message(idx, &full_messages, thinking_mode)?);
     }
 
@@ -634,5 +634,23 @@ mod tests {
         let out = encode_messages(&msgs, ThinkingMode::Chat, &params).unwrap();
         assert!(!out.starts_with(BOS_TOKEN));
         assert!(out.starts_with(USER_PREFIX));
+    }
+
+    #[test]
+    fn drop_thinking_does_not_overrun_when_filtering_shrinks_messages() {
+        // `drop_thinking_messages` removes developer-role messages before the
+        // last user turn, so `full_messages.len() < messages.len()`. The
+        // outer loop must iterate the filtered length, not the original, or
+        // it walks off the end and returns IndexOutOfRange.
+        let msgs = [
+            json!({ "role": "developer", "content": "earlier developer note" }),
+            json!({ "role": "user", "content": "now" }),
+        ];
+        let out = encode_messages(&msgs, ThinkingMode::Thinking, &EncodeParams::default())
+            .expect("filtered message length must not blow up the loop");
+        assert!(
+            out.contains("now"),
+            "user message missing from prompt: {out}"
+        );
     }
 }

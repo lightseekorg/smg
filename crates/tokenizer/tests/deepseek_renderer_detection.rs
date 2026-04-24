@@ -5,7 +5,9 @@ mod tests {
     use std::{collections::HashMap, fs};
 
     use llm_tokenizer::{
-        chat_template::ChatTemplateParams, huggingface::HuggingFaceTokenizer, TokenizerTrait,
+        chat_template::{ChatTemplateParams, ThinkingKeyName, ThinkingToggle},
+        huggingface::HuggingFaceTokenizer,
+        TokenizerTrait,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -108,6 +110,117 @@ mod tests {
         let result = tokenizer.apply_chat_template(&messages, ChatTemplateParams::default());
         assert!(result.is_err());
     }
+    #[test]
+    fn deepseek_v4_injects_tools_into_system_message() {
+        // Client passes tools at the request level (params.tools), not embedded
+        // in messages. The shim must attach them to a system message so the
+        // encoder renders the tools block.
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "city": { "type": "string" } },
+                    "required": ["city"]
+                }
+            }
+        })];
+        let params = ChatTemplateParams {
+            tools: Some(&tools),
+            ..Default::default()
+        };
+        let out = tokenizer.apply_chat_template(&messages, params).unwrap();
+        assert!(out.contains("## Tools"), "tools block missing: {out}");
+        assert!(
+            out.contains("get_weather"),
+            "tool name missing from prompt: {out}"
+        );
+        assert!(
+            out.contains("<\u{FF5C}DSML\u{FF5C}tool_calls>"),
+            "V4 DSML invocation grammar missing: {out}"
+        );
+    }
+
+    #[test]
+    fn deepseek_v32_injects_tools_into_system_message() {
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV32ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hi" })];
+        let tools = vec![json!({
+            "type": "function",
+            "function": { "name": "ping", "description": "ping", "parameters": {} }
+        })];
+        let params = ChatTemplateParams {
+            tools: Some(&tools),
+            ..Default::default()
+        };
+        let out = tokenizer.apply_chat_template(&messages, params).unwrap();
+        assert!(out.contains("## Tools"), "tools block missing: {out}");
+        assert!(out.contains("ping"), "tool name missing: {out}");
+        // V3.2 uses function_calls (vs V4's tool_calls).
+        assert!(
+            out.contains("<\u{FF5C}DSML\u{FF5C}function_calls>"),
+            "V3.2 DSML invocation grammar missing: {out}"
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_attaches_tools_to_existing_system_message() {
+        // When a system message is already present, tools should attach to it
+        // rather than inserting a second system block.
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![
+            json!({ "role": "system", "content": "Be concise." }),
+            json!({ "role": "user", "content": "Hi" }),
+        ];
+        let tools = vec![json!({
+            "type": "function",
+            "function": { "name": "ping", "description": "ping", "parameters": {} }
+        })];
+        let params = ChatTemplateParams {
+            tools: Some(&tools),
+            ..Default::default()
+        };
+        let out = tokenizer.apply_chat_template(&messages, params).unwrap();
+        assert!(
+            out.contains("Be concise."),
+            "existing system content lost: {out}"
+        );
+        assert!(out.contains("ping"), "tool not attached: {out}");
+    }
+
+    #[test]
+    fn deepseek_renderers_report_thinking_introspection() {
+        // V3.2 / V4 inject `<think>` in the prefill when thinking is on, and
+        // gate thinking on the `thinking` kwarg. The trait methods must
+        // surface this so the gateway can call `mark_reasoning_started` on
+        // the conditional reasoning parser (deepseek_v31 etc).
+        for arch in &["DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM"] {
+            let (_tmp, tok) = write_dir(Some(&[*arch]));
+            let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+            assert_eq!(
+                tokenizer.thinking_toggle(),
+                ThinkingToggle::DefaultOff,
+                "{arch}: expected DefaultOff toggle"
+            );
+            assert_eq!(
+                tokenizer.thinking_key_name(),
+                Some(ThinkingKeyName::Thinking),
+                "{arch}: expected Thinking key name"
+            );
+            assert!(
+                tokenizer.think_in_prefill(),
+                "{arch}: expected think_in_prefill=true"
+            );
+        }
+    }
+
     #[test]
     fn deepseek_v4_renderer_passes_reasoning_effort() {
         let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));

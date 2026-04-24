@@ -412,14 +412,29 @@ impl TokenizerTrait for HuggingFaceTokenizer {
     }
 
     fn thinking_toggle(&self) -> ThinkingToggle {
-        self.chat_template.thinking_toggle()
+        match self.renderer {
+            // DeepSeek V3.2 and V4 encoders gate thinking on the `thinking`
+            // kwarg, default off. The Jinja processor has no knowledge of
+            // the native encoder so we must report it directly.
+            Renderer::DeepseekV32 | Renderer::DeepseekV4 => ThinkingToggle::DefaultOff,
+            Renderer::Jinja => self.chat_template.thinking_toggle(),
+        }
     }
 
     fn thinking_key_name(&self) -> Option<ThinkingKeyName> {
-        self.chat_template.thinking_key_name()
+        match self.renderer {
+            Renderer::DeepseekV32 | Renderer::DeepseekV4 => Some(ThinkingKeyName::Thinking),
+            Renderer::Jinja => self.chat_template.thinking_key_name(),
+        }
     }
     fn think_in_prefill(&self) -> bool {
-        self.chat_template.think_in_prefill()
+        match self.renderer {
+            // Both encoders emit `<｜Assistant｜><think>` at the end of the
+            // prompt when thinking mode is on; the completion therefore starts
+            // mid-reasoning and the parser must be told so.
+            Renderer::DeepseekV32 | Renderer::DeepseekV4 => true,
+            Renderer::Jinja => self.chat_template.think_in_prefill(),
+        }
     }
 
     fn set_chat_template(&mut self, template: String) -> Result<()> {
@@ -506,22 +521,53 @@ fn resolve_drop_thinking(messages: &[serde_json::Value]) -> bool {
                 .is_some_and(|arr| !arr.is_empty())
     })
 }
+/// Attach `tools` to a leading system/developer message so the V3.2/V4
+/// encoder can render the tools block. Mirrors the wrapper step in
+/// vllm's `vllm/tokenizers/deepseek_v32.py` and sglang's V4 serving path.
+/// Returns `None` when no rewrite is needed so callers can pass the input
+/// slice directly in the common path.
+fn inject_tools_into_messages(
+    messages: &[serde_json::Value],
+    tools: Option<&[serde_json::Value]>,
+) -> Option<Vec<serde_json::Value>> {
+    let tools = tools?;
+    if tools.is_empty() {
+        return None;
+    }
+    let mut owned: Vec<serde_json::Value> = messages.to_vec();
+    let first_role = owned
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(|r| r.as_str());
+    if !matches!(first_role, Some("system" | "developer")) {
+        owned.insert(0, serde_json::json!({ "role": "system", "content": "" }));
+    }
+    if let Some(obj) = owned[0].as_object_mut() {
+        obj.insert("tools".into(), serde_json::Value::Array(tools.to_vec()));
+    }
+    Some(owned)
+}
+
 fn apply_deepseek_v32(
     messages: &[serde_json::Value],
     params: &ChatTemplateParams,
 ) -> Result<String> {
+    let owned = inject_tools_into_messages(messages, params.tools);
+    let msgs: &[serde_json::Value] = owned.as_deref().unwrap_or(messages);
     let thinking_mode = derive_thinking_mode(params);
     let encode_params = deepseek_v32::EncodeParams {
         add_default_bos_token: true,
-        drop_thinking: resolve_drop_thinking(messages),
+        drop_thinking: resolve_drop_thinking(msgs),
     };
-    deepseek_v32::encode_messages(messages, thinking_mode, &encode_params)
+    deepseek_v32::encode_messages(msgs, thinking_mode, &encode_params)
         .map_err(|e| Error::msg(format!("DeepSeek V3.2 encode failed: {e}")))
 }
 fn apply_deepseek_v4(
     messages: &[serde_json::Value],
     params: &ChatTemplateParams,
 ) -> Result<String> {
+    let owned = inject_tools_into_messages(messages, params.tools);
+    let msgs: &[serde_json::Value] = owned.as_deref().unwrap_or(messages);
     let thinking_mode = derive_thinking_mode(params);
     let reasoning_effort = params
         .template_kwargs
@@ -534,9 +580,9 @@ fn apply_deepseek_v4(
         });
     let encode_params = deepseek_v4::EncodeParams {
         add_default_bos_token: true,
-        drop_thinking: resolve_drop_thinking(messages),
+        drop_thinking: resolve_drop_thinking(msgs),
         reasoning_effort,
     };
-    deepseek_v4::encode_messages(messages, thinking_mode, &encode_params)
+    deepseek_v4::encode_messages(msgs, thinking_mode, &encode_params)
         .map_err(|e| Error::msg(format!("DeepSeek V4 encode failed: {e}")))
 }
