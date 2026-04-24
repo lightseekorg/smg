@@ -1720,4 +1720,143 @@ mod tests {
             .expect("output_item.done must be emitted");
         assert!(completed_idx < done_idx);
     }
+
+    #[test]
+    fn code_interpreter_completion_events_fire_before_output_item_done() {
+        // R6.7b companion: the suppression gate in `tool_handler.rs` drops
+        // the upstream umbrella `output_item.done` for every tool-call
+        // item type. This test locks the downstream half of the contract
+        // for `code_interpreter_call` — the tool loop's completion
+        // emitter must push `response.code_interpreter_call.completed`
+        // BEFORE `response.output_item.done` so the gate's suppression
+        // lines up with a correctly-ordered wire sequence.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_ci".to_string(),
+            name: "code_interpreter".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_ci".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "code_interpreter_call",
+            "id": "ci_ci",
+            "status": "completed",
+            "code": "print('hi')",
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::CodeInterpreterCall,
+            &mut sequence_number,
+        );
+        assert!(ok);
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.code_interpreter_call.completed")
+            .expect("code_interpreter_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("output_item.done must be emitted");
+        assert!(
+            completed_idx < done_idx,
+            "`response.code_interpreter_call.completed` (index {completed_idx}) must come \
+             before `response.output_item.done` (index {done_idx}); full sequence: {types:?}"
+        );
+
+        // No duplicate `output_item.done` — the tool loop emits exactly
+        // one umbrella (the R6.7b gate drops the upstream copy).
+        let done_count = types
+            .iter()
+            .filter(|t| *t == "response.output_item.done")
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "exactly one `output_item.done` expected, got {done_count}: {types:?}"
+        );
+    }
+
+    #[test]
+    fn file_search_completion_events_fire_before_output_item_done() {
+        // R6.7b companion: lock the ordering contract for the remaining
+        // hosted `file_search_call` format so the gate's suppression
+        // covers every tool-call item type listed in
+        // `TOOL_CALL_ITEM_TYPES`.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_fs".to_string(),
+            name: "file_search".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_fs".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "file_search_call",
+            "id": "fs_fs",
+            "status": "completed",
+            "queries": ["needle"],
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::FileSearchCall,
+            &mut sequence_number,
+        );
+        assert!(ok);
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.file_search_call.completed")
+            .expect("file_search_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("output_item.done must be emitted");
+        assert!(
+            completed_idx < done_idx,
+            "`response.file_search_call.completed` (index {completed_idx}) must come \
+             before `response.output_item.done` (index {done_idx}); full sequence: {types:?}"
+        );
+
+        // No duplicate `output_item.done` — the tool loop emits exactly
+        // one umbrella (the R6.7b gate drops the upstream copy).
+        let done_count = types
+            .iter()
+            .filter(|t| *t == "response.output_item.done")
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "exactly one `output_item.done` expected, got {done_count}: {types:?}"
+        );
+    }
 }

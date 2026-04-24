@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use openai_protocol::event_types::{
-    is_function_call_type, FunctionCallEvent, OutputItemEvent, ResponseEvent,
+    is_function_call_type, FunctionCallEvent, ItemType, OutputItemEvent, ResponseEvent,
 };
 use serde_json::Value;
 use tracing::warn;
@@ -11,6 +11,30 @@ use tracing::warn;
 use crate::routers::openai::responses::{
     extract_output_index, get_event_type, StreamingResponseAccumulator,
 };
+
+/// Item-type discriminators for output items that the streaming tool loop
+/// closes with its own `output_item.done` umbrella event. Upstream emits its
+/// own duplicate umbrella before the structured `<type>.completed` sub-event,
+/// which would violate the spec requirement that `output_item.done` is the
+/// LAST event for a given item (see `.claude/_audit/openai-responses-api-spec.md`
+/// §streaming). Whenever an `output_item.done` arrives for one of these types
+/// while a tool call is pending, we suppress the upstream copy and let the
+/// tool loop emit the umbrella at the correct position.
+const TOOL_CALL_ITEM_TYPES: &[&str] = &[
+    ItemType::FUNCTION_CALL,
+    ItemType::FUNCTION_TOOL_CALL,
+    ItemType::IMAGE_GENERATION_CALL,
+    ItemType::WEB_SEARCH_CALL,
+    ItemType::CODE_INTERPRETER_CALL,
+    ItemType::FILE_SEARCH_CALL,
+];
+
+/// Check whether an item-type string designates a tool-call item whose
+/// umbrella `output_item.done` is re-emitted by the tool loop (and therefore
+/// must be suppressed when forwarded by upstream).
+fn is_tool_call_item_type(item_type: &str) -> bool {
+    TOOL_CALL_ITEM_TYPES.contains(&item_type)
+}
 
 /// Action to take based on streaming event processing
 #[derive(Debug)]
@@ -196,16 +220,27 @@ impl StreamingToolHandler {
                     self.ensure_output_index(output_index);
                 }
                 // Only suppress the umbrella `output_item.done` when it is
-                // closing a function_call item that we are intercepting —
-                // an unrelated `output_item.done` for a message, reasoning
+                // closing a tool-call item that we are intercepting — an
+                // unrelated `output_item.done` for a message, reasoning
                 // item, or mcp_list_tools block must reach the client
                 // untouched even when a pending tool call is queued.
-                let is_function_call_done = parsed
+                //
+                // The gate covers every tool-call item type that emits its
+                // own structured `<type>.completed` sub-event (function_call
+                // and the hosted builtins: image_generation_call,
+                // web_search_call, code_interpreter_call, file_search_call).
+                // When OpenAI cloud passthrough streams a native hosted tool
+                // directly (not wrapped as function_call), the upstream
+                // umbrella `output_item.done` fires BEFORE
+                // `<type>.completed`, and forwarding it breaks the spec
+                // ordering invariant. See PR #1365 CI failure log for
+                // image_generation_call evidence.
+                let is_tool_call_done = parsed
                     .get("item")
                     .and_then(|item| item.get("type"))
                     .and_then(|value| value.as_str())
-                    .is_some_and(is_function_call_type);
-                if is_function_call_done && self.has_complete_calls() {
+                    .is_some_and(is_tool_call_item_type);
+                if is_tool_call_done && self.has_complete_calls() {
                     // Suppress the upstream umbrella event — the tool loop
                     // will emit its own `output_item.done` at the correct
                     // position, AFTER `response.<type>.completed`.
@@ -471,6 +506,77 @@ mod tests {
             ),
             other => panic!("expected ExecuteTools, got {other:?}"),
         }
+    }
+
+    /// Assert that an `output_item.done` for `item_type` is suppressed (the
+    /// gate returns `ExecuteTools { forward_triggering_event: false }`) when
+    /// a tool call is already pending. This is the R6.7b regression: R6.7's
+    /// original gate only matched `function_call`/`function_tool_call`, so
+    /// OpenAI cloud passthrough of native hosted tools (which emits the
+    /// item directly with its hosted-tool type) slipped through and the
+    /// duplicate umbrella event reached the wire. See PR #1365 CI log for
+    /// the `image_generation_call` reproduction.
+    fn assert_output_item_done_suppressed_for_hosted_tool(item_type: &str) {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        bootstrap_function_call_added(&mut handler);
+
+        let done_event = format!(
+            r#"{{
+              "type": "response.output_item.done",
+              "output_index": 0,
+              "item": {{
+                "type": "{item_type}",
+                "id": "hosted_test",
+                "status": "completed"
+              }}
+            }}"#
+        );
+
+        let action = handler.process_event(Some("response.output_item.done"), &done_event);
+
+        match action {
+            StreamAction::ExecuteTools {
+                forward_triggering_event,
+            } => assert!(
+                !forward_triggering_event,
+                "output_item.done for {item_type} must be suppressed to avoid a duplicate umbrella event"
+            ),
+            other => panic!("expected ExecuteTools for {item_type}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_item_done_suppressed_for_image_generation_call() {
+        // R6.7b: OpenAI cloud passthrough emits the `image_generation_call`
+        // item directly — the umbrella `output_item.done` that upstream
+        // sends before `response.image_generation_call.completed` must be
+        // suppressed so the tool loop's umbrella lands at the right spot
+        // (see PR #1365 CI failure: `completed` at index 9, `output_item.done`
+        // at index 3).
+        assert_output_item_done_suppressed_for_hosted_tool(ItemType::IMAGE_GENERATION_CALL);
+    }
+
+    #[test]
+    fn output_item_done_suppressed_for_web_search_call() {
+        // R6.7b: hosted `web_search_call` items emitted directly by
+        // upstream must also trigger suppression — the tool loop emits
+        // `response.web_search_call.completed` followed by its own
+        // `output_item.done` at the correct position.
+        assert_output_item_done_suppressed_for_hosted_tool(ItemType::WEB_SEARCH_CALL);
+    }
+
+    #[test]
+    fn output_item_done_suppressed_for_code_interpreter_call() {
+        // R6.7b: hosted `code_interpreter_call` items share the ordering
+        // contract with the other tool-call item types.
+        assert_output_item_done_suppressed_for_hosted_tool(ItemType::CODE_INTERPRETER_CALL);
+    }
+
+    #[test]
+    fn output_item_done_suppressed_for_file_search_call() {
+        // R6.7b: hosted `file_search_call` items share the ordering
+        // contract with the other tool-call item types.
+        assert_output_item_done_suppressed_for_hosted_tool(ItemType::FILE_SEARCH_CALL);
     }
 
     #[test]
