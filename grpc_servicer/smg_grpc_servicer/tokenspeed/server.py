@@ -4,8 +4,9 @@ Mirrors ``smg_grpc_servicer.sglang.server.serve_grpc``:
 
 1. Launch TokenSpeed's scheduler subprocess(es) + AsyncLLM via
    :func:`smg_grpc_servicer.tokenspeed.scheduler_launcher.launch_engine`.
-2. Start a ``grpc.aio`` server that advertises the SGLang proto so the
-   SMG router can auto-detect and route to this worker without any changes.
+2. Start a ``grpc.aio`` server that advertises the
+   ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` service so the SMG
+   router's ``DetectBackendStep`` identifies the worker natively.
 3. Warm the worker up with a tiny generation request, flip the health
    servicer to SERVING, and await SIGTERM/SIGINT for graceful shutdown.
 """
@@ -23,7 +24,11 @@ from concurrent import futures
 import grpc
 from grpc_health.v1 import health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
-from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
+from smg_grpc_proto import (
+    sglang_scheduler_pb2,
+    tokenspeed_scheduler_pb2_grpc,
+)
+from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
 from tokenspeed.runtime.server_args import ServerArgs
 
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
@@ -63,10 +68,12 @@ async def serve_grpc(server_args: ServerArgs) -> None:
         scheduler_info=scheduler_info,
         health_servicer=health_servicer,
     )
-    sglang_scheduler_pb2_grpc.add_SglangSchedulerServicer_to_server(servicer, server)
+    tokenspeed_scheduler_pb2_grpc.add_TokenSpeedSchedulerServicer_to_server(servicer, server)
 
     service_names = (
-        sglang_scheduler_pb2.DESCRIPTOR.services_by_name["SglangScheduler"].full_name,
+        tokenspeed_scheduler_pb2.DESCRIPTOR.services_by_name[
+            "TokenSpeedScheduler"
+        ].full_name,
         "grpc.health.v1.Health",
         reflection.SERVICE_NAME,
     )
@@ -136,7 +143,7 @@ def _wait_and_warmup(
             ("grpc.max_receive_message_length", 1024 * 1024 * 256),
         ],
     )
-    stub = sglang_scheduler_pb2_grpc.SglangSchedulerStub(channel)
+    stub = tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerStub(channel)
 
     # Wait until GetModelInfo round-trips — that's the quickest confirmation
     # that the gRPC server is both bound and has a live AsyncLLM behind it.
