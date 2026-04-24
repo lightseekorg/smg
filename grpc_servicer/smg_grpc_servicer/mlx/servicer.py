@@ -511,6 +511,20 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         return mlx_engine_pb2.AbortResponse()
 
     async def HealthCheck(self, request, context):
+        # Reflect actual servicer state so the router can stop routing to us
+        # when the generation thread is dead or we're shutting down.
+        if self._shutdown_event.is_set():
+            return mlx_engine_pb2.HealthCheckResponse(
+                healthy=False, message="servicer shutting down"
+            )
+        if self._gen_thread is None:
+            return mlx_engine_pb2.HealthCheckResponse(
+                healthy=False, message="generation loop not started"
+            )
+        if not self._gen_thread.is_alive():
+            return mlx_engine_pb2.HealthCheckResponse(
+                healthy=False, message="generation thread exited"
+            )
         return mlx_engine_pb2.HealthCheckResponse(healthy=True, message="OK")
 
     async def GetTokenizer(self, request, context):
