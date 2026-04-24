@@ -638,17 +638,17 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
 
             if let Some(tree) = tree {
-                tree.insert_text(text, worker_url);
-
-                // Populate hash_index with the matched prefix, not
-                // the full prompt text. Running the match here adds
-                // a small CPU cost on the imbalanced fallback
-                // (microseconds per request), but storing the short
-                // matched_prefix (~50-200 chars) instead of the full
-                // text (80k+) avoids the memory leak v1 called out.
-                // Matches the happy-path populate pattern.
+                // Match BEFORE insert: after `insert_text`, the
+                // tree contains a full path for `text` so a match
+                // would return the entire input length and we'd
+                // store the full prompt — exactly the memory leak
+                // we're trying to avoid. The pre-insert match
+                // returns the prior shared prefix (~50-200 chars).
                 let result = tree.match_prefix_with_counts(text);
                 let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
+
+                tree.insert_text(text, worker_url);
+
                 let path_hash = smg_mesh::hash_node_path(text);
                 self.hash_index
                     .entry(model_id.to_string())
