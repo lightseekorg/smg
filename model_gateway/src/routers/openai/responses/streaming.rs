@@ -855,19 +855,32 @@ pub(super) fn handle_streaming_with_tool_interception(
                                 StreamAction::Buffer => {
                                     // Don't forward, just buffer
                                 }
-                                StreamAction::ExecuteTools => {
-                                    if !forward_streaming_event(
-                                        SseEventData {
-                                            raw_block: &raw_block,
-                                            event_name,
-                                            data: data.as_ref(),
-                                            pre_parsed: None,
-                                        },
-                                        &mut handler,
-                                        &tx,
-                                        &streaming_ctx,
-                                        &mut sequence_number,
-                                    ) {
+                                StreamAction::ExecuteTools {
+                                    forward_triggering_event,
+                                } => {
+                                    // When the upstream signals tool completion via
+                                    // `output_item.done` (instead of a preceding
+                                    // `function_call_arguments.done`), forwarding the
+                                    // event here would emit an umbrella
+                                    // `response.output_item.done` BEFORE
+                                    // `response.<tool>.completed`, violating spec
+                                    // sub-event ordering. The tool loop emits its own
+                                    // `output_item.done` at the correct position after
+                                    // the `.completed` sub-event; suppress here.
+                                    if forward_triggering_event
+                                        && !forward_streaming_event(
+                                            SseEventData {
+                                                raw_block: &raw_block,
+                                                event_name,
+                                                data: data.as_ref(),
+                                                pre_parsed: None,
+                                            },
+                                            &mut handler,
+                                            &tx,
+                                            &streaming_ctx,
+                                            &mut sequence_number,
+                                        )
+                                    {
                                         return;
                                     }
                                     tool_calls_detected = true;

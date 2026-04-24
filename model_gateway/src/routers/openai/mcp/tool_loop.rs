@@ -1220,6 +1220,7 @@ mod tests {
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
         McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry,
     };
+    use tokio::sync::mpsc;
 
     use super::{
         build_transformed_mcp_call_item, extract_openai_response_output_items,
@@ -1528,5 +1529,148 @@ mod tests {
         let output = r#"[{"type":"text","text":"{\"openai_response\":null}"}]"#;
         let extracted = extract_openai_response_output_items(output);
         assert!(extracted.is_empty());
+    }
+
+    // ========================================================================
+    // R6.7 Gap B — streaming emission ordering invariant.
+    //
+    // `send_tool_call_completion_events` MUST emit
+    // `response.<tool>.completed` BEFORE `response.output_item.done` so the
+    // umbrella event terminates the item's sub-events per spec (see
+    // `.claude/_audit/openai-responses-api-spec.md` §streaming, events
+    // L1054-L1072).
+    // ========================================================================
+
+    fn drain_channel(
+        rx: &mut mpsc::UnboundedReceiver<Result<bytes::Bytes, std::io::Error>>,
+    ) -> Vec<String> {
+        let mut events = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            let bytes = chunk.expect("no io errors in unit-test channel");
+            events.push(String::from_utf8(bytes.to_vec()).expect("utf-8 sse block"));
+        }
+        events
+    }
+
+    fn event_type_from_sse_block(block: &str) -> String {
+        // SSE block shape: `event: <name>\ndata: {...}\n\n`. We parse only
+        // the leading `event: …` line to get the wire type without pulling
+        // serde_json into this tiny assertion helper.
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("event: ") {
+                return rest.trim().to_string();
+            }
+        }
+        block.to_string()
+    }
+
+    #[test]
+    fn image_generation_completion_events_fire_before_output_item_done() {
+        // Gap B lock test: after the tool executes, the completion
+        // emitter must push `response.image_generation_call.completed`
+        // onto the wire BEFORE `response.output_item.done`. If a future
+        // refactor reverses the order this asserts and fails loudly.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_img".to_string(),
+            name: "image_generation".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_img".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "image_generation_call",
+            "id": "ig_img",
+            "status": "completed",
+            "result": "BASE64",
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::ImageGenerationCall,
+            &mut sequence_number,
+        );
+        assert!(ok, "send_tool_call_completion_events should not disconnect");
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.image_generation_call.completed")
+            .expect("response.image_generation_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("response.output_item.done must be emitted");
+
+        assert!(
+            completed_idx < done_idx,
+            "`response.image_generation_call.completed` (index {completed_idx}) must come \
+             before `response.output_item.done` (index {done_idx}); full sequence: {types:?}"
+        );
+    }
+
+    #[test]
+    fn web_search_completion_events_fire_before_output_item_done() {
+        // Same ordering contract for the pre-existing web_search_call path,
+        // so the invariant applies uniformly across every hosted-tool
+        // ResponseFormat we emit.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_ws".to_string(),
+            name: "web_search".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_ws".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "web_search_call",
+            "id": "ws_ws",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::WebSearchCall,
+            &mut sequence_number,
+        );
+        assert!(ok);
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.web_search_call.completed")
+            .expect("web_search_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("output_item.done must be emitted");
+        assert!(completed_idx < done_idx);
     }
 }
