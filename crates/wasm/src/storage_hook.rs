@@ -4,11 +4,6 @@
 //! into a [`StorageHook`] implementation, allowing WASM guests to intercept
 //! storage operations with custom before/after logic.
 
-use std::{
-    collections::HashSet,
-    sync::{LazyLock, Mutex},
-};
-
 use async_trait::async_trait;
 use serde_json::Value;
 use smg_data_connector::{
@@ -27,9 +22,6 @@ use crate::storage_spec::{
     },
     StorageHook as StorageHookBindings,
 };
-
-static UNMAPPED_WIT_OPERATIONS_LOGGED: LazyLock<Mutex<HashSet<StorageOperation>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// WASI state for storage hook WASM execution.
 struct StorageHookWasiState {
@@ -110,28 +102,26 @@ impl WasmStorageHook {
 
 // ── Type conversions ─────────────────────────────────────────────────────
 
-fn to_wit_operation(op: StorageOperation) -> Option<WitOperation> {
+fn to_wit_operation(op: StorageOperation) -> WitOperation {
     match op {
-        StorageOperation::CreateConversation => Some(WitOperation::CreateConversation),
-        StorageOperation::GetConversation => Some(WitOperation::GetConversation),
-        StorageOperation::UpdateConversation => Some(WitOperation::UpdateConversation),
-        StorageOperation::DeleteConversation => Some(WitOperation::DeleteConversation),
-        StorageOperation::CreateItem => Some(WitOperation::CreateItem),
-        StorageOperation::LinkItem => Some(WitOperation::LinkItem),
-        StorageOperation::LinkItems => Some(WitOperation::LinkItems),
-        StorageOperation::ListItems => Some(WitOperation::ListItems),
-        StorageOperation::GetItem => Some(WitOperation::GetItem),
-        StorageOperation::IsItemLinked => Some(WitOperation::IsItemLinked),
-        StorageOperation::DeleteItem => Some(WitOperation::DeleteItem),
-        StorageOperation::StoreResponse => Some(WitOperation::StoreResponse),
-        StorageOperation::GetResponse => Some(WitOperation::GetResponse),
-        StorageOperation::DeleteResponse => Some(WitOperation::DeleteResponse),
-        StorageOperation::GetResponseChain => Some(WitOperation::GetResponseChain),
-        StorageOperation::ListIdentifierResponses => Some(WitOperation::ListIdentifierResponses),
-        StorageOperation::DeleteIdentifierResponses => {
-            Some(WitOperation::DeleteIdentifierResponses)
-        }
-        StorageOperation::CreateMemory => None,
+        StorageOperation::CreateConversation => WitOperation::CreateConversation,
+        StorageOperation::GetConversation => WitOperation::GetConversation,
+        StorageOperation::UpdateConversation => WitOperation::UpdateConversation,
+        StorageOperation::DeleteConversation => WitOperation::DeleteConversation,
+        StorageOperation::CreateItem => WitOperation::CreateItem,
+        StorageOperation::LinkItem => WitOperation::LinkItem,
+        StorageOperation::LinkItems => WitOperation::LinkItems,
+        StorageOperation::ListItems => WitOperation::ListItems,
+        StorageOperation::GetItem => WitOperation::GetItem,
+        StorageOperation::IsItemLinked => WitOperation::IsItemLinked,
+        StorageOperation::DeleteItem => WitOperation::DeleteItem,
+        StorageOperation::StoreResponse => WitOperation::StoreResponse,
+        StorageOperation::GetResponse => WitOperation::GetResponse,
+        StorageOperation::DeleteResponse => WitOperation::DeleteResponse,
+        StorageOperation::GetResponseChain => WitOperation::GetResponseChain,
+        StorageOperation::ListIdentifierResponses => WitOperation::ListIdentifierResponses,
+        StorageOperation::DeleteIdentifierResponses => WitOperation::DeleteIdentifierResponses,
+        StorageOperation::CreateMemory => WitOperation::CreateMemory,
     }
 }
 
@@ -172,22 +162,6 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
-fn log_unmapped_wit_operation_once(operation: StorageOperation, phase: &'static str) {
-    let should_log = {
-        let mut logged = UNMAPPED_WIT_OPERATIONS_LOGGED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        logged.insert(operation)
-    };
-
-    if should_log {
-        tracing::debug!(
-            "skipping WASM storage-hook {phase}() for {:?} until WIT supports it",
-            operation
-        );
-    }
-}
-
 // ── StorageHook implementation ───────────────────────────────────────────
 
 #[async_trait]
@@ -198,11 +172,6 @@ impl StorageHook for WasmStorageHook {
         context: Option<&RequestContext>,
         payload: &Value,
     ) -> Result<BeforeHookResult, HookError> {
-        let Some(wit_op) = to_wit_operation(operation) else {
-            log_unmapped_wit_operation_once(operation, "before");
-            return Ok(BeforeHookResult::Continue(ExtraColumns::new()));
-        };
-
         let mut store = self.new_store();
 
         let bindings =
@@ -228,7 +197,12 @@ impl StorageHook for WasmStorageHook {
 
         let result = bindings
             .smg_storage_storage_hook_before()
-            .call_before(&mut store, wit_op, &wit_ctx, &payload_str)
+            .call_before(
+                &mut store,
+                to_wit_operation(operation),
+                &wit_ctx,
+                &payload_str,
+            )
             .await;
 
         ticker.abort();
@@ -252,11 +226,6 @@ impl StorageHook for WasmStorageHook {
         result: &Value,
         extra: &ExtraColumns,
     ) -> Result<ExtraColumns, HookError> {
-        let Some(wit_op) = to_wit_operation(operation) else {
-            log_unmapped_wit_operation_once(operation, "after");
-            return Ok(extra.clone());
-        };
-
         let mut store = self.new_store();
 
         let bindings =
@@ -286,7 +255,7 @@ impl StorageHook for WasmStorageHook {
             .smg_storage_storage_hook_after()
             .call_after(
                 &mut store,
-                wit_op,
+                to_wit_operation(operation),
                 &wit_ctx,
                 &payload_str,
                 &result_str,
@@ -329,16 +298,12 @@ mod tests {
             StorageOperation::GetResponseChain,
             StorageOperation::ListIdentifierResponses,
             StorageOperation::DeleteIdentifierResponses,
+            StorageOperation::CreateMemory,
         ];
         // Verify all variants convert without panic
         for op in ops {
-            assert!(to_wit_operation(op).is_some());
+            let _ = to_wit_operation(op);
         }
-    }
-
-    #[test]
-    fn create_memory_has_no_wit_mapping_until_abi_support_exists() {
-        assert!(to_wit_operation(StorageOperation::CreateMemory).is_none());
     }
 
     #[test]

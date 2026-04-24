@@ -259,20 +259,12 @@ pub(crate) async fn enqueue_conversation_memory_rows(
         }
     };
 
-    // Best-effort enqueue: rows are inserted sequentially and we stop on the
-    // first error. This is intentionally non-transactional so an LTM seed row
-    // can still be persisted even if a later on-demand row fails. A persisted
-    // LTM row without a paired on-demand row is therefore a valid state.
-    // Downstream processors must tolerate this asymmetry.
-    for row in plan.rows {
-        if let Err(err) = conversation_memory_writer.create_memory(row).await {
-            warn!(
-                conversation_id = %conversation_id.0,
-                error = %err,
-                "Failed to enqueue conversation memory row"
-            );
-            return;
-        }
+    if let Err(err) = conversation_memory_writer.create_memories(plan.rows).await {
+        warn!(
+            conversation_id = %conversation_id.0,
+            error = %err,
+            "Failed to enqueue conversation memory rows"
+        );
     }
 }
 
@@ -567,30 +559,25 @@ async fn persist_conversation_items_inner(
         .cloned()
         .ok_or_else(|| "No output array in response".to_string())?;
 
+    let conv_id_opt = resolve_persistence_conversation_id(
+        &conversation_storage,
+        &response_storage,
+        original_body,
+    )
+    .await?;
+
     // Build and store response
     let mut stored_response = build_stored_response(response_json, original_body);
     stored_response.id = response_id.clone();
     stored_response.input = Value::Array(input_items.clone());
+    if let Some(conv_id) = &conv_id_opt {
+        stored_response.conversation_id = Some(conv_id.0.clone());
+    }
 
     response_storage
         .store_response(stored_response)
         .await
         .map_err(|e| format!("Failed to store response: {e}"))?;
-
-    // Check if conversation is provided and validate it exists
-    let conv_id_opt = if let Some(conv_ref) = &original_body.conversation {
-        let conv_id = ConversationId::from(conv_ref.as_id());
-        match conversation_storage.get_conversation(&conv_id).await {
-            Ok(Some(_)) => Some(conv_id),
-            Ok(None) => {
-                warn!(conversation_id = %conv_id.0, "Conversation not found, skipping item linking");
-                None
-            }
-            Err(e) => return Err(format!("Failed to get conversation: {e}")),
-        }
-    } else {
-        None
-    };
 
     // If conversation exists, link items to it
     if let Some(conv_id) = conv_id_opt {
@@ -628,4 +615,59 @@ async fn persist_conversation_items_inner(
     }
 
     Ok(())
+}
+
+async fn resolve_persistence_conversation_id(
+    conversation_storage: &Arc<dyn ConversationStorage>,
+    response_storage: &Arc<dyn ResponseStorage>,
+    original_body: &ResponsesRequest,
+) -> Result<Option<ConversationId>, String> {
+    if let Some(conv_ref) = &original_body.conversation {
+        return resolve_existing_conversation_id(
+            conversation_storage,
+            ConversationId::from(conv_ref.as_id()),
+        )
+        .await;
+    }
+
+    let Some(previous_response_id) = original_body.previous_response_id.as_deref() else {
+        return Ok(None);
+    };
+
+    let previous_response = response_storage
+        .get_response(&ResponseId::from(previous_response_id))
+        .await
+        .map_err(|e| format!("Failed to get previous response: {e}"))?;
+
+    let Some(previous_response) = previous_response else {
+        warn!(
+            previous_response_id,
+            "Previous response not found during persistence, skipping conversation linking"
+        );
+        return Ok(None);
+    };
+
+    let Some(conversation_id) = previous_response.conversation_id else {
+        return Ok(None);
+    };
+
+    resolve_existing_conversation_id(conversation_storage, ConversationId::from(conversation_id))
+        .await
+}
+
+async fn resolve_existing_conversation_id(
+    conversation_storage: &Arc<dyn ConversationStorage>,
+    conv_id: ConversationId,
+) -> Result<Option<ConversationId>, String> {
+    match conversation_storage.get_conversation(&conv_id).await {
+        Ok(Some(_)) => Ok(Some(conv_id)),
+        Ok(None) => {
+            warn!(
+                conversation_id = %conv_id.0,
+                "Conversation not found, skipping item linking"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(format!("Failed to get conversation: {e}")),
+    }
 }

@@ -27,6 +27,7 @@ interface storage-hook-types {
         get-response-chain,
         list-identifier-responses,
         delete-identifier-responses,
+        create-memory,
     }
 
     /// An extra column name-value pair to persist alongside core data.

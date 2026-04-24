@@ -352,6 +352,7 @@ pub async fn create_conversation_items_with_headers(
     }
 
     let mut created_items = Vec::new();
+    let mut memory_items = Vec::new();
     let mut warnings = Vec::new();
     let mut link_pairs = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -359,9 +360,12 @@ pub async fn create_conversation_items_with_headers(
 
     for item_val in items_array {
         match process_item(item_storage, &conversation_id, item_val, added_at).await {
-            Ok((item_json, item_id, warning)) => {
+            Ok((item_json, item_id, warning, memory_origin)) => {
                 if seen_ids.insert(item_id.0.clone()) {
                     link_pairs.push((item_id, added_at));
+                }
+                if matches!(memory_origin, ItemMemoryOrigin::Fresh) {
+                    memory_items.push(item_json.clone());
                 }
                 created_items.push(item_json);
                 if let Some(w) = warning {
@@ -376,13 +380,18 @@ pub async fn create_conversation_items_with_headers(
     if let Err(e) = item_storage.link_items(&conversation_id, &link_pairs).await {
         return internal_error(format!("Failed to link items to conversation: {e}"));
     }
-    enqueue_conversation_memory_rows_for_items(
-        conversation_memory_writer,
-        &memory_execution_context,
-        &conversation_id,
-        &created_items,
-    )
-    .await;
+    // Re-linked existing items (`item_reference` or user-supplied ids that
+    // already exist) are excluded from `memory_items`, so only fresh content
+    // contributes new memory work.
+    if !memory_items.is_empty() {
+        enqueue_conversation_memory_rows_for_items(
+            conversation_memory_writer,
+            &memory_execution_context,
+            &conversation_id,
+            &memory_items,
+        )
+        .await;
+    }
 
     let mut response = json!({
         "object": "list",
@@ -407,9 +416,6 @@ async fn enqueue_conversation_memory_rows_for_items(
     conversation_id: &ConversationId,
     created_items: &[Value],
 ) {
-    // `created_items` already contains resolved `item_reference` payloads
-    // (via `process_item_reference`), so referenced message text contributes to
-    // turn text extraction for enqueue.
     let user_text = extract_role_message_text_from_items(created_items, "user");
     let assistant_text = extract_role_message_text_from_items(created_items, "assistant");
     enqueue_conversation_memory_rows(
@@ -423,6 +429,12 @@ async fn enqueue_conversation_memory_rows_for_items(
     .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemMemoryOrigin {
+    Fresh,
+    Existing,
+}
+
 /// Process a single item for creation. Returns (json, item_id, warning).
 /// Linking is deferred to the caller for batch operation.
 async fn process_item(
@@ -430,7 +442,7 @@ async fn process_item(
     conversation_id: &ConversationId,
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
-) -> Result<(Value, ConversationItemId, Option<String>), Response> {
+) -> Result<(Value, ConversationItemId, Option<String>, ItemMemoryOrigin), Response> {
     let item_type = item_val
         .get("type")
         .and_then(|v| v.as_str())
@@ -443,14 +455,15 @@ async fn process_item(
 
     let user_provided_id = item_val.get("id").and_then(|v| v.as_str());
 
-    let (item, warning) = if let Some(id_str) = user_provided_id {
+    let (item, warning, memory_origin) = if let Some(id_str) = user_provided_id {
         process_item_with_id(item_storage, conversation_id, item_val, id_str).await?
     } else {
-        process_new_item(item_storage, item_val).await?
+        let (item, warning) = process_new_item(item_storage, item_val).await?;
+        (item, warning, ItemMemoryOrigin::Fresh)
     };
 
     let item_id = item.id.clone();
-    Ok((item_to_json(&item), item_id, warning))
+    Ok((item_to_json(&item), item_id, warning, memory_origin))
 }
 
 /// Process an item_reference - resolve an existing item for linking.
@@ -460,7 +473,7 @@ async fn process_item_reference(
     _conversation_id: &ConversationId,
     item_val: &Value,
     _added_at: chrono::DateTime<Utc>,
-) -> Result<(Value, ConversationItemId, Option<String>), Response> {
+) -> Result<(Value, ConversationItemId, Option<String>, ItemMemoryOrigin), Response> {
     let ref_id = item_val
         .get("id")
         .and_then(|v| v.as_str())
@@ -479,7 +492,12 @@ async fn process_item_reference(
     };
 
     let item_id = existing_item.id.clone();
-    Ok((item_to_json(&existing_item), item_id, None))
+    Ok((
+        item_to_json(&existing_item),
+        item_id,
+        None,
+        ItemMemoryOrigin::Existing,
+    ))
 }
 
 /// Process an item with a user-provided ID
@@ -488,7 +506,7 @@ async fn process_item_with_id(
     conversation_id: &ConversationId,
     item_val: &Value,
     id_str: &str,
-) -> Result<(ConversationItem, Option<String>), Response> {
+) -> Result<(ConversationItem, Option<String>, ItemMemoryOrigin), Response> {
     let item_id = ConversationItemId::from(id_str);
 
     // Check if already linked
@@ -508,7 +526,7 @@ async fn process_item_with_id(
 
     // Check if item exists globally
     match item_storage.get_item(&item_id).await {
-        Ok(Some(existing)) => Ok((existing, None)),
+        Ok(Some(existing)) => Ok((existing, None, ItemMemoryOrigin::Existing)),
         Ok(None) => {
             // Create new item with the provided ID
             let (mut new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
@@ -519,7 +537,7 @@ async fn process_item_with_id(
                 .await
                 .map_err(|e| internal_error(format!("Failed to create item: {e}")))?;
 
-            Ok((created, warning))
+            Ok((created, warning, ItemMemoryOrigin::Fresh))
         }
         Err(e) => Err(internal_error(format!(
             "Failed to check item existence: {e}"

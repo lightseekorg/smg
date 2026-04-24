@@ -648,6 +648,17 @@ pub trait ConversationMemoryWriter: Send + Sync + 'static {
         &self,
         input: NewConversationMemory,
     ) -> ConversationMemoryResult<ConversationMemoryId>;
+
+    async fn create_memories(
+        &self,
+        inputs: Vec<NewConversationMemory>,
+    ) -> ConversationMemoryResult<Vec<ConversationMemoryId>> {
+        let mut ids = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            ids.push(self.create_memory(input).await?);
+        }
+        Ok(ids)
+    }
 }
 
 impl Default for StoredResponse {

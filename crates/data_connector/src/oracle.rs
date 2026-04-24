@@ -128,17 +128,17 @@ impl OracleStore {
     /// Execute function with a connection from the pool
     pub async fn execute<F, T>(&self, func: F) -> Result<T, String>
     where
-        F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
         T: Send + 'static,
     {
-        let connection = self
+        let mut connection = self
             .pool
             .get()
             .await
             .map_err(|e| format!("Failed to get Oracle connection: {e}"))?;
 
         tokio::task::spawn_blocking(move || {
-            let result = func(&connection);
+            let result = func(&mut connection);
             drop(connection);
             result
         })
@@ -1268,79 +1268,126 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
         &self,
         input: NewConversationMemory,
     ) -> ConversationMemoryResult<ConversationMemoryId> {
-        let NewConversationMemory {
-            conversation_id,
-            conversation_version,
-            response_id,
-            memory_type,
-            status,
-            attempt,
-            owner_id,
-            next_run_at,
-            lease_until,
-            content,
-            memory_config,
-            scope_id,
-            error_msg,
-        } = input;
+        let mut ids = self.create_memories(vec![input]).await?;
+        ids.pop().ok_or_else(|| {
+            ConversationMemoryStorageError::StorageError(
+                "oracle memory insert returned no generated id".to_string(),
+            )
+        })
+    }
 
-        let id_for_insert = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
-        let response_id = response_id.map(|value| value.0);
-        let memory_type = memory_type.storage_label();
-        let status = status.storage_label();
+    async fn create_memories(
+        &self,
+        inputs: Vec<NewConversationMemory>,
+    ) -> ConversationMemoryResult<Vec<ConversationMemoryId>> {
+        struct PreparedMemoryInsert {
+            id: ConversationMemoryId,
+            conversation_id: String,
+            conversation_version: Option<i64>,
+            response_id: Option<String>,
+            memory_type: &'static str,
+            status: &'static str,
+            attempt: i64,
+            owner_id: Option<String>,
+            next_run_at: DateTime<Utc>,
+            lease_until: Option<DateTime<Utc>>,
+            content: Option<String>,
+            memory_config: Option<String>,
+            scope_id: Option<String>,
+            error_msg: Option<String>,
+        }
+
+        let prepared_rows = inputs
+            .into_iter()
+            .map(|input| PreparedMemoryInsert {
+                id: ConversationMemoryId(format!("mem_{}", ulid::Ulid::new())),
+                conversation_id: input.conversation_id.0,
+                conversation_version: input.conversation_version,
+                response_id: input.response_id.map(|value| value.0),
+                memory_type: input.memory_type.storage_label(),
+                status: input.status.storage_label(),
+                attempt: input.attempt,
+                owner_id: input.owner_id,
+                next_run_at: input.next_run_at,
+                lease_until: input.lease_until,
+                content: input.content,
+                memory_config: input.memory_config,
+                scope_id: input.scope_id,
+                error_msg: input.error_msg,
+            })
+            .collect::<Vec<_>>();
+
+        if prepared_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let schema = self.store.schema.clone();
-        // Capture extra columns before spawn_blocking (task-locals don't propagate)
         let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
-                let s = &schema.conversation_memories;
-                let table = s.qualified_table(schema.owner.as_deref());
+                conn.set_autocommit(false);
 
-                let mut columns: Vec<&str> = vec![s.col("memory_id")];
-                let mut params: Vec<&dyn ToSql> = vec![&id_for_insert.0];
+                let result = (|| {
+                    let s = &schema.conversation_memories;
+                    let table = s.qualified_table(schema.owner.as_deref());
+                    let extra_cols: Vec<(&str, Option<String>)> =
+                        resolve_extra_column_values(s, &hook_extra);
+                    let mut inserted_ids = Vec::with_capacity(prepared_rows.len());
 
-                macro_rules! push_col {
-                    ($logical:literal, $value:expr) => {
-                        if !s.is_skipped($logical) {
-                            columns.push(s.col($logical));
-                            params.push($value);
+                    for row in &prepared_rows {
+                        let mut columns: Vec<&str> = vec![s.col("memory_id")];
+                        let mut params: Vec<&dyn ToSql> = vec![&row.id.0];
+
+                        macro_rules! push_col {
+                            ($logical:literal, $value:expr) => {
+                                if !s.is_skipped($logical) {
+                                    columns.push(s.col($logical));
+                                    params.push($value);
+                                }
+                            };
                         }
-                    };
+
+                        push_col!("conversation_id", &row.conversation_id);
+                        push_col!("conversation_version", &row.conversation_version);
+                        push_col!("response_id", &row.response_id);
+                        push_col!("memory_type", &row.memory_type);
+                        push_col!("status", &row.status);
+                        push_col!("attempt", &row.attempt);
+                        push_col!("owner_id", &row.owner_id);
+                        push_col!("next_run_at", &row.next_run_at);
+                        push_col!("lease_until", &row.lease_until);
+                        push_col!("content", &row.content);
+                        push_col!("memory_config", &row.memory_config);
+                        push_col!("scope_id", &row.scope_id);
+                        push_col!("error_msg", &row.error_msg);
+
+                        for (name, val) in &extra_cols {
+                            columns.push(*name);
+                            params.push(val);
+                        }
+
+                        let placeholders = (1..=params.len())
+                            .map(|i| format!(":{i}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let sql = format!(
+                            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+                            columns.join(", "),
+                        );
+                        conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
+                        inserted_ids.push(row.id.clone());
+                    }
+
+                    conn.commit().map_err(map_oracle_error)?;
+                    Ok(inserted_ids)
+                })();
+
+                if result.is_err() {
+                    let _ = conn.rollback();
                 }
-
-                push_col!("conversation_id", &conversation_id.0);
-                push_col!("conversation_version", &conversation_version);
-                push_col!("response_id", &response_id);
-                push_col!("memory_type", &memory_type);
-                push_col!("status", &status);
-                push_col!("attempt", &attempt);
-                push_col!("owner_id", &owner_id);
-                push_col!("next_run_at", &next_run_at);
-                push_col!("lease_until", &lease_until);
-                push_col!("content", &content);
-                push_col!("memory_config", &memory_config);
-                push_col!("scope_id", &scope_id);
-                push_col!("error_msg", &error_msg);
-
-                // Append extra columns from hooks or defaults
-                let extra_cols: Vec<(&str, Option<String>)> =
-                    resolve_extra_column_values(s, &hook_extra);
-                for (name, val) in &extra_cols {
-                    columns.push(*name);
-                    params.push(val);
-                }
-
-                let placeholders = (1..=params.len())
-                    .map(|i| format!(":{i}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let sql = format!(
-                    "INSERT INTO {table} ({}) VALUES ({placeholders})",
-                    columns.join(", "),
-                );
-                conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
-                Ok(id_for_insert)
+                conn.set_autocommit(true);
+                result
             })
             .await
             .map_err(ConversationMemoryStorageError::StorageError)

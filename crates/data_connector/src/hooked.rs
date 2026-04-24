@@ -611,6 +611,23 @@ impl HookedConversationMemoryWriter {
     pub fn new(inner: Arc<dyn ConversationMemoryWriter>, hook: Arc<dyn StorageHook>) -> Self {
         Self { inner, hook }
     }
+
+    fn validate_bulk_extra_columns(
+        extras: &[ExtraColumns],
+    ) -> ConversationMemoryResult<ExtraColumns> {
+        let Some(first) = extras.first() else {
+            return Ok(ExtraColumns::new());
+        };
+
+        if extras.iter().skip(1).any(|extra| extra != first) {
+            return Err(ConversationMemoryStorageError::StorageError(
+                "CreateMemory hook produced inconsistent extra columns across a bulk enqueue"
+                    .to_string(),
+            ));
+        }
+
+        Ok(first.clone())
+    }
 }
 
 #[async_trait]
@@ -641,6 +658,53 @@ impl ConversationMemoryWriter for HookedConversationMemoryWriter {
         .await;
 
         Ok(result)
+    }
+
+    async fn create_memories(
+        &self,
+        inputs: Vec<NewConversationMemory>,
+    ) -> ConversationMemoryResult<Vec<ConversationMemoryId>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut payloads = Vec::with_capacity(inputs.len());
+        let mut extras = Vec::with_capacity(inputs.len());
+        for input in &inputs {
+            let payload = serde_json::to_value(input).unwrap_or_default();
+            let extra = run_before(
+                &*self.hook,
+                StorageOperation::CreateMemory,
+                &payload,
+                ConversationMemoryStorageError::StorageError,
+            )
+            .await?;
+            payloads.push(payload);
+            extras.push(extra);
+        }
+
+        let bulk_extra = Self::validate_bulk_extra_columns(&extras)?;
+        let results =
+            with_extra_columns(bulk_extra.clone(), self.inner.create_memories(inputs)).await?;
+        if results.len() != payloads.len() {
+            return Err(ConversationMemoryStorageError::StorageError(
+                "CreateMemory bulk insert returned an unexpected number of ids".to_string(),
+            ));
+        }
+
+        for ((payload, extra), result) in payloads.iter().zip(extras.iter()).zip(results.iter()) {
+            let result_json = serde_json::to_value(result).unwrap_or_default();
+            run_after(
+                &*self.hook,
+                StorageOperation::CreateMemory,
+                payload,
+                &result_json,
+                extra,
+            )
+            .await;
+        }
+
+        Ok(results)
     }
 }
 

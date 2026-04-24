@@ -953,69 +953,130 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
         &self,
         input: NewConversationMemory,
     ) -> ConversationMemoryResult<ConversationMemoryId> {
-        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
-        let response_id = input.response_id.as_ref().map(|value| value.0.clone());
-        let memory_type = input.memory_type.storage_label();
-        let status = input.status.storage_label();
+        let mut ids = self.create_memories(vec![input]).await?;
+        ids.pop().ok_or_else(|| {
+            ConversationMemoryStorageError::StorageError(
+                "postgres memory insert returned no generated id".to_string(),
+            )
+        })
+    }
+
+    async fn create_memories(
+        &self,
+        inputs: Vec<NewConversationMemory>,
+    ) -> ConversationMemoryResult<Vec<ConversationMemoryId>> {
+        struct PreparedMemoryInsert {
+            id: ConversationMemoryId,
+            conversation_id: String,
+            conversation_version: Option<i64>,
+            response_id: Option<String>,
+            memory_type: &'static str,
+            status: &'static str,
+            attempt: i64,
+            owner_id: Option<String>,
+            next_run_at: DateTime<Utc>,
+            lease_until: Option<DateTime<Utc>>,
+            content: Option<String>,
+            memory_config: Option<String>,
+            scope_id: Option<String>,
+            error_msg: Option<String>,
+        }
+
+        let prepared_rows = inputs
+            .into_iter()
+            .map(|input| PreparedMemoryInsert {
+                id: ConversationMemoryId(format!("mem_{}", ulid::Ulid::new())),
+                conversation_id: input.conversation_id.0,
+                conversation_version: input.conversation_version,
+                response_id: input.response_id.map(|value| value.0),
+                memory_type: input.memory_type.storage_label(),
+                status: input.status.storage_label(),
+                attempt: input.attempt,
+                owner_id: input.owner_id,
+                next_run_at: input.next_run_at,
+                lease_until: input.lease_until,
+                content: input.content,
+                memory_config: input.memory_config,
+                scope_id: input.scope_id,
+                error_msg: input.error_msg,
+            })
+            .collect::<Vec<_>>();
+
+        if prepared_rows.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let s = &self.store.schema.conversation_memories;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
-
-        let mut col_names: Vec<&str> = vec![s.col("memory_id")];
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&id.0];
-
-        macro_rules! push_col {
-            ($logical:literal, $value:expr) => {
-                if !s.is_skipped($logical) {
-                    col_names.push(s.col($logical));
-                    params.push($value);
-                }
-            };
-        }
-
-        push_col!("conversation_id", &input.conversation_id.0);
-        push_col!("conversation_version", &input.conversation_version);
-        push_col!("response_id", &response_id);
-        push_col!("memory_type", &memory_type);
-        push_col!("status", &status);
-        push_col!("attempt", &input.attempt);
-        push_col!("owner_id", &input.owner_id);
-        push_col!("next_run_at", &input.next_run_at);
-        push_col!("lease_until", &input.lease_until);
-        push_col!("content", &input.content);
-        push_col!("memory_config", &input.memory_config);
-        push_col!("scope_id", &input.scope_id);
-        push_col!("error_msg", &input.error_msg);
-
-        // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
         let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
-        for (name, val) in &extra_cols {
-            col_names.push(*name);
-            params.push(val);
-        }
 
-        let placeholders = (1..=params.len())
-            .map(|i| format!("${i}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT INTO {table} ({}) VALUES ({placeholders})",
-            col_names.join(", "),
-        );
-
-        let client = self
+        let mut client = self
             .store
             .pool
             .get()
             .await
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
-        client
-            .execute(&sql, &params)
+        let transaction = client
+            .transaction()
             .await
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
 
-        Ok(id)
+        let mut inserted_ids = Vec::with_capacity(prepared_rows.len());
+        for row in &prepared_rows {
+            let mut col_names: Vec<&str> = vec![s.col("memory_id")];
+            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&row.id.0];
+
+            macro_rules! push_col {
+                ($logical:literal, $value:expr) => {
+                    if !s.is_skipped($logical) {
+                        col_names.push(s.col($logical));
+                        params.push($value);
+                    }
+                };
+            }
+
+            push_col!("conversation_id", &row.conversation_id);
+            push_col!("conversation_version", &row.conversation_version);
+            push_col!("response_id", &row.response_id);
+            push_col!("memory_type", &row.memory_type);
+            push_col!("status", &row.status);
+            push_col!("attempt", &row.attempt);
+            push_col!("owner_id", &row.owner_id);
+            push_col!("next_run_at", &row.next_run_at);
+            push_col!("lease_until", &row.lease_until);
+            push_col!("content", &row.content);
+            push_col!("memory_config", &row.memory_config);
+            push_col!("scope_id", &row.scope_id);
+            push_col!("error_msg", &row.error_msg);
+
+            for (name, val) in &extra_cols {
+                col_names.push(*name);
+                params.push(val);
+            }
+
+            let placeholders = (1..=params.len())
+                .map(|i| format!("${i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "INSERT INTO {table} ({}) VALUES ({placeholders})",
+                col_names.join(", "),
+            );
+
+            transaction
+                .execute(&sql, &params)
+                .await
+                .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+            inserted_ids.push(row.id.clone());
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
+
+        Ok(inserted_ids)
     }
 }
 
