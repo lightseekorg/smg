@@ -195,7 +195,17 @@ impl StreamingToolHandler {
                 if let Some(output_index) = extract_output_index(&parsed) {
                     self.ensure_output_index(output_index);
                 }
-                if self.has_complete_calls() {
+                // Only suppress the umbrella `output_item.done` when it is
+                // closing a function_call item that we are intercepting —
+                // an unrelated `output_item.done` for a message, reasoning
+                // item, or mcp_list_tools block must reach the client
+                // untouched even when a pending tool call is queued.
+                let is_function_call_done = parsed
+                    .get("item")
+                    .and_then(|item| item.get("type"))
+                    .and_then(|value| value.as_str())
+                    .is_some_and(is_function_call_type);
+                if is_function_call_done && self.has_complete_calls() {
                     // Suppress the upstream umbrella event — the tool loop
                     // will emit its own `output_item.done` at the correct
                     // position, AFTER `response.<type>.completed`.
@@ -490,6 +500,39 @@ mod tests {
             ),
             other => panic!("expected ExecuteTools, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn output_item_done_for_unrelated_item_forwards_even_with_pending_call() {
+        // Regression for PR #1369 review (chatgpt-codex-connector P1):
+        // suppression must be gated on the done event's item type. When a
+        // function_call is queued AND an unrelated `output_item.done` for a
+        // message / reasoning / mcp_list_tools block arrives, the umbrella
+        // event for that sibling item must pass through untouched so the
+        // client sees its completion. Only the function_call's own
+        // `output_item.done` should be suppressed (the tool loop will emit
+        // the correct umbrella at its proper position).
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        bootstrap_function_call_added(&mut handler);
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 1,
+          "item": {
+            "type": "message",
+            "id": "msg_sibling",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "hello"}]
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+
+        assert!(
+            matches!(action, StreamAction::Forward),
+            "sibling output_item.done must forward even while a function_call is pending; got {action:?}"
+        );
     }
 
     #[test]
