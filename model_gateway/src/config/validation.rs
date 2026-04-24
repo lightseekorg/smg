@@ -57,6 +57,9 @@ impl ConfigValidator {
             ),
             ("background.max_queue_depth", u64::from(bg.max_queue_depth)),
             ("background.lease_duration_secs", bg.lease_duration_secs),
+            ("background.max_retries", u64::from(bg.max_retries)),
+            ("background.retry_base_delay_secs", bg.retry_base_delay_secs),
+            ("background.retry_max_delay_secs", bg.retry_max_delay_secs),
             ("background.sweep_interval_secs", bg.sweep_interval_secs),
             ("background.poll_interval_ms", bg.poll_interval_ms),
             ("background.stream_retention_secs", bg.stream_retention_secs),
@@ -120,6 +123,7 @@ impl ConfigValidator {
                 reason: "Must be > 0".to_string(),
             });
         }
+        validate_mebibyte_limit("skills.max_upload_size_mb", skills.max_upload_size_mb)?;
 
         if skills.max_file_size_mb == 0 {
             return Err(ConfigError::InvalidValue {
@@ -128,6 +132,7 @@ impl ConfigValidator {
                 reason: "Must be > 0".to_string(),
             });
         }
+        validate_mebibyte_limit("skills.max_file_size_mb", skills.max_file_size_mb)?;
 
         if skills.max_file_size_mb > skills.max_upload_size_mb {
             return Err(ConfigError::InvalidValue {
@@ -862,6 +867,20 @@ impl ConfigValidator {
         }
         Ok(())
     }
+}
+
+fn validate_mebibyte_limit(field: &str, value_mb: usize) -> ConfigResult<()> {
+    const MEBIBYTE: usize = 1024 * 1024;
+
+    if value_mb.checked_mul(MEBIBYTE).is_none() {
+        return Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: value_mb.to_string(),
+            reason: "Must fit into usize bytes".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ use smg::{
     config::{PolicyConfig, RouterConfig, RoutingMode},
     routers::RouterTrait,
 };
-use smg_skills::SkillsConfig;
+use smg_skills::{SkillsAdminOperation, SkillsConfig};
 use tempfile::TempDir;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -1071,6 +1071,90 @@ async fn create_skill_route_is_not_mounted_when_skills_admin_is_disabled() {
         .expect("send create skill request");
 
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_skill_enforces_configured_upload_limits_before_service() {
+    let blob_dir = tempfile::tempdir().expect("blob tempdir");
+    let cache_dir = tempfile::tempdir().expect("cache tempdir");
+    let mut config = skills_test_config(&blob_dir, &cache_dir, true);
+    let skills = config.skills.as_mut().expect("skills config");
+    skills.max_upload_size_mb = 2;
+    skills.max_file_size_mb = 1;
+    let app = create_skills_test_app(config).await;
+    let (base_url, server) = spawn_app(app).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .multipart(
+            Form::new()
+                .text("tenant_id", "tenant-a")
+                .part(
+                    "files[]",
+                    Part::bytes(
+                        b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg.".to_vec(),
+                    )
+                    .file_name("SKILL.md")
+                    .mime_str("text/markdown")
+                    .expect("valid markdown mime"),
+                )
+                .part(
+                    "files[]",
+                    Part::bytes(vec![b'x'; 1024 * 1024 + 1])
+                        .file_name("too-large.txt")
+                        .mime_str("text/plain")
+                        .expect("valid text mime"),
+                ),
+        )
+        .send()
+        .await
+        .expect("send create skill request");
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json response");
+    assert_eq!(body["error"]["code"], "skill_upload_too_large");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn skills_admin_allowed_operations_gate_create_requests() {
+    let blob_dir = tempfile::tempdir().expect("blob tempdir");
+    let cache_dir = tempfile::tempdir().expect("cache tempdir");
+    let mut config = skills_test_config(&blob_dir, &cache_dir, true);
+    config
+        .skills
+        .as_mut()
+        .expect("skills config")
+        .admin
+        .allowed_operations = vec![SkillsAdminOperation::ReadAnyTenant];
+    let app = create_skills_test_app(config).await;
+    let (base_url, server) = spawn_app(app).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/v1/skills"))
+        .bearer_auth("test-admin-key")
+        .multipart(
+            Form::new().text("tenant_id", "tenant-a").part(
+                "files[]",
+                Part::bytes(
+                    b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg.".to_vec(),
+                )
+                .file_name("SKILL.md")
+                .mime_str("text/markdown")
+                .expect("valid markdown mime"),
+            ),
+        )
+        .send()
+        .await
+        .expect("send create skill request");
+
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: Value = response.json().await.expect("json response");
+    assert_eq!(body["error"]["code"], "skills_operation_not_allowed");
 
     server.abort();
 }

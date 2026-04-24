@@ -66,12 +66,19 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageB
     let bundle = match config.backend {
         HistoryBackend::Memory => {
             info!("Initializing data connector: Memory");
+            // Share one MemoryResponseStorage between the response read path
+            // and the background repository's mirror, so background-mode
+            // writes are visible to GET /v1/responses/{id}.
+            let memory_response_storage = Arc::new(MemoryResponseStorage::new());
+            let background_repository = Arc::new(MemoryBackgroundRepository::new(Arc::clone(
+                &memory_response_storage,
+            )));
             StorageBundle {
-                response_storage: Arc::new(MemoryResponseStorage::new()),
+                response_storage: memory_response_storage,
                 conversation_storage: Arc::new(MemoryConversationStorage::new()),
                 conversation_item_storage: Arc::new(MemoryConversationItemStorage::new()),
                 conversation_memory_writer: Arc::new(MemoryConversationMemoryWriter::new()),
-                background_repository: Some(Arc::new(MemoryBackgroundRepository::new())),
+                background_repository: Some(background_repository),
             }
         }
         HistoryBackend::None => {

@@ -9,10 +9,13 @@ use serde_yml::{Mapping, Value};
 use thiserror::Error;
 use zip::ZipArchive;
 
-use crate::types::{
-    NormalizedSkillBundle, NormalizedSkillFile, ParsedSkillBundle, SkillDependencyTool,
-    SkillInterfaceMetadata, SkillParseWarning, SkillParseWarningKind, SkillPolicyMetadata,
-    SkillSidecarDependencies,
+use crate::{
+    config::SkillUploadLimits,
+    types::{
+        NormalizedSkillBundle, NormalizedSkillFile, ParsedSkillBundle, SkillDependencyTool,
+        SkillInterfaceMetadata, SkillParseWarning, SkillParseWarningKind, SkillPolicyMetadata,
+        SkillSidecarDependencies,
+    },
 };
 
 const MAX_NAME_LEN: usize = 64;
@@ -20,9 +23,6 @@ const MAX_DISPLAY_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const MAX_SIDECAR_STRING_LEN: usize = 1024;
 const MAX_BUNDLE_ARCHIVE_ENTRY_COUNT: usize = 1024;
-const MAX_BUNDLE_FILE_COUNT: usize = 500;
-const MAX_BUNDLE_FILE_SIZE_BYTES: u64 = 25 * 1024 * 1024;
-const MAX_BUNDLE_TOTAL_SIZE_BYTES: u64 = 30 * 1024 * 1024;
 const RESERVED_SKILL_NAMES: [&str; 3] = ["anthropic", "claude", "openai"];
 const SKILL_MD_PATH: &str = "SKILL.md";
 const OPENAI_SIDECAR_PATH: &str = "agents/openai.yaml";
@@ -154,6 +154,14 @@ pub fn parse_skill_bundle(
 pub fn normalize_skill_bundle_zip(
     zip_bytes: &[u8],
 ) -> Result<NormalizedSkillBundle, SkillBundleArchiveError> {
+    normalize_skill_bundle_zip_with_limits(zip_bytes, SkillUploadLimits::default())
+}
+
+/// Normalize an uploaded skill-bundle zip archive using explicit upload limits.
+pub fn normalize_skill_bundle_zip_with_limits(
+    zip_bytes: &[u8],
+    limits: SkillUploadLimits,
+) -> Result<NormalizedSkillBundle, SkillBundleArchiveError> {
     let mut archive = ZipArchive::new(Cursor::new(zip_bytes)).map_err(|error| {
         SkillBundleArchiveError::InvalidZip {
             message: error.to_string(),
@@ -237,32 +245,32 @@ pub fn normalize_skill_bundle_zip(
         match entry_type {
             ZipEntryType::Directory => continue,
             ZipEntryType::RegularFile => {
-                if files.len() >= MAX_BUNDLE_FILE_COUNT {
+                if files.len() >= limits.max_files_per_version {
                     return Err(SkillBundleArchiveError::TooManyFiles {
-                        max_files: MAX_BUNDLE_FILE_COUNT,
+                        max_files: limits.max_files_per_version,
                     });
                 }
 
                 let advertised_size_bytes = entry.size();
-                if advertised_size_bytes > MAX_BUNDLE_FILE_SIZE_BYTES {
+                if advertised_size_bytes > limits.max_file_size_bytes as u64 {
                     return Err(SkillBundleArchiveError::EntryTooLarge {
                         path: relative_path,
-                        max_bytes: MAX_BUNDLE_FILE_SIZE_BYTES,
+                        max_bytes: limits.max_file_size_bytes as u64,
                     });
                 }
 
-                let remaining_bundle_bytes = MAX_BUNDLE_TOTAL_SIZE_BYTES
+                let remaining_bundle_bytes = (limits.max_upload_size_bytes as u64)
                     .checked_sub(total_uncompressed_size_bytes)
                     .ok_or(SkillBundleArchiveError::BundleTooLarge {
-                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                        max_bytes: limits.max_upload_size_bytes as u64,
                     })?;
                 if advertised_size_bytes > remaining_bundle_bytes {
                     return Err(SkillBundleArchiveError::BundleTooLarge {
-                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                        max_bytes: limits.max_upload_size_bytes as u64,
                     });
                 }
 
-                let max_read_bytes = remaining_bundle_bytes.min(MAX_BUNDLE_FILE_SIZE_BYTES);
+                let max_read_bytes = remaining_bundle_bytes.min(limits.max_file_size_bytes as u64);
                 let mut contents = Vec::new();
                 let mut limited_entry = entry.take(max_read_bytes + 1);
                 limited_entry.read_to_end(&mut contents).map_err(|error| {
@@ -277,20 +285,20 @@ pub fn normalize_skill_bundle_zip(
                         message: "decompressed entry size overflowed u64".to_owned(),
                     }
                 })?;
-                if actual_size_bytes > MAX_BUNDLE_FILE_SIZE_BYTES {
+                if actual_size_bytes > limits.max_file_size_bytes as u64 {
                     return Err(SkillBundleArchiveError::EntryTooLarge {
                         path: relative_path,
-                        max_bytes: MAX_BUNDLE_FILE_SIZE_BYTES,
+                        max_bytes: limits.max_file_size_bytes as u64,
                     });
                 }
                 total_uncompressed_size_bytes = total_uncompressed_size_bytes
                     .checked_add(actual_size_bytes)
                     .ok_or(SkillBundleArchiveError::BundleTooLarge {
-                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                        max_bytes: limits.max_upload_size_bytes as u64,
                     })?;
-                if total_uncompressed_size_bytes > MAX_BUNDLE_TOTAL_SIZE_BYTES {
+                if total_uncompressed_size_bytes > limits.max_upload_size_bytes as u64 {
                     return Err(SkillBundleArchiveError::BundleTooLarge {
-                        max_bytes: MAX_BUNDLE_TOTAL_SIZE_BYTES,
+                        max_bytes: limits.max_upload_size_bytes as u64,
                     });
                 }
 

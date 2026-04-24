@@ -1,5 +1,5 @@
 use axum::{
-    extract::{multipart::MultipartError, Multipart, Path, Query, State},
+    extract::{multipart::Field, Multipart, Path, Query, State},
     http::{
         header::{self, HeaderMap, HeaderValue},
         StatusCode,
@@ -20,13 +20,16 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use smg_skills::{
     CreateSkillRequest, CreateSkillVersionRequest, SkillCreateResult, SkillServiceError,
-    SkillUpload, UpdateSkillRequest, UpdateSkillVersionRequest, UploadedSkillFile,
+    SkillUpload, SkillUploadLimits, SkillsAdminOperation, UpdateSkillRequest,
+    UpdateSkillVersionRequest, UploadedSkillFile,
 };
+use tracing::error;
 
 use crate::{middleware::resolve_admin_target_tenant_key, server::AppState};
 
 const DEFAULT_SKILLS_LIST_LIMIT: usize = 100;
 const MAX_SKILLS_LIST_LIMIT: usize = 100;
+const MAX_TENANT_ID_FIELD_BYTES: usize = 4096;
 
 #[derive(Debug)]
 struct ParsedSkillUpload {
@@ -37,6 +40,7 @@ struct ParsedSkillUpload {
 #[derive(Debug)]
 enum SkillsApiError {
     BadRequest { code: &'static str, message: String },
+    Forbidden { code: &'static str, message: String },
     NotFound { code: &'static str, message: String },
     Conflict { code: &'static str, message: String },
     Internal { code: &'static str, message: String },
@@ -46,6 +50,7 @@ impl IntoResponse for SkillsApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             Self::BadRequest { code, message } => (StatusCode::BAD_REQUEST, code, message),
+            Self::Forbidden { code, message } => (StatusCode::FORBIDDEN, code, message),
             Self::NotFound { code, message } => (StatusCode::NOT_FOUND, code, message),
             Self::Conflict { code, message } => (StatusCode::CONFLICT, code, message),
             Self::Internal { code, message } => (StatusCode::INTERNAL_SERVER_ERROR, code, message),
@@ -122,15 +127,29 @@ impl From<SkillServiceError> for SkillsApiError {
             SkillServiceError::BundleBuild(_)
             | SkillServiceError::BlobStore(_)
             | SkillServiceError::Store(_)
-            | SkillServiceError::MissingComponent { .. } => Self::Internal {
-                code: "skills_internal_error",
-                message: error.to_string(),
-            },
-            SkillServiceError::MissingDefaultVersion { .. } => Self::Internal {
-                code: "default_version_missing",
-                message: error.to_string(),
-            },
+            | SkillServiceError::MissingComponent { .. } => internal_skill_service_error(
+                error,
+                "skills_internal_error",
+                "skills request failed due to an internal error",
+            ),
+            SkillServiceError::MissingDefaultVersion { .. } => internal_skill_service_error(
+                error,
+                "default_version_missing",
+                "skills metadata is internally inconsistent",
+            ),
         }
+    }
+}
+
+fn internal_skill_service_error(
+    error: SkillServiceError,
+    code: &'static str,
+    public_message: &'static str,
+) -> SkillsApiError {
+    error!(error = %error, "skills API internal error");
+    SkillsApiError::Internal {
+        code,
+        message: public_message.to_string(),
     }
 }
 
@@ -258,7 +277,8 @@ async fn create_skill_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
-    let parsed = parse_skill_upload(multipart).await?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::CreateAnyTenant)?;
+    let parsed = parse_skill_upload(multipart, skill_service.upload_limits()).await?;
     let result = skill_service
         .create_skill(CreateSkillRequest {
             tenant_id: parsed.tenant_id,
@@ -283,7 +303,8 @@ async fn create_skill_version_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
-    let parsed = parse_skill_upload(multipart).await?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::CreateAnyTenant)?;
+    let parsed = parse_skill_upload(multipart, skill_service.upload_limits()).await?;
     let result = skill_service
         .create_skill_version(CreateSkillVersionRequest {
             tenant_id: parsed.tenant_id,
@@ -310,6 +331,7 @@ async fn patch_skill_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::UpdateAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let updated = skill_service
         .update_skill(UpdateSkillRequest {
@@ -338,6 +360,7 @@ async fn patch_skill_version_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::UpdateAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let updated = skill_service
         .update_skill_version(UpdateSkillVersionRequest {
@@ -365,6 +388,7 @@ async fn delete_skill_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::DeleteAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     skill_service
         .delete_skill(&tenant_id, &skill_id)
@@ -387,6 +411,7 @@ async fn delete_skill_version_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::DeleteAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     skill_service
         .delete_skill_version(&tenant_id, &skill_id, &version)
@@ -409,6 +434,7 @@ async fn list_skills_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::ReadAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let limit = validate_list_limit(query.limit)?;
     let mut records = skill_service
@@ -469,6 +495,7 @@ async fn get_skill_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::ReadAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let record = skill_service
         .get_skill(&tenant_id, &skill_id)
@@ -499,6 +526,7 @@ async fn list_skill_versions_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::ReadAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let limit = validate_list_limit(query.limit)?;
     let skill = skill_service
@@ -565,6 +593,7 @@ async fn get_skill_version_impl(
                 code: "skills_not_configured",
                 message: "skills service is not configured".to_string(),
             })?;
+    ensure_admin_operation_allowed(&state, SkillsAdminOperation::ReadAnyTenant)?;
     let tenant_id = resolve_target_tenant_id(query.tenant_id.as_deref())?;
     let skill = skill_service
         .get_skill(&tenant_id, &skill_id)
@@ -658,6 +687,26 @@ fn resolve_target_tenant_id(raw_tenant_id: Option<&str>) -> Result<String, Skill
             code: "missing_target_tenant",
             message: error.to_string(),
         })
+}
+
+fn ensure_admin_operation_allowed(
+    state: &AppState,
+    operation: SkillsAdminOperation,
+) -> Result<(), SkillsApiError> {
+    let allowed = state
+        .context
+        .router_config
+        .skills
+        .as_ref()
+        .is_some_and(|skills| skills.admin.allowed_operations.contains(&operation));
+    if allowed {
+        return Ok(());
+    }
+
+    Err(SkillsApiError::Forbidden {
+        code: "skills_operation_not_allowed",
+        message: format!("skills admin operation '{operation:?}' is not allowed"),
+    })
 }
 
 fn validate_list_limit(limit: Option<u32>) -> Result<usize, SkillsApiError> {
@@ -854,10 +903,14 @@ fn cache_headers(
     Ok(headers)
 }
 
-async fn parse_skill_upload(mut multipart: Multipart) -> Result<ParsedSkillUpload, SkillsApiError> {
+async fn parse_skill_upload(
+    mut multipart: Multipart,
+    limits: SkillUploadLimits,
+) -> Result<ParsedSkillUpload, SkillsApiError> {
     let mut tenant_id = None;
     let mut zip_upload = None;
     let mut files = Vec::new();
+    let mut total_file_bytes = 0usize;
 
     while let Some(field) = multipart
         .next_field()
@@ -870,10 +923,12 @@ async fn parse_skill_upload(mut multipart: Multipart) -> Result<ParsedSkillUploa
                 if tenant_id.is_some() {
                     return Err(unexpected_field("tenant_id may only be provided once"));
                 }
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|error| bad_text_field(SKILLS_MULTIPART_TENANT_ID_FIELD, error))?;
+                let value = read_text_field_limited(
+                    field,
+                    SKILLS_MULTIPART_TENANT_ID_FIELD,
+                    MAX_TENANT_ID_FIELD_BYTES,
+                )
+                .await?;
                 tenant_id = Some(
                     resolve_admin_target_tenant_key(&value)
                         .map_err(|error| SkillsApiError::BadRequest {
@@ -901,10 +956,10 @@ async fn parse_skill_upload(mut multipart: Multipart) -> Result<ParsedSkillUploa
                                 .to_string(),
                     });
                 }
-                let bytes = field.bytes().await.map_err(|error| {
-                    invalid_multipart(format!("failed to read zip upload: {error}"))
-                })?;
-                zip_upload = Some(bytes.to_vec());
+                let bytes =
+                    read_field_bytes_limited(field, limits.max_upload_size_bytes, "zip upload")
+                        .await?;
+                zip_upload = Some(bytes);
             }
             "files" | SKILLS_MULTIPART_FILES_FIELD => {
                 if zip_upload.is_some() {
@@ -921,17 +976,38 @@ async fn parse_skill_upload(mut multipart: Multipart) -> Result<ParsedSkillUploa
                     }
                 })?;
                 let media_type = field.content_type().map(str::to_string);
-                let contents = field.bytes().await.map_err(|error| {
-                    invalid_multipart(format!("failed to read uploaded file bytes: {error}"))
-                })?;
+                if files.len() >= limits.max_files_per_version {
+                    return Err(SkillsApiError::BadRequest {
+                        code: "invalid_skill_bundle",
+                        message: format!(
+                            "skill bundle contains more than {} regular files",
+                            limits.max_files_per_version
+                        ),
+                    });
+                }
+                let remaining_upload_bytes = limits
+                    .max_upload_size_bytes
+                    .saturating_sub(total_file_bytes);
+                let max_field_bytes = remaining_upload_bytes.min(limits.max_file_size_bytes);
+                let contents =
+                    read_field_bytes_limited(field, max_field_bytes, "uploaded skill file").await?;
+                total_file_bytes =
+                    total_file_bytes
+                        .checked_add(contents.len())
+                        .ok_or_else(|| SkillsApiError::BadRequest {
+                            code: "skill_upload_too_large",
+                            message: format!(
+                                "skill upload exceeds maximum total size of {} bytes",
+                                limits.max_upload_size_bytes
+                            ),
+                        })?;
                 files.push(UploadedSkillFile {
                     relative_path,
-                    contents: contents.to_vec(),
+                    contents,
                     media_type,
                 });
             }
             _ => {
-                let _ = field.bytes().await;
                 return Err(unexpected_field(&format!(
                     "unexpected multipart field '{field_name}'"
                 )));
@@ -994,10 +1070,43 @@ fn unexpected_field(message: &str) -> SkillsApiError {
     }
 }
 
-fn bad_text_field(field: &str, error: MultipartError) -> SkillsApiError {
-    SkillsApiError::BadRequest {
+async fn read_text_field_limited(
+    field: Field<'_>,
+    field_name: &'static str,
+    max_bytes: usize,
+) -> Result<String, SkillsApiError> {
+    let bytes = read_field_bytes_limited(field, max_bytes, field_name).await?;
+    String::from_utf8(bytes).map_err(|error| SkillsApiError::BadRequest {
         code: "invalid_multipart",
-        message: format!("failed to read '{field}' field: {error}"),
+        message: format!("failed to read '{field_name}' field as UTF-8: {error}"),
+    })
+}
+
+async fn read_field_bytes_limited(
+    mut field: Field<'_>,
+    max_bytes: usize,
+    field_description: &str,
+) -> Result<Vec<u8>, SkillsApiError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field.chunk().await.map_err(|error| {
+        invalid_multipart(format!("failed to read {field_description}: {error}"))
+    })? {
+        let next_len = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| upload_too_large(field_description, max_bytes))?;
+        if next_len > max_bytes {
+            return Err(upload_too_large(field_description, max_bytes));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn upload_too_large(field_description: &str, max_bytes: usize) -> SkillsApiError {
+    SkillsApiError::BadRequest {
+        code: "skill_upload_too_large",
+        message: format!("{field_description} exceeds maximum size of {max_bytes} bytes"),
     }
 }
 
@@ -1079,4 +1188,35 @@ fn serialize_optional_json<T: Serialize>(
             })
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+    use smg_blob_storage::BlobStoreError;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn internal_skill_service_errors_hide_backend_details(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let response =
+            SkillsApiError::from(SkillServiceError::BlobStore(BlobStoreError::Operation {
+                operation: "put",
+                message: "oracle dsn and filesystem path".to_string(),
+            }))
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let body: Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(body["error"]["code"], "skills_internal_error");
+        assert_eq!(
+            body["error"]["message"],
+            "skills request failed due to an internal error"
+        );
+        assert!(!body.to_string().contains("oracle dsn"));
+
+        Ok(())
+    }
 }

@@ -347,6 +347,41 @@ impl MemoryResponseStorage {
         store.responses.clear();
         store.identifier_index.clear();
     }
+
+    /// Sync upsert used by `MemoryBackgroundRepository` to mirror background
+    /// writes atomically with its own state transitions.
+    ///
+    /// Goes through the same lock as the async `store_response`; callers that
+    /// want hook interception must use the async `ResponseStorage` path.
+    pub(crate) fn upsert_response_sync(&self, mut response: StoredResponse) {
+        if response.id.0.is_empty() {
+            response.id = ResponseId::new();
+        }
+        let response_id = response.id.clone();
+        let mut store = self.store.write();
+        if let Some(ref safety_identifier) = response.safety_identifier {
+            let ids = store
+                .identifier_index
+                .entry(safety_identifier.clone())
+                .or_default();
+            if !ids.contains(&response_id) {
+                ids.push(response_id.clone());
+            }
+        }
+        store.responses.insert(response_id, response);
+    }
+
+    /// Sync delete; see [`Self::upsert_response_sync`].
+    pub(crate) fn delete_response_sync(&self, response_id: &ResponseId) {
+        let mut store = self.store.write();
+        if let Some(response) = store.responses.remove(response_id) {
+            if let Some(ref safety_identifier) = response.safety_identifier {
+                if let Some(user_responses) = store.identifier_index.get_mut(safety_identifier) {
+                    user_responses.retain(|id| id != response_id);
+                }
+            }
+        }
+    }
 }
 
 impl Default for MemoryResponseStorage {

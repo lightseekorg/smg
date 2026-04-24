@@ -65,6 +65,8 @@ pub(crate) async fn ensure_mcp_connection(
     }
 
     if let Some(tools) = tools {
+        // TODO: Thread real request headers through the gRPC responses path if/when
+        // gRPC MCP flows need the same forwarded-header preservation contract.
         match ensure_request_mcp_client(mcp_orchestrator, tools).await {
             Some(mcp_servers) => {
                 return Ok((true, mcp_servers));

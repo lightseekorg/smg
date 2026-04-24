@@ -22,7 +22,8 @@ use crate::{
         QueuedResponse, ResumeEventBatch, StoredCancelResult, StoredStreamEvent,
     },
     context::RequestContext,
-    core::ResponseId,
+    core::{ResponseId, StoredResponse},
+    memory::MemoryResponseStorage,
 };
 
 /// Convert `std::time::Duration` → `chrono::Duration` for lease arithmetic.
@@ -93,6 +94,7 @@ struct Entry {
     model: String,
     conversation_id: Option<String>,
     previous_response_id: Option<ResponseId>,
+    safety_identifier: Option<String>,
 
     priority: i32,
     retry_attempt: u32,
@@ -111,19 +113,63 @@ struct Entry {
     completed_at: Option<DateTime<Utc>>,
 }
 
+impl Entry {
+    fn to_stored_response(&self, id: &ResponseId) -> StoredResponse {
+        StoredResponse {
+            id: id.clone(),
+            previous_response_id: self.previous_response_id.clone(),
+            input: self.input.clone(),
+            created_at: self.created_at,
+            safety_identifier: self.safety_identifier.clone(),
+            model: Some(self.model.clone()),
+            conversation_id: self.conversation_id.clone(),
+            raw_response: self.raw_response.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     entries: HashMap<ResponseId, Entry>,
 }
 
-#[derive(Clone, Default)]
+/// In-memory background repository.
+///
+/// `response_storage` must point at the same `MemoryResponseStorage` that
+/// serves `AppContext.response_storage`, so background-mode writes
+/// (enqueue / finalize / cancel / delete) are visible to the normal
+/// `GET /v1/responses/{id}` and `DELETE /v1/responses/{id}` paths. The
+/// durable Postgres / Oracle backends keep these in a single SQL table;
+/// the memory analogue mirrors writes into `MemoryResponseStorage` using
+/// the sync `upsert_response_sync` / `delete_response_sync` paths, held
+/// under the same `state` write lock so two state transitions cannot
+/// interleave their mirror writes.
+///
+/// Hook integration: the sync mirror bypasses `HookedResponseStorage`.
+/// That wrapper only interposes on the async `ResponseStorage` trait
+/// methods, and routing background writes through it would cost us the
+/// atomicity above. The memory backend is intended for dev / CI /
+/// single-node; production deployments that need storage-hook interception
+/// of background writes should use `postgres` or `oracle`, which will
+/// handle hooks inside their own transactional write path.
+#[derive(Clone)]
 pub struct MemoryBackgroundRepository {
     state: Arc<RwLock<State>>,
+    response_storage: Arc<MemoryResponseStorage>,
 }
 
 impl MemoryBackgroundRepository {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(response_storage: Arc<MemoryResponseStorage>) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(State::default())),
+            response_storage,
+        }
+    }
+
+    /// Standalone repo for tests that don't need the response-storage mirror.
+    #[cfg(test)]
+    fn new_standalone() -> Self {
+        Self::new(Arc::new(MemoryResponseStorage::new()))
     }
 }
 
@@ -135,6 +181,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         request_context: Option<RequestContext>,
     ) -> BackgroundRepositoryResult<QueuedResponse> {
         let now = Utc::now();
+        let response_id = req.response_id.clone();
         let mut state = self.state.write();
 
         if state.entries.contains_key(&req.response_id) {
@@ -144,7 +191,6 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             )));
         }
 
-        let response_id = req.response_id.clone();
         let entry = Entry {
             status: InternalStatus::Queued,
             request_json: req.request_json,
@@ -154,6 +200,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             model: req.model,
             conversation_id: req.conversation_id,
             previous_response_id: req.previous_response_id,
+            safety_identifier: req.safety_identifier,
             priority: req.priority,
             retry_attempt: 0,
             worker_id: None,
@@ -167,7 +214,12 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             started_at: None,
             completed_at: None,
         };
+        let stored = entry.to_stored_response(&response_id);
         state.entries.insert(response_id.clone(), entry);
+        // Sync mirror under the same lock keeps the two stores atomic w.r.t
+        // concurrent finalize / delete, and removes the need to roll back
+        // on mirror failure (this path is infallible).
+        self.response_storage.upsert_response_sync(stored);
 
         let queue_depth = state
             .entries
@@ -217,9 +269,15 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
             // Cancel-before-claim: flip straight to Cancelled and keep
             // scanning rather than hand a worker a job it must not execute
             // or let the worker loop sleep while other runnable rows exist.
+            // Mirror the terminal payload into shared response storage so
+            // `GET /v1/responses/{id}` doesn't stay stuck on the previous
+            // in-progress payload.
             if entry.cancel_requested {
                 entry.status = InternalStatus::Cancelled;
                 entry.completed_at = Some(now);
+                overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+                let stored = entry.to_stored_response(&id);
+                self.response_storage.upsert_response_sync(stored);
                 continue;
             }
 
@@ -295,6 +353,8 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
                 entry.worker_id = None;
                 entry.lease_expires_at = None;
                 overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+                let stored = entry.to_stored_response(response_id);
+                self.response_storage.upsert_response_sync(stored);
                 Ok(StoredCancelResult::QueuedCancelled)
             }
             InternalStatus::InProgress => {
@@ -410,6 +470,9 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         entry.worker_id = None;
         entry.lease_expires_at = None;
 
+        let stored = entry.to_stored_response(&update.response_id);
+        self.response_storage.upsert_response_sync(stored);
+
         Ok(FinalizeResult {
             response_id: update.response_id,
             final_status,
@@ -461,6 +524,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         }
 
         state.entries.remove(response_id);
+        self.response_storage.delete_response_sync(response_id);
         Ok(DeleteResult::Deleted)
     }
 }
@@ -470,6 +534,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::core::ResponseStorage;
 
     fn enqueue_req(id: &str) -> EnqueueRequest {
         EnqueueRequest::new(
@@ -495,15 +560,132 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_creates_queued_response() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         let ack = repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         assert_eq!(ack.response_id, ResponseId::from("r1"));
         assert_eq!(ack.queue_depth_at_insert, 1);
     }
 
     #[tokio::test]
+    async fn enqueue_mirrors_into_shared_response_storage() {
+        // GET /v1/responses/{id} must see background-mode writes.
+        let rs = Arc::new(MemoryResponseStorage::new());
+        let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        let stored = rs.get_response(&ResponseId::from("r1")).await.unwrap();
+        assert!(
+            stored.is_some(),
+            "enqueue must mirror into response storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_and_delete_mirror_into_shared_response_storage() {
+        let rs = Arc::new(MemoryResponseStorage::new());
+        let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        repo.finalize(
+            finalize_req("r1", "w1", FinalizeStatus::Completed),
+            claim_time + chrono::Duration::seconds(10),
+        )
+        .await
+        .unwrap();
+
+        let stored = rs
+            .get_response(&ResponseId::from("r1"))
+            .await
+            .unwrap()
+            .expect("finalize must mirror the updated payload");
+        assert_eq!(stored.raw_response["status"], "completed");
+
+        let result = repo
+            .delete_background_response(&ResponseId::from("r1"))
+            .await
+            .unwrap();
+        assert_eq!(result, DeleteResult::Deleted);
+        assert!(
+            rs.get_response(&ResponseId::from("r1"))
+                .await
+                .unwrap()
+                .is_none(),
+            "delete must mirror into response storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_next_cancel_fast_path_mirrors_cancelled_payload() {
+        // Path: in-progress row has cancel_requested, lease expires +
+        // requeue_expired puts it back to Queued with the flag preserved,
+        // next claim lands on it and flips to Cancelled. The shared
+        // response storage must see the cancelled payload (otherwise
+        // GET /v1/responses/{id} stays stuck on the in-progress state).
+        let rs = Arc::new(MemoryResponseStorage::new());
+        let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::CancelRequested
+        );
+        assert_eq!(
+            repo.requeue_expired(claim_time + chrono::Duration::seconds(120))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Next claim hits the cancel-before-claim fast path → Cancelled.
+        let claim = repo
+            .claim_next(
+                "w2",
+                claim_time + chrono::Duration::seconds(130),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert!(claim.is_none(), "cancelled row must not be claimed");
+
+        let stored = rs
+            .get_response(&ResponseId::from("r1"))
+            .await
+            .unwrap()
+            .expect("cancel fast path must mirror");
+        assert_eq!(stored.raw_response["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn queued_cancel_mirrors_cancelled_payload_into_shared_storage() {
+        let rs = Arc::new(MemoryResponseStorage::new());
+        let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
+        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::QueuedCancelled
+        );
+        let stored = rs
+            .get_response(&ResponseId::from("r1"))
+            .await
+            .unwrap()
+            .expect("cancelled payload must be visible via response storage");
+        assert_eq!(stored.raw_response["status"], "cancelled");
+    }
+
+    #[tokio::test]
     async fn enqueue_rejects_duplicate() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let err = repo.enqueue(enqueue_req("r1"), None).await.unwrap_err();
         assert!(matches!(
@@ -517,7 +699,7 @@ mod tests {
         // Fully distinct priorities so ordering is determined by the
         // priority tiebreaker alone, not by timestamps that could collide on
         // coarse-clock systems.
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         let mut r1 = enqueue_req("r1");
         r1.priority = 10;
         let mut r2 = enqueue_req("r2");
@@ -550,7 +732,7 @@ mod tests {
         // expires and `requeue_expired` flips it back to Queued with the
         // flag preserved. When the picker encounters that row next, it must
         // mark it Cancelled and keep scanning rather than return `None`.
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
 
         let mut r1 = enqueue_req("r1");
         r1.priority = 1;
@@ -597,7 +779,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_next_empty_returns_none() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         let now = Utc::now();
         assert!(repo
             .claim_next("w1", now, Duration::from_secs(60))
@@ -608,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_on_cancel_requested_skips_worker_and_marks_cancelled() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         assert!(matches!(
             repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
@@ -623,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_requires_active_lease() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
 
         let err = repo
@@ -671,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_cancel_returns_variant_for_each_state() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         assert_eq!(
             repo.request_cancel(&ResponseId::from("missing"))
                 .await
@@ -702,7 +884,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_and_load_stream_events_monotonic() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let id = ResponseId::from("r1");
 
@@ -731,7 +913,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_writes_terminal_and_clears_lease() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
@@ -764,7 +946,7 @@ mod tests {
     async fn queued_cancel_rewrites_raw_response_status() {
         // `GET /v1/responses/{id}` must see status=cancelled in the persisted
         // payload, not the original queued snapshot.
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         assert_eq!(
             repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
@@ -777,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_cancel_wins_over_worker_status() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
@@ -810,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_rejects_non_lease_holder() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
@@ -836,7 +1018,7 @@ mod tests {
         // Stale-worker guard: a worker whose lease has already expired must
         // not be able to commit terminal state, even if `requeue_expired`
         // hasn't run yet.
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
@@ -860,7 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn requeue_expired_moves_in_progress_back_to_queued() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         repo.enqueue(enqueue_req("r1"), None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
@@ -896,7 +1078,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_request_context_round_trips() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         let mut ctx = RequestContext::default();
         ctx.set("tenant_id", "acme");
         ctx.set("principal", "alice");
@@ -920,7 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_honors_state_machine() {
-        let repo = MemoryBackgroundRepository::new();
+        let repo = MemoryBackgroundRepository::new_standalone();
         assert_eq!(
             repo.delete_background_response(&ResponseId::from("nope"))
                 .await
