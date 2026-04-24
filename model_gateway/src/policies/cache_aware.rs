@@ -640,13 +640,21 @@ impl CacheAwarePolicy {
             if let Some(tree) = tree {
                 tree.insert_text(text, worker_url);
 
-                // Don't populate path_hash_index here — we don't have a
-                // match result and storing the full prompt text (80k+ chars)
-                // would recreate the memory leak. Layer 2 snapshots handle
-                // convergence for entries from the imbalanced-load path.
-
-                // Use hash-based sync to avoid 80k+ String clone.
+                // Populate hash_index with the matched prefix, not
+                // the full prompt text. Running the match here adds
+                // a small CPU cost on the imbalanced fallback
+                // (microseconds per request), but storing the short
+                // matched_prefix (~50-200 chars) instead of the full
+                // text (80k+) avoids the memory leak v1 called out.
+                // Matches the happy-path populate pattern.
+                let result = tree.match_prefix_with_counts(text);
+                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
                 let path_hash = smg_mesh::hash_node_path(text);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .string_tree
+                    .insert(path_hash, matched_prefix);
                 self.sync_insert_hash(model_id, path_hash, worker_url);
             } else {
                 debug!(
