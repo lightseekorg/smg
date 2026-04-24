@@ -427,3 +427,56 @@ pub(crate) fn emit_visible_mcp_list_tools_sequence(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn parse_tools(value: serde_json::Value) -> Vec<ResponseTool> {
+        serde_json::from_value(value).expect("valid response tool list")
+    }
+
+    #[test]
+    fn has_custom_tool_matches_namespaced_custom_tool() {
+        let tools = parse_tools(json!([
+            {
+                "type": "namespace",
+                "name": "file_ops",
+                "description": "file operations",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "write_file"
+                    }
+                ]
+            }
+        ]));
+
+        assert!(has_custom_tool(&tools, "write_file"));
+        assert!(!has_custom_tool(&tools, "delete_file"));
+    }
+
+    #[test]
+    fn normalize_response_tool_choice_keeps_namespaced_custom_selection() {
+        let tools = parse_tools(json!([
+            {
+                "type": "namespace",
+                "name": "file_ops",
+                "description": "file operations",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "write_file"
+                    }
+                ]
+            }
+        ]));
+
+        let mut tool_choice = r#"{"type":"custom","name":"write_file"}"#.to_string();
+        normalize_response_tool_choice(&mut tool_choice, &tools);
+
+        assert_eq!(tool_choice, r#"{"type":"custom","name":"write_file"}"#);
+    }
+}

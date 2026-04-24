@@ -237,16 +237,54 @@ fn is_mcp_arguments_event(
         return false;
     };
 
-    extract_output_index(parsed_data)
-        .and_then(|idx| {
-            handler
-                .pending_calls
-                .iter()
-                .find(|call| call.output_index == idx)
-                .map(|call| call.name.as_str())
-        })
+    if let Some(name) = parsed_data
+        .get("name")
+        .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
-        .is_some_and(|name| session.should_intercept_function_call(name, ctx.user_function_names))
+    {
+        return session.should_intercept_function_call(name, ctx.user_function_names);
+    }
+
+    if let Some(name) = parsed_data
+        .get("item")
+        .and_then(|item| item.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    {
+        return session.should_intercept_function_call(name, ctx.user_function_names);
+    }
+
+    if let Some(idx) = extract_output_index(parsed_data) {
+        if handler.is_output_hidden(idx) {
+            return true;
+        }
+
+        if let Some(name) = handler
+            .pending_calls
+            .iter()
+            .find(|call| call.output_index == idx)
+            .map(|call| call.name.as_str())
+            .filter(|name| !name.is_empty())
+        {
+            return session.should_intercept_function_call(name, ctx.user_function_names);
+        }
+    }
+
+    let event_call_id = parsed_data.get("call_id").and_then(Value::as_str);
+    let event_item_id = parsed_data.get("item_id").and_then(Value::as_str);
+
+    handler
+        .pending_calls
+        .iter()
+        .find(|call| {
+            !call.name.is_empty()
+                && (event_call_id.is_some_and(|call_id| call.call_id == call_id)
+                    || event_item_id
+                        .is_some_and(|item_id| call.item_id.as_deref() == Some(item_id)))
+        })
+        .is_some_and(|call| {
+            session.should_intercept_function_call(&call.name, ctx.user_function_names)
+        })
 }
 
 /// Send buffered function call arguments as a synthetic delta event.
@@ -665,7 +703,7 @@ pub(super) fn send_final_response_event(
 
     if let Some(session) = ctx.session {
         inject_mcp_metadata_streaming(&mut final_response, state, session, ctx.user_function_names);
-    } else if let Some(session) = redaction_session.filter(|_| state.total_calls > 0) {
+    } else if let Some(session) = redaction_session {
         reconcile_mixed_mode_final_response(
             &mut final_response,
             state,
@@ -1322,15 +1360,15 @@ pub(super) fn handle_streaming_with_tool_interception(
                             obj.insert("id".to_string(), Value::String(id.clone()));
                         }
                     }
-                    if !disable_mcp_interception {
-                        inject_mcp_metadata_streaming(
+                    if disable_mcp_interception {
+                        reconcile_mixed_mode_final_response(
                             &mut response_json,
                             &state,
                             &session,
                             &user_function_names,
                         );
-                    } else if state.total_calls > 0 {
-                        reconcile_mixed_mode_final_response(
+                    } else {
+                        inject_mcp_metadata_streaming(
                             &mut response_json,
                             &state,
                             &session,
@@ -1503,16 +1541,17 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
 mod tests {
     use std::collections::HashSet;
 
-    use openai_protocol::responses::ResponseInput;
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
     use serde_json::json;
     use smg_mcp::{
         McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession,
         McpTransport, Tool, ToolEntry,
     };
+    use tokio::sync::mpsc;
 
     use super::{
-        reconcile_mixed_mode_final_response, should_drop_hidden_internal_tool_event,
-        StreamingToolHandler,
+        is_mcp_arguments_event, reconcile_mixed_mode_final_response, send_final_response_event,
+        should_drop_hidden_internal_tool_event, StreamingEventContext, StreamingToolHandler,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -1733,5 +1772,110 @@ mod tests {
             }),
             "expected executed MCP function_call placeholder to be removed"
         );
+    }
+
+    #[tokio::test]
+    async fn passthrough_final_reconciliation_runs_even_with_zero_total_calls() {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![visible_server_config()],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "visible-server",
+                test_tool("visible_mcp_tool"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![visible_server_binding()],
+            "test-request",
+        );
+        let state = super::ToolLoopState::new(ResponseInput::Text("hello".to_string()), vec![]);
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        handler.process_event(
+            Some("response.completed"),
+            r#"{"type":"response.completed","response":{"id":"resp_upstream","output":[]}}"#,
+        );
+
+        let request = ResponsesRequest {
+            model: "gpt-test".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let user_function_names = HashSet::new();
+        let ctx = StreamingEventContext {
+            original_request: &request,
+            previous_response_id: None,
+            session: None,
+            user_function_names: &user_function_names,
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number = 0;
+
+        assert!(send_final_response_event(
+            &handler,
+            &tx,
+            &mut sequence_number,
+            &state,
+            &ctx,
+            Some(&session),
+        ));
+
+        let sse = String::from_utf8(
+            rx.try_recv()
+                .expect("completed event")
+                .expect("bytes")
+                .to_vec(),
+        )
+        .expect("utf8");
+        assert!(sse.contains("\"type\":\"mcp_list_tools\""));
+        assert!(sse.contains("\"response\":{\"id\":\"resp_upstream\""));
+    }
+
+    #[tokio::test]
+    async fn mcp_arguments_event_detects_intercepted_call_from_payload_name() {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![visible_server_config()],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "visible-server",
+                test_tool("visible_mcp_tool"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![visible_server_binding()],
+            "test-request",
+        );
+
+        let request = ResponsesRequest {
+            model: "gpt-test".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let user_function_names = HashSet::from(["user_tool".to_string()]);
+        let ctx = StreamingEventContext {
+            original_request: &request,
+            previous_response_id: None,
+            session: Some(&session),
+            user_function_names: &user_function_names,
+        };
+        let handler = StreamingToolHandler::with_starting_index(0);
+        let parsed_data = json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "name": "visible_mcp_tool",
+            "delta": "{\"q\":\"x\"}"
+        });
+
+        assert!(is_mcp_arguments_event(&parsed_data, &handler, &ctx));
     }
 }

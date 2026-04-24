@@ -307,7 +307,10 @@ impl StreamingToolHandler {
             OutputItemEvent::DONE => {
                 let done_output_index = extract_output_index(&parsed);
                 if let Some(output_index) = done_output_index {
-                    let _ = self.resolve_output_index_for_forwarding(output_index);
+                    // Do not create a new Unknown->Visible mapping here.
+                    // `process_event` runs before visibility/redaction checks in the caller,
+                    // so mapping creation must stay in the forwarding path.
+                    self.maybe_assign_existing_mapping(output_index);
                 }
                 // Only suppress the umbrella `output_item.done` when it is
                 // closing a tool-call item that we are intercepting — an
@@ -693,6 +696,39 @@ mod tests {
             ),
             other => panic!("expected ExecuteTools, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn output_item_done_does_not_allocate_unknown_mapping() {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let starting_next_index = handler.next_output_index();
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 42,
+          "item": {
+            "type": "function_call",
+            "id": "fc_unknown",
+            "call_id": "call_unknown",
+            "name": "unknown_tool",
+            "arguments": "{}",
+            "status": "completed"
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+
+        assert!(
+            matches!(action, StreamAction::Forward),
+            "without a pending complete call, done event should forward"
+        );
+        assert_eq!(handler.visibility_state(42), OutputVisibilityState::Unknown);
+        assert_eq!(handler.mapped_output_index(42), None);
+        assert_eq!(
+            handler.next_output_index(),
+            starting_next_index,
+            "output_item.done must not allocate mapping before visibility is resolved"
+        );
     }
 
     /// Assert that an `output_item.done` for `item_type` is suppressed (the
