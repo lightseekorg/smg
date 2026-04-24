@@ -57,6 +57,12 @@ else
 fi
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
+# Torch's JIT cpp_extension builder compiles some TokenSpeed runtime
+# extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and doesn't
+# pass ``-I$CUDA_HOME/include``, so ``#include <cuda_runtime.h>`` fails even
+# when CUDA_HOME is set. Expose the headers via CPATH so g++ picks them up
+# without needing upstream to change their extension config.
+export CPATH="${CUDA_HOME}/include${CPATH:+:$CPATH}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
 if [ ! -d "$TOKENSPEED_DIR" ]; then
@@ -111,6 +117,14 @@ uv pip install "./python" --no-build-isolation
 if [ -n "${GITHUB_ENV:-}" ]; then
     echo "CUDA_HOME=$CUDA_HOME" >> "$GITHUB_ENV"
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+    # See note above: needed so torch's JIT C++ extension builder sees
+    # CUDA headers when it bypasses nvcc for .cpp sources.
+    echo "CPATH=$CPATH" >> "$GITHUB_ENV"
+fi
+if [ -n "${GITHUB_PATH:-}" ]; then
+    # Make ``nvcc`` discoverable to downstream steps (pytest spawns the
+    # worker which may trigger CUDA extension builds).
+    echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
 fi
 
 # ── smg gRPC packages (same as other engines: from source so PR changes land) ─
