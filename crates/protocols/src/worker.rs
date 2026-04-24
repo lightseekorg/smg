@@ -630,6 +630,18 @@ pub struct WorkerSpec {
     /// Falls back to the global `load_monitor_interval_secs` from router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_monitor_interval_secs: Option<u64>,
+
+    /// Override for the tool-call parser this worker emits.
+    /// When `None`, falls back to router-wide `--tool-call-parser`, then registry
+    /// model-name mapping, then the registry default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_parser: Option<String>,
+
+    /// Override for the reasoning parser this worker emits.
+    /// When `None`, falls back to router-wide `--reasoning-parser`, then registry
+    /// model-name mapping, then the registry default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_parser: Option<String>,
 }
 
 impl WorkerSpec {
@@ -659,6 +671,8 @@ impl WorkerSpec {
             resilience: ResilienceUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
         }
     }
 }
@@ -1085,5 +1099,55 @@ impl IntoResponse for WorkerLoadsResult {
             })
             .collect();
         Json(json!({"workers": loads})).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_spec_parser_fields_default_to_none_and_skip_serialization() {
+        let spec = WorkerSpec::new("http://w:8000");
+        assert!(spec.tool_call_parser.is_none());
+        assert!(spec.reasoning_parser.is_none());
+
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(
+            !json.contains("tool_call_parser"),
+            "None should be skipped: {json}"
+        );
+        assert!(
+            !json.contains("reasoning_parser"),
+            "None should be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn worker_spec_parser_fields_roundtrip() {
+        let spec = WorkerSpec {
+            tool_call_parser: Some("kimik2".to_string()),
+            reasoning_parser: Some("deepseek_r1".to_string()),
+            ..WorkerSpec::new("http://w:8000")
+        };
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(json.contains("\"tool_call_parser\":\"kimik2\""), "{json}");
+        assert!(
+            json.contains("\"reasoning_parser\":\"deepseek_r1\""),
+            "{json}"
+        );
+
+        let back: WorkerSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.tool_call_parser.as_deref(), Some("kimik2"));
+        assert_eq!(back.reasoning_parser.as_deref(), Some("deepseek_r1"));
+    }
+
+    #[test]
+    fn worker_spec_deserializes_without_parser_fields() {
+        // Older clients may not include the new fields — must default to None.
+        let json = r#"{"url":"http://w:8000"}"#;
+        let spec: WorkerSpec = serde_json::from_str(json).expect("deserialize");
+        assert!(spec.tool_call_parser.is_none());
+        assert!(spec.reasoning_parser.is_none());
     }
 }
