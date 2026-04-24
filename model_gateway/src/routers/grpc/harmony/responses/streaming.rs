@@ -12,7 +12,10 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::{
-    common::{build_next_request_with_tools, load_previous_messages, McpCallTracking},
+    common::{
+        build_next_request_with_tools, load_previous_messages,
+        strip_image_generation_from_request_tools, McpCallTracking,
+    },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
@@ -161,6 +164,13 @@ async fn execute_mcp_tool_loop_streaming(
             "MCP client available - added static MCP tools to Harmony Responses streaming request"
         );
     }
+
+    // R6.8: once the MCP loop has taken ownership of image_generation
+    // dispatch, drop the hosted-tool descriptor so the harmony builder
+    // advertises only the MCP-exposed function-tool name (which
+    // `has_exposed_tool` actually recognizes for dispatch). See the
+    // helper doc comment in `common.rs` for the full rationale.
+    strip_image_generation_from_request_tools(&mut current_request, &session);
 
     let mut mcp_tracking = McpCallTracking::new();
 
