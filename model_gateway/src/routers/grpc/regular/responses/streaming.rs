@@ -563,15 +563,14 @@ async fn execute_tool_loop_streaming_internal(
                         "total_tokens": u.total_tokens,
                     })
                 });
-                persist_streaming_response(
+                spawn_persisted_streaming_response(
                     ctx,
                     take_memory_execution_context(&mut memory_execution_context)?,
                     &emitter,
                     accumulated_response.usage.clone(),
                     original_request,
                     Some(incomplete_details.clone()),
-                )
-                .await;
+                );
                 let mut event = emitter.emit_completed(usage_json.as_ref());
                 event["response"]["status"] = json!("incomplete");
                 event["response"]["incomplete_details"] = incomplete_details;
@@ -837,15 +836,14 @@ async fn execute_tool_loop_streaming_internal(
                 }
 
                 // Break loop to return response to caller
-                persist_streaming_response(
+                spawn_persisted_streaming_response(
                     ctx,
                     take_memory_execution_context(&mut memory_execution_context)?,
                     &emitter,
                     accumulated_response.usage.clone(),
                     original_request,
                     None,
-                )
-                .await;
+                );
                 emit_terminal_completed(&mut emitter, accumulated_response.usage.as_ref(), &tx)?;
                 break;
             }
@@ -875,15 +873,14 @@ async fn execute_tool_loop_streaming_internal(
         // Text message events already emitted naturally by process_chunk during stream processing
         // (OpenAI router approach - text only appears on final iteration when no tool calls)
 
-        persist_streaming_response(
+        spawn_persisted_streaming_response(
             ctx,
             take_memory_execution_context(&mut memory_execution_context)?,
             &emitter,
             accumulated_response.usage.clone(),
             original_request,
             None,
-        )
-        .await;
+        );
         emit_terminal_completed(&mut emitter, accumulated_response.usage.as_ref(), &tx)?;
 
         break;
@@ -916,7 +913,11 @@ fn take_memory_execution_context(
     })
 }
 
-async fn persist_streaming_response(
+#[expect(
+    clippy::disallowed_methods,
+    reason = "response persistence should not delay terminal SSE delivery"
+)]
+fn spawn_persisted_streaming_response(
     ctx: &ResponsesContext,
     memory_execution_context: MemoryExecutionContext,
     emitter: &ResponseStreamEventEmitter,
@@ -929,14 +930,21 @@ async fn persist_streaming_response(
     if final_response.incomplete_details.is_some() {
         final_response.status = ResponseStatus::Incomplete;
     }
-    persist_response_if_needed(
-        &ctx.persistence,
-        memory_execution_context,
-        &final_response,
-        original_request,
-        ctx.request_context.clone(),
-    )
-    .await;
+
+    let persistence = ctx.persistence.clone();
+    let original_request = original_request.clone();
+    let request_context = ctx.request_context.clone();
+
+    tokio::spawn(async move {
+        persist_response_if_needed(
+            &persistence,
+            memory_execution_context,
+            &final_response,
+            &original_request,
+            request_context,
+        )
+        .await;
+    });
 }
 
 /// Convert chat stream to Responses API events while accumulating for tool call detection

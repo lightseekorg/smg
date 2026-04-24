@@ -442,12 +442,22 @@ async fn persist_conversation_items_inner(
         .cloned()
         .ok_or_else(|| "No output array in response".to_string())?;
 
-    let conv_id_opt = resolve_persistence_conversation_id(
+    let conv_id_opt = match resolve_persistence_conversation_id(
         &conversation_storage,
         &response_storage,
         original_body,
     )
-    .await?;
+    .await
+    {
+        Ok(conv_id_opt) => conv_id_opt,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Failed to resolve persistence conversation id; storing response without conversation linking"
+            );
+            None
+        }
+    };
 
     // Build and store response
     let mut stored_response = build_stored_response(response_json, original_body);
