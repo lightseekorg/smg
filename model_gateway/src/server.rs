@@ -173,11 +173,15 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
 
     let healthy: Vec<_> = workers.iter().filter(|w| w.is_healthy()).collect();
     if healthy.is_empty() {
-        let info: Vec<_> = workers.iter().map(|w| format!("{} ({})", w.model_id(), w.url())).collect();
+        let info: Vec<_> = workers
+            .iter()
+            .map(|w| format!("{} ({})", w.model_id(), w.url()))
+            .collect();
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("0/{} workers healthy: {}", workers.len(), info.join(", ")),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let model_id = healthy[0].model_id().to_string();
@@ -199,10 +203,12 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
     );
 
     let start = Instant::now();
-    let probe_result = state.context.client
+    let probe_result = state
+        .context
+        .client
         .post(&probe_url)
         .json(&probe_body)
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(Duration::from_secs(3))
         .send()
         .await;
     let duration_ms = start.elapsed().as_millis();
@@ -220,9 +226,12 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
                 StatusCode::OK,
                 format!(
                     "OK - {} workers healthy, probe succeeded in {}ms (model: {})",
-                    healthy.len(), duration_ms, model_id
+                    healthy.len(),
+                    duration_ms,
+                    model_id
                 ),
-            ).into_response()
+            )
+                .into_response()
         }
         Ok(resp) => {
             let status = resp.status();
@@ -236,11 +245,9 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
             );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "Probe failed: backend returned {} in {}ms — {}",
-                    status, duration_ms, body
-                ),
-            ).into_response()
+                format!("Probe failed: backend returned {status} in {duration_ms}ms — {body}"),
+            )
+                .into_response()
         }
         Err(e) => {
             warn!(
@@ -252,8 +259,9 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
             );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("Probe failed: {} in {}ms", e, duration_ms),
-            ).into_response()
+                format!("Probe failed: {e} in {duration_ms}ms"),
+            )
+                .into_response()
         }
     }
 }

@@ -648,6 +648,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            request_id: None,
         };
         assert_eq!(get_history_tool_calls_count_messages(&request), 0);
 
@@ -696,6 +697,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            request_id: None,
         };
         assert_eq!(get_history_tool_calls_count_messages(&request), 2);
     }
