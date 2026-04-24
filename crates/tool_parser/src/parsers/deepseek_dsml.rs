@@ -65,6 +65,10 @@ pub struct DeepSeekDsmlParser {
 const DSML_PARAMETER_END_TAG: &str = "</｜DSML｜parameter>";
 const DSML_INVOKE_END_TAG: &str = "</｜DSML｜invoke>";
 
+/// DeepSeek end-of-sentence marker. Some engines emit this as raw text at the
+/// end of a truncated turn; it must never bleed into tool-call argument bytes.
+const EOS_TOKEN: &str = "<｜end▁of▁sentence｜>";
+
 /// Strip a trailing partial DSML closing tag from a string.
 ///
 /// If the string ends with a prefix of `closing_tag` (e.g. `"Tokyo</｜DSML｜para"`
@@ -158,7 +162,10 @@ impl DeepSeekDsmlParser {
         // Direct JSON path
         if trimmed.starts_with('{') {
             if allow_partial {
-                return strip_dsml_trailing(trimmed, DSML_INVOKE_END_TAG);
+                // `strip_dsml_trailing` handles partial `</｜DSML｜invoke>` prefixes
+                // but can't match the EOS sentinel (different prefix). Strip it
+                // unconditionally so a truncated turn doesn't leak EOS into args.
+                return strip_dsml_trailing(trimmed, DSML_INVOKE_END_TAG).replace(EOS_TOKEN, "");
             } else if trimmed.ends_with('}') {
                 return trimmed.to_string();
             }
@@ -170,7 +177,9 @@ impl DeepSeekDsmlParser {
         for cap in self.parameter_complete_regex.captures_iter(invoke_content) {
             let name = cap.get(1).map_or("", |m| m.as_str());
             let is_string = cap.get(2).map_or("true", |m| m.as_str());
-            let value = cap.get(3).map_or("", |m| m.as_str());
+            // Strip any stray EOS marker — should never legitimately appear
+            // inside a closed parameter, but defend against malformed output.
+            let value = cap.get(3).map_or("", |m| m.as_str()).replace(EOS_TOKEN, "");
 
             let json_value = if is_string == "true" {
                 Value::String(value.to_string())
@@ -200,7 +209,14 @@ impl DeepSeekDsmlParser {
             if let Some(cap) = self.partial_parameter_regex.captures(&cleaned) {
                 let name = cap.get(1).map_or("", |m| m.as_str());
                 let is_string = cap.get(2).map_or("true", |m| m.as_str());
-                let value = cap.get(3).map_or("", |m| m.as_str()).trim();
+                // Strip EOS before trimming — `strip_dsml_trailing` above only
+                // handles `</｜DSML｜parameter>` prefixes, so a truncated turn
+                // with `value<EOS>` would otherwise stream EOS as arg bytes.
+                let value = cap
+                    .get(3)
+                    .map_or("", |m| m.as_str())
+                    .replace(EOS_TOKEN, "");
+                let value = value.trim();
 
                 // Only add if we have actual content and this param isn't already complete
                 if !value.is_empty() && !params.contains_key(name) {
@@ -285,9 +301,9 @@ impl ToolParser for DeepSeekDsmlParser {
             let mut normal_text = std::mem::take(&mut self.buffer);
             for end_token in [
                 self.block_close.as_str(),
-                "</｜DSML｜invoke>",
-                "</｜DSML｜parameter>",
-                "<｜end▁of▁sentence｜>",
+                DSML_INVOKE_END_TAG,
+                DSML_PARAMETER_END_TAG,
+                EOS_TOKEN,
             ] {
                 normal_text = normal_text.replace(end_token, "");
             }

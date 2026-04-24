@@ -465,3 +465,70 @@ async fn test_deepseek_v4_factory_registration() {
         assert_eq!(calls[0].function.name, "search");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Robustness regressions
+// ---------------------------------------------------------------------------
+
+/// When the engine emits `<｜end▁of▁sentence｜>` mid-parameter (e.g. a turn
+/// cut off at max_tokens), the EOS marker must not leak into streamed
+/// argument bytes. Previously only `</｜DSML｜parameter>` prefixes were
+/// stripped from partial values, so EOS bled through as raw arg bytes.
+#[tokio::test]
+async fn test_deepseek_dsml_streaming_strips_eos_from_partial_parameter() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeekDsmlParser::v32();
+
+    let chunks = [
+        "<｜DSML｜function_calls>\n",
+        "<｜DSML｜invoke name=\"get_weather\">\n",
+        "<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo",
+        // Engine truncated mid-parameter and emitted EOS as raw text.
+        "<｜end▁of▁sentence｜>",
+    ];
+
+    let mut collected_args = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert!(
+        !collected_args.contains("<｜end▁of▁sentence｜>"),
+        "EOS must not leak into streamed argument bytes, got: {collected_args:?}"
+    );
+}
+
+/// Same test against the V4 variant (different outer block name, same
+/// parameter-level behaviour). Locks in that Fix 1 applies to both.
+#[tokio::test]
+async fn test_deepseek_dsml_v4_streaming_strips_eos_from_partial_parameter() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeekDsmlParser::v4();
+
+    let chunks = [
+        "<｜DSML｜tool_calls>\n",
+        "<｜DSML｜invoke name=\"get_weather\">\n",
+        "<｜DSML｜parameter name=\"location\" string=\"true\">Beijing",
+        "<｜end▁of▁sentence｜>",
+    ];
+
+    let mut collected_args = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert!(
+        !collected_args.contains("<｜end▁of▁sentence｜>"),
+        "EOS must not leak into V4 streamed argument bytes, got: {collected_args:?}"
+    );
+}
