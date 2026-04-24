@@ -501,14 +501,14 @@ fn derive_thinking_mode(params: &ChatTemplateParams) -> deepseek_v32::ThinkingMo
     }
 }
 
-/// Resolve `drop_thinking` the way vllm does: drop earlier reasoning when the
-/// final message is a fresh user turn.
+/// Drop earlier reasoning unless any message declares tools — matches the
+/// canonical V4 encoding spec (V4 also enforces this internally; V3.2 does not).
 fn resolve_drop_thinking(messages: &[serde_json::Value]) -> bool {
-    messages
-        .last()
-        .and_then(|m| m.get("role"))
-        .and_then(|r| r.as_str())
-        == Some("user")
+    !messages.iter().any(|m| {
+        m.get("tools")
+            .and_then(|t| t.as_array())
+            .is_some_and(|arr| !arr.is_empty())
+    })
 }
 fn apply_deepseek_v32(
     messages: &[serde_json::Value],
