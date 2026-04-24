@@ -10,22 +10,35 @@ use crate::{
     types::{FunctionCall, StreamingParseResult, ToolCall, ToolCallItem},
 };
 
-/// DeepSeek V3.2 DSML format parser for tool calls
+/// DeepSeek DSML format parser for tool calls (V3.2 and V4).
 ///
-/// Handles the DeepSeek V3.2 DSML format:
+/// Both variants share an identical invoke/parameter grammar and streaming
+/// state machine. They differ only in the outer block-name token:
+/// - V3.2: `function_calls`
+/// - V4:   `tool_calls`
+///
 /// ```text
-/// <｜DSML｜function_calls>
+/// <｜DSML｜{block_name}>
 /// <｜DSML｜invoke name="func">
 /// <｜DSML｜parameter name="key" string="true">value</｜DSML｜parameter>
 /// </｜DSML｜invoke>
-/// </｜DSML｜function_calls>
+/// </｜DSML｜{block_name}>
 /// ```
 ///
 /// Also supports direct JSON inside invoke blocks as a fallback format.
 ///
-/// Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
-pub struct DeepSeek32Parser {
-    /// Regex for extracting full function_calls block content
+/// References:
+/// - <https://huggingface.co/deepseek-ai/DeepSeek-V3.2>
+/// - <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash>
+pub struct DeepSeekDsmlParser {
+    /// Outer block-name token: `function_calls` (V3.2) or `tool_calls` (V4).
+    block_name: &'static str,
+    /// Cached `<｜DSML｜{block_name}>` for marker-scan hot paths.
+    block_open: String,
+    /// Cached `</｜DSML｜{block_name}>` for streaming cleanup.
+    block_close: String,
+
+    /// Regex for extracting full outer-block content
     tool_call_complete_regex: Regex,
     /// Regex for extracting complete invoke blocks (name + body)
     invoke_complete_regex: Regex,
@@ -67,16 +80,34 @@ fn strip_dsml_trailing(s: &str, closing_tag: &str) -> String {
     s.to_string()
 }
 
-impl DeepSeek32Parser {
-    /// Create a new DeepSeek V3.2 parser
+impl DeepSeekDsmlParser {
+    /// Create a DeepSeek V3.2 parser (outer block token `function_calls`).
+    pub fn v32() -> Self {
+        Self::new("function_calls")
+    }
+
+    /// Create a DeepSeek V4 parser (outer block token `tool_calls`).
+    pub fn v4() -> Self {
+        Self::new("tool_calls")
+    }
+
+    /// Which block name this instance parses (`function_calls` or `tool_calls`).
+    pub fn block_name(&self) -> &'static str {
+        self.block_name
+    }
+
     #[expect(
         clippy::expect_used,
         reason = "regex patterns are compile-time string literals"
     )]
-    pub fn new() -> Self {
-        let tool_call_complete_regex =
-            Regex::new(r"(?s)<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>")
-                .expect("Valid regex pattern");
+    fn new(block_name: &'static str) -> Self {
+        // `regex::escape` is not needed — both known block names are
+        // `[a-z_]`-only. If a future variant introduces regex metacharacters,
+        // wrap with `regex::escape(block_name)` before interpolation.
+        let tool_call_complete_regex = Regex::new(&format!(
+            r"(?s)<｜DSML｜{block_name}>(.*?)</｜DSML｜{block_name}>"
+        ))
+        .expect("Valid regex pattern");
 
         let invoke_complete_regex =
             Regex::new(r#"(?s)<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>"#)
@@ -97,6 +128,9 @@ impl DeepSeek32Parser {
                 .expect("Valid regex pattern");
 
         Self {
+            block_name,
+            block_open: format!("<｜DSML｜{block_name}>"),
+            block_close: format!("</｜DSML｜{block_name}>"),
             tool_call_complete_regex,
             invoke_complete_regex,
             parameter_complete_regex,
@@ -197,21 +231,17 @@ impl DeepSeek32Parser {
     }
 }
 
-impl Default for DeepSeek32Parser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Intentionally no `Default` impl — callers must pick `v32()` or `v4()`.
 
 #[async_trait]
-impl ToolParser for DeepSeek32Parser {
+impl ToolParser for DeepSeekDsmlParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
         if !self.has_tool_markers(text) {
             return Ok((text.to_string(), vec![]));
         }
 
         let idx = text
-            .find("<｜DSML｜function_calls>")
+            .find(self.block_open.as_str())
             .ok_or_else(|| ParserError::ParsingFailed("DSML marker not found".to_string()))?;
         let normal_text = text[..idx].trim_end().to_string();
 
@@ -254,7 +284,7 @@ impl ToolParser for DeepSeek32Parser {
         if !has_dsml && !has_partial_prefix {
             let mut normal_text = std::mem::take(&mut self.buffer);
             for end_token in [
-                "</｜DSML｜function_calls>",
+                self.block_close.as_str(),
                 "</｜DSML｜invoke>",
                 "</｜DSML｜parameter>",
                 "<｜end▁of▁sentence｜>",
@@ -444,7 +474,7 @@ impl ToolParser for DeepSeek32Parser {
     }
 
     fn has_tool_markers(&self, text: &str) -> bool {
-        text.contains("<｜DSML｜function_calls>")
+        text.contains(self.block_open.as_str())
     }
 
     fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallItem>> {

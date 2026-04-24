@@ -17,7 +17,7 @@ mod tests;
 // Re-export types used outside this module
 pub use factory::{ParserFactory, PooledParser, ToolConstraint};
 pub use parsers::{
-    CohereParser, DeepSeek31Parser, DeepSeek32Parser, DeepSeekParser, Glm4MoeParser, JsonParser,
+    CohereParser, DeepSeek31Parser, DeepSeekDsmlParser, DeepSeekParser, Glm4MoeParser, JsonParser,
     KimiK2Parser, LlamaParser, MinimaxM2Parser, MistralParser, PythonicParser, QwenParser,
     Step3Parser,
 };
