@@ -163,19 +163,45 @@ def _assert_streaming_envelope(events: list) -> None:
         except ValueError:
             return -1
 
-    # Presence
-    missing = [evt for evt in _REQUIRED_STREAM_EVENTS if first_idx(evt) < 0]
+    def first_img_envelope_idx(evt: str) -> int:
+        """First ``response.output_item.{added,done}`` whose ``item.type`` is
+        ``image_generation_call``. Plain ``first_idx`` would match the
+        earlier envelope for a preceding reasoning / message item —
+        OpenAI cloud emits a reasoning item with its own
+        added/done pair before the image_generation_call item on
+        ``gpt-5-nano``, which would make the ordering check compare the
+        wrong envelope.
+        """
+        for i, e in enumerate(events):
+            if getattr(e, "type", None) == evt and (
+                getattr(getattr(e, "item", None), "type", None) == "image_generation_call"
+            ):
+                return i
+        return -1
+
+    def scoped_idx(evt: str) -> int:
+        """Per-event index that filters envelope events to the
+        image_generation_call item but passes other event types through
+        to ``first_idx``.
+        """
+        if evt in ("response.output_item.added", "response.output_item.done"):
+            return first_img_envelope_idx(evt)
+        return first_idx(evt)
+
+    # Presence — envelope events must be present AND scoped to the
+    # image_generation_call item, not any other item in the output array.
+    missing = [evt for evt in _REQUIRED_STREAM_EVENTS if scoped_idx(evt) < 0]
     assert not missing, (
         f"Missing required streaming events: {missing}. "
         f"Observed event types: {sorted(set(types_in_order))}"
     )
 
     # Order (each event's first occurrence < the next event's first occurrence)
-    idxs = [first_idx(evt) for evt in _REQUIRED_STREAM_EVENTS]
+    idxs = [scoped_idx(evt) for evt in _REQUIRED_STREAM_EVENTS]
     for earlier, later in zip(_REQUIRED_STREAM_EVENTS, _REQUIRED_STREAM_EVENTS[1:]):
-        assert first_idx(earlier) < first_idx(later), (
-            f"Events out of order: {earlier!r} (first@{first_idx(earlier)}) must precede "
-            f"{later!r} (first@{first_idx(later)}). Full sequence of required first indices: "
+        assert scoped_idx(earlier) < scoped_idx(later), (
+            f"Events out of order: {earlier!r} (first@{scoped_idx(earlier)}) must precede "
+            f"{later!r} (first@{scoped_idx(later)}). Full sequence of required first indices: "
             f"{dict(zip(_REQUIRED_STREAM_EVENTS, idxs))}"
         )
 
