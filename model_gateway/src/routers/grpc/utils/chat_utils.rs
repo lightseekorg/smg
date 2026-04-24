@@ -17,13 +17,14 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tracing::error;
+use tracing::{debug, error};
 use uuid::Uuid;
 
 use crate::routers::{
     error,
     grpc::{context::RequestContext, ProcessedMessages},
 };
+use crate::worker::UNKNOWN_MODEL_ID;
 
 /// Type alias for the SSE channel sender used across streaming endpoints.
 pub(crate) type SseSender = mpsc::UnboundedSender<Result<Bytes, io::Error>>;
@@ -62,6 +63,20 @@ pub(crate) fn resolve_tokenizer(
         .components
         .tokenizer_registry
         .get(model_id)
+        .or_else(|| {
+            if model_id == UNKNOWN_MODEL_ID || model_id.is_empty() {
+                let entries = ctx.components.tokenizer_registry.list();
+                if let Some(first) = entries.first() {
+                    debug!(
+                        function = %stage_name,
+                        resolved_model = %first.name,
+                        "Resolved unknown model to first available tokenizer"
+                    );
+                    return Some(first.tokenizer.clone());
+                }
+            }
+            None
+        })
         .ok_or_else(|| {
             error!(
                 function = %stage_name,
