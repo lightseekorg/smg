@@ -689,7 +689,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             "0::BIGINT".to_string()
         } else {
             format!(
-                "COALESCE(SUM(CASE WHEN i.{} = 'message' AND i.{} = 'user' THEN 1 ELSE 0 END), 0)::BIGINT",
+                "COALESCE(SUM(CASE WHEN i.{} = 'message' AND LOWER(i.{}) = 'user' THEN 1 ELSE 0 END), 0)::BIGINT",
                 si.col("item_type"),
                 si.col("role"),
             )

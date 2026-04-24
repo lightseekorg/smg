@@ -14,7 +14,7 @@ use smg_data_connector::{
     ConversationMemoryWriter, ConversationStorage, NewConversationItem, NewConversationMemory,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 use crate::memory::MemoryExecutionContext;
 
@@ -482,14 +482,28 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
-        maybe_schedule_stmo_after_persist(
-            &item_storage,
-            &conversation_memory_writer,
-            &memory_execution_context,
-            &conv_id,
-            &response_id,
-        )
-        .await;
+        let stmo_item_storage = item_storage.clone();
+        let stmo_writer = conversation_memory_writer.clone();
+        let stmo_ctx = memory_execution_context.clone();
+        let stmo_conv_id = conv_id.clone();
+        let stmo_response_id = response_id.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "STMO scheduling is best-effort and must not block the response path"
+        )]
+        tokio::spawn(
+            async move {
+                maybe_schedule_stmo_after_persist(
+                    &stmo_item_storage,
+                    &stmo_writer,
+                    &stmo_ctx,
+                    &stmo_conv_id,
+                    &stmo_response_id,
+                )
+                .await;
+            }
+            .instrument(tracing::Span::current()),
+        );
         info!(
             conversation_id = %conv_id.0,
             response_id = %response_id.0,
@@ -681,6 +695,16 @@ mod tests {
             rows[0].response_id.as_ref().map(|r| r.0.as_str()),
             Some("resp_01")
         );
+        let cfg: serde_json::Value = serde_json::from_str(
+            rows[0]
+                .memory_config
+                .as_deref()
+                .expect("memory_config should be set"),
+        )
+        .expect("memory_config should be valid JSON");
+        assert_eq!(cfg["condenser_model"], "condense-v1");
+        assert_eq!(cfg["last_index"], 4);
+        assert_eq!(cfg["target_item_end"], 4);
     }
 
     #[tokio::test]

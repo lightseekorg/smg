@@ -1017,7 +1017,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     "0".to_string()
                 } else {
                     format!(
-                        "NVL(SUM(CASE WHEN i.{si_col_item_type} = 'message' AND i.{si_col_role} = 'user' THEN 1 ELSE 0 END), 0)"
+                        "NVL(SUM(CASE WHEN i.{si_col_item_type} = 'message' AND LOWER(i.{si_col_role}) = 'user' THEN 1 ELSE 0 END), 0)"
                     )
                 };
 

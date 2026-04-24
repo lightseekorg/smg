@@ -151,11 +151,16 @@ pub(crate) fn extract_tools_from_response_tools(
 ///
 /// Common helper function to avoid duplication across sync and streaming paths
 /// in both harmony and regular responses implementations.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "persister takes explicit storage handles and request metadata for shared grpc paths"
+)]
 pub(crate) async fn persist_response_if_needed(
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
     response_storage: Arc<dyn ResponseStorage>,
     conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     response: &ResponsesResponse,
     original_request: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -170,7 +175,7 @@ pub(crate) async fn persist_response_if_needed(
             conversation_item_storage,
             response_storage,
             conversation_memory_writer,
-            MemoryExecutionContext::default(),
+            memory_execution_context,
             &response_json,
             original_request,
             request_context,

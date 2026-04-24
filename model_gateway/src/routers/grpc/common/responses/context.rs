@@ -10,7 +10,10 @@ use smg_data_connector::{
 };
 use smg_mcp::McpOrchestrator;
 
-use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
+use crate::{
+    memory::MemoryExecutionContext,
+    routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
+};
 
 /// Context for /v1/responses endpoint
 ///
@@ -41,6 +44,9 @@ pub(crate) struct ResponsesContext {
 
     /// Storage hook request context extracted from HTTP headers by middleware.
     pub request_context: Option<StorageRequestContext>,
+
+    /// Memory execution context derived from request headers and runtime config.
+    pub memory_execution_context: MemoryExecutionContext,
 }
 
 impl ResponsesContext {
@@ -58,6 +64,7 @@ impl ResponsesContext {
         conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
         mcp_orchestrator: Arc<McpOrchestrator>,
         request_context: Option<StorageRequestContext>,
+        memory_execution_context: MemoryExecutionContext,
     ) -> Self {
         Self {
             pipeline,
@@ -68,6 +75,7 @@ impl ResponsesContext {
             conversation_memory_writer,
             mcp_orchestrator,
             request_context,
+            memory_execution_context,
         }
     }
 }

@@ -85,6 +85,7 @@ pub(crate) async fn serve_harmony_responses(
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
         ctx.conversation_memory_writer.clone(),
+        ctx.memory_execution_context.clone(),
         &response,
         &original_request,
         ctx.request_context.clone(),

@@ -620,62 +620,15 @@ impl ConversationItemStorage for RedisConversationItemStorage {
 
     async fn count_items_and_user_turns(
         &self,
-        conversation_id: &ConversationId,
+        _conversation_id: &ConversationId,
     ) -> ConversationItemResult<(usize, usize)> {
-        let cid = conversation_id.0.as_str();
-        let key = self.conv_items_key(cid);
-        let mut conn = self
-            .store
-            .pool
-            .get()
-            .await
-            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-
-        let total_items: usize = conn
-            .zcard(&key)
-            .await
-            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-        if total_items == 0 {
-            return Ok((0, 0));
-        }
-
-        let si = &self.store.schema.conversation_items;
-        if si.is_skipped("item_type") || si.is_skipped("role") {
-            return Ok((total_items, 0));
-        }
-
-        let item_ids: Vec<String> = conn
-            .zrange(&key, 0, -1)
-            .await
-            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-        if item_ids.is_empty() {
-            return Ok((0, 0));
-        }
-
-        let col_item_type = si.col("item_type").to_string();
-        let col_role = si.col("role").to_string();
-
-        let mut pipe = redis::pipe();
-        for iid in &item_ids {
-            let item_key = self.item_key(iid);
-            pipe.hget(&item_key, &col_item_type);
-            pipe.hget(&item_key, &col_role);
-        }
-
-        let values: Vec<Option<String>> = pipe
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-        let user_turns = values
-            .chunks_exact(2)
-            .filter(|chunk| {
-                let item_type = chunk[0].as_deref();
-                let role = chunk[1].as_deref();
-                item_type == Some("message") && role.is_some_and(|r| r.eq_ignore_ascii_case("user"))
-            })
-            .count();
-
-        Ok((total_items, user_turns))
+        // Redis does not support an efficient user-turn aggregate. Callers that
+        // need this count (e.g. STMO scheduling) treat the error as best-effort
+        // and skip the operation; callers that require a real value should use
+        // a relational backend (Postgres or Oracle).
+        Err(ConversationItemStorageError::StorageError(
+            "count_items_and_user_turns is not supported on the Redis backend".to_string(),
+        ))
     }
 
     async fn get_item(

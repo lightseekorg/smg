@@ -51,6 +51,7 @@ use super::{
     conversions,
 };
 use crate::{
+    memory::MemoryExecutionContext,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
@@ -109,6 +110,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
     let conversation_memory_writer = ctx.conversation_memory_writer.clone();
+    let memory_execution_context = ctx.memory_execution_context.clone();
     let request_context = ctx.request_context.clone();
 
     #[expect(
@@ -123,6 +125,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             conversation_storage,
             conversation_item_storage,
             conversation_memory_writer,
+            memory_execution_context,
             request_context,
             tx.clone(),
         )
@@ -152,6 +155,7 @@ async fn process_and_transform_sse_stream(
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
     conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: MemoryExecutionContext,
     request_context: Option<StorageRequestContext>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
@@ -245,6 +249,7 @@ async fn process_and_transform_sse_stream(
         conversation_item_storage,
         response_storage,
         conversation_memory_writer,
+        memory_execution_context,
         &final_response,
         &original_request,
         request_context,

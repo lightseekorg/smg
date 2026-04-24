@@ -71,6 +71,7 @@ pub(super) async fn route_responses_internal(
         ctx.conversation_item_storage.clone(),
         ctx.response_storage.clone(),
         ctx.conversation_memory_writer.clone(),
+        ctx.memory_execution_context.clone(),
         &responses_response,
         &request,
         ctx.request_context.clone(),
