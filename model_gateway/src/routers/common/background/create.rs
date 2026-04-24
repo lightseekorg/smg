@@ -143,7 +143,7 @@ async fn resolve_snapshot(
     if items.len() > MAX_SNAPSHOT_ITEMS {
         return Err(error::create_error(
             StatusCode::CONFLICT,
-            "previous_response_too_large",
+            "resolved_snapshot_too_large",
             format!(
                 "Resolved snapshot has {} items, exceeds the cap of {}.",
                 items.len(),
@@ -249,7 +249,13 @@ async fn append_conversation_items(
     }
 
     // Fetch one past the cap so oversize conversations surface as 409
-    // instead of a silent truncation below `MAX_SNAPSHOT_ITEMS`.
+    // instead of silently truncating. The cap applies to *replayable* items
+    // — `conversation_item_to_snapshot_value` drops reasoning and unknown
+    // types, so a raw row count can overstate the snapshot size. Fetching
+    // `MAX + 1` gives the check enough headroom when every row is
+    // replayable; this bound is a heuristic for the common case, not a
+    // guarantee of strict rejection for pathologically reasoning-heavy
+    // conversations larger than the fetch window.
     let list_params = smg_data_connector::ListParams {
         limit: MAX_SNAPSHOT_ITEMS + 1,
         order: smg_data_connector::SortOrder::Asc,
@@ -265,24 +271,28 @@ async fn append_conversation_items(
         }
     };
 
-    if conv_items.len() > MAX_SNAPSHOT_ITEMS {
-        return Err(error::create_error(
-            StatusCode::CONFLICT,
-            "conversation_too_large",
-            format!(
-                "Conversation '{conv_id_str}' has more than {MAX_SNAPSHOT_ITEMS} items; \
-                 background snapshots cannot exceed this cap."
-            ),
-        ));
-    }
-
+    let mut converted = Vec::with_capacity(conv_items.len());
     for ci in conv_items {
         match conversation_item_to_snapshot_value(ci, conv_id_str) {
-            Ok(Some(value)) => items.push(value),
+            Ok(Some(value)) => converted.push(value),
             Ok(None) => {}
             Err(boxed) => return Err(*boxed),
         }
     }
+
+    if converted.len() > MAX_SNAPSHOT_ITEMS {
+        return Err(error::create_error(
+            StatusCode::CONFLICT,
+            "conversation_too_large",
+            format!(
+                "Conversation '{conv_id_str}' resolves to more than \
+                 {MAX_SNAPSHOT_ITEMS} replayable items; background snapshots \
+                 cannot exceed this cap."
+            ),
+        ));
+    }
+
+    items.extend(converted);
     Ok(())
 }
 
@@ -623,6 +633,45 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "conversation_too_large");
+    }
+
+    #[tokio::test]
+    async fn conversation_with_reasoning_rows_below_cap_is_accepted() {
+        // The cap counts replayable items, not raw storage rows. Seeding a
+        // conversation with more storage rows than the cap but where
+        // reasoning items take the excess must still succeed.
+        use smg_data_connector::{ConversationItemStorage, NewConversationItem};
+        let h = Harness::new(10);
+        seed_conversation(&h, "conv_mixed", MAX_SNAPSHOT_ITEMS - 1).await;
+        let conv_id = ConversationId::from("conv_mixed".to_string());
+        // Append two reasoning rows — they are dropped by the converter,
+        // pushing raw row count to MAX_SNAPSHOT_ITEMS + 1 while the
+        // replayable count stays at MAX_SNAPSHOT_ITEMS - 1.
+        for _ in 0..2 {
+            let item = h
+                .conversation_item_storage
+                .create_item(NewConversationItem {
+                    id: None,
+                    response_id: None,
+                    item_type: "reasoning".to_string(),
+                    role: None,
+                    content: json!({"summary": []}),
+                    status: None,
+                })
+                .await
+                .unwrap();
+            h.conversation_item_storage
+                .link_item(&conv_id, &item.id, chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+
+        let mut req = bg_req();
+        req.conversation = Some(openai_protocol::common::ConversationRef::Id(
+            "conv_mixed".to_string(),
+        ));
+        let resp = handle_background_create(h.deps_with_repo(), &req, "gpt-5.1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
