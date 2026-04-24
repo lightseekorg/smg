@@ -290,9 +290,18 @@ impl ToolParser for DeepSeekDsmlParser {
         self.buffer.push_str(chunk);
         let current_text = self.buffer.clone();
 
-        // Check for DSML markers or partial DSML prefixes
-        let has_dsml =
-            self.has_tool_markers(&current_text) || current_text.contains("<｜DSML｜invoke");
+        // Check for DSML markers or partial DSML prefixes.
+        //
+        // `<｜DSML｜` is a single BPE token in DeepSeek's tokenizer (id 128793),
+        // so real streams deliver it atomically. We flag the stream as DSML as
+        // soon as the sentinel appears anywhere in the buffer — we don't wait
+        // for a complete outer `<｜DSML｜{function,tool}_calls>` opener, because
+        // live backends chunk the opener as `<｜DSML｜` + `tool` + `_c` + `alls` + `>`.
+        // Without this, chunk 2 of a live stream would flush the buffer on the
+        // passthrough path and lose the sentinel, turning every subsequent
+        // chunk into plain text. (See regression test
+        // `test_deepseek_dsml_v4_streaming_bpe_chunked_opener`.)
+        let has_dsml = current_text.contains("<｜DSML｜");
         let has_partial_prefix = current_text.ends_with('<')
             || current_text.ends_with("<｜")
             || current_text.ends_with("</")

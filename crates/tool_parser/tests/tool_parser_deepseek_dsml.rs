@@ -581,6 +581,148 @@ async fn test_deepseek_dsml_streaming_malformed_empty_name_does_not_trap_buffer(
     );
 }
 
+/// Regression for Catherine's e2e failure (PR #1030 comment 4314866618).
+///
+/// Real DeepSeek-V4 streams deliver chunks at BPE-token granularity: the
+/// `<｜DSML｜` sentinel is a single token (id 128793), and the surrounding
+/// text (`tool_calls`, `invoke`, parameter names, values) arrives as tiny
+/// sub-word pieces. The exact chunk sequence below was captured from a live
+/// `tool_choice=auto` completion.
+///
+/// Pre-fix bug: `has_dsml` only fired on a complete outer opener
+/// (`<｜DSML｜tool_calls>`) or `<｜DSML｜invoke` substring. When chunk 2
+/// arrived and the buffer held only `\n\n<｜DSML｜`, neither matched, and
+/// `has_partial_prefix` missed `<｜DSML｜` (it only tracked `<`, `<｜`, `</`,
+/// `</｜`). The passthrough branch fired, `std::mem::take` flushed the
+/// buffer, and the sentinel was lost. Every subsequent chunk was then
+/// treated as plain text and the tool call never emitted.
+#[tokio::test]
+async fn test_deepseek_dsml_v4_streaming_bpe_chunked_opener() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeekDsmlParser::v4();
+
+    // BPE-sized chunks matching live model output.
+    let chunks = [
+        "\n\n",
+        "<｜DSML｜",
+        "tool",
+        "_c",
+        "alls",
+        ">\n",
+        "<｜DSML｜",
+        "inv",
+        "oke",
+        " name",
+        "=\"",
+        "get",
+        "_",
+        "weather",
+        "\">\n",
+        "<｜DSML｜",
+        "parameter",
+        " name",
+        "=\"",
+        "location",
+        "\"",
+        " string",
+        "=\"",
+        "true",
+        "\">",
+        "Tokyo",
+        "</｜DSML｜",
+        "parameter",
+        ">\n",
+        "</｜DSML｜",
+        "inv",
+        "oke",
+        ">\n",
+        "</｜DSML｜",
+        "tool",
+        "_c",
+        "alls",
+        ">",
+    ];
+
+    let mut tool_names: Vec<String> = Vec::new();
+    let mut collected_args = String::new();
+    let mut normal_text = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        normal_text.push_str(&result.normal_text);
+        for call in result.calls {
+            if let Some(name) = call.name {
+                tool_names.push(name);
+            }
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert_eq!(
+        tool_names,
+        vec!["get_weather"],
+        "BPE-chunked DSML opener must be recognized, not passed through as text"
+    );
+    assert!(
+        collected_args.contains("Tokyo"),
+        "argument bytes must be emitted, got: {collected_args:?}"
+    );
+    assert!(
+        !normal_text.contains("<｜DSML｜"),
+        "DSML sentinel must not leak into normal_text, got: {normal_text:?}"
+    );
+}
+
+/// Same BPE-chunking scenario for V3.2 (block name `function_calls`).
+/// The bug is identical across variants — the `has_dsml` check is the same
+/// code path for both.
+#[tokio::test]
+async fn test_deepseek_dsml_v32_streaming_bpe_chunked_opener() {
+    let tools = create_test_tools();
+    let mut parser = DeepSeekDsmlParser::v32();
+
+    let chunks = [
+        "<｜DSML｜",
+        "function",
+        "_c",
+        "alls",
+        ">\n",
+        "<｜DSML｜",
+        "invoke",
+        " name=\"",
+        "get_weather",
+        "\">\n",
+        "<｜DSML｜",
+        "parameter",
+        " name=\"location\" string=\"true\">",
+        "Beijing",
+        "</｜DSML｜",
+        "parameter>\n",
+        "</｜DSML｜",
+        "invoke>\n",
+        "</｜DSML｜",
+        "function_calls>",
+    ];
+
+    let mut tool_names: Vec<String> = Vec::new();
+    let mut collected_args = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                tool_names.push(name);
+            }
+            if !call.parameters.is_empty() {
+                collected_args.push_str(&call.parameters);
+            }
+        }
+    }
+
+    assert_eq!(tool_names, vec!["get_weather"]);
+    assert!(collected_args.contains("Beijing"));
+}
+
 /// Same scenario against V4 — proves the fix applies to both block names.
 #[tokio::test]
 async fn test_deepseek_dsml_v4_streaming_malformed_empty_name_does_not_trap_buffer() {
