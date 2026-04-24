@@ -49,15 +49,35 @@ fi
 echo "uv version: $(uv --version)"
 
 # ── CUDA runtime setup ─────────────────────────────────────────────────────
-# Locate the CUDA toolkit by finding ``cuda_runtime.h`` — don't trust a
-# fixed path. On k8s-runner-gpu the full SDK lives at
-# /usr/local/cuda-13.0; /usr/local/cuda is sometimes a thin symlink
-# without all the headers, so ``[ -d /usr/local/cuda-13.0 ]`` + job-level
-# ``CUDA_HOME: /usr/local/cuda`` from the workflow aren't reliable.
-CUDA_HEADER=$(find /usr/local /opt -maxdepth 5 -name cuda_runtime.h 2>/dev/null | head -1)
+# The k8s-runner-gpu runners are runtime-only: they have the NVIDIA
+# driver + CUDA runtime libraries, but NOT the SDK headers in
+# /usr/local/cuda*. Finding the toolkit requires a broader search —
+# headers may live under /usr/include/cuda, inside a Python-installed
+# nvidia-cuda-runtime-cu13 wheel, or anywhere else.
+find_cuda_header() {
+    # 1. Standard /usr/local/cuda* and /opt
+    local h
+    h=$(find /usr/local /opt -maxdepth 5 -name cuda_runtime.h 2>/dev/null | head -1)
+    [ -n "$h" ] && { echo "$h"; return; }
+    # 2. System apt-installed paths
+    h=$(find /usr/include /usr/lib /usr/share -maxdepth 4 -name cuda_runtime.h 2>/dev/null | head -1)
+    [ -n "$h" ] && { echo "$h"; return; }
+    # 3. pip/uv-installed nvidia-cuda-runtime wheels (torch's default dep)
+    h=$(python3 -c '
+import glob, os, sys
+for d in sys.path:
+    for p in glob.glob(os.path.join(d, "nvidia", "cuda_runtime", "include", "cuda_runtime.h")):
+        print(p); sys.exit(0)
+' 2>/dev/null)
+    [ -n "$h" ] && { echo "$h"; return; }
+}
+CUDA_HEADER=$(find_cuda_header)
 if [ -z "$CUDA_HEADER" ]; then
-    echo "FATAL: could not find cuda_runtime.h under /usr/local or /opt" >&2
-    ls -la /usr/local/ 2>&1 | head -20 >&2
+    echo "FATAL: could not locate cuda_runtime.h anywhere" >&2
+    echo "--- /usr/local ---" >&2; ls -la /usr/local/ 2>&1 | head -20 >&2
+    echo "--- nvcc ---" >&2; which nvcc 2>&1 >&2
+    echo "--- nvidia-smi ---" >&2; nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>&1 >&2
+    echo "--- apt packages ---" >&2; dpkg -l 2>/dev/null | grep -iE "cuda|nvidia" | head -20 >&2
     exit 1
 fi
 CUDA_INCLUDE_DIR=$(dirname "$CUDA_HEADER")
