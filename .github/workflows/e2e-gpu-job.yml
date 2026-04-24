@@ -51,11 +51,6 @@ jobs:
       E2E_RUNTIME: ${{ inputs.engine }}
       E2E_GPU_TIER: ${{ inputs.gpu_tier }}
       ROUTER_LOCAL_MODEL_PATH: /models
-      # TODO: remove once tokenspeed tool-call text handling is verified on
-      # meta-llama. The servicer dumps raw output_ids + meta_info for the
-      # first 3 requests at WARNING level so CI logs carry the data needed
-      # to compare meta-llama vs unsloth token streams.
-      TOKENSPEED_DEBUG_OUTPUT: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
