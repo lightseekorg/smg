@@ -216,7 +216,8 @@ impl StreamingToolHandler {
             FunctionCallEvent::ARGUMENTS_DONE => self.handle_arguments_done(&parsed),
             OutputItemEvent::DELTA => self.process_output_delta(&parsed),
             OutputItemEvent::DONE => {
-                if let Some(output_index) = extract_output_index(&parsed) {
+                let done_output_index = extract_output_index(&parsed);
+                if let Some(output_index) = done_output_index {
                     self.ensure_output_index(output_index);
                 }
                 // Only suppress the umbrella `output_item.done` when it is
@@ -240,7 +241,20 @@ impl StreamingToolHandler {
                     .and_then(|item| item.get("type"))
                     .and_then(|value| value.as_str())
                     .is_some_and(is_tool_call_item_type);
-                if is_tool_call_done && self.has_complete_calls() {
+                // Tighter guard: require the done event's `output_index` to
+                // match one of our pending calls. Without this, a mixed
+                // stream that carries a function_call the handler intercepts
+                // plus a native hosted-tool item at a different output_index
+                // (the second one gets forwarded as-is because
+                // `handle_output_item_added` does not register hosted-tool
+                // items as pending calls) would have its hosted-tool
+                // `output_item.done` suppressed — and the tool loop would
+                // never re-emit the umbrella since it only closes items it
+                // actually executed. The output_index match ensures
+                // suppression only kicks in for items this handler owns.
+                let belongs_to_pending_call = done_output_index
+                    .is_some_and(|idx| self.pending_calls.iter().any(|c| c.output_index == idx));
+                if is_tool_call_done && belongs_to_pending_call && self.has_complete_calls() {
                     // Suppress the upstream umbrella event — the tool loop
                     // will emit its own `output_item.done` at the correct
                     // position, AFTER `response.<type>.completed`.
@@ -577,6 +591,45 @@ mod tests {
         // R6.7b: hosted `file_search_call` items share the ordering
         // contract with the other tool-call item types.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::FILE_SEARCH_CALL);
+    }
+
+    #[test]
+    fn output_item_done_for_unregistered_hosted_tool_output_index_forwards() {
+        // R6.7b Claude-review follow-up: the gate must also match the
+        // done event's `output_index` to a pending call. Without this
+        // guard a mixed stream where a function_call (intercepted) and
+        // a native hosted-tool item (NOT intercepted because
+        // `handle_output_item_added` only registers function_call
+        // types) live at different output indices would see the
+        // hosted-tool's `output_item.done` incorrectly suppressed —
+        // and the tool loop only re-emits umbrellas for items it
+        // actually executed, so the hosted-tool's umbrella would be
+        // permanently lost from the wire.
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        // Pending function_call at output_index 0.
+        bootstrap_function_call_added(&mut handler);
+
+        // Native web_search_call (passthrough) at output_index 1 — the
+        // handler never registered a pending call for this item.
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 1,
+          "item": {
+            "type": "web_search_call",
+            "id": "ws_passthrough",
+            "status": "completed",
+            "action": {"type": "search"}
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+
+        assert!(
+            matches!(action, StreamAction::Forward),
+            "output_item.done for a hosted tool whose output_index is NOT a pending call must \
+             forward — the tool loop only re-emits umbrellas for items it executed, so \
+             suppressing this would drop the umbrella permanently; got {action:?}"
+        );
     }
 
     #[test]
