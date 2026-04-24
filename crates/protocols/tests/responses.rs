@@ -4161,7 +4161,10 @@ fn test_tool_search_tool_server_execution_round_trip() {
                 Some("Discover additional tools at inference time")
             );
             assert_eq!(ts.execution, Some(ToolSearchExecution::Server));
-            let params = ts.parameters.as_ref().expect("parameters should be present");
+            let params = ts
+                .parameters
+                .as_ref()
+                .expect("parameters should be present");
             assert_eq!(params["required"], json!(["query"]));
         }
         other => panic!("expected ResponseTool::ToolSearch, got {other:?}"),
@@ -4194,8 +4197,8 @@ fn test_tool_search_tool_client_execution_round_trip() {
 #[test]
 fn test_tool_search_tool_minimal_round_trip() {
     let payload = json!({"type": "tool_search"});
-    let tool: ResponseTool = serde_json::from_value(payload.clone())
-        .expect("bare tool_search tool should deserialize");
+    let tool: ResponseTool =
+        serde_json::from_value(payload.clone()).expect("bare tool_search tool should deserialize");
     match &tool {
         ResponseTool::ToolSearch(ts) => {
             assert_eq!(ts.description, None);
@@ -4351,10 +4354,7 @@ fn test_tool_search_output_input_item_recursive_tools_round_trip() {
             match &tools[1] {
                 ResponseTool::Mcp(m) => {
                     assert_eq!(m.server_label, "deepwiki");
-                    assert_eq!(
-                        m.server_url.as_deref(),
-                        Some("https://example.invalid/mcp")
-                    );
+                    assert_eq!(m.server_url.as_deref(), Some("https://example.invalid/mcp"));
                 }
                 other => panic!("expected tools[1] = Mcp, got {other:?}"),
             }
