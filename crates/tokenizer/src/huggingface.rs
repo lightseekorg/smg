@@ -16,12 +16,6 @@ use crate::{
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
 
-/// Which renderer to use when applying the chat template.
-///
-/// Most models use the Jinja template stored in tokenizer_config.json. A
-/// small set of model families (DeepSeek V3.2 and V4 today) ship a Python
-/// chat-template encoder that the bundled Jinja template does not fully
-/// reproduce; for those we dispatch to a dedicated Rust port.
 #[derive(Debug, Clone, Copy)]
 enum Renderer {
     Jinja,

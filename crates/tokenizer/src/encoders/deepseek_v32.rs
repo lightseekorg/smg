@@ -1,9 +1,4 @@
 // Ported from https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/main/encoding/encoding_dsv32.py
-//
-// Function and variable names are kept close to the Python source so that
-// future re-syncs against the HuggingFace upstream remain mechanical. The
-// DeepSeek special-token sentinel "｜" is U+FF5C (FULLWIDTH VERTICAL LINE),
-// NOT the ASCII pipe — copy directly from the Python file.
 
 use std::fmt::Write as _;
 
