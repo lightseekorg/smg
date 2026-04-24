@@ -488,6 +488,10 @@ struct CliArgs {
     #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle", "postgres", "redis"], help_heading = "Backend")]
     history_backend: String,
 
+    /// Compute per-message SHA-256 hashes for session reconstruction logging
+    #[arg(long, default_value_t = false, help_heading = "Logging")]
+    enable_message_hash: bool,
+
     /// Enable WebAssembly support
     #[arg(long, default_value_t = false, help_heading = "Backend")]
     enable_wasm: bool,
@@ -1249,6 +1253,7 @@ impl CliArgs {
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
+            .enable_message_hash(self.enable_message_hash)
             .enable_wasm(self.enable_wasm)
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)
