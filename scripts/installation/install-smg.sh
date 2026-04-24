@@ -5,6 +5,8 @@ set -e
 # Usage: install-smg.sh [path-to-smg-src]
 # Default path: /tmp/smg-src
 
+export MAKEFLAGS="-j$(nproc)"
+
 SMG_SRC="${1:-/tmp/smg-src}"
 
 apt update -y \
