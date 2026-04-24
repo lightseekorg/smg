@@ -3,7 +3,9 @@
 use axum::response::Response;
 use openai_protocol::{common::ToolCall, responses::ResponseTool};
 use serde_json::{from_str, json, Value};
-use smg_mcp::{McpToolSession, ToolExecutionInput};
+use smg_mcp::{
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpToolSession, ToolExecutionInput,
+};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
@@ -36,22 +38,47 @@ pub(super) async fn execute_mcp_tools(
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
+    request_tools: &[ResponseTool],
 ) -> Result<Vec<ToolResult>, Response> {
-    // Convert tool calls to execution inputs
+    // Convert tool calls to execution inputs, merging caller-declared
+    // hosted-tool configuration from `request_tools` into dispatch args.
+    // For non-hosted-tool calls (Passthrough format), no override lookup runs.
+    // Non-object model payloads coerce to `{}` so the override merge actually
+    // applies rather than silently dropping the caller's declared config.
     let inputs: Vec<ToolExecutionInput> = tool_calls
         .iter()
         .map(|tc| {
             let args_str = tc.function.arguments.as_deref().unwrap_or("{}");
-            let args: Value = from_str(args_str).unwrap_or_else(|e| {
-                error!(
-                    function = "execute_mcp_tools",
-                    tool_name = %tc.function.name,
-                    call_id = %tc.id,
-                    error = %e,
-                    "Failed to parse tool arguments JSON, using empty object"
-                );
-                json!({})
-            });
+            let mut args: Value = match from_str::<Value>(args_str) {
+                Ok(Value::Object(map)) => Value::Object(map),
+                Ok(_) => {
+                    debug!(
+                        function = "execute_mcp_tools",
+                        tool_name = %tc.function.name,
+                        call_id = %tc.id,
+                        "Tool arguments parsed to non-object JSON; coercing to empty object"
+                    );
+                    json!({})
+                }
+                Err(e) => {
+                    error!(
+                        function = "execute_mcp_tools",
+                        tool_name = %tc.function.name,
+                        call_id = %tc.id,
+                        error = %e,
+                        "Failed to parse tool arguments JSON, using empty object"
+                    );
+                    json!({})
+                }
+            };
+            if let Some(kind) = session
+                .tool_response_format(&tc.function.name)
+                .to_builtin_tool_type()
+            {
+                if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
+                    apply_hosted_tool_overrides(&mut args, &overrides);
+                }
+            }
             ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),

@@ -22,7 +22,10 @@ use crate::{
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
-    routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
+    routers::{
+        grpc::multimodal::MultimodalConfigRegistry, openai::realtime::RealtimeRegistry,
+        router_manager::RouterManager,
+    },
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
     worker::{KvEventMonitor, WorkerMonitor, WorkerRegistry, WorkerService},
     workflow::{JobQueue, WorkflowEngines},
@@ -52,6 +55,7 @@ pub struct AppContext {
     pub router_config: RouterConfig,
     pub rate_limiter: Option<Arc<TokenBucket>>,
     pub tokenizer_registry: Arc<TokenizerRegistry>,
+    pub multimodal_config_registry: Arc<MultimodalConfigRegistry>,
     pub reasoning_parser_factory: Option<ReasoningParserFactory>,
     pub tool_parser_factory: Option<ToolParserFactory>,
     pub worker_registry: Arc<WorkerRegistry>,
@@ -361,6 +365,7 @@ impl AppContextBuilder {
             tokenizer_registry: self
                 .tokenizer_registry
                 .ok_or(AppContextBuildError::MissingField("tokenizer_registry"))?,
+            multimodal_config_registry: Arc::new(MultimodalConfigRegistry::new()),
             reasoning_parser_factory: self.reasoning_parser_factory,
             tool_parser_factory: self.tool_parser_factory,
             worker_registry,

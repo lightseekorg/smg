@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use openai_protocol::responses::{ResponseTool, ResponsesRequest};
+use openai_protocol::responses::{NamespaceTool, ResponseTool, ResponsesRequest};
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
     ResponseFormat,
@@ -207,16 +207,23 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
 
 /// Collect user-declared function tool names from a Responses request.
 pub(crate) fn collect_user_function_names(request: &ResponsesRequest) -> HashSet<String> {
-    request
-        .tools
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|tool| match tool {
-            ResponseTool::Function(function_tool) => Some(function_tool.function.name.clone()),
-            _ => None,
-        })
-        .collect()
+    let mut names = HashSet::new();
+    for tool in request.tools.as_deref().unwrap_or_default() {
+        match tool {
+            ResponseTool::Function(function_tool) => {
+                names.insert(function_tool.function.name.clone());
+            }
+            ResponseTool::Namespace(namespace_tool) => {
+                for nested in &namespace_tool.tools {
+                    if let NamespaceTool::Function(function_tool) = nested {
+                        names.insert(function_tool.function.name.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Unified MCP server connection logic shared by all routers.

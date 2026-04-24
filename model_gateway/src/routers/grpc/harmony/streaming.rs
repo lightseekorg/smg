@@ -3,7 +3,7 @@
 use std::{
     collections::{hash_map::Entry::Vacant, HashMap, HashSet},
     io,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Instant,
 };
 
@@ -84,6 +84,8 @@ struct ToolCallStreamState {
     response_format: Option<ResponseFormat>,
     is_visible: bool,
 }
+
+static EMPTY_USER_FUNCTION_NAMES: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
 
 impl HarmonyStreamingProcessor {
     /// Create a new Harmony streaming processor
@@ -592,8 +594,7 @@ impl HarmonyStreamingProcessor {
         let mut has_emitted_content_part_added = false;
 
         // Tool call tracking: call_index -> (output_index, item_id, response_format)
-        let empty_user_function_names = HashSet::new();
-        let user_function_names = user_function_names.unwrap_or(&empty_user_function_names);
+        let user_function_names = user_function_names.unwrap_or(&EMPTY_USER_FUNCTION_NAMES);
         let mut tool_call_tracking: HashMap<usize, ToolCallStreamState> = HashMap::new();
 
         // Metadata from Complete message; seed cached_tokens from prefill phase (dual-stream)

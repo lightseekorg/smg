@@ -301,6 +301,7 @@ pub async fn remove_tokenizer(context: &Arc<AppContext>, tokenizer_id: &str) -> 
         .or_else(|| context.tokenizer_registry.remove(tokenizer_id));
 
     if let Some(entry) = removed {
+        context.multimodal_config_registry.remove(&entry.id);
         debug!("Removed tokenizer '{}' (id: {})", entry.name, entry.id);
         (
             StatusCode::OK,

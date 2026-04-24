@@ -7,7 +7,7 @@ use bytes::Bytes;
 use openai_protocol::{
     common::{Tool, ToolReference},
     responses::{
-        BuiltInToolChoiceType, ResponseOutputItem, ResponseTool, ResponsesRequest,
+        BuiltInToolChoiceType, NamespaceTool, ResponseOutputItem, ResponseTool, ResponsesRequest,
         ResponsesResponse, ResponsesToolChoice, ToolChoiceOptions,
     },
 };
@@ -31,11 +31,11 @@ use crate::{
     worker::WorkerRegistry,
 };
 
-/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
+/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared.
 ///
-/// Checks if request declares MCP tools or builtin tool types (web_search_preview,
-/// code_interpreter), and if so, validates that the MCP clients can be created
-/// and connected.
+/// Checks if the request declares MCP tools or builtin tool types
+/// (`web_search_preview`, `code_interpreter`, `image_generation`) and,
+/// if so, validates that the MCP clients can be created and connected.
 ///
 /// Returns Ok((has_mcp_tools, mcp_servers)) on success.
 pub(crate) async fn ensure_mcp_connection(
@@ -47,13 +47,23 @@ pub(crate) async fn ensure_mcp_connection(
         .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
         .unwrap_or(false);
 
-    // Check for builtin tools that MAY have MCP routing configured
+    // Check for builtin tools that MAY have MCP routing configured.
+    //
+    // `ImageGeneration` is included here (R6.8) because gpt-oss via the
+    // harmony pipeline, and Qwen/Llama via the regular pipeline, both
+    // dispatch hosted `image_generation` calls through the same MCP
+    // routing path — the only difference is how the tool is advertised in
+    // the prompt. Without this arm, the short-circuit below returned
+    // `(false, Vec::new())`, the MCP loop was never entered, and the
+    // registered `image_generation` MCP server received zero dispatches.
     let has_builtin_tools = tools
         .map(|t| {
             t.iter().any(|tool| {
                 matches!(
                     tool,
-                    ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+                    ResponseTool::WebSearchPreview(_)
+                        | ResponseTool::CodeInterpreter(_)
+                        | ResponseTool::ImageGeneration(_)
                 )
             })
         })
@@ -206,11 +216,15 @@ fn retain_client_visible_tools_in_place(
 }
 
 fn has_function_tool(tools: &[ResponseTool], tool_name: &str) -> bool {
-    tools.iter().any(|tool| {
-        matches!(
-            tool,
-            ResponseTool::Function(function_tool) if function_tool.function.name == tool_name
-        )
+    tools.iter().any(|tool| match tool {
+        ResponseTool::Function(function_tool) => function_tool.function.name == tool_name,
+        ResponseTool::Namespace(namespace_tool) => namespace_tool.tools.iter().any(|nested_tool| {
+            matches!(
+                nested_tool,
+                NamespaceTool::Function(function_tool) if function_tool.function.name == tool_name
+            )
+        }),
+        _ => false,
     })
 }
 
@@ -332,7 +346,14 @@ fn normalize_response_tool_choice(tool_choice: &mut String, tools: &[ResponseToo
         return;
     }
 
-    let Ok(choice) = serde_json::from_str::<ResponsesToolChoice>(tool_choice) else {
+    let choice = match tool_choice.as_str() {
+        "auto" => Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto)),
+        "required" => Some(ResponsesToolChoice::Options(ToolChoiceOptions::Required)),
+        "none" => Some(ResponsesToolChoice::Options(ToolChoiceOptions::None)),
+        _ => serde_json::from_str::<ResponsesToolChoice>(tool_choice).ok(),
+    };
+
+    let Some(choice) = choice else {
         *tool_choice = "auto".to_string();
         return;
     };
@@ -384,7 +405,11 @@ pub(crate) fn emit_visible_mcp_list_tools_sequence(
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
+    let mut seen_labels = HashSet::new();
     for binding in session.mcp_servers() {
+        if !seen_labels.insert(binding.label.clone()) {
+            continue;
+        }
         if !session.should_emit_streaming_mcp_list_tools(&binding.label) {
             continue;
         }

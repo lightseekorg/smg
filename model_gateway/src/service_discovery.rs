@@ -1155,6 +1155,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::routers::grpc::multimodal::MultimodalConfigRegistry;
 
     fn create_k8s_pod(
         name: Option<&str>,
@@ -1278,6 +1279,7 @@ mod tests {
             workflow_engines: Arc::new(std::sync::OnceLock::new()),
             mcp_orchestrator: Arc::new(std::sync::OnceLock::new()),
             tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
+            multimodal_config_registry: Arc::new(MultimodalConfigRegistry::new()),
             skill_service: None,
             wasm_manager: None,
             worker_service: Arc::new(WorkerService::new(

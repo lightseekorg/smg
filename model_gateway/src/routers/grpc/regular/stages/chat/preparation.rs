@@ -57,30 +57,32 @@ impl ChatPreparationStage {
         let (image_placeholder, mm_context) = if is_multimodal {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
                 let model_id = ctx.input.model_id.as_str();
-                let tokenizer_source = ctx
+                let entry = ctx
                     .components
                     .tokenizer_registry
                     .get_by_name(model_id)
-                    .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id))
-                    .map(|e| e.source)
-                    .unwrap_or_default();
+                    .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id));
 
-                if tokenizer_source.is_empty() {
-                    error!(
-                        function = "ChatPreparationStage::execute",
-                        model = %model_id,
-                        "Tokenizer source path not found for multimodal processing"
-                    );
-                    return Err(error::bad_request(
-                        "multimodal_config_missing",
-                        format!("Tokenizer source path not found for model: {model_id}"),
-                    ));
-                }
+                let (tokenizer_id, tokenizer_source) = match entry {
+                    Some(e) => (e.id.clone(), e.source.clone()),
+                    None => {
+                        error!(
+                            function = "ChatPreparationStage::execute",
+                            model = %model_id,
+                            "Tokenizer entry not found for multimodal processing"
+                        );
+                        return Err(error::bad_request(
+                            "multimodal_config_missing",
+                            format!("Tokenizer not found for model: {model_id}"),
+                        ));
+                    }
+                };
 
                 let placeholder = multimodal::resolve_placeholder_token(
                     model_id,
                     &*tokenizer,
                     mm_components,
+                    &tokenizer_id,
                     &tokenizer_source,
                 )
                 .await
@@ -99,7 +101,7 @@ impl ChatPreparationStage {
 
                 (
                     placeholder,
-                    Some((mm_components, model_id, tokenizer_source)),
+                    Some((mm_components, model_id, tokenizer_id, tokenizer_source)),
                 )
             } else {
                 error!(
@@ -144,13 +146,14 @@ impl ChatPreparationStage {
 
         // Step 4: Full multimodal processing (fetch + preprocess + expand tokens + hash)
         let mut multimodal_intermediate = None;
-        if let Some((mm_components, model_id, tokenizer_source)) = mm_context {
+        if let Some((mm_components, model_id, tokenizer_id, tokenizer_source)) = mm_context {
             match multimodal::process_multimodal(
                 &request.messages,
                 model_id,
                 &*tokenizer,
                 token_ids,
                 mm_components,
+                &tokenizer_id,
                 &tokenizer_source,
             )
             .await

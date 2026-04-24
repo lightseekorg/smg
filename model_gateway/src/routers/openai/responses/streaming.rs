@@ -58,8 +58,7 @@ use crate::{
             mcp::{
                 build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
                 mcp_list_tools_bindings_to_emit, prepare_mcp_tools_as_functions,
-                remove_intercepted_mcp_function_calls_from_output, send_mcp_list_tools_events,
-                StreamAction, StreamingToolHandler, ToolLoopState,
+                send_mcp_list_tools_events, StreamAction, StreamingToolHandler, ToolLoopState,
             },
         },
     },
@@ -353,7 +352,7 @@ fn should_drop_hidden_internal_tool_event(
             .is_some_and(|item| session.should_hide_output_item_json(item, user_function_names)),
         // MCP ARGUMENTS_DELTA events are handled before this function is reached
         // (buffered and re-emitted synthetically), so only ARGUMENTS_DONE needs handling here.
-        // This branch assumes pending_calls has already been populated from prior
+        // INVARIANT: This branch assumes pending_calls has already been populated from prior
         // function_call/output_item events for this output_index.
         Some(FunctionCallEvent::ARGUMENTS_DONE) => output_index
             .and_then(|idx| {
@@ -418,14 +417,21 @@ pub(super) fn forward_streaming_event(
         },
     };
 
+    // Some providers emit data-only SSE blocks (no `event:` header). Use the
+    // JSON payload `type` as a fallback so MCP argument buffering/remapping is
+    // applied consistently across both SSE shapes.
+    let resolved_event_type = get_event_type(event_name, &parsed_data);
+    let is_arguments_delta_event = resolved_event_type == FunctionCallEvent::ARGUMENTS_DELTA;
+    let is_arguments_done_event = resolved_event_type == FunctionCallEvent::ARGUMENTS_DONE;
+
     let is_mcp_call_arguments_event = matches!(
-        event_name,
-        Some(FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE)
+        resolved_event_type,
+        FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE
     ) && is_mcp_arguments_event(&parsed_data, handler, ctx);
 
     // Only MCP-intercepted argument deltas are dropped. User-function argument
     // deltas must pass through unchanged.
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) && is_mcp_call_arguments_event {
+    if is_arguments_delta_event && is_mcp_call_arguments_event {
         return true;
     }
 
@@ -447,7 +453,7 @@ pub(super) fn forward_streaming_event(
 
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+    if is_arguments_done_event
         && is_mcp_call_arguments_event
         && !send_buffered_arguments(
             &mut parsed_data,
@@ -475,7 +481,7 @@ pub(super) fn forward_streaming_event(
         parsed_data["output_index"] = json!(mapped);
     }
 
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE) && is_mcp_call_arguments_event {
+    if is_arguments_done_event && is_mcp_call_arguments_event {
         parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
         if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
             parsed_data["item_id"] = json!(mcp_response_item_id(item_id));
@@ -577,11 +583,60 @@ fn reconcile_mixed_mode_final_response(
     session: &McpToolSession<'_>,
     user_function_names: &HashSet<String>,
 ) {
-    // In mixed MCP + user-function batches, upstream final responses still contain
-    // function_call placeholders for MCP calls we already executed server-side.
-    // Remove those placeholders before injecting executed MCP output metadata.
-    remove_intercepted_mcp_function_calls_from_output(final_response, session, user_function_names);
+    // In mixed MCP + user-function batches, final output can contain both:
+    // 1) intercepted MCP function_call placeholders already executed by gateway, and
+    // 2) later MCP function_call placeholders left for client-driven passthrough.
+    // Remove only the executed placeholders (by call_id) before injecting MCP metadata.
+    let executed_call_ids: HashSet<&str> = state
+        .conversation_history
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some(ItemType::FUNCTION_CALL))
+        .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+        .collect();
+
+    if let Some(output_array) = final_response
+        .get_mut("output")
+        .and_then(Value::as_array_mut)
+    {
+        output_array.retain(|item| {
+            if !item
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(is_function_call_type)
+            {
+                return true;
+            }
+
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                return true;
+            };
+            if !session.should_intercept_function_call(name, user_function_names) {
+                return true;
+            }
+
+            let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                return true;
+            };
+
+            !executed_call_ids.contains(call_id)
+        });
+    }
+
     inject_mcp_metadata_streaming(final_response, state, session, user_function_names);
+}
+
+fn should_suppress_executed_mcp_output_done(
+    event_name: Option<&str>,
+    parsed_data: &Value,
+    executed_mcp_output_indices: &HashSet<usize>,
+) -> bool {
+    if executed_mcp_output_indices.is_empty() {
+        return false;
+    }
+
+    get_event_type(event_name, parsed_data) == OutputItemEvent::DONE
+        && extract_output_index(parsed_data)
+            .is_some_and(|idx| executed_mcp_output_indices.contains(&idx))
 }
 
 /// Send final response.completed event to client
@@ -859,7 +914,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
         let list_tools_bindings =
-            mcp_list_tools_bindings_to_emit(&state.existing_mcp_list_tools_labels, &session);
+            mcp_list_tools_bindings_to_emit(&state.existing_mcp_list_tools_dedupe_keys, &session);
         let user_function_names = collect_user_function_names(&original_request);
 
         let streaming_ctx = StreamingEventContext {
@@ -914,6 +969,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             let mut chunk_processor = ChunkProcessor::new();
             let mut tool_calls_detected = false;
             let mut seen_in_progress = false;
+            let mut executed_mcp_output_indices: HashSet<usize> = HashSet::new();
 
             while let Some(chunk_result) = upstream_stream.next().await {
                 match chunk_result {
@@ -954,8 +1010,16 @@ pub(super) fn handle_streaming_with_tool_interception(
                                             v.get("type").and_then(|t| t.as_str())
                                                 == Some(ResponseEvent::IN_PROGRESS)
                                         });
+                                    let should_suppress_done = disable_mcp_interception
+                                        && parsed.as_ref().is_some_and(|v| {
+                                            should_suppress_executed_mcp_output_done(
+                                                event_name,
+                                                v,
+                                                &executed_mcp_output_indices,
+                                            )
+                                        });
 
-                                    if !should_skip {
+                                    if !should_skip && !should_suppress_done {
                                         let active_ctx = if disable_mcp_interception {
                                             &passthrough_streaming_ctx
                                         } else {
@@ -1011,6 +1075,17 @@ pub(super) fn handle_streaming_with_tool_interception(
                                 }
                                 StreamAction::Buffer => {
                                     if disable_mcp_interception {
+                                        let should_suppress_done =
+                                            parsed.as_ref().is_some_and(|v| {
+                                                should_suppress_executed_mcp_output_done(
+                                                    event_name,
+                                                    v,
+                                                    &executed_mcp_output_indices,
+                                                )
+                                            });
+                                        if should_suppress_done {
+                                            continue;
+                                        }
                                         if !forward_streaming_event(
                                             SseEventData {
                                                 raw_block: &raw_block,
@@ -1031,7 +1106,9 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         // `StreamingToolHandler`; no passthrough forward needed.
                                     }
                                 }
-                                StreamAction::ExecuteTools => {
+                                StreamAction::ExecuteTools {
+                                    forward_triggering_event,
+                                } => {
                                     let has_non_mcp_calls =
                                         handler.pending_calls.iter().any(|call| {
                                             !call.name.is_empty()
@@ -1041,26 +1118,44 @@ pub(super) fn handle_streaming_with_tool_interception(
                                                 )
                                         });
 
-                                    let active_ctx = if disable_mcp_interception {
-                                        &passthrough_streaming_ctx
-                                    } else {
-                                        &streaming_ctx
-                                    };
+                                    // When tool completion is signaled by
+                                    // `output_item.done`, that umbrella event
+                                    // must be suppressed; the tool loop emits
+                                    // a correctly ordered umbrella after
+                                    // `response.<tool>.completed`.
+                                    if forward_triggering_event {
+                                        let active_ctx = if disable_mcp_interception {
+                                            &passthrough_streaming_ctx
+                                        } else {
+                                            &streaming_ctx
+                                        };
+                                        if disable_mcp_interception
+                                            && parsed.as_ref().is_some_and(|v| {
+                                                should_suppress_executed_mcp_output_done(
+                                                    event_name,
+                                                    v,
+                                                    &executed_mcp_output_indices,
+                                                )
+                                            })
+                                        {
+                                            continue;
+                                        }
 
-                                    if !forward_streaming_event(
-                                        SseEventData {
-                                            raw_block: &raw_block,
-                                            event_name,
-                                            data: data.as_ref(),
-                                            pre_parsed: parsed,
-                                        },
-                                        &mut handler,
-                                        &tx,
-                                        active_ctx,
-                                        Some(&session),
-                                        &mut sequence_number,
-                                    ) {
-                                        return;
+                                        if !forward_streaming_event(
+                                            SseEventData {
+                                                raw_block: &raw_block,
+                                                event_name,
+                                                data: data.as_ref(),
+                                                pre_parsed: parsed,
+                                            },
+                                            &mut handler,
+                                            &tx,
+                                            active_ctx,
+                                            Some(&session),
+                                            &mut sequence_number,
+                                        ) {
+                                            return;
+                                        }
                                     }
 
                                     if disable_mcp_interception {
@@ -1094,6 +1189,10 @@ pub(super) fn handle_streaming_with_tool_interception(
                                         // response output so the client can drive them.
 
                                         if !mcp_pending_calls.is_empty() {
+                                            let executed_indices: Vec<usize> = mcp_pending_calls
+                                                .iter()
+                                                .map(|call| call.output_index)
+                                                .collect();
                                             state.iteration += 1;
                                             state.total_calls += mcp_pending_calls.len();
                                             Metrics::record_mcp_tool_iteration(
@@ -1131,10 +1230,14 @@ pub(super) fn handle_streaming_with_tool_interception(
                                                 &mut state,
                                                 &mut sequence_number,
                                                 &original_request.model,
+                                                original_request.tools.as_deref().unwrap_or(&[]),
                                             )
                                             .await
                                             {
                                                 return;
+                                            }
+                                            for idx in executed_indices {
+                                                executed_mcp_output_indices.insert(idx);
                                             }
                                         }
 
@@ -1286,6 +1389,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &mut state,
                 &mut sequence_number,
                 &original_request.model,
+                original_request.tools.as_deref().unwrap_or(&[]),
             )
             .await
             {
@@ -1506,7 +1610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_mode_reconciliation_removes_mcp_placeholders() {
+    async fn mixed_mode_reconciliation_removes_only_executed_mcp_placeholders() {
         let orchestrator = McpOrchestrator::new(McpConfig {
             servers: vec![visible_server_config()],
             ..Default::default()
@@ -1526,6 +1630,12 @@ mod tests {
         );
         let mut state = super::ToolLoopState::new(ResponseInput::Text("hello".to_string()), vec![]);
         state.total_calls = 1;
+        state.conversation_history.push(json!({
+            "type": "function_call",
+            "call_id": "call_executed",
+            "name": "visible_mcp_tool",
+            "arguments": "{}"
+        }));
         state.mcp_call_items.push(json!({
             "type": "mcp_call",
             "id": "mcp_visible_tool",
@@ -1540,7 +1650,16 @@ mod tests {
             "output": [
                 {
                     "type": "function_call",
+                    "call_id": "call_executed",
                     "id": "fc_internal",
+                    "name": "visible_mcp_tool",
+                    "status": "completed",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_client",
+                    "id": "fc_client",
                     "name": "visible_mcp_tool",
                     "status": "completed",
                     "arguments": "{}"
@@ -1583,11 +1702,20 @@ mod tests {
             "expected user function call to remain in final output"
         );
         assert!(
+            output.iter().any(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("function_call")
+                    && item.get("name").and_then(|v| v.as_str()) == Some("visible_mcp_tool")
+                    && item.get("call_id").and_then(|v| v.as_str()) == Some("call_client")
+            }),
+            "expected non-executed MCP function_call placeholder to remain for client execution"
+        );
+        assert!(
             !output.iter().any(|item| {
                 item.get("type").and_then(|v| v.as_str()) == Some("function_call")
                     && item.get("name").and_then(|v| v.as_str()) == Some("visible_mcp_tool")
+                    && item.get("call_id").and_then(|v| v.as_str()) == Some("call_executed")
             }),
-            "expected intercepted MCP function_call placeholder to be removed"
+            "expected executed MCP function_call placeholder to be removed"
         );
     }
 }

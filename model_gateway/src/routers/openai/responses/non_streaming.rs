@@ -96,7 +96,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             payload,
             ToolLoopExecutionContext {
                 original_body,
-                existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
+                existing_mcp_list_tools_dedupe_keys: &existing_mcp_list_tools_labels,
                 session: &session,
             },
         )

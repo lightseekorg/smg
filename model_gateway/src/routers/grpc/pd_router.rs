@@ -56,7 +56,7 @@ impl GrpcPDRouter {
             .clone();
 
         // Create multimodal components (best-effort; non-fatal if initialization fails)
-        let multimodal = match MultimodalComponents::new() {
+        let multimodal = match MultimodalComponents::new(ctx.multimodal_config_registry.clone()) {
             Ok(mc) => Some(Arc::new(mc)),
             Err(e) => {
                 tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");

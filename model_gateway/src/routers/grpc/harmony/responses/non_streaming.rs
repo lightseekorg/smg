@@ -20,7 +20,8 @@ use tracing::{debug, error, warn};
 
 use super::{
     common::{
-        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages, McpCallTracking,
+        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages,
+        strip_image_generation_from_request_tools, McpCallTracking,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
@@ -134,6 +135,13 @@ async fn execute_with_mcp_loop(
             "MCP client available - added static MCP tools to Harmony Responses request"
         );
     }
+
+    // R6.8: once the MCP loop has taken ownership of image_generation
+    // dispatch, drop the hosted-tool descriptor so the harmony builder
+    // advertises only the MCP-exposed function-tool name (which
+    // `has_exposed_tool` actually recognizes for dispatch). See the
+    // helper doc comment in `common.rs` for the full rationale.
+    strip_image_generation_from_request_tools(&mut current_request, &session);
 
     loop {
         iteration_count += 1;
@@ -262,7 +270,9 @@ async fn execute_with_mcp_loop(
                     return Ok(response);
                 }
 
-                // Execute MCP tools (if any)
+                // Execute MCP tools (if any). Caller-declared hosted-tool overrides
+                // live on `original_tools` (pre-MCP-injection), so we thread those
+                // into dispatch — `execute_mcp_tools` merges per-kind.
                 let mcp_results = if mcp_tool_calls.is_empty() {
                     Vec::new()
                 } else {
@@ -271,6 +281,7 @@ async fn execute_with_mcp_loop(
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
+                        original_tools.as_deref().unwrap_or(&[]),
                     )
                     .await?
                 };
@@ -308,6 +319,11 @@ async fn execute_with_mcp_loop(
                             &user_function_names,
                         );
                     }
+                    retain_client_visible_output_items(
+                        &mut response.output,
+                        &session,
+                        &user_function_names,
+                    );
                     retain_client_visible_response_tools(
                         &mut response,
                         &session,
@@ -347,6 +363,11 @@ async fn execute_with_mcp_loop(
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.take().unwrap_or_default();
+                retain_client_visible_output_items(
+                    &mut response.output,
+                    &session,
+                    &user_function_names,
+                );
                 retain_client_visible_response_tools(&mut response, &session, &user_function_names);
 
                 debug!(

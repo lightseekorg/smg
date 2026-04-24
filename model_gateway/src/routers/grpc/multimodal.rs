@@ -42,18 +42,138 @@ pub(crate) struct MultimodalModelConfig {
     pub preprocessor_config: PreProcessorConfig,
 }
 
+/// Shared cache of multimodal model configuration files keyed by tokenizer UUID.
+///
+/// Sources of data:
+/// 1. Preloaded from `GetTokenizer` bundles during tokenizer registration.
+/// 2. Lazy-loaded from local disk / HF on first multimodal request.
+pub struct MultimodalConfigRegistry {
+    configs: DashMap<String, Arc<MultimodalModelConfig>>,
+}
+
+impl MultimodalConfigRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            configs: DashMap::new(),
+        }
+    }
+
+    pub(crate) fn get(&self, tokenizer_id: &str) -> Option<Arc<MultimodalModelConfig>> {
+        self.configs.get(tokenizer_id).map(|r| r.clone())
+    }
+
+    pub(crate) fn insert(&self, tokenizer_id: String, config: Arc<MultimodalModelConfig>) {
+        self.configs.insert(tokenizer_id, config);
+    }
+
+    /// Drop the cached config for a tokenizer. Called when a tokenizer is
+    /// removed so stale entries don't accumulate across re-registrations
+    /// (tokenizer IDs are regenerated on each registration via `Uuid::now_v7`).
+    pub(crate) fn remove(&self, tokenizer_id: &str) -> Option<Arc<MultimodalModelConfig>> {
+        self.configs.remove(tokenizer_id).map(|(_, v)| v)
+    }
+
+    /// Return a cached config if present; otherwise load from `tokenizer_source`
+    /// (local dir or HF cache/download via `llm_multimodal::hub`), cache under
+    /// `tokenizer_id`, and return it.
+    pub(crate) async fn get_or_load(
+        &self,
+        tokenizer_id: &str,
+        tokenizer_source: &str,
+    ) -> Result<Arc<MultimodalModelConfig>> {
+        if let Some(cached) = self.get(tokenizer_id) {
+            debug!(%tokenizer_id, "multimodal config cache hit");
+            return Ok(cached);
+        }
+
+        debug!(
+            %tokenizer_id,
+            %tokenizer_source,
+            "multimodal config cache miss, loading"
+        );
+
+        let base_dir = llm_multimodal::hub::resolve_model_config_dir(tokenizer_source)
+            .await
+            .with_context(|| {
+                format!("Failed to resolve model config directory for '{tokenizer_source}'")
+            })?;
+
+        let config_path = base_dir.join("config.json");
+        let config: serde_json::Value = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read config.json at {}", config_path.display()))
+            .and_then(|s| {
+                serde_json::from_str(&s).with_context(|| {
+                    format!("Failed to parse config.json at {}", config_path.display())
+                })
+            })?;
+
+        // preprocessor_config.json is optional — each image processor supplies
+        // its own model-specific defaults, so missing/unparsable files fall
+        // back to `PreProcessorConfig::default()`. This matches the bundle
+        // preload path in `try_load_multimodal_config`.
+        let pp_config_path = base_dir.join("preprocessor_config.json");
+        let preprocessor_config = if pp_config_path.exists() {
+            match std::fs::read_to_string(&pp_config_path) {
+                Ok(pp_str) => match PreProcessorConfig::from_json(&pp_str) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(
+                            path = %pp_config_path.display(),
+                            error = %e,
+                            "Failed to parse preprocessor_config.json; falling back to defaults"
+                        );
+                        PreProcessorConfig::default()
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        path = %pp_config_path.display(),
+                        error = %e,
+                        "Failed to read preprocessor_config.json; falling back to defaults"
+                    );
+                    PreProcessorConfig::default()
+                }
+            }
+        } else {
+            debug!(
+                path = %pp_config_path.display(),
+                "No preprocessor_config.json found; using PreProcessorConfig defaults"
+            );
+            PreProcessorConfig::default()
+        };
+
+        let model_config = Arc::new(MultimodalModelConfig {
+            config,
+            preprocessor_config,
+        });
+
+        self.configs
+            .insert(tokenizer_id.to_string(), model_config.clone());
+
+        debug!(%tokenizer_id, "multimodal config loaded and cached");
+        Ok(model_config)
+    }
+}
+
+impl Default for MultimodalConfigRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Shared multimodal components injected at router creation time.
 pub(crate) struct MultimodalComponents {
     pub media_connector: Arc<MediaConnector>,
     pub image_processor_registry: Arc<ImageProcessorRegistry>,
     pub model_registry: Arc<ModelRegistry>,
-    /// Lazily-loaded model configs, keyed by model_id.
-    pub model_configs: DashMap<String, Arc<MultimodalModelConfig>>,
+    /// Shared reference to the app-level multimodal config cache.
+    pub config_registry: Arc<MultimodalConfigRegistry>,
 }
 
 impl MultimodalComponents {
-    /// Create multimodal components with default registries.
-    pub fn new() -> Result<Self> {
+    /// Create multimodal components with default registries and a reference
+    /// to the shared `MultimodalConfigRegistry` owned by `AppContext`.
+    pub fn new(config_registry: Arc<MultimodalConfigRegistry>) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -65,62 +185,8 @@ impl MultimodalComponents {
             media_connector: Arc::new(media_connector),
             image_processor_registry: Arc::new(ImageProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
-            model_configs: DashMap::new(),
+            config_registry,
         })
-    }
-
-    /// Load or retrieve cached model config for a given model and tokenizer source path.
-    pub async fn get_or_load_config(
-        &self,
-        model_id: &str,
-        tokenizer_source: &str,
-    ) -> Result<Arc<MultimodalModelConfig>> {
-        if let Some(cached) = self.model_configs.get(model_id) {
-            return Ok(cached.clone());
-        }
-
-        let base_dir = llm_multimodal::hub::resolve_model_config_dir(tokenizer_source)
-            .await
-            .with_context(|| {
-                format!("Failed to resolve model config directory for '{tokenizer_source}'")
-            })?;
-
-        // Load config.json
-        let config_path = base_dir.join("config.json");
-        let config: serde_json::Value = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read config.json at {}", config_path.display()))
-            .and_then(|s| {
-                serde_json::from_str(&s).with_context(|| {
-                    format!("Failed to parse config.json at {}", config_path.display())
-                })
-            })?;
-
-        // Load preprocessor_config.json
-        let pp_config_path = base_dir.join("preprocessor_config.json");
-        let preprocessor_config = std::fs::read_to_string(&pp_config_path)
-            .with_context(|| {
-                format!(
-                    "Failed to read preprocessor_config.json at {}",
-                    pp_config_path.display()
-                )
-            })
-            .and_then(|s| {
-                PreProcessorConfig::from_json(&s).with_context(|| {
-                    format!(
-                        "Failed to parse preprocessor_config.json at {}",
-                        pp_config_path.display()
-                    )
-                })
-            })?;
-
-        let model_config = Arc::new(MultimodalModelConfig {
-            config,
-            preprocessor_config,
-        });
-
-        self.model_configs
-            .insert(model_id.to_string(), model_config.clone());
-        Ok(model_config)
     }
 }
 
@@ -158,17 +224,20 @@ pub(crate) struct MultimodalIntermediate {
 
 /// Resolve the placeholder token string for a multimodal model.
 ///
-/// Loads the model config and looks up the model spec to get the placeholder
-/// token (e.g. `"<|image|>"` for Phi-3-vision). Returns `None` if the model
-/// is not recognized as multimodal.
+/// Loads the model config (via the shared registry, keyed by `tokenizer_id`)
+/// and looks up the model spec to get the placeholder token (e.g.
+/// `"<|image|>"` for Phi-3-vision). Returns `None` if the model is not
+/// recognized as multimodal.
 pub(crate) async fn resolve_placeholder_token(
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<Option<String>> {
     let model_config = components
-        .get_or_load_config(model_id, tokenizer_source)
+        .config_registry
+        .get_or_load(tokenizer_id, tokenizer_source)
         .await?;
     let metadata = ModelMetadata {
         model_id,
@@ -317,15 +386,13 @@ fn extract_content_parts_messages(messages: &[InputMessage]) -> Vec<MediaContent
 }
 
 /// Process multimodal content from Messages API input messages.
-///
-/// Entry point for the messages preparation stage. Extracts image content parts
-/// from `InputMessage`, then delegates to the shared processing core.
 pub(crate) async fn process_multimodal_messages(
     messages: &[InputMessage],
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
     let content_parts = extract_content_parts_messages(messages);
@@ -335,6 +402,7 @@ pub(crate) async fn process_multimodal_messages(
         tokenizer,
         token_ids,
         components,
+        tokenizer_id,
         tokenizer_source,
     )
     .await
@@ -343,13 +411,13 @@ pub(crate) async fn process_multimodal_messages(
 /// Process multimodal content: fetch images, preprocess pixels, expand tokens, collect hashes.
 ///
 /// Single entry point called from preparation.rs. Handles the full pipeline:
-/// extract content parts → fetch images → preprocess → expand tokens → collect hashes.
 pub(crate) async fn process_multimodal(
     messages: &[ChatMessage],
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
     let content_parts = extract_content_parts(messages);
@@ -359,6 +427,7 @@ pub(crate) async fn process_multimodal(
         tokenizer,
         token_ids,
         components,
+        tokenizer_id,
         tokenizer_source,
     )
     .await
@@ -374,6 +443,7 @@ async fn process_multimodal_parts(
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
+    tokenizer_id: &str,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
     let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
@@ -417,7 +487,8 @@ async fn process_multimodal_parts(
 
     // Step 2: Resolve model spec and preprocess images
     let model_config = components
-        .get_or_load_config(model_id, tokenizer_source)
+        .config_registry
+        .get_or_load(tokenizer_id, tokenizer_source)
         .await?;
     let model_type = model_config
         .config
@@ -801,7 +872,10 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use openai_protocol::common::ImageUrl;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -973,5 +1047,96 @@ mod tests {
         assert_eq!(parse_detail("LOW"), Some(ImageDetail::Low));
         assert_eq!(parse_detail("high"), Some(ImageDetail::High));
         assert_eq!(parse_detail("unknown"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // MultimodalConfigRegistry tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn registry_get_or_load_reads_from_local_dir_and_caches() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("config.json"),
+            r#"{"model_type":"phi3_v","image_token_index":32044}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("preprocessor_config.json"),
+            r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
+        )
+        .unwrap();
+        let source = tmp.path().to_string_lossy().into_owned();
+
+        let reg = MultimodalConfigRegistry::new();
+        let first = reg.get_or_load("tok-uuid-2", &source).await.unwrap();
+        assert_eq!(first.config["model_type"].as_str(), Some("phi3_v"));
+
+        let second = reg.get_or_load("tok-uuid-2", &source).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second call must hit cache and return same Arc"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_get_or_load_falls_back_when_preprocessor_config_missing() {
+        // Mirrors the bundle-preload behavior in try_load_multimodal_config:
+        // a local dir without preprocessor_config.json must still load and
+        // cache an entry using PreProcessorConfig::default().
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+        let source = tmp.path().to_string_lossy().into_owned();
+
+        let reg = MultimodalConfigRegistry::new();
+        let loaded = reg
+            .get_or_load("tok-uuid-nopp", &source)
+            .await
+            .expect("must fall back to default preprocessor_config");
+        assert_eq!(loaded.config["model_type"].as_str(), Some("llama"));
+        assert!(reg.get("tok-uuid-nopp").is_some());
+    }
+
+    #[tokio::test]
+    async fn registry_remove_drops_cached_entry() {
+        let reg = MultimodalConfigRegistry::new();
+        let cfg = Arc::new(MultimodalModelConfig {
+            config: serde_json::json!({"model_type":"phi3_v"}),
+            preprocessor_config: PreProcessorConfig::from_json(
+                r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
+            )
+            .unwrap(),
+        });
+        reg.insert("tok-uuid-rm".to_string(), cfg.clone());
+        assert!(reg.get("tok-uuid-rm").is_some());
+
+        let removed = reg.remove("tok-uuid-rm").expect("remove returns the entry");
+        assert!(Arc::ptr_eq(&removed, &cfg));
+        assert!(reg.get("tok-uuid-rm").is_none());
+        assert!(reg.remove("tok-uuid-rm").is_none());
+    }
+
+    #[tokio::test]
+    async fn registry_get_or_load_hits_preloaded_entry_without_touching_source() {
+        // Regression test for the IGW bug: preload populates the registry
+        // under the tokenizer UUID; `get_or_load` must return it without
+        // consulting `tokenizer_source` (which in IGW points to an
+        // unreachable worker-only path).
+        let reg = MultimodalConfigRegistry::new();
+        let cfg = Arc::new(MultimodalModelConfig {
+            config: serde_json::json!({"model_type":"phi3_v"}),
+            preprocessor_config: PreProcessorConfig::from_json(
+                r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
+            )
+            .unwrap(),
+        });
+        reg.insert("tok-uuid-3".to_string(), cfg.clone());
+
+        let bad_source = "/nonexistent/worker-only/path-that-would-fail";
+        let got = reg
+            .get_or_load("tok-uuid-3", bad_source)
+            .await
+            .expect("preloaded entry must be returned without touching source");
+        assert!(Arc::ptr_eq(&got, &cfg));
     }
 }
