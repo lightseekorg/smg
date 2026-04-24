@@ -380,17 +380,28 @@ class MockMcpServer:
             quality: str = "standard",
             moderation: str = "auto",
             output_format: str = "png",
+            user: str | None = None,
         ) -> dict[str, str]:
+            # ``user`` is forwarded by the gateway when the client sets the
+            # top-level ``user`` field on the Responses request (R7 Fix B).
+            # The OpenAI spec does not list ``user`` as an
+            # ``ImageGenerationTool`` field, but the gateway injects it into
+            # hosted-tool dispatch args so MCP proxies can attribute usage
+            # per-user. The arg is accepted here AND recorded in the call log
+            # so tests can assert on it.
+            arguments: dict[str, Any] = {
+                "prompt": prompt,
+                "size": size,
+                "quality": quality,
+                "moderation": moderation,
+                "output_format": output_format,
+            }
+            if user is not None:
+                arguments["user"] = user
             record_call(
                 {
                     "tool": "image_generation",
-                    "arguments": {
-                        "prompt": prompt,
-                        "size": size,
-                        "quality": quality,
-                        "moderation": moderation,
-                        "output_format": output_format,
-                    },
+                    "arguments": arguments,
                 }
             )
             return {

@@ -88,6 +88,33 @@ def _image_generation_mcp_config(mock_mcp_url: str) -> dict:
     }
 
 
+def _plain_mcp_config(mock_mcp_url: str) -> dict:
+    """Build an MCP config that registers the mock server WITHOUT builtin_type.
+
+    This mirrors the deployment the external reviewer hit in R7: a plain MCP
+    server that happens to expose an ``image_generation`` tool, but whose YAML
+    config does NOT tag the server with ``builtin_type: image_generation`` or
+    ``response_format: image_generation_call``.
+
+    With this shape, the gateway's session-side response format for the tool
+    resolves to ``Passthrough``. The R7 runtime override must then promote
+    the format to ``ImageGenerationCall`` based on the client-declared
+    ``tools: [{"type": "image_generation", ...}]`` in the Responses API
+    request. This fixture is what proves the bug the reviewer reported is
+    fixed — the original R6.5 fixture pre-matched both sides, which is why
+    the bug slipped past the test suite.
+    """
+    return {
+        "servers": [
+            {
+                "name": "mock-image-gen-plain",
+                "protocol": "streamable",
+                "url": mock_mcp_url,
+            }
+        ]
+    }
+
+
 @pytest.fixture(scope="session")
 def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # noqa: F811
     """Write the MCP config YAML to a tempfile and yield its path.
@@ -106,6 +133,28 @@ def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # no
         with os.fdopen(fd, "w") as f:
             yaml.dump(config, f)
         logger.info("MCP config for mock image_generation at %s", path)
+        yield path
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+@pytest.fixture(scope="session")
+def mock_mcp_config_file_plain(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # noqa: F811
+    """Write the plain (no ``builtin_type``) MCP config YAML to a tempfile.
+
+    Counterpart to ``mock_mcp_config_file`` for R7 regression coverage. The
+    mock MCP server is the same (``image_generation`` tool still reachable)
+    but the gateway config leaves ``builtin_type`` / ``response_format``
+    unset, forcing the runtime override path to decide the output shape
+    based on the client's request-side tool declaration.
+    """
+    config = _plain_mcp_config(mock_mcp_server.url)
+    fd, path = tempfile.mkstemp(suffix=".yaml", prefix="mock_mcp_image_gen_plain_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.dump(config, f)
+        logger.info("Plain MCP config (no builtin_type) at %s", path)
         yield path
     finally:
         if os.path.exists(path):
@@ -185,6 +234,55 @@ def gateway_with_mock_mcp_cloud(
 # The rewritten suite prefers the explicit ``_cloud`` / ``_grpc_*`` names
 # but this preserves anyone who imported ``gateway_with_mock_mcp`` before.
 gateway_with_mock_mcp = gateway_with_mock_mcp_cloud
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_plain_cloud(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file_plain: str,
+) -> Iterator[tuple]:
+    """Launch an OpenAI cloud gateway wired to a PLAIN MCP server (no ``builtin_type``).
+
+    R7 regression fixture. Same mock MCP server as
+    ``gateway_with_mock_mcp_cloud`` (so the underlying ``image_generation``
+    tool behaves identically), but the gateway's MCP config deliberately
+    does NOT tag the server with ``builtin_type: image_generation`` or a
+    per-tool ``response_format``. The client is still expected to declare
+    ``tools: [{"type": "image_generation", ...}]`` on the request — that
+    declaration is what the R7 runtime override uses to shape the output
+    item.
+
+    Skips when ``OPENAI_API_KEY`` is absent, same as the matched cloud
+    fixture.
+    """
+    api_key_env = "OPENAI_API_KEY"
+    if not os.environ.get(api_key_env):
+        pytest.skip(f"{api_key_env} not set — plain-MCP image_generation cloud lane needs OpenAI")
+
+    logger.info(
+        "Launching OpenAI cloud gateway with PLAIN mock MCP config (url=%s, config=%s)",
+        mock_mcp_server.url,
+        mock_mcp_config_file_plain,
+    )
+    gateway = launch_cloud_gateway(
+        "openai",
+        history_backend="memory",
+        extra_args=["--mcp-config-path", mock_mcp_config_file_plain],
+    )
+
+    try:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=os.environ[api_key_env],
+        )
+    except Exception:
+        gateway.shutdown()
+        raise
+
+    try:
+        yield gateway, client, mock_mcp_server, "gpt-5-nano"
+    finally:
+        gateway.shutdown()
 
 
 # =============================================================================

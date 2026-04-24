@@ -6,6 +6,17 @@ tool result is transformed into an ``image_generation_call`` output item, the
 argument compactor applies size/quality overrides correctly, and multi-turn
 replay strips the base64 payload from stored conversation context.
 
+Also covers R7 regression surfaces:
+
+* ``TestImageGenerationClientDeclaredServerPlain`` exercises a plain MCP
+  server (no ``builtin_type`` on the config) so the runtime response-format
+  override is forced to kick in based on the client's request-side
+  ``tools: [{"type": "image_generation", ...}]`` declaration. Every happy-path
+  body from ``_ImageGenerationAssertions`` must pass against this fixture.
+* ``_UserForwardingAssertions`` proves the top-level ``user`` field reaches
+  the MCP server as part of the dispatch arguments, so per-user quotas /
+  usage attribution downstream of the proxy keep working.
+
 The tests point the gateway at the in-process ``MockMcpServer`` so that:
 
 * responses are deterministic (byte-for-byte assertions on the base64 image),
@@ -22,6 +33,9 @@ Engine matrix
 * **openai** cloud (``TestImageGenerationCloud``) — exercised against the
   real ``gpt-5-nano`` upstream; the mock MCP server replaces the image
   backend. Validates the OpenAI-compat router (R6.2).
+* **openai** cloud, plain MCP server (``TestImageGenerationClientDeclaredServerPlain``) —
+  forces the runtime response-format override to make the decision
+  (R7 Fix A).
 * **sglang** + gpt-oss-20b via harmony (``TestImageGenerationGrpc``,
   engine=sglang) — validates the gRPC-harmony path (R6.3).
 * **vllm** + Llama-3.1-8B-Instruct via regular (``TestImageGenerationGrpc``,
@@ -437,16 +451,116 @@ class _ImageGenerationAssertions:
 
 
 # =============================================================================
+# R7: user-forwarding mix-in
+# =============================================================================
+
+
+class _UserForwardingAssertions:
+    """Test body that asserts ``request.user`` reaches the MCP dispatch args.
+
+    Shared by the plain-MCP cloud class AND the original cloud class so we
+    exercise R7 Fix B on both server configurations. The OpenAI spec does
+    NOT list ``user`` as a field on ``ImageGeneration`` tool config, so the
+    gateway injects it into the dispatch args payload directly (mirroring
+    what OpenAI's own hosted image-generation backend does via the
+    top-level request ``user``).
+
+    Subclasses supply ``_fixture_name`` pointing at a fixture that yields
+    ``(gateway, client, mock_mcp, model)``.
+    """
+
+    _fixture_name: str = ""  # overridden by subclasses
+
+    def _ctx(self, request):
+        return request.getfixturevalue(self._fixture_name)
+
+    def test_image_generation_forwards_user_to_mcp(self, request, image_gen_tool_args) -> None:
+        """R7: top-level ``user`` must reach MCP dispatch arguments.
+
+        The reviewer-reported bug was: ``ResponsesRequest.user`` is only
+        mirrored into ``safety_identifier`` for OpenAI cloud, never into the
+        MCP dispatch. Per-user quotas / usage attribution on the MCP proxy
+        side then silently fail. The mock MCP server records every call's
+        arguments in ``call_log``; assert the ``user`` we sent shows up
+        exactly there.
+
+        Non-vacuity guard: snapshot the call-log length before issuing the
+        request so a regression that silently skips the tool invocation
+        (making the test pass vacuously on leftover state) still fails.
+        """
+        _, client, mock_mcp, model = self._ctx(request)
+
+        user_id = "test-user-abc123"
+        baseline_calls = len(mock_mcp.call_log)
+
+        resp = client.responses.create(
+            model=model,
+            input=_IMAGE_GEN_PROMPT,
+            tools=[image_gen_tool_args],
+            tool_choice=_FORCED_TOOL_CHOICE,
+            stream=False,
+            user=user_id,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+
+        # New invocation must have been recorded.
+        assert len(mock_mcp.call_log) > baseline_calls, (
+            f"Mock MCP server saw no new calls (baseline={baseline_calls}); "
+            "user-forwarding assertion would be vacuous."
+        )
+
+        last_args = mock_mcp.last_call_args
+        assert last_args is not None, "Mock MCP server saw no calls"
+        received = last_args.get("arguments", {})
+        assert received.get("user") == user_id, (
+            f"Gateway did not forward top-level request.user into MCP dispatch args; "
+            f"expected {user_id!r}, got {received.get('user')!r}. "
+            f"Full args received: {received!r}"
+        )
+
+
+# =============================================================================
 # Engine-specific classes
 # =============================================================================
 
 
 @pytest.mark.vendor("openai")
 @pytest.mark.gpu(0)
-class TestImageGenerationCloud(_ImageGenerationAssertions):
-    """``image_generation`` tool against the OpenAI cloud backend (R6.2)."""
+class TestImageGenerationCloud(_ImageGenerationAssertions, _UserForwardingAssertions):
+    """``image_generation`` tool against the OpenAI cloud backend (R6.2).
+
+    Extended for R7 to also exercise ``user`` forwarding on the
+    ``builtin_type``-tagged server config (the most common production
+    deployment).
+    """
 
     _fixture_name = "gateway_with_mock_mcp_cloud"
+
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
+class TestImageGenerationClientDeclaredServerPlain(
+    _ImageGenerationAssertions, _UserForwardingAssertions
+):
+    """R7 regression: the MCP server config has no ``builtin_type``.
+
+    The reviewer's deployment doesn't tag the MCP server with
+    ``builtin_type: image_generation`` and doesn't set a per-tool
+    ``response_format``. Before R7, the session-side format resolved to
+    ``Passthrough`` and ``ResponseTransformer::transform`` emitted an
+    ``mcp_call`` item with ``output`` + ``arguments`` fields — wrong for a
+    hosted image_generation call. The R7 runtime override rescues the
+    output shape using the client-declared ``tools: [{"type":
+    "image_generation"}]`` on the request.
+
+    Every assertion in ``_ImageGenerationAssertions`` must pass against
+    this fixture, same as the original cloud class. If R7 Fix A
+    regresses, the non-streaming test fails first (output item type +
+    field names), followed by the streaming envelope (wrong event types).
+    """
+
+    _fixture_name = "gateway_with_mock_mcp_plain_cloud"
 
 
 # ``gpu(2)`` on the gRPC classes matches the ``e2e-2gpu-responses`` job in
