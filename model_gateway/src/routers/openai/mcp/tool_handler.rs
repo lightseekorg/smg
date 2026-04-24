@@ -1,6 +1,6 @@
 //! Streaming tool call handling for MCP interception.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use openai_protocol::event_types::{
     is_function_call_type, FunctionCallEvent, ItemType, OutputItemEvent, ResponseEvent,
@@ -43,6 +43,22 @@ pub(crate) enum StreamAction {
     Forward,
     /// Accumulate the event for tool execution, do not send downstream.
     Buffer,
+    /// Drop the upstream event from the wire without triggering tool
+    /// execution.
+    ///
+    /// Used for the R6.7c native-passthrough suppression: when the upstream
+    /// OpenAI cloud API emits a hosted tool-call item (e.g.
+    /// `image_generation_call`) directly and the accompanying umbrella
+    /// `output_item.done` arrives BEFORE `response.<type>.completed`,
+    /// forwarding the umbrella would violate the spec ordering invariant
+    /// (see `.claude/_audit/openai-responses-api-spec.md` §streaming). The
+    /// handler drops the duplicated/mis-ordered envelope; the subsequent
+    /// `<type>.completed` still reaches the client and upstream re-emits the
+    /// correctly-ordered umbrella later on the wire. Unlike
+    /// [`StreamAction::ExecuteTools`], this variant does NOT kick the tool
+    /// loop — native passthrough items are not tracked in the handler's
+    /// pending-call registry, so there is nothing to dispatch.
+    Drop,
     /// The upstream signalled tool-call completion — run the MCP tool now.
     ///
     /// `forward_triggering_event` distinguishes two upstream shapes:
@@ -145,6 +161,16 @@ pub(crate) struct StreamingToolHandler {
     output_index_mapper: OutputIndexMapper,
     /// Original response id captured from the first response.created event
     pub original_response_id: Option<String>,
+    /// Output indices whose `output_item.added` carried a known tool-call
+    /// item type that the MCP-dispatch registry does NOT track (i.e. upstream
+    /// emitted a native hosted-tool item directly — `image_generation_call`,
+    /// `web_search_call`, `code_interpreter_call`, `file_search_call` — rather
+    /// than wrapping it as a `function_call` that [`handle_output_item_added`]
+    /// would register in `pending_calls`). Recorded so the
+    /// `output_item.done` gate can recognise the R6.7c "native passthrough"
+    /// path and drop the duplicate/mis-ordered umbrella without kicking the
+    /// tool loop.
+    native_passthrough_tool_call_indices: HashSet<usize>,
 }
 
 impl StreamingToolHandler {
@@ -154,6 +180,7 @@ impl StreamingToolHandler {
             pending_calls: Vec::new(),
             output_index_mapper: OutputIndexMapper::with_start(start),
             original_response_id: None,
+            native_passthrough_tool_call_indices: HashSet::new(),
         }
     }
 
@@ -240,26 +267,62 @@ impl StreamingToolHandler {
                     .and_then(|item| item.get("type"))
                     .and_then(|value| value.as_str())
                     .is_some_and(is_tool_call_item_type);
-                // Tighter guard: require the done event's `output_index` to
-                // match one of our pending calls. Without this, a mixed
-                // stream that carries a function_call the handler intercepts
-                // plus a native hosted-tool item at a different output_index
-                // (the second one gets forwarded as-is because
-                // `handle_output_item_added` does not register hosted-tool
-                // items as pending calls) would have its hosted-tool
-                // `output_item.done` suppressed — and the tool loop would
-                // never re-emit the umbrella since it only closes items it
-                // actually executed. The output_index match ensures
-                // suppression only kicks in for items this handler owns.
+                // R6.7b MCP-dispatch guard: require the done event's
+                // `output_index` to match one of our pending calls. Without
+                // this, a mixed stream that carries a function_call the
+                // handler intercepts plus a native hosted-tool item at a
+                // different output_index could have its hosted-tool
+                // `output_item.done` suppressed via the wrong arm — the
+                // tool loop only re-emits umbrellas for items it
+                // dispatched, so routing a passthrough item through the
+                // MCP-dispatch arm would drop it permanently. The
+                // output_index match ensures the MCP-dispatch arm only
+                // kicks in for items tracked by `pending_calls`.
                 let belongs_to_pending_call = done_output_index
                     .is_some_and(|idx| self.pending_calls.iter().any(|c| c.output_index == idx));
+                // R6.7c native-passthrough guard: an upstream
+                // `output_item.added` for a known hosted tool-call item
+                // type that the MCP-dispatch path does NOT track
+                // registered this output_index in
+                // `native_passthrough_tool_call_indices`. When the
+                // matching `output_item.done` arrives — mis-ordered BEFORE
+                // `response.<type>.completed` on the cloud path — we drop
+                // the upstream envelope rather than forwarding it, so the
+                // wire order the client sees satisfies the spec invariant
+                // that `output_item.done` is the LAST event for a given
+                // item. Unlike the MCP-dispatch arm, this path does NOT
+                // kick the tool loop (there is nothing to dispatch — the
+                // item was not intercepted).
+                //
+                // We `take()` the index out of the set (via `remove`) so
+                // that only the FIRST `output_item.done` for a
+                // passthrough item is dropped. Upstream re-emits a
+                // correctly-ordered umbrella after `<type>.completed`,
+                // and that second envelope must be forwarded so the
+                // client sees the terminal `output_item.done`. Without
+                // this one-shot behaviour both envelopes would be
+                // dropped and the client would never receive a final
+                // umbrella for the passthrough item.
                 if is_tool_call_done && belongs_to_pending_call && self.has_complete_calls() {
-                    // Suppress the upstream umbrella event — the tool loop
-                    // will emit its own `output_item.done` at the correct
-                    // position, AFTER `response.<type>.completed`.
+                    // MCP-dispatch path (R6.7b): suppress the upstream
+                    // umbrella event and kick the tool loop — it will emit
+                    // its own `output_item.done` at the correct position,
+                    // AFTER `response.<type>.completed`.
                     StreamAction::ExecuteTools {
                         forward_triggering_event: false,
                     }
+                } else if is_tool_call_done
+                    && done_output_index
+                        .is_some_and(|idx| self.native_passthrough_tool_call_indices.remove(&idx))
+                {
+                    // Native passthrough path (R6.7c): drop the upstream
+                    // umbrella without running the tool loop. The
+                    // downstream `<type>.completed` event still reaches
+                    // the client, and upstream's subsequent
+                    // correctly-ordered `output_item.done` is forwarded
+                    // (the index was removed above so this branch will
+                    // not match a second time for the same item).
+                    StreamAction::Drop
                 } else {
                     StreamAction::Forward
                 }
@@ -282,6 +345,21 @@ impl StreamingToolHandler {
         };
 
         if !is_function_call_type(item_type) {
+            // R6.7c: when upstream emits a hosted tool-call item directly
+            // (e.g. `image_generation_call` from OpenAI cloud native
+            // passthrough), record the output_index so the matching
+            // `output_item.done` gate can recognise the item as native
+            // passthrough rather than an MCP-dispatched call. This is the
+            // counterpart to the `belongs_to_pending_call` guard added in
+            // R6.7b — together they let the gate distinguish
+            // MCP-dispatch (tracked in `pending_calls`) from native
+            // passthrough (tracked here) without confusing the two.
+            if is_tool_call_item_type(item_type) {
+                if let Some(output_index) = cached_output_index {
+                    self.native_passthrough_tool_call_indices
+                        .insert(output_index);
+                }
+            }
             return StreamAction::Forward;
         }
 
@@ -590,22 +668,25 @@ mod tests {
     }
 
     #[test]
-    fn output_item_done_for_unregistered_hosted_tool_output_index_forwards() {
-        // The gate must also match the done event's `output_index` to a
-        // pending call. Without this guard a mixed stream where a
-        // function_call (intercepted) and a native hosted-tool item
-        // (NOT intercepted because `handle_output_item_added` only
-        // registers function_call types) live at different output
-        // indices would see the hosted-tool's `output_item.done`
-        // incorrectly suppressed — and the tool loop only re-emits
-        // umbrellas for items it actually executed, so the hosted-tool's
-        // umbrella would be permanently lost from the wire.
+    fn output_item_done_for_unobserved_hosted_tool_output_index_forwards() {
+        // When the handler has seen NEITHER a function_call_added (MCP
+        // dispatch path) NOR an output_item.added for a hosted tool-call
+        // type (native passthrough path) at the done event's
+        // output_index, the gate must forward. Dropping the umbrella
+        // without having observed the item's start would silently
+        // swallow an `output_item.done` that no one else is going to
+        // re-emit.
+        //
+        // This scenario models a truly spurious/unexpected
+        // `output_item.done` whose matching `output_item.added` never
+        // arrived — the safe action is to forward it rather than drop.
         let mut handler = StreamingToolHandler::with_starting_index(0);
-        // Pending function_call at output_index 0.
+        // Pending function_call at output_index 0 (MCP dispatch).
         bootstrap_function_call_added(&mut handler);
 
-        // Native web_search_call (passthrough) at output_index 1 — the
-        // handler never registered a pending call for this item.
+        // `output_item.done` at output_index 1 with NO preceding
+        // `output_item.added` — neither MCP-dispatch nor native
+        // passthrough tracking recorded this index.
         let done_event = r#"{
           "type": "response.output_item.done",
           "output_index": 1,
@@ -621,9 +702,8 @@ mod tests {
 
         assert!(
             matches!(action, StreamAction::Forward),
-            "output_item.done for a hosted tool whose output_index is NOT a pending call must \
-             forward — the tool loop only re-emits umbrellas for items it executed, so \
-             suppressing this would drop the umbrella permanently; got {action:?}"
+            "output_item.done for an index the handler never observed via output_item.added \
+             must forward — suppressing here would drop the umbrella permanently; got {action:?}"
         );
     }
 
@@ -714,6 +794,280 @@ mod tests {
         assert!(
             matches!(action, StreamAction::Forward),
             "expected Forward for an umbrella output_item.done on a non-tool item, got {action:?}"
+        );
+    }
+
+    // ========================================================================
+    // R6.7c — native passthrough suppression.
+    //
+    // When OpenAI cloud passthrough streams a hosted tool-call item
+    // directly (e.g. `image_generation_call` emitted end-to-end rather
+    // than wrapped as a `function_call` we intercept), R6.7b's
+    // `belongs_to_pending_call` guard short-circuits the gate because
+    // `handle_output_item_added` only registers `function_call` /
+    // `function_tool_call` types in `pending_calls`. The duplicate
+    // umbrella then reached the wire mis-ordered before
+    // `response.<type>.completed` and broke the spec invariant.
+    //
+    // R6.7c extends the gate with an OR-branch: an `output_item.added`
+    // for a hosted tool-call type records the output_index in
+    // `native_passthrough_tool_call_indices`, and the matching
+    // `output_item.done` returns `StreamAction::Drop` so the caller
+    // drops the upstream envelope without kicking the tool loop. The
+    // R6.7b MCP-dispatch arm is untouched — both paths coexist.
+    // ========================================================================
+
+    /// Feed an `output_item.added` for a hosted tool-call type so the
+    /// handler records the index in `native_passthrough_tool_call_indices`.
+    fn bootstrap_native_hosted_tool_added(
+        handler: &mut StreamingToolHandler,
+        item_type: &str,
+        output_index: usize,
+        item_id: &str,
+    ) {
+        let added_event = format!(
+            r#"{{
+              "type": "response.output_item.added",
+              "output_index": {output_index},
+              "item": {{
+                "type": "{item_type}",
+                "id": "{item_id}",
+                "status": "in_progress"
+              }}
+            }}"#
+        );
+        let _ = handler.process_event(Some("response.output_item.added"), &added_event);
+    }
+
+    /// Assert that an `output_item.done` for a hosted tool-call item at
+    /// `output_index` is dropped (the gate returns `StreamAction::Drop`)
+    /// after the corresponding upstream `output_item.added` was observed.
+    /// This is the R6.7c native-passthrough case: no MCP dispatch, no
+    /// pending call — just upstream emitting the item directly and the
+    /// gate needing to drop the mis-ordered umbrella.
+    fn assert_native_passthrough_done_drops(item_type: &str) {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        // Only upstream's `output_item.added` — no MCP-dispatched function
+        // call is pending.
+        bootstrap_native_hosted_tool_added(&mut handler, item_type, 0, "native_test");
+
+        let done_event = format!(
+            r#"{{
+              "type": "response.output_item.done",
+              "output_index": 0,
+              "item": {{
+                "type": "{item_type}",
+                "id": "native_test",
+                "status": "completed"
+              }}
+            }}"#
+        );
+
+        let action = handler.process_event(Some("response.output_item.done"), &done_event);
+
+        assert!(
+            matches!(action, StreamAction::Drop),
+            "output_item.done for native-passthrough {item_type} must be dropped — \
+             upstream emits a duplicate/mis-ordered umbrella, dropping preserves wire \
+             ordering; got {action:?}"
+        );
+    }
+
+    #[test]
+    fn output_item_done_dropped_for_native_passthrough_image_generation_call() {
+        // R6.7c: OpenAI cloud passthrough emits `image_generation_call`
+        // directly. With R6.7b alone the mis-ordered umbrella leaked to
+        // the wire because the item was not tracked in `pending_calls`.
+        // The R6.7c arm drops it based on the observed `output_item.added`.
+        assert_native_passthrough_done_drops(ItemType::IMAGE_GENERATION_CALL);
+    }
+
+    #[test]
+    fn output_item_done_dropped_for_native_passthrough_web_search_call() {
+        assert_native_passthrough_done_drops(ItemType::WEB_SEARCH_CALL);
+    }
+
+    #[test]
+    fn output_item_done_dropped_for_native_passthrough_code_interpreter_call() {
+        assert_native_passthrough_done_drops(ItemType::CODE_INTERPRETER_CALL);
+    }
+
+    #[test]
+    fn output_item_done_dropped_for_native_passthrough_file_search_call() {
+        assert_native_passthrough_done_drops(ItemType::FILE_SEARCH_CALL);
+    }
+
+    #[test]
+    fn native_passthrough_gate_coexists_with_mcp_dispatch_gate() {
+        // R6.7c invariant: both arms of the gate must fire correctly when
+        // a single stream carries an MCP-dispatched function_call at one
+        // output_index AND a native-passthrough hosted tool-call at
+        // another. The function_call's done goes through the
+        // `ExecuteTools` arm (R6.7b); the hosted tool-call's done goes
+        // through the `Drop` arm (R6.7c). Neither re-narrows the other.
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+
+        // MCP-dispatch path: function_call at output_index 0.
+        bootstrap_function_call_added(&mut handler);
+
+        // Native passthrough path: image_generation_call at output_index 1.
+        bootstrap_native_hosted_tool_added(
+            &mut handler,
+            ItemType::IMAGE_GENERATION_CALL,
+            1,
+            "ig_native",
+        );
+
+        // First done — hosted-tool at output_index 1 should Drop.
+        let passthrough_done = r#"{
+          "type": "response.output_item.done",
+          "output_index": 1,
+          "item": {
+            "type": "image_generation_call",
+            "id": "ig_native",
+            "status": "completed"
+          }
+        }"#;
+        let action = handler.process_event(Some("response.output_item.done"), passthrough_done);
+        assert!(
+            matches!(action, StreamAction::Drop),
+            "native passthrough hosted-tool done must Drop; got {action:?}"
+        );
+
+        // Second done — function_call at output_index 0 should
+        // ExecuteTools (the MCP-dispatch arm). This confirms R6.7c did
+        // not accidentally funnel the function_call into the new branch.
+        let function_call_done = r#"{
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "type": "function_call",
+            "id": "fc_test",
+            "call_id": "call_test",
+            "name": "image_generation",
+            "arguments": "{}",
+            "status": "completed"
+          }
+        }"#;
+        let action = handler.process_event(Some("response.output_item.done"), function_call_done);
+        match action {
+            StreamAction::ExecuteTools {
+                forward_triggering_event,
+            } => assert!(
+                !forward_triggering_event,
+                "MCP-dispatch arm must still suppress the upstream umbrella"
+            ),
+            other => panic!(
+                "function_call done must go through MCP-dispatch arm (ExecuteTools), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn native_passthrough_done_drops_even_when_pending_function_call_complete() {
+        // R6.7c must not depend on `pending_calls` being empty. When an
+        // MCP-dispatched function_call is in-flight (has_complete_calls()
+        // is true) AND a native passthrough hosted-tool done arrives at
+        // a different output_index, the passthrough path must still
+        // Drop — `belongs_to_pending_call` for the done's own index is
+        // false, so the R6.7b arm cleanly declines and the R6.7c arm
+        // fires.
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        bootstrap_function_call_added(&mut handler); // complete pending call @ idx 0
+        bootstrap_native_hosted_tool_added(&mut handler, ItemType::WEB_SEARCH_CALL, 2, "ws_native");
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 2,
+          "item": {
+            "type": "web_search_call",
+            "id": "ws_native",
+            "status": "completed",
+            "action": {"type": "search"}
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+        assert!(
+            matches!(action, StreamAction::Drop),
+            "native passthrough done at a non-pending-call index must Drop even when a \
+             function_call is pending elsewhere; got {action:?}"
+        );
+    }
+
+    #[test]
+    fn output_item_added_for_native_passthrough_still_forwards() {
+        // R6.7c records the output_index for later drop-gating but must
+        // still forward the `output_item.added` itself so the client
+        // sees the item come into existence. Only the mis-ordered
+        // `output_item.done` is dropped.
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+
+        let added_event = r#"{
+          "type": "response.output_item.added",
+          "output_index": 0,
+          "item": {
+            "type": "image_generation_call",
+            "id": "ig_native",
+            "status": "in_progress"
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.added"), added_event);
+        assert!(
+            matches!(action, StreamAction::Forward),
+            "native passthrough output_item.added must still forward; got {action:?}"
+        );
+    }
+
+    #[test]
+    fn native_passthrough_second_output_item_done_forwards_after_first_dropped() {
+        // R6.7c one-shot invariant (CodeRabbit P1 fix): the first
+        // (mis-ordered) upstream `output_item.done` for a native
+        // passthrough item is dropped, but upstream then re-emits a
+        // correctly-ordered `output_item.done` after
+        // `response.<type>.completed`. That second envelope MUST be
+        // forwarded so the client sees the terminal umbrella for the
+        // item — otherwise the spec's "output_item.done is the LAST
+        // event" invariant fails on the client side.
+        //
+        // The implementation removes the passthrough index from
+        // `native_passthrough_tool_call_indices` on the first drop, so
+        // the second done falls through to the `Forward` arm.
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        bootstrap_native_hosted_tool_added(
+            &mut handler,
+            ItemType::IMAGE_GENERATION_CALL,
+            0,
+            "ig_native",
+        );
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "type": "image_generation_call",
+            "id": "ig_native",
+            "status": "completed"
+          }
+        }"#;
+
+        // First done (mis-ordered, arrives BEFORE `<type>.completed`) —
+        // must be dropped.
+        let first_action = handler.process_event(Some("response.output_item.done"), done_event);
+        assert!(
+            matches!(first_action, StreamAction::Drop),
+            "first output_item.done for native passthrough must Drop; got {first_action:?}"
+        );
+
+        // Second done (correctly-ordered, arrives AFTER
+        // `<type>.completed`) — must be forwarded so the client sees
+        // the terminal umbrella.
+        let second_action = handler.process_event(Some("response.output_item.done"), done_event);
+        assert!(
+            matches!(second_action, StreamAction::Forward),
+            "second output_item.done for native passthrough must Forward after the first \
+             dropped envelope consumed the passthrough-index entry; got {second_action:?}"
         );
     }
 }
