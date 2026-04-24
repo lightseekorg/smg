@@ -225,7 +225,9 @@ async fn process_and_transform_sse_stream(
 
     // Finalize accumulated response and kick off persistence before the
     // terminal SSE send so a disconnected client does not skip storage.
-    let final_response = accumulator.finalize();
+    let mut final_response = accumulator.finalize();
+    final_response.id.clone_from(&event_emitter.response_id);
+    final_response.created_at = created_at as i64;
     #[expect(
         clippy::disallowed_methods,
         reason = "response persistence should not delay the terminal SSE event"

@@ -17,10 +17,10 @@ use smg_data_connector::{
 use tracing::info;
 
 use crate::{
-    memory::MemoryExecutionContext,
-    routers::common::persistence_utils::{
-        enqueue_conversation_memory_rows, extract_role_message_text_from_items, item_to_json,
+    memory::{
+        conversation_enqueue::enqueue_conversation_memory_rows_from_items, MemoryExecutionContext,
     },
+    routers::common::persistence_utils::item_to_json,
 };
 
 // ============================================================================
@@ -384,7 +384,7 @@ pub async fn create_conversation_items_with_headers(
     // already exist) are excluded from `memory_items`, so only fresh content
     // contributes new memory work.
     if !memory_items.is_empty() {
-        enqueue_conversation_memory_rows_for_items(
+        enqueue_conversation_memory_rows_from_items(
             conversation_memory_writer,
             &memory_execution_context,
             &conversation_id,
@@ -408,25 +408,6 @@ pub async fn create_conversation_items_with_headers(
     }
 
     (StatusCode::OK, Json(response)).into_response()
-}
-
-async fn enqueue_conversation_memory_rows_for_items(
-    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
-    memory_execution_context: &MemoryExecutionContext,
-    conversation_id: &ConversationId,
-    created_items: &[Value],
-) {
-    let user_text = extract_role_message_text_from_items(created_items, "user");
-    let assistant_text = extract_role_message_text_from_items(created_items, "assistant");
-    enqueue_conversation_memory_rows(
-        conversation_memory_writer,
-        memory_execution_context,
-        conversation_id,
-        None,
-        user_text,
-        assistant_text,
-    )
-    .await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

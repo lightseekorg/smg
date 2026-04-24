@@ -1328,7 +1328,7 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
             .execute(move |conn| {
                 conn.set_autocommit(false);
 
-                let result = (|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let s = &schema.conversation_memories;
                     let table = s.qualified_table(schema.owner.as_deref());
                     let extra_cols: Vec<(&str, Option<String>)> =
@@ -1381,13 +1381,16 @@ impl ConversationMemoryWriter for OracleConversationMemoryWriter {
 
                     conn.commit().map_err(map_oracle_error)?;
                     Ok(inserted_ids)
-                })();
+                }));
 
-                if result.is_err() {
+                if result.as_ref().map_or(true, |inner| inner.is_err()) {
                     let _ = conn.rollback();
                 }
                 conn.set_autocommit(true);
-                result
+                match result {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
             })
             .await
             .map_err(ConversationMemoryStorageError::StorageError)

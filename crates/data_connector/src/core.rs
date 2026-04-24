@@ -649,6 +649,13 @@ pub trait ConversationMemoryWriter: Send + Sync + 'static {
         input: NewConversationMemory,
     ) -> ConversationMemoryResult<ConversationMemoryId>;
 
+    /// Persist multiple conversation-memory rows using repeated
+    /// [`Self::create_memory`] calls.
+    ///
+    /// This default implementation is best-effort, non-atomic, and sequential:
+    /// it stops on the first error and does not roll back rows that were
+    /// already written. Callers must not assume all-or-nothing behavior and
+    /// should handle partial writes accordingly.
     async fn create_memories(
         &self,
         inputs: Vec<NewConversationMemory>,

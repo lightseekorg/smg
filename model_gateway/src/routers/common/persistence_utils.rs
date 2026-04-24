@@ -15,7 +15,9 @@ use smg_data_connector::{
 };
 use tracing::{debug, info, warn};
 
-use crate::memory::{build_enqueue_plan, EnqueueInputs, MemoryExecutionContext};
+use crate::memory::{
+    conversation_enqueue::enqueue_conversation_memory_rows_from_turn_items, MemoryExecutionContext,
+};
 
 // ============================================================================
 // Constants
@@ -167,125 +169,6 @@ pub async fn create_and_link_item(
 /// Extract a string field from JSON, returning owned String
 fn get_string(json: &Value, key: &str) -> Option<String> {
     json.get(key).and_then(|v| v.as_str()).map(String::from)
-}
-
-fn push_trimmed(text: &str, out: &mut Vec<String>) {
-    let trimmed = text.trim();
-    if !trimmed.is_empty() {
-        out.push(trimmed.to_string());
-    }
-}
-
-fn collect_text_fragments(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::String(text) => push_trimmed(text, out),
-        Value::Array(values) => {
-            for item in values {
-                collect_text_fragments(item, out);
-            }
-        }
-        Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                push_trimmed(text, out);
-            } else if let Some(content) = map.get("content") {
-                collect_text_fragments(content, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn join_text_fragments(fragments: Vec<String>) -> Option<String> {
-    if fragments.is_empty() {
-        None
-    } else {
-        Some(fragments.join("\n"))
-    }
-}
-
-pub(crate) fn extract_role_message_text_from_items(items: &[Value], role: &str) -> Option<String> {
-    let mut fragments = Vec::new();
-
-    for item in items {
-        if item.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        if item.get("role").and_then(Value::as_str) != Some(role) {
-            continue;
-        }
-        if let Some(content) = item.get("content") {
-            collect_text_fragments(content, &mut fragments);
-        }
-    }
-
-    join_text_fragments(fragments)
-}
-
-fn extract_turn_text_for_enqueue(
-    input_items: &[Value],
-    output_items: &[Value],
-) -> (Option<String>, Option<String>) {
-    (
-        extract_role_message_text_from_items(input_items, "user"),
-        extract_role_message_text_from_items(output_items, "assistant"),
-    )
-}
-
-pub(crate) async fn enqueue_conversation_memory_rows(
-    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
-    memory_execution_context: &MemoryExecutionContext,
-    conversation_id: &ConversationId,
-    response_id: Option<ResponseId>,
-    user_text: Option<String>,
-    assistant_text: Option<String>,
-) {
-    let plan = match build_enqueue_plan(EnqueueInputs {
-        now: Utc::now(),
-        memory_execution_context: memory_execution_context.clone(),
-        conversation_id: conversation_id.clone(),
-        response_id,
-        user_text,
-        assistant_text,
-    }) {
-        Ok(Some(plan)) => plan,
-        Ok(None) => return,
-        Err(reason) => {
-            warn!(
-                conversation_id = %conversation_id.0,
-                ?reason,
-                "Skipping conversation memory enqueue due to invalid durable memory configuration"
-            );
-            return;
-        }
-    };
-
-    if let Err(err) = conversation_memory_writer.create_memories(plan.rows).await {
-        warn!(
-            conversation_id = %conversation_id.0,
-            error = %err,
-            "Failed to enqueue conversation memory rows"
-        );
-    }
-}
-
-async fn enqueue_conversation_memories_from_items(
-    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
-    memory_execution_context: &MemoryExecutionContext,
-    conversation_id: &ConversationId,
-    response_id: Option<ResponseId>,
-    input_items: &[Value],
-    output_items: &[Value],
-) {
-    let (user_text, assistant_text) = extract_turn_text_for_enqueue(input_items, output_items);
-    enqueue_conversation_memory_rows(
-        conversation_memory_writer,
-        memory_execution_context,
-        conversation_id,
-        response_id,
-        user_text,
-        assistant_text,
-    )
-    .await;
 }
 
 /// Build a StoredResponse from response JSON and original request
@@ -572,6 +455,8 @@ async fn persist_conversation_items_inner(
     stored_response.input = Value::Array(input_items.clone());
     if let Some(conv_id) = &conv_id_opt {
         stored_response.conversation_id = Some(conv_id.0.clone());
+    } else {
+        stored_response.conversation_id = None;
     }
 
     response_storage
@@ -589,7 +474,7 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
-        enqueue_conversation_memories_from_items(
+        enqueue_conversation_memory_rows_from_turn_items(
             &conversation_memory_writer,
             &memory_execution_context,
             &conv_id,

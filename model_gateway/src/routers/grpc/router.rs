@@ -30,7 +30,10 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::retry::{is_retryable_status, RetryExecutor},
+        common::{
+            header_utils::MemoryHeaderView,
+            retry::{is_retryable_status, RetryExecutor},
+        },
         RouterTrait,
     },
     worker::WorkerRegistry,
@@ -327,9 +330,15 @@ impl GrpcRouter {
             return error_response;
         }
 
-        let memory_execution_context = headers
-            .map(|h| MemoryExecutionContext::from_http_headers(h, &self.memory_runtime_config))
-            .unwrap_or_default();
+        let memory_execution_context = match headers {
+            Some(headers) => {
+                MemoryExecutionContext::from_http_headers(headers, &self.memory_runtime_config)
+            }
+            None => MemoryExecutionContext::from_headers(
+                &MemoryHeaderView::default(),
+                &self.memory_runtime_config,
+            ),
+        };
 
         // Choose implementation based on Harmony model detection (checks worker metadata)
         let is_harmony =

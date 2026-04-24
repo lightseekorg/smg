@@ -70,6 +70,11 @@ impl WasmStorageHook {
         let mut linker = Linker::<StorageHookWasiState>::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| format!("WASI linker setup failed: {e}"))?;
+        linker.instantiate_pre(&component).map_err(|e| {
+            format!(
+                "storage hook component is incompatible with the current host interface; rebuild the WASM component against the current storage-hooks.wit: {e}"
+            )
+        })?;
 
         Ok(Self {
             engine,

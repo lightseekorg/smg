@@ -1022,47 +1022,68 @@ impl ConversationMemoryWriter for PostgresConversationMemoryWriter {
             .await
             .map_err(|e| ConversationMemoryStorageError::StorageError(e.to_string()))?;
 
+        let mut col_names: Vec<&str> = vec![s.col("memory_id")];
+        macro_rules! push_col_name {
+            ($logical:literal) => {
+                if !s.is_skipped($logical) {
+                    col_names.push(s.col($logical));
+                }
+            };
+        }
+        push_col_name!("conversation_id");
+        push_col_name!("conversation_version");
+        push_col_name!("response_id");
+        push_col_name!("memory_type");
+        push_col_name!("status");
+        push_col_name!("attempt");
+        push_col_name!("owner_id");
+        push_col_name!("next_run_at");
+        push_col_name!("lease_until");
+        push_col_name!("content");
+        push_col_name!("memory_config");
+        push_col_name!("scope_id");
+        push_col_name!("error_msg");
+        for (name, _) in &extra_cols {
+            col_names.push(*name);
+        }
+        let placeholders = (1..=col_names.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+            col_names.join(", "),
+        );
+
         let mut inserted_ids = Vec::with_capacity(prepared_rows.len());
         for row in &prepared_rows {
-            let mut col_names: Vec<&str> = vec![s.col("memory_id")];
             let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&row.id.0];
 
-            macro_rules! push_col {
+            macro_rules! push_param {
                 ($logical:literal, $value:expr) => {
                     if !s.is_skipped($logical) {
-                        col_names.push(s.col($logical));
                         params.push($value);
                     }
                 };
             }
 
-            push_col!("conversation_id", &row.conversation_id);
-            push_col!("conversation_version", &row.conversation_version);
-            push_col!("response_id", &row.response_id);
-            push_col!("memory_type", &row.memory_type);
-            push_col!("status", &row.status);
-            push_col!("attempt", &row.attempt);
-            push_col!("owner_id", &row.owner_id);
-            push_col!("next_run_at", &row.next_run_at);
-            push_col!("lease_until", &row.lease_until);
-            push_col!("content", &row.content);
-            push_col!("memory_config", &row.memory_config);
-            push_col!("scope_id", &row.scope_id);
-            push_col!("error_msg", &row.error_msg);
+            push_param!("conversation_id", &row.conversation_id);
+            push_param!("conversation_version", &row.conversation_version);
+            push_param!("response_id", &row.response_id);
+            push_param!("memory_type", &row.memory_type);
+            push_param!("status", &row.status);
+            push_param!("attempt", &row.attempt);
+            push_param!("owner_id", &row.owner_id);
+            push_param!("next_run_at", &row.next_run_at);
+            push_param!("lease_until", &row.lease_until);
+            push_param!("content", &row.content);
+            push_param!("memory_config", &row.memory_config);
+            push_param!("scope_id", &row.scope_id);
+            push_param!("error_msg", &row.error_msg);
 
-            for (name, val) in &extra_cols {
-                col_names.push(*name);
+            for (_, val) in &extra_cols {
                 params.push(val);
             }
-
-            let placeholders = (1..=params.len())
-                .map(|i| format!("${i}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "INSERT INTO {table} ({}) VALUES ({placeholders})",
-                col_names.join(", "),
-            );
 
             transaction
                 .execute(&sql, &params)
