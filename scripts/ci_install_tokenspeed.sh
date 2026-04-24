@@ -25,12 +25,10 @@ fi
 # we want a newer runtime; keeping it pinned avoids surprise breakage when
 # TokenSpeed main moves ahead of what our gRPC servicer was verified against.
 #
-# Temporarily pinned to feat/dense-llama-model-registry
-# (lightseekorg/tokenspeed#357) — that branch adds ``LlamaForCausalLM`` to
-# TokenSpeed's model registry so the e2e ``test_function_calling`` suite can
-# run meta-llama/Llama-3.2-1B-Instruct against the tokenspeed engine. Flip
-# back to ``main`` once that PR merges.
-TOKENSPEED_REF="${TOKENSPEED_REF:-feat/dense-llama-model-registry}"
+# ``main`` includes lightseekorg/tokenspeed#357 (dense ``LlamaForCausalLM``
+# registration) so the e2e ``test_function_calling`` suite can run
+# meta-llama/Llama-3.2-1B-Instruct against the tokenspeed engine.
+TOKENSPEED_REF="${TOKENSPEED_REF:-main}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
