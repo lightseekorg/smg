@@ -304,8 +304,8 @@ pub(super) async fn load_previous_messages(
 /// Strip `ResponseTool::ImageGeneration` from a request's tools list once
 /// the MCP session has exposed an MCP-routed replacement.
 ///
-/// Motivation (R6.8): the harmony builder synthesizes a function-tool
-/// description named `image_generation` from
+/// The harmony builder synthesizes a function-tool description named
+/// `image_generation` from
 /// [`openai_protocol::responses::ResponseTool::ImageGeneration`]. That is
 /// the right advertisement when no MCP server is configured, but once the
 /// MCP loop injects a `ResponseTool::Function` for the MCP-exposed

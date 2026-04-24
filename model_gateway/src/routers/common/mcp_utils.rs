@@ -533,7 +533,7 @@ mod tests {
         // Image generation is wired through the same hosted-tool MCP plumbing
         // as web_search / code_interpreter / file_search. This test proves
         // BuiltinToolType::ImageGeneration → ResponseFormat::ImageGenerationCall
-        // so PRs R6.2/R6.3/R6.4 can rely on the infrastructure.
+        // so per-router wiring can rely on the infrastructure.
         let mut image_gen_tools = HashMap::new();
         image_gen_tools.insert(
             "generate_image".to_string(),

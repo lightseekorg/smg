@@ -1579,7 +1579,7 @@ mod tests {
     }
 
     // ========================================================================
-    // R6.7 Gap B — streaming emission ordering invariant.
+    // Streaming emission ordering invariant.
     //
     // `send_tool_call_completion_events` MUST emit
     // `response.<tool>.completed` BEFORE `response.output_item.done` so the
@@ -1723,13 +1723,13 @@ mod tests {
 
     #[test]
     fn code_interpreter_completion_events_fire_before_output_item_done() {
-        // R6.7b companion: the suppression gate in `tool_handler.rs` drops
-        // the upstream umbrella `output_item.done` for every tool-call
-        // item type. This test locks the downstream half of the contract
-        // for `code_interpreter_call` — the tool loop's completion
-        // emitter must push `response.code_interpreter_call.completed`
-        // BEFORE `response.output_item.done` so the gate's suppression
-        // lines up with a correctly-ordered wire sequence.
+        // The suppression gate in `tool_handler.rs` drops the upstream
+        // umbrella `output_item.done` for every tool-call item type. This
+        // test locks the downstream half of the contract for
+        // `code_interpreter_call` — the tool loop's completion emitter
+        // must push `response.code_interpreter_call.completed` BEFORE
+        // `response.output_item.done` so the gate's suppression lines up
+        // with a correctly-ordered wire sequence.
         let call = super::FunctionCallInProgress {
             call_id: "call_ci".to_string(),
             name: "code_interpreter".to_string(),
@@ -1781,7 +1781,8 @@ mod tests {
         );
 
         // No duplicate `output_item.done` — the tool loop emits exactly
-        // one umbrella (the R6.7b gate drops the upstream copy).
+        // one umbrella (the upstream copy is dropped by the suppression
+        // gate in `tool_handler.rs`).
         let done_count = types
             .iter()
             .filter(|t| *t == "response.output_item.done")
@@ -1794,10 +1795,9 @@ mod tests {
 
     #[test]
     fn file_search_completion_events_fire_before_output_item_done() {
-        // R6.7b companion: lock the ordering contract for the remaining
-        // hosted `file_search_call` format so the gate's suppression
-        // covers every tool-call item type listed in
-        // `TOOL_CALL_ITEM_TYPES`.
+        // Lock the ordering contract for the hosted `file_search_call`
+        // format so the gate's suppression covers every tool-call item
+        // type listed in `TOOL_CALL_ITEM_TYPES`.
         let call = super::FunctionCallInProgress {
             call_id: "call_fs".to_string(),
             name: "file_search".to_string(),
@@ -1849,7 +1849,8 @@ mod tests {
         );
 
         // No duplicate `output_item.done` — the tool loop emits exactly
-        // one umbrella (the R6.7b gate drops the upstream copy).
+        // one umbrella (the upstream copy is dropped by the suppression
+        // gate in `tool_handler.rs`).
         let done_count = types
             .iter()
             .filter(|t| *t == "response.output_item.done")

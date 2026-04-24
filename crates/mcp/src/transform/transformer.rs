@@ -260,8 +260,8 @@ impl ResponseTransformer {
             // `result` is non-optional in the spec; fall back to an empty
             // string when the MCP server returns no image data so the shape
             // still matches `ResponseOutputItem::ImageGenerationCall`. Router
-            // wiring in R6.2/R6.3/R6.4 is responsible for surfacing an error
-            // status when `image_b64` is missing.
+            // wiring is responsible for surfacing an error status when
+            // `image_b64` is missing.
             result: image_b64.unwrap_or_default(),
             revised_prompt,
             status: ImageGenerationCallStatus::Completed,
@@ -1111,10 +1111,10 @@ mod tests {
         // MCP servers authored against the FastMCP SDK (and any server that
         // returns a plain `dict` from its tool handler) emit a single text
         // block whose JSON body has `result` / `revised_prompt` at the TOP
-        // level — there is no `openai_response` wrapper. This is the shape
-        // produced by the R6.5 in-process mock and is equally valid per the
-        // MCP spec. The extractor must read those top-level fields the same
-        // way it reads direct-object and embedded-openai_response payloads.
+        // level — there is no `openai_response` wrapper. This shape is
+        // equally valid per the MCP spec. The extractor must read those
+        // top-level fields the same way it reads direct-object and
+        // embedded-openai_response payloads.
         let result = json!([
             {
                 "type": "text",
@@ -1227,7 +1227,7 @@ mod tests {
     fn test_image_generation_transform_missing_image_data() {
         // When the MCP server returns neither image nor prompt, the transformer
         // still produces a well-formed ImageGenerationCall with an empty result.
-        // Per-router wiring in R6.2/R6.3/R6.4 owns surfacing an error status.
+        // Per-router wiring owns surfacing an error status.
         let result = json!({});
 
         let transformed = ResponseTransformer::transform(

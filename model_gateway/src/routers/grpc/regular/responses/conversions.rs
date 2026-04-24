@@ -551,9 +551,9 @@ mod tests {
 
     #[test]
     fn test_image_generation_call_input_rejected() {
-        // Regression (R6.4): `image_generation_call` items are server-produced
-        // output (populated via the shared MCP transformer in R6.1) and must
-        // not be round-tripped back into the chat conversion as input.
+        // Regression: `image_generation_call` items are server-produced
+        // output (populated via the shared MCP transformer) and must not
+        // be round-tripped back into the chat conversion as input.
         // The regular gRPC path — used by non-Harmony text LLMs that only do
         // function calling — rejects this variant with the same contract as
         // sibling hosted-tool items (Computer/Shell/Custom/ApplyPatch).
