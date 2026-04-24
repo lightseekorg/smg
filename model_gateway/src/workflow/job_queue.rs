@@ -642,6 +642,7 @@ impl JobQueue {
             Job::RemoveTokenizer { request } => {
                 // Tokenizer removal is synchronous and fast
                 if let Some(entry) = context.tokenizer_registry.remove_by_id(&request.id) {
+                    context.multimodal_config_registry.remove(&entry.id);
                     info!(
                         "Successfully removed tokenizer '{}' (id: {})",
                         entry.name, entry.id

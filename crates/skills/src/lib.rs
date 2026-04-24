@@ -17,12 +17,12 @@ pub use api::{
     UpdateSkillVersionRequest, UploadedSkillFile,
 };
 pub use config::{
-    SkillsAdminConfig, SkillsAdminOperation, SkillsBlobStoreBackend, SkillsBlobStoreConfig,
-    SkillsBudgetLimit, SkillsCacheConfig, SkillsConfig, SkillsDependenciesConfig,
-    SkillsExecutionAsyncMode, SkillsExecutionConfig, SkillsExecutionModeOverrides,
-    SkillsInstructionBudgetConfig, SkillsMissingMcpPolicy, SkillsRateLimitsConfig,
-    SkillsResolutionMode, SkillsRetentionConfig, SkillsRetentionMode, SkillsTenancyConfig,
-    SkillsToolLoopConfig, SkillsZdrConfig,
+    SkillUploadLimits, SkillsAdminConfig, SkillsAdminOperation, SkillsBlobStoreBackend,
+    SkillsBlobStoreConfig, SkillsBudgetLimit, SkillsCacheConfig, SkillsConfig,
+    SkillsDependenciesConfig, SkillsExecutionAsyncMode, SkillsExecutionConfig,
+    SkillsExecutionModeOverrides, SkillsInstructionBudgetConfig, SkillsMissingMcpPolicy,
+    SkillsRateLimitsConfig, SkillsResolutionMode, SkillsRetentionConfig, SkillsRetentionMode,
+    SkillsTenancyConfig, SkillsToolLoopConfig, SkillsZdrConfig,
 };
 pub use memory::InMemorySkillStore;
 pub use storage::{

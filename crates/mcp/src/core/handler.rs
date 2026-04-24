@@ -5,7 +5,7 @@
 //! - Tool/resource/prompt list change notifications
 //! - Progress and logging notifications
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::RwLock;
 use rmcp::{
@@ -38,6 +38,7 @@ pub struct HandlerRequestContext {
     pub request_id: String,
     pub approval_mode: ApprovalMode,
     pub tenant_ctx: TenantContext,
+    pub forwarded_headers: HashMap<String, String>,
 }
 
 impl HandlerRequestContext {
@@ -45,11 +46,13 @@ impl HandlerRequestContext {
         request_id: impl Into<String>,
         approval_mode: ApprovalMode,
         tenant_ctx: TenantContext,
+        forwarded_headers: HashMap<String, String>,
     ) -> Self {
         Self {
             request_id: request_id.into(),
             approval_mode,
             tenant_ctx,
+            forwarded_headers,
         }
     }
 }
@@ -350,6 +353,7 @@ mod tests {
             "req-1",
             ApprovalMode::PolicyOnly,
             TenantContext::new("tenant-1"),
+            HashMap::new(),
         );
 
         handler.set_request_context(ctx.clone());

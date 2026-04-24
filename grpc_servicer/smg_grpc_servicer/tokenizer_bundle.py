@@ -25,6 +25,7 @@ TOKENIZER_FILES = [
     "tokenizer.model",  # SentencePiece
     "tiktoken.model",  # tiktoken
     "chat_template.json",
+    "preprocessor_config.json",  # multimodal image preprocessor
 ]
 
 # Glob patterns for additional tokenizer-related files

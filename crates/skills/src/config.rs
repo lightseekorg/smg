@@ -9,6 +9,8 @@ pub use smg_blob_storage::{
     BlobStoreConfig as SkillsBlobStoreConfig,
 };
 
+const MEBIBYTE: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillsMissingMcpPolicy {
@@ -37,7 +39,9 @@ pub enum SkillsExecutionAsyncMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillsAdminOperation {
+    CreateAnyTenant,
     ReadAnyTenant,
+    UpdateAnyTenant,
     DeleteAnyTenant,
     CreateAlias,
     ExecuteMigration,
@@ -166,6 +170,52 @@ pub struct SkillsConfig {
     pub retention: SkillsRetentionConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillUploadLimits {
+    pub max_upload_size_bytes: usize,
+    pub max_files_per_version: usize,
+    pub max_file_size_bytes: usize,
+}
+
+impl SkillUploadLimits {
+    pub fn from_config(config: &SkillsConfig) -> Result<Self, String> {
+        if config.max_upload_size_mb == 0 {
+            return Err("skills.max_upload_size_mb must be greater than 0".to_string());
+        }
+        if config.max_file_size_mb == 0 {
+            return Err("skills.max_file_size_mb must be greater than 0".to_string());
+        }
+        if config.max_file_size_mb > config.max_upload_size_mb {
+            return Err(
+                "skills.max_file_size_mb must be less than or equal to skills.max_upload_size_mb"
+                    .to_string(),
+            );
+        }
+        if config.max_files_per_version == 0 {
+            return Err("skills.max_files_per_version must be greater than 0".to_string());
+        }
+
+        Ok(Self {
+            max_upload_size_bytes: mb_to_bytes(
+                config.max_upload_size_mb,
+                "skills.max_upload_size_mb",
+            )?,
+            max_files_per_version: config.max_files_per_version,
+            max_file_size_bytes: mb_to_bytes(config.max_file_size_mb, "skills.max_file_size_mb")?,
+        })
+    }
+}
+
+impl Default for SkillUploadLimits {
+    fn default() -> Self {
+        Self {
+            max_upload_size_bytes: 30 * MEBIBYTE,
+            max_files_per_version: 500,
+            max_file_size_bytes: 25 * MEBIBYTE,
+        }
+    }
+}
+
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
@@ -188,6 +238,12 @@ impl Default for SkillsConfig {
             retention: SkillsRetentionConfig::default(),
         }
     }
+}
+
+fn mb_to_bytes(value_mb: usize, field: &'static str) -> Result<usize, String> {
+    value_mb
+        .checked_mul(MEBIBYTE)
+        .ok_or_else(|| format!("{field} is too large to convert to bytes"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,7 +274,9 @@ impl Default for SkillsAdminConfig {
         Self {
             enabled: false,
             allowed_operations: vec![
+                SkillsAdminOperation::CreateAnyTenant,
                 SkillsAdminOperation::ReadAnyTenant,
+                SkillsAdminOperation::UpdateAnyTenant,
                 SkillsAdminOperation::DeleteAnyTenant,
                 SkillsAdminOperation::CreateAlias,
                 SkillsAdminOperation::ExecuteMigration,

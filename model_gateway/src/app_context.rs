@@ -13,7 +13,7 @@ use smg_data_connector::{
     StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
-use smg_skills::SkillService;
+use smg_skills::{SkillService, SkillUploadLimits};
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
@@ -22,7 +22,10 @@ use crate::{
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
-    routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
+    routers::{
+        grpc::multimodal::MultimodalConfigRegistry, openai::realtime::RealtimeRegistry,
+        router_manager::RouterManager,
+    },
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
     worker::{KvEventMonitor, WorkerMonitor, WorkerRegistry, WorkerService},
     workflow::{JobQueue, WorkflowEngines},
@@ -52,6 +55,7 @@ pub struct AppContext {
     pub router_config: RouterConfig,
     pub rate_limiter: Option<Arc<TokenBucket>>,
     pub tokenizer_registry: Arc<TokenizerRegistry>,
+    pub multimodal_config_registry: Arc<MultimodalConfigRegistry>,
     pub reasoning_parser_factory: Option<ReasoningParserFactory>,
     pub tool_parser_factory: Option<ToolParserFactory>,
     pub worker_registry: Arc<WorkerRegistry>,
@@ -249,6 +253,14 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn background_repository(
+        mut self,
+        background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
+    ) -> Self {
+        self.background_repository = background_repository;
+        self
+    }
+
     pub fn worker_monitor(mut self, worker_monitor: Option<Arc<WorkerMonitor>>) -> Self {
         self.worker_monitor = worker_monitor;
         self
@@ -353,6 +365,7 @@ impl AppContextBuilder {
             tokenizer_registry: self
                 .tokenizer_registry
                 .ok_or(AppContextBuildError::MissingField("tokenizer_registry"))?,
+            multimodal_config_registry: Arc::new(MultimodalConfigRegistry::new()),
             reasoning_parser_factory: self.reasoning_parser_factory,
             tool_parser_factory: self.tool_parser_factory,
             worker_registry,
@@ -673,7 +686,12 @@ impl AppContextBuilder {
         let blob_store =
             create_blob_store(&skills_config.blob_store, Some(&skills_config.cache))
                 .map_err(|error| format!("Failed to initialize skills blob store: {error}"))?;
-        self.skill_service = Some(Arc::new(SkillService::in_memory(blob_store)));
+        let upload_limits = SkillUploadLimits::from_config(skills_config)
+            .map_err(|error| format!("Invalid skills upload limits: {error}"))?;
+        self.skill_service = Some(Arc::new(SkillService::in_memory_with_limits(
+            blob_store,
+            upload_limits,
+        )));
         Ok(self)
     }
 

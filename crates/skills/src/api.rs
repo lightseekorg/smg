@@ -11,6 +11,7 @@ use ulid::Ulid;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
+    config::SkillUploadLimits,
     memory::InMemorySkillStore,
     storage::{
         BundleTokenStore, ContinuationCookieStore, SkillMetadataStore, SkillsStoreError,
@@ -21,8 +22,8 @@ use crate::{
         SkillVersionRecord,
     },
     validation::{
-        is_code_file_path, normalize_skill_bundle_zip, parse_skill_bundle, SkillBundleArchiveError,
-        SkillParseError,
+        is_code_file_path, normalize_skill_bundle_zip_with_limits, parse_skill_bundle,
+        SkillBundleArchiveError, SkillParseError,
     },
 };
 
@@ -40,6 +41,7 @@ struct SkillServiceInner {
     bundle_token_store: Option<Arc<dyn BundleTokenStore>>,
     continuation_cookie_store: Option<Arc<dyn ContinuationCookieStore>>,
     blob_store: Option<Arc<dyn BlobStore>>,
+    upload_limits: SkillUploadLimits,
 }
 
 impl fmt::Debug for SkillServiceInner {
@@ -193,6 +195,7 @@ impl SkillService {
                 bundle_token_store: None,
                 continuation_cookie_store: None,
                 blob_store: None,
+                upload_limits: SkillUploadLimits::default(),
             }),
         }
     }
@@ -204,6 +207,24 @@ impl SkillService {
         continuation_cookie_store: Arc<dyn ContinuationCookieStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
+        Self::single_process_with_limits(
+            metadata_store,
+            tenant_alias_store,
+            bundle_token_store,
+            continuation_cookie_store,
+            blob_store,
+            SkillUploadLimits::default(),
+        )
+    }
+
+    pub fn single_process_with_limits(
+        metadata_store: Arc<dyn SkillMetadataStore>,
+        tenant_alias_store: Arc<dyn TenantAliasStore>,
+        bundle_token_store: Arc<dyn BundleTokenStore>,
+        continuation_cookie_store: Arc<dyn ContinuationCookieStore>,
+        blob_store: Arc<dyn BlobStore>,
+        upload_limits: SkillUploadLimits,
+    ) -> Self {
         Self {
             inner: Arc::new(SkillServiceInner {
                 mode: SkillServiceMode::SingleProcess,
@@ -212,6 +233,7 @@ impl SkillService {
                 bundle_token_store: Some(bundle_token_store),
                 continuation_cookie_store: Some(continuation_cookie_store),
                 blob_store: Some(blob_store),
+                upload_limits,
             }),
         }
     }
@@ -224,6 +246,21 @@ impl SkillService {
             store.clone(),
             store,
             blob_store,
+        )
+    }
+
+    pub fn in_memory_with_limits(
+        blob_store: Arc<dyn BlobStore>,
+        upload_limits: SkillUploadLimits,
+    ) -> Self {
+        let store = Arc::new(InMemorySkillStore::default());
+        Self::single_process_with_limits(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store,
+            blob_store,
+            upload_limits,
         )
     }
 
@@ -249,6 +286,10 @@ impl SkillService {
 
     pub fn blob_store(&self) -> Option<Arc<dyn BlobStore>> {
         self.inner.blob_store.clone()
+    }
+
+    pub fn upload_limits(&self) -> SkillUploadLimits {
+        self.inner.upload_limits
     }
 
     pub async fn get_skill(
@@ -374,7 +415,7 @@ impl SkillService {
                 component: "blob_store",
             })?;
 
-        let (bundle, media_types) = normalize_upload_bundle(request.upload)?;
+        let (bundle, media_types) = normalize_upload_bundle(request.upload, self.upload_limits())?;
         let parsed_bundle = parse_bundle_contents(&bundle)?;
         let skill_id = generate_skill_id();
         let version = generate_version_id(&[]);
@@ -418,16 +459,10 @@ impl SkillService {
             created_at: now,
         };
 
-        if let Err(error) = metadata_store.put_skill(skill_record.clone()).await {
-            cleanup_blobs(&*blob_store, &version_record.file_manifest).await;
-            return Err(error.into());
-        }
-
         if let Err(error) = metadata_store
-            .put_skill_version(version_record.clone())
+            .put_skill_with_initial_version(skill_record.clone(), version_record.clone())
             .await
         {
-            let _ = metadata_store.delete_skill(&tenant_id, &skill_id).await;
             cleanup_blobs(&*blob_store, &version_record.file_manifest).await;
             return Err(error.into());
         }
@@ -482,7 +517,7 @@ impl SkillService {
             })
             .transpose()?;
 
-        let (bundle, media_types) = normalize_upload_bundle(request.upload)?;
+        let (bundle, media_types) = normalize_upload_bundle(request.upload, self.upload_limits())?;
         let parsed_bundle = parse_bundle_contents(&bundle)?;
         let version = generate_version_id(&existing_versions);
         let version_number = next_version_number(&existing_versions);
@@ -513,14 +548,6 @@ impl SkillService {
             created_at: now,
         };
 
-        if let Err(error) = metadata_store
-            .put_skill_version(version_record.clone())
-            .await
-        {
-            cleanup_blobs(&*blob_store, &version_record.file_manifest).await;
-            return Err(error.into());
-        }
-
         let mut updated_skill = existing_skill.clone();
         updated_skill.latest_version = Some(version.clone());
         if updated_skill.default_version.is_none() {
@@ -531,10 +558,10 @@ impl SkillService {
         apply_skill_projection_from_version(&mut updated_skill, &default_projection);
         updated_skill.updated_at = now;
 
-        if let Err(error) = metadata_store.put_skill(updated_skill.clone()).await {
-            let _ = metadata_store
-                .delete_skill_version(&skill_id, &version)
-                .await;
+        if let Err(error) = metadata_store
+            .put_skill_version_and_update_skill(version_record.clone(), updated_skill.clone())
+            .await
+        {
             cleanup_blobs(&*blob_store, &version_record.file_manifest).await;
             return Err(error.into());
         }
@@ -795,21 +822,29 @@ fn normalize_required_value(
 
 fn normalize_upload_bundle(
     upload: SkillUpload,
+    limits: SkillUploadLimits,
 ) -> Result<(NormalizedSkillBundle, HashMap<String, Option<String>>), SkillServiceError> {
     match upload {
         SkillUpload::Zip(bytes) => {
-            let bundle = normalize_skill_bundle_zip(&bytes)?;
+            if bytes.len() > limits.max_upload_size_bytes {
+                return Err(SkillBundleArchiveError::BundleTooLarge {
+                    max_bytes: limits.max_upload_size_bytes as u64,
+                }
+                .into());
+            }
+            let bundle = normalize_skill_bundle_zip_with_limits(&bytes, limits)?;
             Ok((bundle, HashMap::new()))
         }
         SkillUpload::Files(files) => {
             if files.is_empty() {
                 return Err(SkillServiceError::MissingUploadParts);
             }
+            validate_files_upload_limits(&files, limits)?;
             let media_types = files
                 .iter()
                 .map(|file| (file.relative_path.clone(), file.media_type.clone()))
                 .collect::<HashMap<_, _>>();
-            let bundle = normalize_files_upload(&files)?;
+            let bundle = normalize_files_upload(&files, limits)?;
             Ok((bundle, media_types))
         }
     }
@@ -817,6 +852,7 @@ fn normalize_upload_bundle(
 
 fn normalize_files_upload(
     files: &[UploadedSkillFile],
+    limits: SkillUploadLimits,
 ) -> Result<NormalizedSkillBundle, SkillServiceError> {
     let mut buffer = Cursor::new(Vec::new());
     {
@@ -835,7 +871,43 @@ fn normalize_files_upload(
             .map_err(|error| SkillServiceError::BundleBuild(error.to_string()))?;
     }
 
-    normalize_skill_bundle_zip(buffer.get_ref()).map_err(Into::into)
+    normalize_skill_bundle_zip_with_limits(buffer.get_ref(), limits).map_err(Into::into)
+}
+
+fn validate_files_upload_limits(
+    files: &[UploadedSkillFile],
+    limits: SkillUploadLimits,
+) -> Result<(), SkillServiceError> {
+    if files.len() > limits.max_files_per_version {
+        return Err(SkillBundleArchiveError::TooManyFiles {
+            max_files: limits.max_files_per_version,
+        }
+        .into());
+    }
+
+    let mut total_size_bytes = 0usize;
+    for file in files {
+        if file.contents.len() > limits.max_file_size_bytes {
+            return Err(SkillBundleArchiveError::EntryTooLarge {
+                path: file.relative_path.clone(),
+                max_bytes: limits.max_file_size_bytes as u64,
+            }
+            .into());
+        }
+        total_size_bytes = total_size_bytes.checked_add(file.contents.len()).ok_or(
+            SkillBundleArchiveError::BundleTooLarge {
+                max_bytes: limits.max_upload_size_bytes as u64,
+            },
+        )?;
+        if total_size_bytes > limits.max_upload_size_bytes {
+            return Err(SkillBundleArchiveError::BundleTooLarge {
+                max_bytes: limits.max_upload_size_bytes as u64,
+            }
+            .into());
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_bundle_contents(
@@ -1023,8 +1095,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CreateSkillRequest, CreateSkillVersionRequest, SkillService, SkillServiceMode, SkillUpload,
-        UpdateSkillRequest, UpdateSkillVersionRequest, UploadedSkillFile,
+        CreateSkillRequest, CreateSkillVersionRequest, SkillBundleArchiveError, SkillService,
+        SkillServiceError, SkillServiceMode, SkillUpload, SkillUploadLimits, UpdateSkillRequest,
+        UpdateSkillVersionRequest, UploadedSkillFile,
     };
 
     #[test]
@@ -1105,6 +1178,48 @@ mod tests {
             .await?
             .is_some());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_skill_enforces_configured_file_count_limit() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory_with_limits(
+            blob_store,
+            SkillUploadLimits {
+                max_upload_size_bytes: 1024,
+                max_files_per_version: 1,
+                max_file_size_bytes: 1024,
+            },
+        );
+
+        let error = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![
+                    UploadedSkillFile {
+                        relative_path: "SKILL.md".to_string(),
+                        contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                            .to_vec(),
+                        media_type: Some("text/markdown".to_string()),
+                    },
+                    UploadedSkillFile {
+                        relative_path: "notes.txt".to_string(),
+                        contents: b"notes".to_vec(),
+                        media_type: Some("text/plain".to_string()),
+                    },
+                ]),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SkillServiceError::BundleArchive(SkillBundleArchiveError::TooManyFiles {
+                max_files: 1
+            })
+        ));
         Ok(())
     }
 
@@ -1259,7 +1374,7 @@ mod tests {
             .expect_err("default version delete should fail");
         assert!(matches!(
             error,
-            super::SkillServiceError::CannotDeleteDefaultVersion { .. }
+            SkillServiceError::CannotDeleteDefaultVersion { .. }
         ));
 
         let switched = service
