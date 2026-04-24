@@ -231,9 +231,10 @@ fn map_event_name(event_name: &str, map_function_call_args: bool) -> &str {
 fn is_mcp_arguments_event(
     parsed_data: &Value,
     handler: &StreamingToolHandler,
-    ctx: &StreamingEventContext<'_>,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<String>,
 ) -> bool {
-    let Some(session) = ctx.session else {
+    let Some(session) = session else {
         return false;
     };
 
@@ -242,7 +243,7 @@ fn is_mcp_arguments_event(
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
     {
-        return session.should_intercept_function_call(name, ctx.user_function_names);
+        return session.should_intercept_function_call(name, user_function_names);
     }
 
     if let Some(name) = parsed_data
@@ -251,7 +252,7 @@ fn is_mcp_arguments_event(
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
     {
-        return session.should_intercept_function_call(name, ctx.user_function_names);
+        return session.should_intercept_function_call(name, user_function_names);
     }
 
     if let Some(idx) = extract_output_index(parsed_data) {
@@ -266,7 +267,7 @@ fn is_mcp_arguments_event(
             .map(|call| call.name.as_str())
             .filter(|name| !name.is_empty())
         {
-            return session.should_intercept_function_call(name, ctx.user_function_names);
+            return session.should_intercept_function_call(name, user_function_names);
         }
     }
 
@@ -282,9 +283,7 @@ fn is_mcp_arguments_event(
                     || event_item_id
                         .is_some_and(|item_id| call.item_id.as_deref() == Some(item_id)))
         })
-        .is_some_and(|call| {
-            session.should_intercept_function_call(&call.name, ctx.user_function_names)
-        })
+        .is_some_and(|call| session.should_intercept_function_call(&call.name, user_function_names))
 }
 
 /// Send buffered function call arguments as a synthetic delta event.
@@ -461,11 +460,17 @@ pub(super) fn forward_streaming_event(
     let resolved_event_type = get_event_type(event_name, &parsed_data);
     let is_arguments_delta_event = resolved_event_type == FunctionCallEvent::ARGUMENTS_DELTA;
     let is_arguments_done_event = resolved_event_type == FunctionCallEvent::ARGUMENTS_DONE;
+    let classification_session = ctx.session.or(redaction_session);
 
     let is_mcp_call_arguments_event = matches!(
         resolved_event_type,
         FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE
-    ) && is_mcp_arguments_event(&parsed_data, handler, ctx);
+    ) && is_mcp_arguments_event(
+        &parsed_data,
+        handler,
+        classification_session,
+        ctx.user_function_names,
+    );
 
     // Only MCP-intercepted argument deltas are dropped. User-function argument
     // deltas must pass through unchanged.
@@ -1876,6 +1881,11 @@ mod tests {
             "delta": "{\"q\":\"x\"}"
         });
 
-        assert!(is_mcp_arguments_event(&parsed_data, &handler, &ctx));
+        assert!(is_mcp_arguments_event(
+            &parsed_data,
+            &handler,
+            ctx.session,
+            ctx.user_function_names,
+        ));
     }
 }
