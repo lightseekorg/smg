@@ -1,7 +1,4 @@
 //! Background create path: resolve input snapshot + enqueue.
-//!
-//! Called from each router entry point (HTTP regular, OpenAI, gRPC regular)
-//! when `background=true`. Non-streaming only in BGM-PR-04.
 
 use std::sync::Arc;
 
@@ -40,10 +37,8 @@ pub struct BackgroundCreateDeps<'a> {
     pub conversation_storage: &'a dyn ConversationStorage,
     pub conversation_item_storage: &'a dyn ConversationItemStorage,
     pub background_config: &'a BackgroundConfig,
-    /// Storage-hook request context extracted from HTTP headers. Threaded
-    /// through to `BackgroundResponseRepository::enqueue` so the worker can
-    /// replay tenant/principal identity during finalize-adjacent writes and
-    /// conversation linkage.
+    /// Forwarded to `enqueue` so the worker replays the caller's tenant /
+    /// principal identity when it later writes the finalized response.
     pub request_context: Option<&'a StorageRequestContext>,
 }
 
@@ -63,10 +58,6 @@ pub async fn handle_background_create(
              Use memory, postgres, or oracle.",
         );
     };
-
-    // `store != Some(false)` and `stream != Some(true)` are enforced at the
-    // `ValidatedJson` boundary by `validate_responses_cross_parameters`, so
-    // request-shape preconditions are guaranteed by the time we reach here.
 
     let snapshot = match resolve_snapshot(&deps, request).await {
         Ok(s) => s,
@@ -154,7 +145,7 @@ async fn resolve_snapshot(
             StatusCode::CONFLICT,
             "previous_response_too_large",
             format!(
-                "Resolved snapshot has {} items, exceeds Phase 1 cap of {}.",
+                "Resolved snapshot has {} items, exceeds the cap of {}.",
                 items.len(),
                 MAX_SNAPSHOT_ITEMS
             ),
@@ -257,9 +248,8 @@ async fn append_conversation_items(
         }
     }
 
-    // Fetch one past the cap so we can detect oversize conversations rather
-    // than silently truncating them. The snapshot contract in Phase 1 rejects
-    // resolved inputs above 100 items.
+    // Fetch one past the cap so oversize conversations surface as 409
+    // instead of a silent truncation below `MAX_SNAPSHOT_ITEMS`.
     let list_params = smg_data_connector::ListParams {
         limit: MAX_SNAPSHOT_ITEMS + 1,
         order: smg_data_connector::SortOrder::Asc,
@@ -281,7 +271,7 @@ async fn append_conversation_items(
             "conversation_too_large",
             format!(
                 "Conversation '{conv_id_str}' has more than {MAX_SNAPSHOT_ITEMS} items; \
-                 background snapshots must fit within the Phase 1 cap."
+                 background snapshots cannot exceed this cap."
             ),
         ));
     }
@@ -296,14 +286,12 @@ async fn append_conversation_items(
     Ok(())
 }
 
-/// Convert a stored `ConversationItem` into the `ResponseInputOutputItem`
-/// shape the execution path consumes. Mirrors the conversion logic in
-/// `openai/responses/history.rs` so the background snapshot matches what a
-/// synchronous replay from conversation history would produce.
+/// Convert a stored `ConversationItem` row into the `ResponseInputOutputItem`
+/// wire shape the worker consumes.
 ///
-/// Returns `Ok(None)` for item types that are intentionally dropped (reasoning,
-/// unknown types) and `Err(Box<Response>)` when a known shape fails to
-/// deserialize — boxed so the `Result`'s `Err` variant stays compact.
+/// `Ok(None)` marks an item that is intentionally omitted from the snapshot
+/// (reasoning rows, unknown types). `Err` is boxed to keep the success
+/// variant small.
 fn conversation_item_to_snapshot_value(
     ci: ConversationItem,
     conv_id_str: &str,
@@ -584,10 +572,8 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_snapshot_uses_response_input_output_shape() {
-        // Regression: before the shape fix, conversation items were serialized
-        // as raw `ConversationItem` rows with `item_type`/`created_at`, which
-        // the worker's execution path cannot deserialize. The snapshot must
-        // emit the on-wire `ResponseInputOutputItem` shape (`type`/`content`).
+        // Snapshot must carry `ResponseInputOutputItem` (`type`/`content`),
+        // not raw `ConversationItem` storage rows (`item_type`/`created_at`).
         let h = Harness::new(10);
         seed_conversation(&h, "conv_snapshot", 1).await;
 

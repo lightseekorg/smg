@@ -12,10 +12,6 @@
 //! 1. **Synchronous** - Returns complete response immediately (non_streaming.rs)
 //! 2. **Streaming** - Returns SSE stream with real-time events (streaming.rs)
 //!
-//! Background mode is dispatched at the axum handler layer
-//! (`v1_responses` in server.rs) before reaching this router, so it never
-//! enters this path.
-//!
 //! # Request Flow
 //!
 //! ```text

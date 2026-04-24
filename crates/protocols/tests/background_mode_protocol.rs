@@ -1,6 +1,4 @@
-//! Protocol-surface contract tests for background-mode responses (BGM-PR-01, narrow scope).
-//!
-//! Covers only the additive changes this PR makes:
+//! Protocol-surface contract tests for background-mode responses.
 //!
 //! - `ResponseStatus::Incomplete` serializes as `"incomplete"` and round-trips.
 //! - `reasoning` items (both input and output variants) round-trip
@@ -10,12 +8,8 @@
 //! - `ResponsesResponseBuilder::copy_from_request` propagates `background`
 //!   and `conversation` from the request.
 //! - `ResponsesResponse::is_incomplete()` reports the new status.
-//!
-//! Intentionally out of scope (deferred to later PRs):
-//! - Strict typing of `incomplete_details` (still `Option<Value>`).
-//!
-//! BGM-PR-04 additionally covers the new `background_requires_store` rule in
-//! `validate_responses_cross_parameters` (below).
+//! - `validate_responses_cross_parameters` rejects `background=true` with
+//!   an explicit `store=false`, and accepts it when `store` is unset.
 
 use openai_protocol::responses::{
     ResponseInput, ResponseInputOutputItem, ResponseOutputItem, ResponseReasoningContent,
@@ -135,8 +129,8 @@ fn responses_response_new_fields_absent_when_unset() {
 
 #[test]
 fn responses_response_deserializes_without_new_fields() {
-    // Existing wire payloads that predate this PR must still deserialize —
-    // the three new fields are `#[serde(default)]` on the struct.
+    // Payloads without `background`/`completed_at`/`conversation` must
+    // still deserialize — those fields are `#[serde(default)]` on the struct.
     let v = json!({
         "id": "resp_legacy",
         "object": "response",

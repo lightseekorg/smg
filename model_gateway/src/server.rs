@@ -256,13 +256,6 @@ async fn v1_responses(
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
-    // Background dispatch happens here, above router selection: `background=true`
-    // is independent of the per-model router plumbing and must short-circuit
-    // before `route_responses` hits the sync/streaming path. Request-shape
-    // validation (stream+background, store=false+background) is enforced by
-    // `ValidatedJson` via `validate_responses_cross_parameters`; state-dependent
-    // checks (repo availability, queue depth, snapshot resolution) happen inside
-    // `handle_background_create`.
     if body.background.unwrap_or(false) {
         let request_context = smg_data_connector::current_request_context();
         let deps = BackgroundCreateDeps {
