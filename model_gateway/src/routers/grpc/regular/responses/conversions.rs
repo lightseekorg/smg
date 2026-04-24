@@ -722,9 +722,7 @@ mod tests {
                     ResponseContentPart::InputImage {
                         detail: Some(openai_protocol::common::Detail::High),
                         file_id: None,
-                        image_url: Some(
-                            "data:image/jpeg;base64,AAAA".to_string(),
-                        ),
+                        image_url: Some("data:image/jpeg;base64,AAAA".to_string()),
                     },
                 ],
                 status: None,

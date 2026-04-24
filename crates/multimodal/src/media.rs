@@ -102,12 +102,8 @@ impl MediaConnector {
         cfg: ImageFetchConfig,
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
         let (bytes, resolved_url) = self.fetch_http_bytes(&url).await?;
-        self.decode_image(
-            bytes,
-            cfg.detail,
-            ImageSource::Url { url: resolved_url },
-        )
-        .await
+        self.decode_image(bytes, cfg.detail, ImageSource::Url { url: resolved_url })
+            .await
     }
 
     /// Fetch raw bytes from an HTTP URL, enforcing the same allowlist and
@@ -115,18 +111,13 @@ impl MediaConnector {
     /// canonicalized URL. Public so the Responses router can reuse the
     /// allowlist/timeout envelope for non-image payloads (e.g.
     /// `input_file` with `file_url`) without re-implementing HTTP.
-    pub async fn fetch_raw_bytes(
-        &self,
-        url: &str,
-    ) -> Result<(Bytes, String), MediaConnectorError> {
+    pub async fn fetch_raw_bytes(&self, url: &str) -> Result<(Bytes, String), MediaConnectorError> {
         self.fetch_http_bytes(url).await
     }
 
-    async fn fetch_http_bytes(
-        &self,
-        url: &str,
-    ) -> Result<(Bytes, String), MediaConnectorError> {
-        let parsed = Url::parse(url).map_err(|_| MediaConnectorError::InvalidUrl(url.to_string()))?;
+    async fn fetch_http_bytes(&self, url: &str) -> Result<(Bytes, String), MediaConnectorError> {
+        let parsed =
+            Url::parse(url).map_err(|_| MediaConnectorError::InvalidUrl(url.to_string()))?;
         self.ensure_domain_allowed(&parsed)?;
 
         let mut req = self.client.get(parsed.as_str());

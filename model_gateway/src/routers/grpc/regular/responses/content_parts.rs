@@ -319,9 +319,7 @@ fn sniff_media_kind(bytes: &[u8]) -> MediaKind {
         return MediaKind::Image("image/jpeg");
     }
     // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if bytes.len() >= 8
-        && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
-    {
+    if bytes.len() >= 8 && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
         return MediaKind::Image("image/png");
     }
     // GIF: "GIF87a" / "GIF89a"
@@ -362,9 +360,7 @@ mod tests {
 
     #[test]
     fn sniff_detects_png_magic() {
-        let bytes = [
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00,
-        ];
+        let bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
         assert!(matches!(sniff_media_kind(&bytes), MediaKind::Image(m) if m == "image/png"));
     }
 
