@@ -299,7 +299,9 @@ async fn execute_mcp_tool_loop_streaming(
                     return;
                 }
 
-                // Execute MCP tools (if any)
+                // Execute MCP tools (if any). `original_request.tools` is the
+                // caller-declared tool list (hosted-tool config lives there);
+                // `execute_mcp_tools` merges the per-kind overrides into dispatch args.
                 let mcp_results = if mcp_tool_calls.is_empty() {
                     Vec::new()
                 } else {
@@ -308,6 +310,7 @@ async fn execute_mcp_tool_loop_streaming(
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
+                        original_request.tools.as_deref().unwrap_or(&[]),
                     )
                     .await
                     {

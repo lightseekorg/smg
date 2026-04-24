@@ -21,8 +21,9 @@ use openai_protocol::{
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
-    extract_embedded_openai_responses, mcp_response_item_id, McpServerBinding, McpToolSession,
-    ResponseFormat, ResponseTransformer, ToolExecutionInput, ToolExecutionResult,
+    apply_hosted_tool_overrides, extract_embedded_openai_responses, extract_hosted_tool_overrides,
+    mcp_response_item_id, McpServerBinding, McpToolSession, ResponseFormat, ResponseTransformer,
+    ToolExecutionInput, ToolExecutionResult,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -148,7 +149,12 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
     }))
 }
 
-/// Execute detected tool calls and send completion events to client
+/// Execute detected tool calls and send completion events to client.
+///
+/// `request_tools` carries the caller-declared `tools` list from the original
+/// request so per-kind hosted-tool overrides can be merged into dispatch args
+/// before [`McpToolSession::execute_tool`].
+///
 /// Returns false if client disconnected during execution
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
@@ -157,6 +163,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
     model_id: &str,
+    request_tools: &[ResponseTool],
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -181,7 +188,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
-        let arguments: Value = match serde_json::from_str(args_str) {
+        let mut arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
                 let err_str = format!("Failed to parse tool arguments: {e}");
@@ -224,6 +231,14 @@ pub(crate) async fn execute_streaming_tool_calls(
 
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
+        }
+
+        // Merge caller-declared hosted-tool configuration (e.g. `size`, `quality`
+        // on image_generation) into dispatch args. No-op for non-hosted tools.
+        if let Some(kind) = response_format.to_builtin_tool_type() {
+            if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
+                apply_hosted_tool_overrides(&mut arguments, &overrides);
+            }
         }
 
         debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
@@ -853,7 +868,7 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
-            let arguments: Value = match serde_json::from_str(&call.arguments) {
+            let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
@@ -890,6 +905,19 @@ pub(crate) async fn execute_tool_loop(
                 }
             };
 
+            // Merge caller-declared hosted-tool configuration into dispatch args
+            // for this tool's hosted-tool kind, if any. `original_body.tools` is
+            // the caller's tool declarations; empty / None = no-op.
+            let response_format = session.tool_response_format(&call.name);
+            if let Some(kind) = response_format.to_builtin_tool_type() {
+                if let Some(overrides) = extract_hosted_tool_overrides(
+                    original_body.tools.as_deref().unwrap_or(&[]),
+                    kind,
+                ) {
+                    apply_hosted_tool_overrides(&mut arguments, &overrides);
+                }
+            }
+
             debug!(
                 "Calling MCP tool '{}' with args: {}",
                 call.name, call.arguments
@@ -902,7 +930,6 @@ pub(crate) async fn execute_tool_loop(
                 })
                 .await;
 
-            let response_format = session.tool_response_format(&call.name);
             let server_label = session.resolve_tool_server_label(&call.name);
             let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let approval_request_id = approval_request_item_id_source(&call.item_id);

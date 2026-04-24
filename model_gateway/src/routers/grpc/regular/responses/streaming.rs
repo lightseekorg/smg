@@ -34,7 +34,10 @@ use smg_data_connector::{
     ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
     ResponseStorage,
 };
-use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
+use smg_mcp::{
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
+    ResponseFormat, ToolExecutionInput,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -705,9 +708,18 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.name,
                     tool_call.arguments
                 );
-                // Parse arguments to Value
-                let arguments: Value =
+                // Parse arguments to Value, merging caller-declared hosted-tool
+                // config from `original_request.tools` for the matching kind.
+                let mut arguments: Value =
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
+                if let Some(kind) = response_format.to_builtin_tool_type() {
+                    if let Some(overrides) = extract_hosted_tool_overrides(
+                        original_request.tools.as_deref().unwrap_or(&[]),
+                        kind,
+                    ) {
+                        apply_hosted_tool_overrides(&mut arguments, &overrides);
+                    }
+                }
 
                 // Execute the single tool via the normalized MCP execution API.
                 // This avoids custom serialization and manual re-transformation in streaming paths.

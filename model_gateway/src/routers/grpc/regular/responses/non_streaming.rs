@@ -10,7 +10,10 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
-use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput};
+use smg_mcp::{
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
+    ToolExecutionInput,
+};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -335,13 +338,28 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Convert tool calls to execution inputs
+            // Convert tool calls to execution inputs, merging caller-declared
+            // hosted-tool config from `original_request.tools` into dispatch args.
+            let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
-                .map(|tc| ToolExecutionInput {
-                    call_id: tc.call_id,
-                    tool_name: tc.name,
-                    arguments: serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({})),
+                .map(|tc| {
+                    let mut arguments: serde_json::Value =
+                        serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
+                    if let Some(kind) = session
+                        .tool_response_format(&tc.name)
+                        .to_builtin_tool_type()
+                    {
+                        if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind)
+                        {
+                            apply_hosted_tool_overrides(&mut arguments, &overrides);
+                        }
+                    }
+                    ToolExecutionInput {
+                        call_id: tc.call_id,
+                        tool_name: tc.name,
+                        arguments,
+                    }
                 })
                 .collect();
 
