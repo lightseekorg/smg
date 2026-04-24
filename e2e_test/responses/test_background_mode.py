@@ -57,17 +57,16 @@ def _post_responses(gateway, body: dict, timeout: float = 30.0) -> httpx.Respons
     )
 
 
-def _assert_validator_400(resp: httpx.Response, expected_code_substring: str) -> None:
+def _assert_validator_400(resp: httpx.Response, expected_message_substring: str) -> None:
     """Assert the gateway returned the Layer-1 validator envelope.
 
     ``ValidatedJson`` in ``crates/protocols/src/validated.rs:91-103`` maps a
     ``Validate`` failure to ``400`` with
     ``{error: {type: "invalid_request_error", code: 400, message: "..."}}``.
-    The validator's ``ValidationError::code`` string
-    (e.g. ``background_requires_store``) is rendered into ``message`` via
-    ``ValidationErrors::to_string()`` — assert on its presence there rather
-    than on the numeric ``code`` field so the test pins the semantic
-    invariant instead of the (weird) `code: 400` integer envelope.
+    ``message`` is produced by ``ValidationErrors::to_string()``, which emits
+    ``"__all__: <human message>"`` — it surfaces the ``ValidationError::message``
+    field, not the machine ``code`` (e.g. ``background_requires_store``), so
+    the only observable substring on the wire is the human text.
     """
     assert resp.status_code == 400, f"expected HTTP 400, got {resp.status_code}: body={resp.text!r}"
     body = resp.json()
@@ -77,8 +76,8 @@ def _assert_validator_400(resp: httpx.Response, expected_code_substring: str) ->
         f"expected invalid_request_error, got {err!r}"
     )
     message = err.get("message", "")
-    assert isinstance(message, str) and expected_code_substring in message, (
-        f"expected message containing {expected_code_substring!r}, got {message!r}"
+    assert isinstance(message, str) and expected_message_substring in message, (
+        f"expected message containing {expected_message_substring!r}, got {message!r}"
     )
 
 
@@ -129,7 +128,8 @@ class TestBackgroundModeValidation:
                 "stream": True,
             },
         )
-        _assert_validator_400(resp, "background_conflicts_with_stream")
+        # Message text pinned in crates/protocols/src/responses.rs:3130.
+        _assert_validator_400(resp, "Cannot use background mode with streaming")
 
     def test_background_plus_store_false_rejected_400(self, setup_backend):
         """``background=true`` + explicit ``store=false`` → ``background_requires_store``.
@@ -146,7 +146,8 @@ class TestBackgroundModeValidation:
                 "store": False,
             },
         )
-        _assert_validator_400(resp, "background_requires_store")
+        # Message text pinned in crates/protocols/src/responses.rs:3138.
+        _assert_validator_400(resp, "Background mode requires 'store' to be true")
 
     def test_background_with_store_unset_is_accepted(self, setup_backend):
         """``store`` unset defaults to ``true`` per the OpenAI spec.
@@ -165,12 +166,26 @@ class TestBackgroundModeValidation:
                 "background": True,
             },
         )
+        # Server errors (5xx) must never be tolerated — they would let a
+        # broken gateway pass this test silently.
+        assert resp.status_code < 500, (
+            f"store=None must not surface a 5xx; got {resp.status_code}: {resp.text!r}"
+        )
         if resp.status_code == 400:
             body = resp.json()
             err = body.get("error", {})
-            message = err.get("message", "")
-            assert "background_requires_store" not in message, (
-                f"store=None must not trigger background_requires_store; got message={message!r}"
+            # Layer-1 validator envelope is the only 400 we explicitly
+            # forbid here: handler-layer 400s (e.g. `background_not_supported`
+            # when the gateway is misconfigured to history_backend=none) are
+            # legitimate fail paths for store=None — the validator must just
+            # not be the one rejecting it.
+            is_layer1_validator_error = (
+                isinstance(err, dict)
+                and err.get("type") == "invalid_request_error"
+                and err.get("code") == 400
+            )
+            assert not is_layer1_validator_error, (
+                f"store=None must not trip the Layer-1 validator; got {body!r}"
             )
 
 
@@ -207,7 +222,7 @@ class TestBackgroundModeEnqueue:
         assert resp.id.startswith("resp_"), f"expected resp_ prefix, got {resp.id!r}"
         assert resp.status == "queued", f"expected queued, got {resp.status!r}"
         assert resp.background is True, f"expected background=True, got {resp.background!r}"
-        assert resp.model is not None
+        assert resp.model == model, f"expected model {model!r}, got {resp.model!r}"
         assert resp.output == [], f"expected empty output, got {resp.output!r}"
         assert resp.error is None, f"expected no error, got {resp.error!r}"
 

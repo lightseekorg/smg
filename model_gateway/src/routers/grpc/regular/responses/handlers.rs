@@ -51,6 +51,17 @@ pub(crate) async fn route_responses(
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
+    // Background dispatch lives on the axum handler `v1_responses` in
+    // `server.rs`. The gRPC router has no path into that handler, so a
+    // `background=true` request reaching here would otherwise execute
+    // synchronously and silently drop the queued semantics. Reject loudly.
+    if request.background.unwrap_or(false) {
+        return error::bad_request(
+            "unsupported_parameter",
+            "Background mode is not supported on the gRPC router; use the HTTP API.",
+        );
+    }
+
     let is_streaming = request.stream.unwrap_or(false);
     if is_streaming {
         let params = ResponsesCallContext {

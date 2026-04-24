@@ -7,9 +7,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use openai_protocol::{
-    event_types::ItemType,
-    responses::{ResponseContentPart, ResponseInputOutputItem, ResponsesRequest},
+use openai_protocol::responses::{
+    generate_id, ResponseContentPart, ResponseInputOutputItem, ResponsesRequest,
 };
 use serde_json::{json, Value};
 use smg_data_connector::{
@@ -67,7 +66,10 @@ pub async fn handle_background_create(
     let response_id = ResponseId::from(format!("resp_{}", Uuid::now_v7()).as_str());
     let now_unix = chrono::Utc::now().timestamp();
     let initial_raw = initial_queued_response(&response_id, model_id, now_unix, request);
-    let request_json = serde_json::to_value(request).unwrap_or(Value::Null);
+    let request_json = serde_json::to_value(request).unwrap_or_else(|e| {
+        warn!(error = %e, "failed to serialize ResponsesRequest for background enqueue");
+        Value::Null
+    });
 
     let mut enqueue_req = EnqueueRequest::new(
         response_id.clone(),
@@ -79,9 +81,13 @@ pub async fn handle_background_create(
         request.priority,
     );
     enqueue_req.conversation_id = request.conversation.as_ref().map(|c| c.as_id().to_string());
-    enqueue_req
+    // Synchronous storage paths fall back to `request.user` when
+    // `safety_identifier` is unset (see `routers/common/persistence_utils`).
+    // Mirror that here so identifier-based queries see queued responses too.
+    enqueue_req.safety_identifier = request
         .safety_identifier
-        .clone_from(&request.safety_identifier);
+        .clone()
+        .or_else(|| request.user.clone());
     enqueue_req.previous_response_id = request
         .previous_response_id
         .as_deref()
@@ -131,9 +137,11 @@ async fn resolve_snapshot(
         items.extend(arr.iter().cloned());
     } else if !request_input_json.is_null() {
         // ResponseInput::String — wrap as a single user message the worker
-        // can execute. Keeping a primitive shape here avoids divergence from
-        // what the rest of the pipeline stores on `StoredResponse.input`.
+        // can execute. Stable `id` matches the synchronous-persistence
+        // normalisation so `GET /v1/responses/{id}/input_items` returns the
+        // same `first_id`/`last_id` across calls.
         items.push(json!({
+            "id": generate_id("msg"),
             "type": "message",
             "role": "user",
             "content": request_input_json,
@@ -161,7 +169,13 @@ async fn append_prev_chain_items(
     items: &mut Vec<Value>,
 ) -> Result<(), Response> {
     let prev_id = ResponseId::from(prev_id_str);
-    let chain = match storage.get_response_chain(&prev_id, None).await {
+    // Bound the chain walk to one past the snapshot cap. Once we've loaded
+    // more than `MAX_SNAPSHOT_ITEMS` ancestors there is no way the resolved
+    // snapshot fits, so don't pull unbounded history out of storage.
+    let chain = match storage
+        .get_response_chain(&prev_id, Some(MAX_SNAPSHOT_ITEMS + 1))
+        .await
+    {
         Ok(chain) => chain,
         Err(e) => {
             return Err(error::internal_error(
@@ -248,48 +262,56 @@ async fn append_conversation_items(
         }
     }
 
-    // Fetch one past the cap so oversize conversations surface as 409
-    // instead of silently truncating. The cap applies to *replayable* items
-    // — `conversation_item_to_snapshot_value` drops reasoning and unknown
-    // types, so a raw row count can overstate the snapshot size. Fetching
-    // `MAX + 1` gives the check enough headroom when every row is
-    // replayable; this bound is a heuristic for the common case, not a
-    // guarantee of strict rejection for pathologically reasoning-heavy
-    // conversations larger than the fetch window.
-    let list_params = smg_data_connector::ListParams {
-        limit: MAX_SNAPSHOT_ITEMS + 1,
-        order: smg_data_connector::SortOrder::Asc,
-        after: None,
-    };
-    let conv_items = match item_storage.list_items(&conv_id, list_params).await {
-        Ok(items) => items,
-        Err(e) => {
-            return Err(error::internal_error(
-                "load_conversation_items_failed",
-                format!("Failed to load conversation items for '{conv_id_str}': {e}"),
-            ));
+    // Page through the conversation in fixed batches and convert as we go.
+    // The cap applies to *replayable* items, but the converter drops
+    // non-replayable rows (reasoning), so a single fixed window can either
+    // miss late replayable turns or reject a still-fitting conversation.
+    // Looping until either the replayable count exceeds the cap or storage
+    // is exhausted gives strict semantics regardless of how rows are mixed.
+    const PAGE_SIZE: usize = 64;
+    let mut converted: Vec<Value> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let list_params = smg_data_connector::ListParams {
+            limit: PAGE_SIZE,
+            order: smg_data_connector::SortOrder::Asc,
+            after: after.clone(),
+        };
+        let batch = match item_storage.list_items(&conv_id, list_params).await {
+            Ok(items) => items,
+            Err(e) => {
+                return Err(error::internal_error(
+                    "load_conversation_items_failed",
+                    format!("Failed to load conversation items for '{conv_id_str}': {e}"),
+                ));
+            }
+        };
+        if batch.is_empty() {
+            break;
         }
-    };
-
-    let mut converted = Vec::with_capacity(conv_items.len());
-    for ci in conv_items {
-        match conversation_item_to_snapshot_value(ci, conv_id_str) {
-            Ok(Some(value)) => converted.push(value),
-            Ok(None) => {}
-            Err(boxed) => return Err(*boxed),
+        let next_after = batch.last().map(|i| i.id.0.clone());
+        for ci in batch {
+            match conversation_item_to_snapshot_value(ci, conv_id_str) {
+                Ok(Some(value)) => converted.push(value),
+                Ok(None) => {}
+                Err(boxed) => return Err(*boxed),
+            }
+            if converted.len() > MAX_SNAPSHOT_ITEMS {
+                return Err(error::create_error(
+                    StatusCode::CONFLICT,
+                    "conversation_too_large",
+                    format!(
+                        "Conversation '{conv_id_str}' resolves to more than \
+                         {MAX_SNAPSHOT_ITEMS} replayable items; background \
+                         snapshots cannot exceed this cap."
+                    ),
+                ));
+            }
         }
-    }
-
-    if converted.len() > MAX_SNAPSHOT_ITEMS {
-        return Err(error::create_error(
-            StatusCode::CONFLICT,
-            "conversation_too_large",
-            format!(
-                "Conversation '{conv_id_str}' resolves to more than \
-                 {MAX_SNAPSHOT_ITEMS} replayable items; background snapshots \
-                 cannot exceed this cap."
-            ),
-        ));
+        after = next_after;
+        if after.is_none() {
+            break;
+        }
     }
 
     items.extend(converted);
@@ -331,29 +353,24 @@ fn conversation_item_to_snapshot_value(
                 phase: stored_phase,
             })
         }
-        ItemType::FUNCTION_CALL | ItemType::FUNCTION_CALL_OUTPUT => {
-            match serde_json::from_value::<ResponseInputOutputItem>(ci.content) {
-                Ok(item) => Some(item),
-                Err(e) => {
-                    return Err(Box::new(error::internal_error(
-                        "deserialize_conversation_item_failed",
-                        format!(
-                            "Failed to deserialize {} content for conversation \
-                             '{conv_id_str}' item '{}': {e}",
-                            ci.item_type, ci.id.0
-                        ),
-                    )));
-                }
-            }
-        }
         "reasoning" => None,
-        other => {
-            warn!(
-                "Dropping unknown conversation item type '{other}' in background snapshot \
-                 for conversation '{conv_id_str}'"
-            );
-            None
-        }
+        // Every other replayable item type — function calls, MCP, web search,
+        // computer/shell/apply-patch tool calls, image generation, etc. — is
+        // stored as a `ResponseInputOutputItem` JSON blob. Round-trip it
+        // through serde so we don't silently drop tool-call history.
+        other => match serde_json::from_value::<ResponseInputOutputItem>(ci.content) {
+            Ok(item) => Some(item),
+            Err(e) => {
+                return Err(Box::new(error::internal_error(
+                    "deserialize_conversation_item_failed",
+                    format!(
+                        "Failed to deserialize {other} content for conversation \
+                         '{conv_id_str}' item '{}': {e}",
+                        ci.id.0
+                    ),
+                )));
+            }
+        },
     };
 
     match converted {
