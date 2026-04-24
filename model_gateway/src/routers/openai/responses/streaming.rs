@@ -1011,7 +1011,8 @@ pub(super) fn handle_streaming_with_tool_interception(
 
             // Execute all pending tool calls. Pass the caller-declared tools so
             // hosted-tool overrides (e.g. image_generation size/quality) are
-            // merged into dispatch args before MCP execution.
+            // merged into dispatch args before MCP execution. The request-level
+            // `user` is also forwarded into hosted-tool dispatch args.
             if !execute_streaming_tool_calls(
                 pending_calls,
                 &session,
@@ -1020,6 +1021,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &mut sequence_number,
                 &original_request.model,
                 original_request.tools.as_deref().unwrap_or(&[]),
+                original_request.user.as_deref(),
             )
             .await
             {

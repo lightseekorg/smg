@@ -53,7 +53,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{inject_user_into_hosted_args, DEFAULT_MAX_ITERATIONS},
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -724,6 +724,15 @@ async fn execute_tool_loop_streaming_internal(
                         apply_hosted_tool_overrides(&mut arguments, &overrides);
                     }
                 }
+                // Forward request-level `user` into hosted-tool dispatch args
+                // so the downstream MCP server can attribute per-user usage.
+                // Skips plain MCP function tools (Passthrough format) and
+                // never overwrites a model-supplied `user` value.
+                inject_user_into_hosted_args(
+                    &mut arguments,
+                    &response_format,
+                    original_request.user.as_deref(),
+                );
 
                 // Execute the single tool via the normalized MCP execution API.
                 // This avoids custom serialization and manual re-transformation in streaming paths.

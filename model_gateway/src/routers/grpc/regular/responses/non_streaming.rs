@@ -27,7 +27,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{inject_user_into_hosted_args, DEFAULT_MAX_ITERATIONS},
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
@@ -341,8 +341,10 @@ pub(super) async fn execute_tool_loop(
             // Convert tool calls to execution inputs, merging caller-declared
             // hosted-tool config from `original_request.tools` into dispatch args.
             // Non-object model payloads coerce to `{}` so the merge actually
-            // applies instead of silently dropping the caller's config.
+            // applies instead of silently dropping the caller's config. The
+            // request-level `user` is also forwarded into hosted-tool args.
             let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
+            let request_user = original_request.user.as_deref();
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
                 .map(|tc| {
@@ -351,15 +353,14 @@ pub(super) async fn execute_tool_loop(
                             Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
                             _ => json!({}),
                         };
-                    if let Some(kind) = session
-                        .tool_response_format(&tc.name)
-                        .to_builtin_tool_type()
-                    {
+                    let response_format = session.tool_response_format(&tc.name);
+                    if let Some(kind) = response_format.to_builtin_tool_type() {
                         if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind)
                         {
                             apply_hosted_tool_overrides(&mut arguments, &overrides);
                         }
                     }
+                    inject_user_into_hosted_args(&mut arguments, &response_format, request_user);
                     ToolExecutionInput {
                         call_id: tc.call_id,
                         tool_name: tc.name,

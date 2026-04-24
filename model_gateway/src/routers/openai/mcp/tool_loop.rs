@@ -32,7 +32,10 @@ use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::{header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+        common::{
+            header_utils::ApiProvider,
+            mcp_utils::{inject_user_into_hosted_args, DEFAULT_MAX_ITERATIONS},
+        },
         error,
     },
 };
@@ -155,7 +158,17 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
 /// request so per-kind hosted-tool overrides can be merged into dispatch args
 /// before [`McpToolSession::execute_tool`].
 ///
+/// `request_user` is the request-level `user` identifier (OpenAI Responses API
+/// `user` field), forwarded into hosted-tool dispatch args so the MCP server
+/// can attribute usage. Plain MCP function tools (Passthrough format) are
+/// not affected.
+///
 /// Returns false if client disconnected during execution
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Streaming tool dispatch threads channel + state + per-request inputs \
+              (tools, user) directly to the loop without an intermediate context struct."
+)]
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
     session: &McpToolSession<'_>,
@@ -164,6 +177,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     sequence_number: &mut u64,
     model_id: &str,
     request_tools: &[ResponseTool],
+    request_user: Option<&str>,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -246,6 +260,11 @@ pub(crate) async fn execute_streaming_tool_calls(
                 apply_hosted_tool_overrides(&mut arguments, &overrides);
             }
         }
+        // Forward request-level `user` into hosted-tool dispatch args so the
+        // downstream MCP server can attribute per-user usage. Skips plain MCP
+        // function tools (Passthrough format) and never overwrites a
+        // model-supplied `user` value.
+        inject_user_into_hosted_args(&mut arguments, &response_format, request_user);
 
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
@@ -931,6 +950,15 @@ pub(crate) async fn execute_tool_loop(
                     apply_hosted_tool_overrides(&mut arguments, &overrides);
                 }
             }
+            // Forward request-level `user` into hosted-tool dispatch args so
+            // the downstream MCP server can attribute per-user usage. Skips
+            // plain MCP function tools (Passthrough format) and never
+            // overwrites a model-supplied `user` value.
+            inject_user_into_hosted_args(
+                &mut arguments,
+                &response_format,
+                original_body.user.as_deref(),
+            );
 
             // Serialize the post-merge args once so downstream logging + the
             // approval payload show the effective (dispatched) payload rather

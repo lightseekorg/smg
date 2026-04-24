@@ -12,7 +12,10 @@ use smg_mcp::{
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
-use crate::observability::metrics::{metrics_labels, Metrics};
+use crate::{
+    observability::metrics::{metrics_labels, Metrics},
+    routers::common::mcp_utils::inject_user_into_hosted_args,
+};
 
 /// Tool execution result
 ///
@@ -44,6 +47,11 @@ pub(crate) struct ToolResult {
 /// Tool execution errors are returned as error results to the model
 /// (allows model to handle gracefully).
 ///
+/// `request_user` is the request-level `user` identifier (OpenAI Responses
+/// API `user` field), forwarded into hosted-tool dispatch args so the MCP
+/// server can attribute usage. Plain MCP function tools (Passthrough format)
+/// are not affected.
+///
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
     session: &McpToolSession<'_>,
@@ -51,6 +59,7 @@ pub(super) async fn execute_mcp_tools(
     tracking: &mut McpCallTracking,
     model_id: &str,
     request_tools: &[ResponseTool],
+    request_user: Option<&str>,
 ) -> Result<Vec<ToolResult>, Response> {
     // Convert tool calls to execution inputs, merging caller-declared
     // hosted-tool configuration from `request_tools` into dispatch args.
@@ -83,14 +92,17 @@ pub(super) async fn execute_mcp_tools(
                     json!({})
                 }
             };
-            if let Some(kind) = session
-                .tool_response_format(&tc.function.name)
-                .to_builtin_tool_type()
-            {
+            let response_format = session.tool_response_format(&tc.function.name);
+            if let Some(kind) = response_format.to_builtin_tool_type() {
                 if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
                     apply_hosted_tool_overrides(&mut args, &overrides);
                 }
             }
+            // Forward request-level `user` into hosted-tool dispatch args so
+            // the downstream MCP server can attribute per-user usage. Skips
+            // plain MCP function tools (Passthrough format) and never
+            // overwrites a model-supplied `user` value.
+            inject_user_into_hosted_args(&mut args, &response_format, request_user);
             ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
