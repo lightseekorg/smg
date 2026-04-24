@@ -108,6 +108,13 @@ impl ConversationItemStorage for NoOpConversationItemStorage {
         Ok(Vec::new())
     }
 
+    async fn count_items_and_user_turns(
+        &self,
+        _conversation_id: &ConversationId,
+    ) -> ConversationItemResult<(usize, usize)> {
+        Ok((0, 0))
+    }
+
     async fn get_item(
         &self,
         _item_id: &ConversationItemId,

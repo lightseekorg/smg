@@ -234,6 +234,36 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         Ok(results)
     }
 
+    async fn count_items_and_user_turns(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> ConversationItemResult<(usize, usize)> {
+        let store = self.inner.read();
+        let Some(links) = store.links.get(conversation_id) else {
+            return Ok((0, 0));
+        };
+
+        let mut total_items = 0usize;
+        let mut user_turns = 0usize;
+
+        for item_id in links.values() {
+            let Some(item) = store.items.get(item_id) else {
+                continue;
+            };
+            total_items += 1;
+            if item.item_type == "message"
+                && item
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+            {
+                user_turns += 1;
+            }
+        }
+
+        Ok((total_items, user_turns))
+    }
+
     async fn get_item(
         &self,
         item_id: &ConversationItemId,
@@ -655,6 +685,44 @@ mod tests {
             .unwrap();
         assert!(!asc_after.is_empty());
         assert_eq!(asc_after[0].id, i3.id);
+    }
+
+    #[tokio::test]
+    async fn test_count_items_and_user_turns_empty_and_mixed() {
+        let store = MemoryConversationItemStorage::new();
+        let conv: ConversationId = "conv_count".into();
+
+        // Empty conversation should return zero counts.
+        let counts = store.count_items_and_user_turns(&conv).await.unwrap();
+        assert_eq!(counts, (0, 0));
+
+        let user = store
+            .create_item(make_item("message", Some("user"), json!([])))
+            .await
+            .unwrap();
+        let assistant = store
+            .create_item(make_item("message", Some("assistant"), json!([])))
+            .await
+            .unwrap();
+        let reasoning = store
+            .create_item(make_item("reasoning", None, json!([])))
+            .await
+            .unwrap();
+
+        let t1 = Utc.timestamp_opt(1_700_000_101, 0).single().unwrap();
+        let t2 = Utc.timestamp_opt(1_700_000_102, 0).single().unwrap();
+        let t3 = Utc.timestamp_opt(1_700_000_103, 0).single().unwrap();
+        store.link_item(&conv, &user.id, t1).await.unwrap();
+        store.link_item(&conv, &assistant.id, t2).await.unwrap();
+        store.link_item(&conv, &reasoning.id, t3).await.unwrap();
+
+        let counts = store.count_items_and_user_turns(&conv).await.unwrap();
+        assert_eq!(counts, (3, 1));
+
+        // Different conversation should remain isolated.
+        let conv2: ConversationId = "conv_count_other".into();
+        let counts2 = store.count_items_and_user_turns(&conv2).await.unwrap();
+        assert_eq!(counts2, (0, 0));
     }
 
     #[tokio::test]

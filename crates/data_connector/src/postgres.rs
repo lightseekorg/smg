@@ -671,6 +671,53 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         Ok(out)
     }
 
+    async fn count_items_and_user_turns(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> ConversationItemResult<(usize, usize)> {
+        let schema = &self.store.schema;
+        let si = &schema.conversation_items;
+        let sl = &schema.conversation_item_links;
+        let items_table = si.qualified_table(schema.owner.as_deref());
+        let links_table = sl.qualified_table(schema.owner.as_deref());
+
+        let l_conv_id = sl.col("conversation_id");
+        let l_item_id = sl.col("item_id");
+        let i_id = si.col("id");
+
+        let user_turn_expr = if si.is_skipped("item_type") || si.is_skipped("role") {
+            "0::BIGINT".to_string()
+        } else {
+            format!(
+                "COALESCE(SUM(CASE WHEN i.{} = 'message' AND i.{} = 'user' THEN 1 ELSE 0 END), 0)::BIGINT",
+                si.col("item_type"),
+                si.col("role"),
+            )
+        };
+
+        let sql = format!(
+            "SELECT COUNT(*)::BIGINT AS total_count, {user_turn_expr} AS user_turn_count \
+             FROM {links_table} l \
+             JOIN {items_table} i ON i.{i_id} = l.{l_item_id} \
+             WHERE l.{l_conv_id} = $1"
+        );
+
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+        let row = client
+            .query_one(&sql, &[&conversation_id.0.as_str()])
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+
+        let total_count: i64 = row.get("total_count");
+        let user_turn_count: i64 = row.get("user_turn_count");
+        Ok((total_count as usize, user_turn_count as usize))
+    }
+
     async fn get_item(
         &self,
         item_id: &ConversationItemId,

@@ -327,6 +327,39 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         Ok(result)
     }
 
+    async fn count_items_and_user_turns(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> ConversationItemResult<(usize, usize)> {
+        let payload = serde_json::json!({ "conversation_id": conversation_id });
+        // Reuse ListItems hook operation to avoid widening StorageOperation
+        // until wasm hook mappings add a dedicated count operation.
+        let extra = run_before(
+            &*self.hook,
+            StorageOperation::ListItems,
+            &payload,
+            ConversationItemStorageError::StorageError,
+        )
+        .await?;
+
+        let result = self
+            .inner
+            .count_items_and_user_turns(conversation_id)
+            .await?;
+
+        let result_json = serde_json::to_value(result).unwrap_or_default();
+        run_after(
+            &*self.hook,
+            StorageOperation::ListItems,
+            &payload,
+            &result_json,
+            &extra,
+        )
+        .await;
+
+        Ok(result)
+    }
+
     async fn get_item(
         &self,
         item_id: &ConversationItemId,

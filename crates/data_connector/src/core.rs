@@ -262,6 +262,14 @@ pub trait ConversationItemStorage: Send + Sync + 'static {
         params: ListParams,
     ) -> ConversationItemResult<Vec<ConversationItem>>;
 
+    /// Return aggregate counts for a conversation as `(total_items, user_turns)`.
+    ///
+    /// `user_turns` counts items where `item_type == "message"` and `role == "user"`.
+    async fn count_items_and_user_turns(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> ConversationItemResult<(usize, usize)>;
+
     /// Get a single item by ID
     async fn get_item(
         &self,

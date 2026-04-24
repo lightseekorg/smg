@@ -19,10 +19,10 @@ use serde_json::Value;
 
 use super::core::{
     make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationItemStorageError, ConversationMetadata,
-    ConversationStorage, ConversationStorageError, ListParams, NewConversation,
-    NewConversationItem, ResponseId, ResponseStorage, ResponseStorageError, SortOrder,
-    StoredResponse,
+    ConversationItemResult, ConversationItemStorage, ConversationItemStorageError,
+    ConversationMetadata, ConversationStorage, ConversationStorageError, ListParams,
+    NewConversation, NewConversationItem, ResponseId, ResponseStorage, ResponseStorageError,
+    SortOrder, StoredResponse,
 };
 use crate::{
     common::{
@@ -988,6 +988,49 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     }
                     Ok(items)
                 }
+            })
+            .await
+            .map_err(ConversationItemStorageError::StorageError)
+    }
+
+    async fn count_items_and_user_turns(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> ConversationItemResult<(usize, usize)> {
+        let cid = conversation_id.0.clone();
+        let schema = self.store.schema.clone();
+
+        self.store
+            .execute(move |conn| {
+                let si = &schema.conversation_items;
+                let sl = &schema.conversation_item_links;
+                let si_table = si.qualified_table(schema.owner.as_deref());
+                let sl_table = sl.qualified_table(schema.owner.as_deref());
+
+                let si_col_id = si.col("id");
+                let si_col_item_type = si.col("item_type");
+                let si_col_role = si.col("role");
+                let sl_col_cid = sl.col("conversation_id");
+                let sl_col_iid = sl.col("item_id");
+
+                let user_turn_expr = if si.is_skipped("item_type") || si.is_skipped("role") {
+                    "0".to_string()
+                } else {
+                    format!(
+                        "NVL(SUM(CASE WHEN i.{si_col_item_type} = 'message' AND i.{si_col_role} = 'user' THEN 1 ELSE 0 END), 0)"
+                    )
+                };
+
+                let sql = format!(
+                    "SELECT COUNT(*) AS total_count, {user_turn_expr} AS user_turn_count \
+                     FROM {sl_table} l \
+                     JOIN {si_table} i ON i.{si_col_id} = l.{sl_col_iid} \
+                     WHERE l.{sl_col_cid} = :1"
+                );
+
+                let (total_count, user_turn_count): (i64, i64) =
+                    conn.query_row_as(&sql, &[&cid]).map_err(map_oracle_error)?;
+                Ok((total_count as usize, user_turn_count as usize))
             })
             .await
             .map_err(ConversationItemStorageError::StorageError)
