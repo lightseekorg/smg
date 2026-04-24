@@ -10,31 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 import openai
 import pytest
 import smg_client
 
 logger = logging.getLogger(__name__)
-
-
-def _skip_if_tokenspeed_grammar_pipeline_unwired() -> None:
-    """Skip tests that depend on json_schema constraint enforcement on tokenspeed.
-
-    TokenSpeed ships a grammar backend (``xgrammar_backend.py``) and a
-    ``--grammar-backend xgrammar`` server-args knob, but the pipeline from
-    ``sampling_params.json_schema`` → ``req.grammar`` → vocab-mask application
-    is not yet wired into the regular sampling path (``create_grammar_backend``
-    is defined but never called; ``Request.grammar`` is never assigned;
-    ``SamplingBatchInfo.grammars`` is never populated). The smg gateway
-    translates ``tool_choice=required`` and ``tool_choice={function}`` into
-    ``sampling_params.json_schema``, so these tests silently regress to
-    "model did whatever it wanted" on tokenspeed until the upstream wiring
-    lands (tracked in lightseekorg/tokenspeed#361).
-    """
-    if os.environ.get("E2E_ENGINE") == "tokenspeed":
-        pytest.xfail("tokenspeed grammar pipeline not wired; see lightseekorg/tokenspeed#361")
 
 
 # =============================================================================
@@ -398,8 +379,6 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice == "required", the model should return one or more tool_calls.
         """
-        _skip_if_tokenspeed_grammar_pipeline_unwired()
-
         tools = [
             {
                 "type": "function",
@@ -479,8 +458,6 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
-        _skip_if_tokenspeed_grammar_pipeline_unwired()
-
         tools = [
             {
                 "type": "function",
@@ -550,8 +527,6 @@ class TestOpenAIServerFunctionCalling:
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
         # Uses tool_choice="required" below, so inherits the tokenspeed gap.
-        _skip_if_tokenspeed_grammar_pipeline_unwired()
-
         tools = [
             {
                 "type": "function",
