@@ -1,0 +1,136 @@
+//! Verify that `HuggingFaceTokenizer` selects the right chat-template renderer
+//! based on `config.json::architectures`.
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, fs};
+
+    use llm_tokenizer::{
+        chat_template::ChatTemplateParams, huggingface::HuggingFaceTokenizer, TokenizerTrait,
+    };
+    use serde_json::json;
+    use tempfile::TempDir;
+    /// A minimal tokenizer.json that loads cleanly. The only requirement is that
+    /// it parses; the encoder logic does not call back into the tokenizer here.
+    const MIN_TOKENIZER_JSON: &str = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": { "type": "Whitespace" },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "vocab": { "hello": 0, "<s>": 1, "</s>": 2 },
+            "merges": []
+        }
+    }"#;
+    fn write_dir(architectures: Option<&[&str]>) -> (TempDir, String) {
+        let temp = TempDir::new().unwrap();
+        let tok_path = temp.path().join("tokenizer.json");
+        fs::write(&tok_path, MIN_TOKENIZER_JSON).unwrap();
+        if let Some(archs) = architectures {
+            let cfg_path = temp.path().join("config.json");
+            let body = json!({ "architectures": archs }).to_string();
+            fs::write(&cfg_path, body).unwrap();
+        }
+        let p = tok_path.to_str().unwrap().to_string();
+        (temp, p)
+    }
+
+    #[test]
+    fn config_with_deepseek_v32_arch_uses_v32_renderer() {
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV32ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+        let params = ChatTemplateParams {
+            template_kwargs: Some(&kwargs),
+            ..Default::default()
+        };
+        let out = tokenizer.apply_chat_template(&messages, params).unwrap();
+        // V3.2 emits BOS + <｜User｜>Hello<｜Assistant｜></think> in chat mode.
+        assert!(out.contains("<\u{FF5C}begin\u{2581}of\u{2581}sentence\u{FF5C}>"));
+        assert!(out.contains("<\u{FF5C}User\u{FF5C}>Hello<\u{FF5C}Assistant\u{FF5C}>"));
+        assert!(out.ends_with("</think>"));
+    }
+    #[test]
+    fn config_with_deepseek_v4_arch_uses_v4_renderer() {
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+        let params = ChatTemplateParams {
+            template_kwargs: Some(&kwargs),
+            ..Default::default()
+        };
+        let out = tokenizer.apply_chat_template(&messages, params).unwrap();
+        // V4 emits BOS + <｜User｜>Hello<｜Assistant｜></think> in chat mode.
+        assert!(out.contains("<\u{FF5C}begin\u{2581}of\u{2581}sentence\u{FF5C}>"));
+        assert!(out.contains("<\u{FF5C}User\u{FF5C}>Hello<\u{FF5C}Assistant\u{FF5C}>"));
+        assert!(out.ends_with("</think>"));
+    }
+
+    #[test]
+    fn config_with_unrelated_arch_falls_back_to_jinja() {
+        // A non-DeepSeek architecture should keep using the Jinja renderer; with
+        // no chat_template set, applying the template should error rather than
+        // silently picking a DeepSeek encoder.
+        let (_tmp, tok) = write_dir(Some(&["LlamaForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let result = tokenizer.apply_chat_template(&messages, ChatTemplateParams::default());
+        assert!(
+            result.is_err(),
+            "expected error from missing Jinja template"
+        );
+    }
+    #[test]
+    fn no_config_json_falls_back_to_jinja() {
+        // No sibling config.json — must still default to Jinja and not blow up.
+        let (_tmp, tok) = write_dir(None);
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let result = tokenizer.apply_chat_template(&messages, ChatTemplateParams::default());
+        // Without a chat template registered, the Jinja renderer surfaces an error.
+        // The important thing is that we did NOT auto-select a DeepSeek encoder.
+        assert!(result.is_err());
+    }
+    #[test]
+    fn malformed_config_json_falls_back_to_jinja() {
+        let temp = TempDir::new().unwrap();
+        let tok_path = temp.path().join("tokenizer.json");
+        fs::write(&tok_path, MIN_TOKENIZER_JSON).unwrap();
+        fs::write(temp.path().join("config.json"), "{ this is not json").unwrap();
+        let tokenizer = HuggingFaceTokenizer::from_file(tok_path.to_str().unwrap()).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let result = tokenizer.apply_chat_template(&messages, ChatTemplateParams::default());
+        assert!(result.is_err());
+    }
+    #[test]
+    fn deepseek_v4_renderer_passes_reasoning_effort() {
+        let (_tmp, tok) = write_dir(Some(&["DeepseekV4ForCausalLM"]));
+        let tokenizer = HuggingFaceTokenizer::from_file(&tok).unwrap();
+        let messages = vec![json!({ "role": "user", "content": "Hello" })];
+        let mut kwargs: HashMap<String, serde_json::Value> = HashMap::new();
+        kwargs.insert(
+            "reasoning_effort".to_string(),
+            serde_json::Value::String("max".to_string()),
+        );
+        kwargs.insert("thinking".to_string(), serde_json::Value::Bool(true));
+        let params = ChatTemplateParams {
+            template_kwargs: Some(&kwargs),
+            ..Default::default()
+        };
+        let out = tokenizer.apply_chat_template(&messages, params).unwrap();
+        assert!(
+            out.contains("Reasoning Effort: Absolute maximum"),
+            "expected reasoning-effort prefix in V4 output"
+        );
+        assert!(
+            out.ends_with("<think>"),
+            "thinking mode should leave a <think> token open"
+        );
+    }
+}
