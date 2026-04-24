@@ -24,7 +24,8 @@ use super::streaming::ResponseStreamEventEmitter;
 use crate::{
     routers::{
         common::{
-            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+            mcp_utils::{ensure_request_mcp_client, project_allowed_tools},
+            persistence_utils::persist_conversation_items,
         },
         error,
     },
@@ -49,13 +50,14 @@ pub(crate) async fn ensure_mcp_connection(
 
     // Check for builtin tools that MAY have MCP routing configured.
     //
-    // `ImageGeneration` is included here (R6.8) because gpt-oss via the
+    // `ImageGeneration` is included here because gpt-oss via the
     // harmony pipeline, and Qwen/Llama via the regular pipeline, both
     // dispatch hosted `image_generation` calls through the same MCP
     // routing path — the only difference is how the tool is advertised in
-    // the prompt. Without this arm, the short-circuit below returned
-    // `(false, Vec::new())`, the MCP loop was never entered, and the
-    // registered `image_generation` MCP server received zero dispatches.
+    // the prompt. Without this arm, the short-circuit below would return
+    // `(false, Vec::new())`, the MCP loop would never be entered, and the
+    // registered `image_generation` MCP server would receive zero
+    // dispatches.
     let has_builtin_tools = tools
         .map(|t| {
             t.iter().any(|tool| {
@@ -252,7 +254,7 @@ fn has_mcp_tool(tools: &[ResponseTool], server_label: &str, name: Option<&str>) 
     tools.iter().any(|tool| match tool {
         ResponseTool::Mcp(mcp_tool) if mcp_tool.server_label == server_label => {
             if let Some(name) = name {
-                match &mcp_tool.allowed_tools {
+                match project_allowed_tools(mcp_tool.allowed_tools.as_ref()) {
                     Some(allowed_tools) => allowed_tools.iter().any(|tool_name| tool_name == name),
                     None => true,
                 }
@@ -265,9 +267,16 @@ fn has_mcp_tool(tools: &[ResponseTool], server_label: &str, name: Option<&str>) 
 }
 
 fn has_custom_tool(tools: &[ResponseTool], custom_name: &str) -> bool {
-    tools.iter().any(
-        |tool| matches!(tool, ResponseTool::Custom(custom_tool) if custom_tool.name == custom_name),
-    )
+    tools.iter().any(|tool| match tool {
+        ResponseTool::Custom(custom_tool) => custom_tool.name == custom_name,
+        ResponseTool::Namespace(namespace_tool) => namespace_tool.tools.iter().any(|nested_tool| {
+            matches!(
+                nested_tool,
+                NamespaceTool::Custom(custom_tool) if custom_tool.name == custom_name
+            )
+        }),
+        _ => false,
+    })
 }
 
 fn has_allowed_tool_reference(tools: &[ResponseTool], tool_reference: &ToolReference) -> bool {

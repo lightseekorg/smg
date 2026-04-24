@@ -514,11 +514,11 @@ impl ResponseStreamEventEmitter {
     /// `emit_tool_call_searching` gates on format. The payload carries the
     /// base64-encoded partial image bytes plus a 0-based partial image index.
     ///
-    /// Per-router wiring in R6.2/R6.3/R6.4 is responsible for deciding when
-    /// to call this and how to source the partial-image bytes.
+    /// Per-router wiring is responsible for deciding when to call this and
+    /// how to source the partial-image bytes.
     #[expect(
         dead_code,
-        reason = "partial_image emission is wired by per-router PRs R6.2/R6.3/R6.4"
+        reason = "partial_image emission is wired by per-router integrations"
     )]
     pub fn emit_image_generation_partial_image(
         &mut self,

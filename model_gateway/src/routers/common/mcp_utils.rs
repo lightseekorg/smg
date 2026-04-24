@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use openai_protocol::responses::{NamespaceTool, ResponseTool, ResponsesRequest};
+use openai_protocol::responses::{McpAllowedTools, NamespaceTool, ResponseTool, ResponsesRequest};
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
     ResponseFormat,
@@ -14,6 +14,34 @@ use tracing::{debug, warn};
 
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
+
+/// Project the T11 `McpAllowedTools` union into the flat name list consumed by
+/// the router-side `McpServerInput` and `McpServerBinding` allowlist paths.
+///
+/// Mapping (documented on the calling sites):
+///   * `None` → `None` (no constraint; all tools exposed)
+///   * `Some(List(names))` → `Some(names)`
+///   * `Some(Filter { tool_names: Some(v), read_only: None })` → `Some(v)`
+///   * `Some(Filter { read_only: Some(_), .. })` → `Some(vec![])` —
+///     fail-closed whenever the caller specified a `read_only` restriction,
+///     regardless of `tool_names`. smg has no `readOnlyHint`-based filter
+///     implementation yet, so honoring only the `tool_names` half would
+///     silently broaden exposure past caller intent (e.g. `{read_only: true,
+///     tool_names: ["mutating_tool"]}` must NOT expose `mutating_tool`).
+///     Narrow to nothing so the downstream retain path exposes none.
+///   * `Some(Filter { tool_names: None, read_only: None })` → `None`
+pub(crate) fn project_allowed_tools(value: Option<&McpAllowedTools>) -> Option<Vec<String>> {
+    value.and_then(|at| match at {
+        McpAllowedTools::List(names) => Some(names.clone()),
+        McpAllowedTools::Filter(filter) => match (&filter.tool_names, &filter.read_only) {
+            // Any `read_only` restriction fails closed: readOnlyHint-based
+            // filtering is unimplemented, so we cannot safely project a subset.
+            (_, Some(_)) => Some(Vec::new()),
+            (Some(names), None) => Some(names.clone()),
+            (None, None) => None,
+        },
+    })
+}
 
 /// Protocol-agnostic MCP server descriptor for connection setup.
 ///
@@ -286,7 +314,11 @@ pub async fn ensure_request_mcp_client(
                 url: mcp.server_url.clone(),
                 authorization: mcp.authorization.clone(),
                 headers: mcp.headers.clone().unwrap_or_default(),
-                allowed_tools: mcp.allowed_tools.clone(),
+                // T11: project the `allowed_tools` union (List | Filter) into
+                // the flat name list `McpServerInput` still expects. See
+                // [`project_allowed_tools`] for the mapping table and the
+                // rationale for the `read_only`-only fail-closed case.
+                allowed_tools: project_allowed_tools(mcp.allowed_tools.as_ref()),
             }),
             _ => None,
         })
@@ -407,6 +439,8 @@ mod tests {
             server_description: None,
             require_approval: None,
             allowed_tools: None,
+            connector_id: None,
+            defer_loading: None,
         })];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
@@ -540,7 +574,7 @@ mod tests {
         // Image generation is wired through the same hosted-tool MCP plumbing
         // as web_search / code_interpreter / file_search. This test proves
         // BuiltinToolType::ImageGeneration → ResponseFormat::ImageGenerationCall
-        // so PRs R6.2/R6.3/R6.4 can rely on the infrastructure.
+        // so per-router wiring can rely on the infrastructure.
         let mut image_gen_tools = HashMap::new();
         image_gen_tools.insert(
             "generate_image".to_string(),
@@ -677,5 +711,72 @@ mod tests {
         let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].label, "search-server");
+    }
+
+    // ---- T11 projection ---------------------------------------------------
+
+    use openai_protocol::responses::McpToolFilter;
+
+    #[test]
+    fn test_project_allowed_tools_none() {
+        assert_eq!(project_allowed_tools(None), None);
+    }
+
+    #[test]
+    fn test_project_allowed_tools_list_variant() {
+        let value = McpAllowedTools::List(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            project_allowed_tools(Some(&value)),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_project_allowed_tools_filter_with_tool_names() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: None,
+            tool_names: Some(vec!["x".to_string()]),
+        });
+        assert_eq!(
+            project_allowed_tools(Some(&value)),
+            Some(vec!["x".to_string()])
+        );
+    }
+
+    /// `Filter { read_only: Some(true) }` with no `tool_names` must project
+    /// to `Some(vec![])` (fail-closed) so downstream does not expose the full
+    /// tool surface when the caller explicitly asked to restrict. See
+    /// [`project_allowed_tools`] rationale.
+    #[test]
+    fn test_project_allowed_tools_filter_read_only_only_is_fail_closed() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: Some(true),
+            tool_names: None,
+        });
+        assert_eq!(project_allowed_tools(Some(&value)), Some(Vec::new()));
+    }
+
+    /// `Filter { read_only: None, tool_names: None }` — both sub-fields
+    /// absent — is indistinguishable from an absent allowlist and projects
+    /// to `None` so the downstream retain path treats it as unconstrained.
+    #[test]
+    fn test_project_allowed_tools_filter_empty_is_unconstrained() {
+        let value = McpAllowedTools::Filter(McpToolFilter::default());
+        assert_eq!(project_allowed_tools(Some(&value)), None);
+    }
+
+    /// `Filter { read_only: Some(_), tool_names: Some(_) }` — both set — must
+    /// still fail-closed. Any `read_only` restriction disables the normal
+    /// name-list projection because `readOnlyHint`-based filtering is
+    /// unimplemented; honoring only the `tool_names` half would broaden
+    /// exposure past caller intent (e.g. `tool_names: ["mutating_tool"]` with
+    /// `read_only: true` must not expose `mutating_tool`).
+    #[test]
+    fn test_project_allowed_tools_filter_read_only_plus_names_is_fail_closed() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: Some(true),
+            tool_names: Some(vec!["mutating_tool".to_string()]),
+        });
+        assert_eq!(project_allowed_tools(Some(&value)), Some(Vec::new()));
     }
 }

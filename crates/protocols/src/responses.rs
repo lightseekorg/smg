@@ -1082,7 +1082,87 @@ pub struct McpTool {
     pub server_description: Option<String>,
     /// Approval requirement configuration for MCP tools.
     pub require_approval: Option<RequireApproval>,
-    pub allowed_tools: Option<Vec<String>>,
+    /// List of allowed tool names, or a filter object with `read_only` /
+    /// `tool_names` fields. Spec (openai-responses-api-spec.md L442):
+    /// `allowed_tools: McpAllowedTools = array of string | McpToolFilter`.
+    /// Backward-compat: legacy `["a","b"]` wire shape still deserializes via
+    /// the untagged `List` variant.
+    pub allowed_tools: Option<McpAllowedTools>,
+    /// Identifier for service connectors (e.g. Dropbox, Gmail). One of
+    /// `server_url` or `connector_id` must be provided per spec
+    /// (openai-responses-api-spec.md L441-445).
+    pub connector_id: Option<McpConnectorId>,
+    /// When `true`, the MCP server's tool list is fetched lazily on first
+    /// use rather than eagerly at request time. Spec
+    /// (openai-responses-api-spec.md L441): `defer_loading?: bool`.
+    /// Not yet present in OpenAI Python SDK 2.8.1 `types/responses/tool.py`;
+    /// included here to track the documented Responses API surface.
+    pub defer_loading: Option<bool>,
+}
+
+/// Allowed-tools filter for an MCP tool.
+///
+/// Spec (openai-responses-api-spec.md L442): `array of string | McpToolFilter`.
+///
+/// Variant order matters for `#[serde(untagged)]`: serde tries `List` first
+/// (JSON array) so a bare `["foo","bar"]` wire shape keeps deserializing into
+/// `List(vec!["foo","bar"])`. A JSON object falls through to `Filter`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum McpAllowedTools {
+    /// Flat allow-list of tool names.
+    List(Vec<String>),
+    /// Object filter selecting tools by read-only flag and/or explicit names.
+    Filter(McpToolFilter),
+}
+
+/// Object filter selecting MCP tools by read-only flag and/or explicit names.
+///
+/// Spec (openai-responses-api-spec.md L442): `McpToolFilter { read_only?, tool_names? }`.
+///
+/// `deny_unknown_fields` is applied so typoed keys (e.g. `"tool_namse"`) fail
+/// fast at deserialize time rather than silently collapsing to an empty filter
+/// — an empty filter would be projected by the router to "no name constraint",
+/// unexpectedly broadening MCP tool exposure for payloads that meant to scope
+/// it down.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpToolFilter {
+    /// Match tools flagged read-only via MCP `readOnlyHint` annotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    /// Explicit list of allowed tool names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_names: Option<Vec<String>>,
+}
+
+/// Service-connector identifier for hosted MCP tools.
+///
+/// Spec (openai-responses-api-spec.md L443): exactly one of `server_url` or
+/// `connector_id` is required on `McpTool`. The wire values are literal
+/// snake-case strings such as `"connector_dropbox"`.
+///
+/// Enum values mirror OpenAI Python SDK 2.8.1
+/// `types/responses/tool.py::Mcp.connector_id`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+pub enum McpConnectorId {
+    #[serde(rename = "connector_dropbox")]
+    Dropbox,
+    #[serde(rename = "connector_gmail")]
+    Gmail,
+    #[serde(rename = "connector_googlecalendar")]
+    GoogleCalendar,
+    #[serde(rename = "connector_googledrive")]
+    GoogleDrive,
+    #[serde(rename = "connector_microsoftteams")]
+    MicrosoftTeams,
+    #[serde(rename = "connector_outlookcalendar")]
+    OutlookCalendar,
+    #[serde(rename = "connector_outlookemail")]
+    OutlookEmail,
+    #[serde(rename = "connector_sharepoint")]
+    SharePoint,
 }
 
 #[serde_with::skip_serializing_none]
@@ -1554,7 +1634,8 @@ pub enum ResponseInputOutputItem {
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
     /// generation by identifier, so `result` and `status` are accepted as
     /// absent on the input side. The full shape is
-    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`.
+    /// `{ id, action?, background?, output_format?, quality?, result?: base64,
+    /// revised_prompt?, size?, status?, type }`.
     ///
     /// This mirrors the OpenAI Python SDK 2.8.x
     /// `response_input_item_param.ImageGenerationCall` TypedDict: while the
@@ -1563,11 +1644,35 @@ pub enum ResponseInputOutputItem {
     /// image-generation tool guide), and `skip_serializing_if` keeps the
     /// serialized form spec-compatible when a full item is round-tripped.
     /// The server-side `ResponseOutputItem::ImageGenerationCall` variant
-    /// remains strict because the gateway always populates those fields
-    /// on emit.
+    /// carries the same metadata so real OpenAI responses
+    /// (`action`/`background`/`output_format`/`quality`/`size`) survive
+    /// cloud-passthrough and persistence round-trips.
+    ///
+    /// The metadata fields (`action`, `background`, `output_format`,
+    /// `quality`, `size`) are typed as `Option<String>` rather than
+    /// narrow enums so unknown or future-added values pass through
+    /// unchanged — this mirrors `ImageGenerationTool` on the input-tool
+    /// side.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
+        /// `"generate" | "edit" | "auto"` — which image-generation action the
+        /// prior turn dispatched. Preserved free-form so future actions pass
+        /// through without a wire break.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        /// `"transparent" | "opaque" | "auto"`. Matches the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        /// `"png" | "webp" | "jpeg"`. Matches the `image_generation` tool
+        /// input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_format: Option<String>,
+        /// `"auto" | "low" | "medium" | "high" | "standard" | "hd"`. Matches
+        /// the `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
         /// Base64-encoded image bytes. Omitted on id-only references.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
@@ -1576,6 +1681,10 @@ pub enum ResponseInputOutputItem {
         /// not drop it on replay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revised_prompt: Option<String>,
+        /// `"auto" | "1024x1024" | "1024x1536" | "1536x1024"`. Matches the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
         /// Generation status. Omitted on id-only references.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<ImageGenerationCallStatus>,
@@ -1779,6 +1888,48 @@ pub enum ResponseInputOutputItem {
         output: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<LocalShellCallStatus>,
+    },
+    /// `type: "mcp_call"` — assistant-emitted hosted-MCP tool call replayed
+    /// as an input item for stateless multi-turn (`store=false`) flows.
+    ///
+    /// Spec (openai-responses-api-spec.md §McpCall L264-266):
+    /// `{ id, arguments, name, server_label, type, approval_request_id?, error?, output?, status? }`.
+    /// Shape mirrors [`ResponseOutputItem::McpCall`] but `approval_request_id`,
+    /// `error`, `output`, and `status` are optional on the input side so
+    /// replay of an abridged or in-flight call (no output yet) stays
+    /// lossless. Matches OpenAI Python SDK 2.8.1
+    /// `types/responses/response_input_item.py::McpCall`.
+    #[serde(rename = "mcp_call")]
+    McpCall {
+        id: String,
+        arguments: String,
+        name: String,
+        server_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    /// `type: "mcp_list_tools"` — hosted-MCP server's tool listing replayed
+    /// as an input item.
+    ///
+    /// Spec (openai-responses-api-spec.md §McpListTools L253-255):
+    /// `{ id, server_label, tools, type, error? }` where each `tools` entry
+    /// is `{ input_schema, name, annotations?, description? }`. Shape
+    /// mirrors [`ResponseOutputItem::McpListTools`] with `error` optional
+    /// per SDK v2.8.1
+    /// `types/responses/response_input_item.py::McpListTools`.
+    #[serde(rename = "mcp_list_tools")]
+    McpListTools {
+        id: String,
+        server_label: String,
+        tools: Vec<McpToolInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(untagged)]
     SimpleInputMessage {
@@ -2016,6 +2167,13 @@ pub enum ResponseOutputItem {
         id: String,
         server_label: String,
         tools: Vec<McpToolInfo>,
+        /// Spec (openai-responses-api-spec.md §McpListTools L253-255):
+        /// `error?: string`. Preserves the failure message when the MCP
+        /// server could not list tools; symmetric with the matching field
+        /// on `ResponseInputOutputItem::McpListTools` so emit↔replay is
+        /// lossless.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(rename = "mcp_call")]
     McpCall {
@@ -2064,10 +2222,39 @@ pub enum ResponseOutputItem {
     },
     /// `type: "image_generation_call"` — output item carrying a base64 image
     /// produced by the `image_generation` built-in tool. Spec:
-    /// `{ id, result: base64 string, revised_prompt?, status, type }`.
+    /// `{ id, action?, background?, output_format?, quality?, result: base64,
+    /// revised_prompt?, size?, status, type }`.
+    ///
+    /// Real OpenAI production responses include the five metadata fields
+    /// (`action`, `background`, `output_format`, `quality`, `size`) even
+    /// though the OpenAI Rust SDK v2.8.1 omits them. We carry them as
+    /// `Option<String>` so cloud passthrough and persistence round-trips
+    /// preserve them verbatim — and so downstream consumers can read them
+    /// without a second round-trip to the provider.
+    ///
+    /// The metadata fields are typed as `Option<String>` rather than narrow
+    /// enums so unknown or future-added values pass through unchanged;
+    /// this mirrors `ImageGenerationTool` on the input-tool side.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
+        /// `"generate" | "edit" | "auto"` — which image-generation action
+        /// this call dispatched. Preserved free-form so future actions pass
+        /// through without a wire break.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        /// `"transparent" | "opaque" | "auto"`. Mirrors the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        /// `"png" | "webp" | "jpeg"`. Mirrors the `image_generation` tool
+        /// input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_format: Option<String>,
+        /// `"auto" | "low" | "medium" | "high" | "standard" | "hd"`. Mirrors
+        /// the `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
         /// Base64-encoded image bytes.
         result: String,
         /// Prompt text the mainline model rewrote before dispatching the
@@ -2075,6 +2262,10 @@ pub enum ResponseOutputItem {
         /// not drop it on replay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revised_prompt: Option<String>,
+        /// `"auto" | "1024x1024" | "1024x1536" | "1536x1024"`. Mirrors the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
         status: ImageGenerationCallStatus,
     },
     /// `type: "compaction"` — server-emitted item carrying an opaque
@@ -2956,7 +3147,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::ApplyPatchCall { .. }
                         | ResponseInputOutputItem::ApplyPatchCallOutput { .. }
                         | ResponseInputOutputItem::LocalShellCall { .. }
-                        | ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
+                        | ResponseInputOutputItem::LocalShellCallOutput { .. }
+                        | ResponseInputOutputItem::McpCall { .. }
+                        | ResponseInputOutputItem::McpListTools { .. } => {}
                     }
                 }
 
@@ -3284,6 +3477,12 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         // `ImageGenerationCall` above (no payload-level content checks).
         ResponseInputOutputItem::LocalShellCall { .. } => {}
         ResponseInputOutputItem::LocalShellCallOutput { .. } => {}
+        // T11 schema-only: MCP call/list-tools input items replayed for
+        // stateless multi-turn. Matches `McpApprovalRequest` above with no
+        // content validation so an abridged or in-flight call (output /
+        // error absent) can round-trip cleanly.
+        ResponseInputOutputItem::McpCall { .. } => {}
+        ResponseInputOutputItem::McpListTools { .. } => {}
     }
     Ok(())
 }
@@ -3327,6 +3526,21 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                 e.message = Some(
                     format!("Duplicate MCP server_label '{raw_label}' found in 'tools' parameter.")
                         .into(),
+                );
+                return Err(e);
+            }
+
+            // T11 spec contract (openai-responses-api-spec.md L441, L445): one
+            // of `server_url` or `connector_id` is required, and the two are
+            // mutually exclusive. Reject payloads that set both so downstream
+            // target resolution is unambiguous.
+            if mcp.server_url.is_some() && mcp.connector_id.is_some() {
+                let mut e = ValidationError::new("mcp_tool_conflicting_targets");
+                e.message = Some(
+                    format!(
+                        "MCP tool with server_label '{raw_label}' sets both 'server_url' and 'connector_id'; exactly one is required."
+                    )
+                    .into(),
                 );
                 return Err(e);
             }

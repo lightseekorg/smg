@@ -160,6 +160,10 @@ pub fn build_mcp_list_tools_item(server_label: &str, entries: &[ToolEntry]) -> R
         id: generate_id("mcpl"),
         server_label: server_label.to_string(),
         tools: build_mcp_tool_infos(entries),
+        // T11: `error` is populated when the MCP server failed to list tools;
+        // this constructor synthesizes a successful listing from tool entries,
+        // so no error is attached.
+        error: None,
     }
 }
 

@@ -32,7 +32,11 @@ pub const ITEM_TYPE_FIELDS: &[(&str, &[&str])] = &[
             "error",
         ],
     ),
-    ("mcp_list_tools", &["tools", "server_label"]),
+    // T11: `error` is optional per spec (openai-responses-api-spec.md §McpListTools
+    // L253-255) and symmetric with `mcp_call.error` above; keep it in the
+    // persistence whitelist so failed list-tools items round-trip through
+    // conversation storage without losing the failure reason.
+    ("mcp_list_tools", &["tools", "server_label", "error"]),
     ("function_call", &["call_id", "name", "arguments", "output"]),
     ("function_call_output", &["call_id", "output"]),
 ];

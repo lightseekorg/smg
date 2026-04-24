@@ -235,12 +235,16 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
                 mcp.server_description.as_ref(),
             );
             insert_optional_value(&mut m, "require_approval", mcp.require_approval.as_ref());
-            if let Some(allowed) = &mcp.allowed_tools {
-                m.insert(
-                    "allowed_tools".to_string(),
-                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                );
-            }
+            // T11: `allowed_tools` is now an untagged union (`List(Vec<String>)`
+            // or `Filter { read_only?, tool_names? }`). Delegate to serde so both
+            // wire shapes serialize identically to the input payload.
+            insert_optional_value(&mut m, "allowed_tools", mcp.allowed_tools.as_ref());
+            // T11: surface the new `connector_id` and `defer_loading` fields so
+            // the echoed tools[] payload round-trips losslessly for clients that
+            // rely on connector-based MCP setups (server_url XOR connector_id)
+            // or the deferred-loading hint.
+            insert_optional_value(&mut m, "connector_id", mcp.connector_id.as_ref());
+            insert_optional_value(&mut m, "defer_loading", mcp.defer_loading.as_ref());
             Some(Value::Object(m))
         }
         ResponseTool::WebSearchPreview(_) => serde_json::to_value(tool).ok(),
@@ -1099,7 +1103,11 @@ mod tests {
                     server_label: "internal-label".to_string(),
                     server_description: None,
                     require_approval: None,
-                    allowed_tools: Some(vec!["internal_search".to_string()]),
+                    allowed_tools: Some(openai_protocol::responses::McpAllowedTools::List(vec![
+                        "internal_search".to_string(),
+                    ])),
+                    connector_id: None,
+                    defer_loading: None,
                 }),
             ]),
             ..Default::default()

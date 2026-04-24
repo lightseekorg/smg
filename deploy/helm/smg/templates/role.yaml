@@ -1,6 +1,10 @@
 {{- if or .Values.rbac.create .Values.router.serviceDiscovery.enabled .Values.router.mesh.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.router.serviceDiscovery.clusterWide }}
+kind: ClusterRole
+{{- else }}
 kind: Role
+{{- end }}
 metadata:
   name: {{ include "smg.fullname" . }}
   labels:
@@ -8,5 +12,5 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
 {{- end }}
