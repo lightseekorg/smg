@@ -48,6 +48,14 @@ logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("TOKENSPEED_HEALTH_CHECK_TIMEOUT", "20"))
 
+# Opt-in verbose dump of raw TokenSpeed output for the first N requests.
+# Enable with ``TOKENSPEED_DEBUG_OUTPUT=1`` to diagnose model-specific text
+# / tool-call parser mismatches (e.g. meta-llama vs unsloth Llama variants).
+# Logs at WARNING level so ``--log-level warning`` workers still surface it.
+_DEBUG_OUTPUT = os.getenv("TOKENSPEED_DEBUG_OUTPUT", "").lower() in ("1", "true", "yes")
+_DEBUG_OUTPUT_MAX_REQUESTS = int(os.getenv("TOKENSPEED_DEBUG_OUTPUT_MAX", "3"))
+_debug_output_seen_rids: set[str] = set()
+
 
 def _lazy_generate_req_input():
     """Late import for ``tokenspeed.runtime.engine.io_struct.GenerateReqInput``.
@@ -558,6 +566,35 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         return out
 
+    def _maybe_dump_output(self, rid: str, output: dict, reason_dict: dict | None, trimmed: list[int]) -> None:
+        """Emit a one-shot WARNING-level dump of TokenSpeed's raw output for
+        the first N requests when ``TOKENSPEED_DEBUG_OUTPUT=1``.
+
+        Surfaces ``output_ids`` (pre-trim), ``meta_info`` (including the
+        ``completion_tokens`` we rely on for prefix slicing), the finish
+        reason, and the trimmed token list. Lets us diff meta-llama vs
+        unsloth output shapes without needing HF_TOKEN'd local repro.
+        """
+        if not _DEBUG_OUTPUT:
+            return
+        if rid in _debug_output_seen_rids:
+            return
+        if len(_debug_output_seen_rids) >= _DEBUG_OUTPUT_MAX_REQUESTS:
+            return
+        _debug_output_seen_rids.add(rid)
+        raw = list(output.get("output_ids") or [])
+        meta = output.get("meta_info", {}) or {}
+        logger.warning(
+            "TS_DEBUG_OUTPUT rid=%s raw_output_ids=%s completion_tokens=%s "
+            "prompt_tokens=%s reason=%s trimmed=%s",
+            rid,
+            raw,
+            meta.get("completion_tokens"),
+            meta.get("prompt_tokens"),
+            reason_dict,
+            trimmed,
+        )
+
     def _generated_output_ids(self, output: dict, reason_dict: dict | None) -> list[int]:
         """Return just the newly-generated tokens from a TokenSpeed output dict.
 
@@ -628,6 +665,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     ) -> tokenspeed_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
         token_ids = self._generated_output_ids(output, reason_dict)
+        self._maybe_dump_output(rid, output, reason_dict, token_ids)
 
         finish_reason = "stop"
         matched_kwargs: dict[str, Any] = {}
