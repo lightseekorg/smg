@@ -28,7 +28,6 @@ import logging
 import os
 
 import httpx
-import openai
 import pytest
 
 logger = logging.getLogger(__name__)
@@ -70,9 +69,7 @@ def _assert_validator_400(resp: httpx.Response, expected_code_substring: str) ->
     than on the numeric ``code`` field so the test pins the semantic
     invariant instead of the (weird) `code: 400` integer envelope.
     """
-    assert resp.status_code == 400, (
-        f"expected HTTP 400, got {resp.status_code}: body={resp.text!r}"
-    )
+    assert resp.status_code == 400, f"expected HTTP 400, got {resp.status_code}: body={resp.text!r}"
     body = resp.json()
     err = body.get("error")
     assert isinstance(err, dict), f"expected error object, got {body!r}"
@@ -85,9 +82,7 @@ def _assert_validator_400(resp: httpx.Response, expected_code_substring: str) ->
     )
 
 
-def _assert_handler_error(
-    resp: httpx.Response, expected_status: int, expected_code: str
-) -> None:
+def _assert_handler_error(resp: httpx.Response, expected_status: int, expected_code: str) -> None:
     """Assert a handler-layer (Layer 3) error envelope.
 
     ``routers::error`` emits
@@ -101,9 +96,7 @@ def _assert_handler_error(
     body = resp.json()
     err = body.get("error")
     assert isinstance(err, dict), f"expected error object, got {body!r}"
-    assert err.get("code") == expected_code, (
-        f"expected code={expected_code!r}, got {err!r}"
-    )
+    assert err.get("code") == expected_code, f"expected code={expected_code!r}, got {err!r}"
 
 
 # ===========================================================================
@@ -177,8 +170,7 @@ class TestBackgroundModeValidation:
             err = body.get("error", {})
             message = err.get("message", "")
             assert "background_requires_store" not in message, (
-                f"store=None must not trigger background_requires_store; "
-                f"got message={message!r}"
+                f"store=None must not trigger background_requires_store; got message={message!r}"
             )
 
 
@@ -241,9 +233,7 @@ class TestBackgroundModeEnqueue:
         assert retrieved.background is True
         assert retrieved.error is None
 
-    def test_background_with_unknown_previous_response_id_returns_404(
-        self, model, setup_backend
-    ):
+    def test_background_with_unknown_previous_response_id_returns_404(self, model, setup_backend):
         """Chaining to a missing prior response → 404 ``previous_response_not_found``.
 
         Pinned at
@@ -263,9 +253,7 @@ class TestBackgroundModeEnqueue:
         )
         _assert_handler_error(resp, 404, "previous_response_not_found")
 
-    def test_background_with_unknown_conversation_returns_404(
-        self, model, setup_backend
-    ):
+    def test_background_with_unknown_conversation_returns_404(self, model, setup_backend):
         """Resolving a missing conversation → 404 ``conversation_not_found``.
 
         Pinned at
