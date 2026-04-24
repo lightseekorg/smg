@@ -126,6 +126,7 @@ fn default_completion_request() -> CompletionRequest {
         session_params: None,
         return_hidden_states: false,
         sampling_seed: None,
+        request_id: None,
         other: serde_json::Map::new(),
     }
 }

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::error;
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::routers::{
@@ -21,11 +21,15 @@ use crate::routers::{
 /// and CreateMessageRequest sampling parameters.
 pub(crate) struct MessageRequestBuildingStage {
     inject_pd_metadata: bool,
+    enable_message_hash: bool,
 }
 
 impl MessageRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, enable_message_hash: bool) -> Self {
+        Self {
+            inject_pd_metadata,
+            enable_message_hash,
+        }
     }
 }
 
@@ -73,8 +77,19 @@ impl PipelineStage for MessageRequestBuildingStage {
             ));
         };
 
-        // Build message request
-        let request_id = format!("msg_{}", Uuid::now_v7());
+        // Build message request — use user-supplied request_id if provided
+        let user_supplied = messages_request.request_id.is_some();
+        let request_id = messages_request
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("msg_{}", Uuid::now_v7()));
+        if user_supplied {
+            info!(target: "smg::request", request_id = %request_id, "Using user-supplied request ID");
+        }
+
+        if self.enable_message_hash {
+            helpers::compute_and_log_input_message_hashes(&request_id, &messages_request.messages);
+        }
 
         // Reject multimodal for backends that don't support it, before assembling
         if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {

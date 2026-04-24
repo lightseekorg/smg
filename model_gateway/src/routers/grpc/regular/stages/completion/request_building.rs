@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::error;
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::routers::{
@@ -27,7 +27,7 @@ pub(crate) struct CompletionRequestBuildingStage {
 }
 
 impl CompletionRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
+    pub fn new(inject_pd_metadata: bool, _enable_message_hash: bool) -> Self {
         Self { inject_pd_metadata }
     }
 }
@@ -61,7 +61,14 @@ impl PipelineStage for CompletionRequestBuildingStage {
             ClientSelection::Dual { prefill, .. } => prefill,
         };
 
-        let request_id = format!("cmpl_{}", Uuid::now_v7());
+        let user_supplied = completion_request.request_id.is_some();
+        let request_id = completion_request
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("cmpl_{}", Uuid::now_v7()));
+        if user_supplied {
+            info!(target: "smg::request", request_id = %request_id, "Using user-supplied request ID");
+        }
 
         let mut proto_request = builder_client
             .build_completion_request(
