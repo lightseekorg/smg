@@ -238,12 +238,26 @@ fn is_mcp_arguments_event(
         return false;
     };
 
+    if let Some(idx) = extract_output_index(parsed_data) {
+        if handler.is_output_hidden(idx) {
+            return true;
+        }
+    }
+
+    resolve_argument_event_tool_name(parsed_data, handler)
+        .is_some_and(|name| session.should_intercept_function_call(name, user_function_names))
+}
+
+fn resolve_argument_event_tool_name<'a>(
+    parsed_data: &'a Value,
+    handler: &'a StreamingToolHandler,
+) -> Option<&'a str> {
     if let Some(name) = parsed_data
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
     {
-        return session.should_intercept_function_call(name, user_function_names);
+        return Some(name);
     }
 
     if let Some(name) = parsed_data
@@ -252,23 +266,18 @@ fn is_mcp_arguments_event(
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
     {
-        return session.should_intercept_function_call(name, user_function_names);
+        return Some(name);
     }
 
-    if let Some(idx) = extract_output_index(parsed_data) {
-        if handler.is_output_hidden(idx) {
-            return true;
-        }
-
-        if let Some(name) = handler
+    if let Some(name) = extract_output_index(parsed_data).and_then(|idx| {
+        handler
             .pending_calls
             .iter()
             .find(|call| call.output_index == idx)
             .map(|call| call.name.as_str())
             .filter(|name| !name.is_empty())
-        {
-            return session.should_intercept_function_call(name, user_function_names);
-        }
+    }) {
+        return Some(name);
     }
 
     let event_call_id = parsed_data.get("call_id").and_then(Value::as_str);
@@ -283,7 +292,7 @@ fn is_mcp_arguments_event(
                     || event_item_id
                         .is_some_and(|item_id| call.item_id.as_deref() == Some(item_id)))
         })
-        .is_some_and(|call| session.should_intercept_function_call(&call.name, user_function_names))
+        .map(|call| call.name.as_str())
 }
 
 /// Send buffered function call arguments as a synthetic delta event.
@@ -387,22 +396,17 @@ fn should_drop_hidden_internal_tool_event(
                     .is_some_and(is_function_call_type)
             })
             .is_some_and(|item| session.should_hide_output_item_json(item, user_function_names)),
-        // MCP ARGUMENTS_DELTA events are handled before this function is reached
-        // (buffered and re-emitted synthetically), so only ARGUMENTS_DONE needs handling here.
-        // INVARIANT: This branch assumes pending_calls has already been populated from prior
-        // function_call/output_item events for this output_index.
-        Some(FunctionCallEvent::ARGUMENTS_DONE) => output_index
-            .and_then(|idx| {
-                handler
-                    .pending_calls
-                    .iter()
-                    .find(|c| c.output_index == idx)
-                    .filter(|c| !c.name.is_empty())
-            })
-            .is_some_and(|c| {
-                let probe = json!({ "type": ItemType::FUNCTION_CALL, "name": c.name.as_str() });
+        // INVARIANT: For argument events, we may see out-of-order streams where
+        // identifying function_call/output_item events trail the argument frames.
+        // We therefore consult all available identity hints (payload name, pending
+        // calls by output_index/call_id/item_id) and hide only when the resolved
+        // tool is internal.
+        Some(FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE) => {
+            resolve_argument_event_tool_name(parsed_data, handler).is_some_and(|name| {
+                let probe = json!({ "type": ItemType::FUNCTION_CALL, "name": name });
                 session.should_hide_output_item_json(&probe, user_function_names)
-            }),
+            })
+        }
         _ => false,
     };
 
@@ -460,17 +464,15 @@ pub(super) fn forward_streaming_event(
     let resolved_event_type = get_event_type(event_name, &parsed_data);
     let is_arguments_delta_event = resolved_event_type == FunctionCallEvent::ARGUMENTS_DELTA;
     let is_arguments_done_event = resolved_event_type == FunctionCallEvent::ARGUMENTS_DONE;
-    let classification_session = ctx.session.or(redaction_session);
 
-    let is_mcp_call_arguments_event = matches!(
-        resolved_event_type,
-        FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE
-    ) && is_mcp_arguments_event(
-        &parsed_data,
-        handler,
-        classification_session,
-        ctx.user_function_names,
-    );
+    // Only active interception (`ctx.session`) can remap/drop argument events as
+    // MCP synthetic frames. Redaction-only passthrough (`redaction_session`)
+    // remains client-owned and should keep function_call_arguments.* shape.
+    let is_mcp_call_arguments_event =
+        matches!(
+            resolved_event_type,
+            FunctionCallEvent::ARGUMENTS_DELTA | FunctionCallEvent::ARGUMENTS_DONE
+        ) && is_mcp_arguments_event(&parsed_data, handler, ctx.session, ctx.user_function_names);
 
     // Only MCP-intercepted argument deltas are dropped. User-function argument
     // deltas must pass through unchanged.
