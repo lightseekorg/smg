@@ -236,9 +236,6 @@ async fn process_and_transform_sse_stream(
         usage_obj
     });
 
-    let completed_event = event_emitter.emit_completed(usage_json.as_ref());
-    event_emitter.send_event(&completed_event, &tx)?;
-
     // Finalize and persist accumulated response
     let final_response = accumulator.finalize();
     persist_response_if_needed(
@@ -252,6 +249,9 @@ async fn process_and_transform_sse_stream(
         request_context,
     )
     .await;
+
+    let completed_event = event_emitter.emit_completed(usage_json.as_ref());
+    event_emitter.send_event(&completed_event, &tx)?;
 
     Ok(())
 }

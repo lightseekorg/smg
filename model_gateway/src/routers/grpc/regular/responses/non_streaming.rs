@@ -332,7 +332,7 @@ pub(super) async fn execute_tool_loop(
                     )
                 })?;
 
-                // Mark as incomplete when incomplete details are present
+                // Align the final response status with the attached incomplete_details.
                 responses_response.status = ResponseStatus::Incomplete;
                 responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
 

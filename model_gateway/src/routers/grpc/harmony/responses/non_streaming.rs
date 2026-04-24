@@ -236,7 +236,7 @@ async fn execute_with_mcp_loop(
                         Arc::new(response_request),
                     );
 
-                    // Mark as incomplete when incomplete details are present
+                    // Align the final response status with the attached incomplete_details.
                     response.status = ResponseStatus::Incomplete;
                     response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
 

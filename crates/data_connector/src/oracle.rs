@@ -624,8 +624,7 @@ impl OracleConversationItemStorage {
             let col_iid = sl.col("item_id");
             let col_added = sl.col("added_at");
 
-            let pk_name = format!("PK_{}", sl.table);
-            let idx_name = format!("{}_CONV_IDX", sl.table);
+            let idx_name = oracle_index_name(&sl.table, "CONV_IDX");
 
             let mut col_defs = vec![
                 format!("{col_cid} VARCHAR2(64) NOT NULL"),
@@ -633,9 +632,7 @@ impl OracleConversationItemStorage {
                 format!("{col_added} TIMESTAMP WITH TIME ZONE"),
             ];
             col_defs.extend(extra_column_defs(sl));
-            col_defs.push(format!(
-                "CONSTRAINT {pk_name} PRIMARY KEY ({col_cid}, {col_iid})"
-            ));
+            col_defs.push(format!("PRIMARY KEY ({col_cid}, {col_iid})"));
 
             conn.execute(
                 &format!("CREATE TABLE {sl_table} ({})", col_defs.join(", ")),

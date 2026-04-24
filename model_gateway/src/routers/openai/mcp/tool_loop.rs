@@ -982,7 +982,7 @@ fn build_incomplete_response(
         .as_object_mut()
         .ok_or_else(|| "response not an object".to_string())?;
 
-    // Mark incomplete responses explicitly when tool-loop limits are hit.
+    // Align the final response status with the attached incomplete_details.
     obj.insert(
         "status".to_string(),
         Value::String("incomplete".to_string()),

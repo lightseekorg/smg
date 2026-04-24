@@ -106,35 +106,28 @@ impl WasmStorageHook {
 
 // ── Type conversions ─────────────────────────────────────────────────────
 
-fn to_wit_operation(op: StorageOperation) -> WitOperation {
+fn to_wit_operation(op: StorageOperation) -> Option<WitOperation> {
     match op {
-        StorageOperation::CreateConversation => WitOperation::CreateConversation,
-        StorageOperation::GetConversation => WitOperation::GetConversation,
-        StorageOperation::UpdateConversation => WitOperation::UpdateConversation,
-        StorageOperation::DeleteConversation => WitOperation::DeleteConversation,
-        StorageOperation::CreateItem => WitOperation::CreateItem,
-        StorageOperation::LinkItem => WitOperation::LinkItem,
-        StorageOperation::LinkItems => WitOperation::LinkItems,
-        StorageOperation::ListItems => WitOperation::ListItems,
-        StorageOperation::GetItem => WitOperation::GetItem,
-        StorageOperation::IsItemLinked => WitOperation::IsItemLinked,
-        StorageOperation::DeleteItem => WitOperation::DeleteItem,
-        StorageOperation::StoreResponse => WitOperation::StoreResponse,
-        StorageOperation::GetResponse => WitOperation::GetResponse,
-        StorageOperation::DeleteResponse => WitOperation::DeleteResponse,
-        StorageOperation::GetResponseChain => WitOperation::GetResponseChain,
-        StorageOperation::ListIdentifierResponses => WitOperation::ListIdentifierResponses,
-        StorageOperation::DeleteIdentifierResponses => WitOperation::DeleteIdentifierResponses,
-        // Backward-compatible mapping: existing WIT surface has no dedicated
-        // CreateMemory operation yet.
-        StorageOperation::CreateMemory => {
-            CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE.call_once(|| {
-                tracing::debug!(
-                    "mapping CreateMemory to WIT StoreResponse (no dedicated WIT variant yet)"
-                );
-            });
-            WitOperation::StoreResponse
+        StorageOperation::CreateConversation => Some(WitOperation::CreateConversation),
+        StorageOperation::GetConversation => Some(WitOperation::GetConversation),
+        StorageOperation::UpdateConversation => Some(WitOperation::UpdateConversation),
+        StorageOperation::DeleteConversation => Some(WitOperation::DeleteConversation),
+        StorageOperation::CreateItem => Some(WitOperation::CreateItem),
+        StorageOperation::LinkItem => Some(WitOperation::LinkItem),
+        StorageOperation::LinkItems => Some(WitOperation::LinkItems),
+        StorageOperation::ListItems => Some(WitOperation::ListItems),
+        StorageOperation::GetItem => Some(WitOperation::GetItem),
+        StorageOperation::IsItemLinked => Some(WitOperation::IsItemLinked),
+        StorageOperation::DeleteItem => Some(WitOperation::DeleteItem),
+        StorageOperation::StoreResponse => Some(WitOperation::StoreResponse),
+        StorageOperation::GetResponse => Some(WitOperation::GetResponse),
+        StorageOperation::DeleteResponse => Some(WitOperation::DeleteResponse),
+        StorageOperation::GetResponseChain => Some(WitOperation::GetResponseChain),
+        StorageOperation::ListIdentifierResponses => Some(WitOperation::ListIdentifierResponses),
+        StorageOperation::DeleteIdentifierResponses => {
+            Some(WitOperation::DeleteIdentifierResponses)
         }
+        StorageOperation::CreateMemory => None,
     }
 }
 
@@ -185,6 +178,15 @@ impl StorageHook for WasmStorageHook {
         context: Option<&RequestContext>,
         payload: &Value,
     ) -> Result<BeforeHookResult, HookError> {
+        let Some(wit_op) = to_wit_operation(operation) else {
+            CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE.call_once(|| {
+                tracing::debug!(
+                    "skipping WASM storage-hook before() for CreateMemory until WIT supports it"
+                );
+            });
+            return Ok(BeforeHookResult::Continue(ExtraColumns::new()));
+        };
+
         let mut store = self.new_store();
 
         let bindings =
@@ -192,7 +194,6 @@ impl StorageHook for WasmStorageHook {
                 .await
                 .map_err(|e| HookError::Internal(format!("WASM instantiation failed: {e}")))?;
 
-        let wit_op = to_wit_operation(operation);
         let wit_ctx = to_wit_context(context);
         let payload_str = payload.to_string();
 
@@ -235,6 +236,15 @@ impl StorageHook for WasmStorageHook {
         result: &Value,
         extra: &ExtraColumns,
     ) -> Result<ExtraColumns, HookError> {
+        let Some(wit_op) = to_wit_operation(operation) else {
+            CREATE_MEMORY_WIT_FALLBACK_LOG_ONCE.call_once(|| {
+                tracing::debug!(
+                    "skipping WASM storage-hook after() for CreateMemory until WIT supports it"
+                );
+            });
+            return Ok(extra.clone());
+        };
+
         let mut store = self.new_store();
 
         let bindings =
@@ -242,7 +252,6 @@ impl StorageHook for WasmStorageHook {
                 .await
                 .map_err(|e| HookError::Internal(format!("WASM instantiation failed: {e}")))?;
 
-        let wit_op = to_wit_operation(operation);
         let wit_ctx = to_wit_context(context);
         let payload_str = payload.to_string();
         let result_str = result.to_string();
@@ -311,8 +320,13 @@ mod tests {
         ];
         // Verify all variants convert without panic
         for op in ops {
-            let _ = to_wit_operation(op);
+            assert!(to_wit_operation(op).is_some());
         }
+    }
+
+    #[test]
+    fn create_memory_has_no_wit_mapping_until_abi_support_exists() {
+        assert!(to_wit_operation(StorageOperation::CreateMemory).is_none());
     }
 
     #[test]
