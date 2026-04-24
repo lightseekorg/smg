@@ -63,9 +63,16 @@ if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
     sudo dpkg -i /tmp/cuda-keyring.deb
     rm /tmp/cuda-keyring.deb
     sudo apt-get update -qq
-    # cuda-nvcc-13-0:       provides nvcc + cuda_runtime_api.h
-    # cuda-cudart-dev-13-0: provides cuda_runtime.h + libcudart headers
-    sudo apt-get install -y --no-install-recommends cuda-nvcc-13-0 cuda-cudart-dev-13-0
+    # cuda-nvcc-13-0:          provides nvcc + cuda_runtime_api.h
+    # cuda-cudart-dev-13-0:    provides cuda_runtime.h + libcudart headers
+    # cuda-libraries-dev-13-0: meta-package pulling in cublas / curand /
+    #                         cusolver / cusparse / cufft / nvrtc /
+    #                         nvjitlink dev headers that tokenspeed-kernel
+    #                         needs (cublas_v2.h, curand.h, cublasLt.h, ...)
+    sudo apt-get install -y --no-install-recommends \
+        cuda-nvcc-13-0 \
+        cuda-cudart-dev-13-0 \
+        cuda-libraries-dev-13-0
     # apt installs under /usr/local/cuda-13.0; expose the /usr/local/cuda
     # alias the job-level ``CUDA_HOME: /usr/local/cuda`` env expects.
     if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-13.0/bin" ]; then
