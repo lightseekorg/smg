@@ -141,8 +141,10 @@ Called from the router Deployment template.
 {{- end }}
 - "--service-discovery-port"
 - {{ .Values.router.serviceDiscovery.port | quote }}
+{{- if not .Values.router.serviceDiscovery.clusterWide }}
 - "--service-discovery-namespace"
 - {{ .Values.router.serviceDiscovery.namespace | default .Release.Namespace | quote }}
+{{- end }}
 {{- if .Values.router.serviceDiscovery.modelIdFrom }}
 - "--model-id-from"
 - {{ .Values.router.serviceDiscovery.modelIdFrom | quote }}
