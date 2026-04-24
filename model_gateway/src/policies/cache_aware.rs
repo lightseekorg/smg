@@ -47,6 +47,7 @@ use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
 use parking_lot::RwLock;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation};
 use tracing::{debug, warn};
 
@@ -89,6 +90,22 @@ pub struct CacheAwarePolicy {
     /// compound key `(model_id, hash)` or hashing `model_id\0text` would be
     /// correct.  Deferring to a follow-up to avoid changing the wire format.
     path_hash_index: Arc<DashMap<u64, String>>,
+
+    /// Mirror of `path_hash_index` for the token tree. Populated on
+    /// local token-based inserts and consulted by the v2
+    /// [`LocalHashResolver`] implementation so incoming token deltas
+    /// can be classified known/unknown without a repair round trip.
+    /// Value is the full `Vec<u32>` tokens for the hashed prefix —
+    /// mirrors the string side, which stores the matched prefix so
+    /// repair/apply paths can reconstruct the node from hash alone.
+    /// Bounded by the same periodic eviction as `path_hash_index`.
+    ///
+    /// v1's `apply_tenant_delta` only touches the string tree
+    /// (line 408 comment: "token-based inserts do NOT populate
+    /// path_hash_index"); the token side is entirely new v2
+    /// plumbing, so any pre-v2 gap here is preserved unchanged —
+    /// no remote token deltas existed to apply.
+    token_path_hash_index: Arc<DashMap<u64, Vec<u32>>>,
 }
 
 impl CacheAwarePolicy {
@@ -100,12 +117,14 @@ impl CacheAwarePolicy {
         let string_trees = Arc::new(DashMap::<String, Arc<Tree>>::new());
         let token_trees = Arc::new(DashMap::<String, Arc<TokenTree>>::new());
         let path_hash_index = Arc::new(DashMap::<u64, String>::new());
+        let token_path_hash_index = Arc::new(DashMap::<u64, Vec<u32>>::new());
 
         // Start background eviction thread if configured
         let eviction_task = if config.eviction_interval_secs > 0 {
             let string_trees_clone = Arc::clone(&string_trees);
             let token_trees_clone = Arc::clone(&token_trees);
             let path_hash_index_clone = Arc::clone(&path_hash_index);
+            let token_path_hash_index_clone = Arc::clone(&token_path_hash_index);
             let max_tree_size = config.max_tree_size;
 
             Some(PeriodicTask::spawn(
@@ -143,16 +162,24 @@ impl CacheAwarePolicy {
                             max_tree_size
                         );
                     }
+                    if token_path_hash_index_clone.len() > max_tree_size {
+                        token_path_hash_index_clone.clear();
+                        debug!(
+                            "Token path hash index cleared (exceeded max_tree_size: {})",
+                            max_tree_size
+                        );
+                    }
 
                     // Log tree sizes — use model count + path_hash_index only.
                     // DO NOT call tree.snapshot() here — it clones all edge text
                     // (~170 MB) every eviction cycle, causing allocator fragmentation.
                     tracing::info!(
                         "Tree memory: string_trees={} models, token_trees={} models, \
-                         path_hash_index={} entries",
+                         path_hash_index={} entries, token_path_hash_index={} entries",
                         string_trees_clone.len(),
                         token_trees_clone.len(),
                         path_hash_index_clone.len(),
+                        token_path_hash_index_clone.len(),
                     );
                 },
             ))
@@ -168,6 +195,7 @@ impl CacheAwarePolicy {
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
             path_hash_index,
+            token_path_hash_index,
         }
     }
 
@@ -557,6 +585,8 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
                 tree.insert_tokens(tokens, worker_url);
+                self.token_path_hash_index
+                    .insert(smg_mesh::hash_token_path(tokens), tokens.to_vec());
                 self.sync_insert_tokens(model_id, tokens, worker_url);
             }
         } else if let Some(text) = info.request_text {
@@ -589,6 +619,30 @@ impl CacheAwarePolicy {
         workers[min_load_idx].increment_processed();
 
         Some(min_load_idx)
+    }
+}
+
+/// Which of the two local trees a hash query targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TreeKind {
+    String,
+    Token,
+}
+
+/// Read-only handle the policy exposes so mesh-adjacent consumers
+/// can answer "is this hash known locally?" without reaching into
+/// private fields. Defined here (not in the adapter) to keep the
+/// dependency direction `adapter → policy`.
+pub trait TreeHandle: Send + Sync + std::fmt::Debug {
+    fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool;
+}
+
+impl TreeHandle for CacheAwarePolicy {
+    fn contains_hash(&self, _model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool {
+        match tree_kind {
+            TreeKind::String => self.path_hash_index.contains_key(&node_hash),
+            TreeKind::Token => self.token_path_hash_index.contains_key(&node_hash),
+        }
     }
 }
 
@@ -815,11 +869,19 @@ impl CacheAwarePolicy {
             if let Some(idx) = selected_idx {
                 tree.insert_tokens(tokens, workers[idx].url());
 
-                // Note: token-based inserts do NOT populate path_hash_index.
-                // Token hashes can't be resolved back to the original token
-                // sequence on the receiving side. Token trees rely on Layer 2
-                // (periodic structure snapshots) for cross-node convergence,
-                // not tenant deltas.
+                // v1 did not populate a token hash index — v1's
+                // `apply_tenant_delta` only touches the string tree,
+                // so there was nothing on the receiving side to
+                // resolve. v2's `TreeSyncAdapter` consults the
+                // `LocalHashResolver` impl below on every incoming
+                // token delta, so the token hash → tokens mapping
+                // has to be maintained alongside the string side.
+                // The `Vec<u32>` value mirrors the string side's
+                // matched-prefix value: future repair/apply paths can
+                // reconstruct the tree node from hash alone.
+                self.token_path_hash_index
+                    .insert(smg_mesh::hash_token_path(tokens), tokens.to_vec());
+
                 self.sync_insert_tokens(model_id, tokens, workers[idx].url());
                 workers[idx].increment_processed();
                 return Some(idx);
