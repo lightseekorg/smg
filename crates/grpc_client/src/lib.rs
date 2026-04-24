@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
-use tonic::metadata::MetadataMap;
 // TokenSpeed has a fully independent wire definition (see
 // ``proto/tokenspeed_scheduler.proto``) — distinct service, distinct
 // messages with intentionally trimmed field sets aimed at top-tier LLM
@@ -28,6 +27,7 @@ use tonic::metadata::MetadataMap;
 pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
 pub use vllm_engine::{proto as vllm_proto, VllmEngineClient};
+use tonic::metadata::MetadataMap;
 
 /// Shared `get_tokenizer()` implementation for all engine clients.
 ///
