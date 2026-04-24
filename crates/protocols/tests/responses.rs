@@ -4415,3 +4415,19 @@ fn test_tool_search_call_rejects_unknown_status() {
     .expect_err("unknown status value must not deserialize");
     assert!(!err.to_string().is_empty());
 }
+
+/// Parity with [`test_tool_search_call_rejects_unknown_status`] — unknown
+/// `status` values on `tool_search_output` must also fail closed. The
+/// `status` field is shared (`ToolSearchStatus`), so rejection behaviour
+/// is identical, but we pin it with a dedicated test so a regression on
+/// either variant is caught independently.
+#[test]
+fn test_tool_search_output_rejects_unknown_status() {
+    let err = serde_json::from_value::<ResponseInputOutputItem>(json!({
+        "type": "tool_search_output",
+        "tools": [],
+        "status": "pending", // not in {in_progress, completed, incomplete}
+    }))
+    .expect_err("unknown status value must not deserialize");
+    assert!(!err.to_string().is_empty());
+}
