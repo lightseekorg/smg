@@ -8,5 +8,5 @@ pub mod tree_sync;
 pub mod worker_sync;
 
 pub use rate_limit_sync::RateLimitSyncAdapter;
-pub use tree_sync::{TreeDelta, TreeKind, TreeSyncAdapter};
+pub use tree_sync::{LocalHashResolver, TreeDelta, TreeKind, TreeSyncAdapter};
 pub use worker_sync::WorkerSyncAdapter;
