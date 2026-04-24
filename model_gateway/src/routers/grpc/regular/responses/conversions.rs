@@ -560,8 +560,13 @@ mod tests {
         let req = ResponsesRequest {
             input: ResponseInput::Items(vec![ResponseInputOutputItem::ImageGenerationCall {
                 id: "ig_test".to_string(),
+                action: None,
+                background: None,
+                output_format: None,
+                quality: None,
                 result: Some("base64data".to_string()),
                 revised_prompt: Some("a cat".to_string()),
+                size: None,
                 status: None,
             }]),
             ..Default::default()

@@ -1554,7 +1554,8 @@ pub enum ResponseInputOutputItem {
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
     /// generation by identifier, so `result` and `status` are accepted as
     /// absent on the input side. The full shape is
-    /// `{ id, result?: base64 string, revised_prompt?, status?, type }`.
+    /// `{ id, action?, background?, output_format?, quality?, result?: base64,
+    /// revised_prompt?, size?, status?, type }`.
     ///
     /// This mirrors the OpenAI Python SDK 2.8.x
     /// `response_input_item_param.ImageGenerationCall` TypedDict: while the
@@ -1563,11 +1564,35 @@ pub enum ResponseInputOutputItem {
     /// image-generation tool guide), and `skip_serializing_if` keeps the
     /// serialized form spec-compatible when a full item is round-tripped.
     /// The server-side `ResponseOutputItem::ImageGenerationCall` variant
-    /// remains strict because the gateway always populates those fields
-    /// on emit.
+    /// carries the same metadata so real OpenAI responses
+    /// (`action`/`background`/`output_format`/`quality`/`size`) survive
+    /// cloud-passthrough and persistence round-trips.
+    ///
+    /// The metadata fields (`action`, `background`, `output_format`,
+    /// `quality`, `size`) are typed as `Option<String>` rather than
+    /// narrow enums so unknown or future-added values pass through
+    /// unchanged — this mirrors `ImageGenerationTool` on the input-tool
+    /// side.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
+        /// `"generate" | "edit" | "auto"` — which image-generation action the
+        /// prior turn dispatched. Preserved free-form so future actions pass
+        /// through without a wire break.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        /// `"transparent" | "opaque" | "auto"`. Matches the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        /// `"png" | "webp" | "jpeg"`. Matches the `image_generation` tool
+        /// input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_format: Option<String>,
+        /// `"auto" | "low" | "medium" | "high" | "standard" | "hd"`. Matches
+        /// the `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
         /// Base64-encoded image bytes. Omitted on id-only references.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
@@ -1576,6 +1601,10 @@ pub enum ResponseInputOutputItem {
         /// not drop it on replay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revised_prompt: Option<String>,
+        /// `"auto" | "1024x1024" | "1024x1536" | "1536x1024"`. Matches the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
         /// Generation status. Omitted on id-only references.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<ImageGenerationCallStatus>,
@@ -2064,10 +2093,39 @@ pub enum ResponseOutputItem {
     },
     /// `type: "image_generation_call"` — output item carrying a base64 image
     /// produced by the `image_generation` built-in tool. Spec:
-    /// `{ id, result: base64 string, revised_prompt?, status, type }`.
+    /// `{ id, action?, background?, output_format?, quality?, result: base64,
+    /// revised_prompt?, size?, status, type }`.
+    ///
+    /// Real OpenAI production responses include the five metadata fields
+    /// (`action`, `background`, `output_format`, `quality`, `size`) even
+    /// though the OpenAI Rust SDK v2.8.1 omits them. We carry them as
+    /// `Option<String>` so cloud passthrough and persistence round-trips
+    /// preserve them verbatim — and so downstream consumers can read them
+    /// without a second round-trip to the provider.
+    ///
+    /// The metadata fields are typed as `Option<String>` rather than narrow
+    /// enums so unknown or future-added values pass through unchanged;
+    /// this mirrors `ImageGenerationTool` on the input-tool side.
     #[serde(rename = "image_generation_call")]
     ImageGenerationCall {
         id: String,
+        /// `"generate" | "edit" | "auto"` — which image-generation action
+        /// this call dispatched. Preserved free-form so future actions pass
+        /// through without a wire break.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        /// `"transparent" | "opaque" | "auto"`. Mirrors the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        /// `"png" | "webp" | "jpeg"`. Mirrors the `image_generation` tool
+        /// input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_format: Option<String>,
+        /// `"auto" | "low" | "medium" | "high" | "standard" | "hd"`. Mirrors
+        /// the `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
         /// Base64-encoded image bytes.
         result: String,
         /// Prompt text the mainline model rewrote before dispatching the
@@ -2075,6 +2133,10 @@ pub enum ResponseOutputItem {
         /// not drop it on replay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revised_prompt: Option<String>,
+        /// `"auto" | "1024x1024" | "1024x1536" | "1536x1024"`. Mirrors the
+        /// `image_generation` tool input knob of the same name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
         status: ImageGenerationCallStatus,
     },
     /// `type: "compaction"` — server-emitted item carrying an opaque

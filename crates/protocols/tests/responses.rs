@@ -1117,6 +1117,7 @@ fn image_generation_call_output_item_round_trips_spec_shape() {
                 result,
                 revised_prompt,
                 status,
+                ..
             } => {
                 assert_eq!(id, "ig_1");
                 assert_eq!(result, "aGVsbG8=");
@@ -1151,6 +1152,7 @@ fn image_generation_call_output_item_round_trips_with_revised_prompt() {
             result,
             revised_prompt,
             status,
+            ..
         } => {
             assert_eq!(id, "ig_1");
             assert_eq!(result, "aGVsbG8=");
@@ -1184,6 +1186,7 @@ fn image_generation_call_input_item_round_trips_spec_shape() {
             result,
             revised_prompt,
             status,
+            ..
         } => {
             assert_eq!(id, "ig_2");
             assert_eq!(result.as_deref(), Some("d29ybGQ="));
@@ -1215,6 +1218,7 @@ fn image_generation_call_input_item_accepts_id_only_reference() {
             result,
             revised_prompt,
             status,
+            ..
         } => {
             assert_eq!(id, "ig_3");
             assert!(result.is_none());
@@ -1249,6 +1253,7 @@ fn image_generation_call_input_item_round_trips_with_revised_prompt() {
             result,
             revised_prompt,
             status,
+            ..
         } => {
             assert_eq!(id, "ig_2");
             assert_eq!(result.as_deref(), Some("d29ybGQ="));
@@ -1257,6 +1262,191 @@ fn image_generation_call_input_item_round_trips_with_revised_prompt() {
                 Some("A cozy cabin in a snowy pine forest at dusk.")
             );
             assert_eq!(*status, Some(ImageGenerationCallStatus::Completed));
+        }
+        other => panic!("expected ImageGenerationCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// Real OpenAI production responses carry additional metadata on
+/// `image_generation_call` output items (`action`, `background`,
+/// `output_format`, `quality`, `size`) that the OpenAI Rust SDK v2.8.1 omits.
+/// This roundtrip pins the full OpenAI-shaped output item and verifies every
+/// metadata field is preserved through (de)serialization — silently dropping
+/// any of these would break cloud-passthrough fidelity and integration
+/// test assertions.
+#[test]
+fn image_generation_call_output_item_round_trips_with_full_metadata() {
+    let payload = json!({
+        "type": "image_generation_call",
+        "id": "ig_prod_1",
+        "action": "generate",
+        "background": "opaque",
+        "output_format": "png",
+        "quality": "high",
+        "result": "aGVsbG8=",
+        "revised_prompt": "A red fox sitting on a mossy rock at golden hour.",
+        "size": "1024x1024",
+        "status": "completed",
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("full-metadata image_generation_call output item deserialize");
+    match &item {
+        ResponseOutputItem::ImageGenerationCall {
+            id,
+            action,
+            background,
+            output_format,
+            quality,
+            result,
+            revised_prompt,
+            size,
+            status,
+        } => {
+            assert_eq!(id, "ig_prod_1");
+            assert_eq!(action.as_deref(), Some("generate"));
+            assert_eq!(background.as_deref(), Some("opaque"));
+            assert_eq!(output_format.as_deref(), Some("png"));
+            assert_eq!(quality.as_deref(), Some("high"));
+            assert_eq!(result, "aGVsbG8=");
+            assert_eq!(
+                revised_prompt.as_deref(),
+                Some("A red fox sitting on a mossy rock at golden hour.")
+            );
+            assert_eq!(size.as_deref(), Some("1024x1024"));
+            assert_eq!(*status, ImageGenerationCallStatus::Completed);
+        }
+        other => panic!("expected ImageGenerationCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// A minimal `image_generation_call` output item (only `id`, `result`,
+/// `status`) must round-trip without introducing `null` entries for the
+/// absent metadata fields — `skip_serializing_if = "Option::is_none"` keeps
+/// the wire shape spec-minimal. Guards against an accidental
+/// `Option::default()` that would materialize `"action": null` etc. on emit.
+#[test]
+fn image_generation_call_output_item_round_trips_minimal_without_metadata() {
+    let payload = json!({
+        "type": "image_generation_call",
+        "id": "ig_min_1",
+        "result": "aGVsbG8=",
+        "status": "completed",
+    });
+    let item: ResponseOutputItem = serde_json::from_value(payload.clone())
+        .expect("minimal image_generation_call output item deserialize");
+    match &item {
+        ResponseOutputItem::ImageGenerationCall {
+            id,
+            action,
+            background,
+            output_format,
+            quality,
+            result,
+            revised_prompt,
+            size,
+            status,
+        } => {
+            assert_eq!(id, "ig_min_1");
+            assert!(action.is_none());
+            assert!(background.is_none());
+            assert!(output_format.is_none());
+            assert!(quality.is_none());
+            assert_eq!(result, "aGVsbG8=");
+            assert!(revised_prompt.is_none());
+            assert!(size.is_none());
+            assert_eq!(*status, ImageGenerationCallStatus::Completed);
+        }
+        other => panic!("expected ImageGenerationCall, got {other:?}"),
+    }
+    // Must be byte-for-byte equal — no `"action": null`, `"size": null` etc.
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// Symmetry with the output-side variant — the input-side
+/// `ImageGenerationCall` also carries the five metadata fields so a client
+/// resubmitting a prior-turn image generation item gets byte-identical
+/// round-tripping. Without this, stateless multi-turn replay strips metadata
+/// that the output item emitted.
+#[test]
+fn image_generation_call_input_item_round_trips_with_full_metadata() {
+    let payload = json!({
+        "type": "image_generation_call",
+        "id": "ig_prod_2",
+        "action": "edit",
+        "background": "transparent",
+        "output_format": "webp",
+        "quality": "medium",
+        "result": "d29ybGQ=",
+        "revised_prompt": "A winter cabin with snow falling softly outside.",
+        "size": "1024x1536",
+        "status": "completed",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("full-metadata image_generation_call input item deserialize");
+    match &item {
+        ResponseInputOutputItem::ImageGenerationCall {
+            id,
+            action,
+            background,
+            output_format,
+            quality,
+            result,
+            revised_prompt,
+            size,
+            status,
+        } => {
+            assert_eq!(id, "ig_prod_2");
+            assert_eq!(action.as_deref(), Some("edit"));
+            assert_eq!(background.as_deref(), Some("transparent"));
+            assert_eq!(output_format.as_deref(), Some("webp"));
+            assert_eq!(quality.as_deref(), Some("medium"));
+            assert_eq!(result.as_deref(), Some("d29ybGQ="));
+            assert_eq!(
+                revised_prompt.as_deref(),
+                Some("A winter cabin with snow falling softly outside.")
+            );
+            assert_eq!(size.as_deref(), Some("1024x1536"));
+            assert_eq!(*status, Some(ImageGenerationCallStatus::Completed));
+        }
+        other => panic!("expected ImageGenerationCall, got {other:?}"),
+    }
+    assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
+}
+
+/// Minimal id-only input-side image_generation_call must keep serializing
+/// without any `null` metadata fields — the documented multi-turn reference
+/// form stays byte-identical after the metadata-field additions.
+#[test]
+fn image_generation_call_input_item_round_trips_minimal_without_metadata() {
+    let payload = json!({
+        "type": "image_generation_call",
+        "id": "ig_min_2",
+    });
+    let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
+        .expect("minimal image_generation_call input item deserialize");
+    match &item {
+        ResponseInputOutputItem::ImageGenerationCall {
+            id,
+            action,
+            background,
+            output_format,
+            quality,
+            result,
+            revised_prompt,
+            size,
+            status,
+        } => {
+            assert_eq!(id, "ig_min_2");
+            assert!(action.is_none());
+            assert!(background.is_none());
+            assert!(output_format.is_none());
+            assert!(quality.is_none());
+            assert!(result.is_none());
+            assert!(revised_prompt.is_none());
+            assert!(size.is_none());
+            assert!(status.is_none());
         }
         other => panic!("expected ImageGenerationCall, got {other:?}"),
     }
