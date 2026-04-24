@@ -68,9 +68,7 @@ async def serve_grpc(server_args: ServerArgs) -> None:
     tokenspeed_scheduler_pb2_grpc.add_TokenSpeedSchedulerServicer_to_server(servicer, server)
 
     service_names = (
-        tokenspeed_scheduler_pb2.DESCRIPTOR.services_by_name[
-            "TokenSpeedScheduler"
-        ].full_name,
+        tokenspeed_scheduler_pb2.DESCRIPTOR.services_by_name["TokenSpeedScheduler"].full_name,
         "grpc.health.v1.Health",
         reflection.SERVICE_NAME,
     )
