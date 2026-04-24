@@ -33,7 +33,7 @@ use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest, responses::ResponsesRequest,
 };
-use tonic::{transport::Channel, Streaming, Request};
+use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
 
 use crate::{

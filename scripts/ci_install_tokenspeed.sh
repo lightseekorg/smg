@@ -35,6 +35,13 @@ TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.g
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
 
+# lightseekorg/tokenspeed is private, so the clone needs HTTPS basic auth.
+# CI passes the token via the ``setup-tokenspeed`` action's ``github-token``
+# input; locally you can export ``TOKENSPEED_GITHUB_TOKEN`` yourself.
+if [ -n "${TOKENSPEED_GITHUB_TOKEN:-}" ]; then
+    TOKENSPEED_REPO="https://x-access-token:${TOKENSPEED_GITHUB_TOKEN}@${TOKENSPEED_REPO#https://}"
+fi
+
 # Install uv for faster package management (mirrors ci_install_sglang.sh).
 if ! command -v uv &> /dev/null; then
     echo "Installing uv..."

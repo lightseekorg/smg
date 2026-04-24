@@ -480,9 +480,7 @@ impl GrpcClient {
             // stage produced any — that's a router-config bug.
             Self::TokenSpeed(client) => {
                 if multimodal_inputs.is_some() {
-                    return Err(
-                        "TokenSpeed backend does not support multimodal inputs".to_string()
-                    );
+                    return Err("TokenSpeed backend does not support multimodal inputs".to_string());
                 }
                 let req = client.build_generate_request_from_chat(
                     request_id,
@@ -569,9 +567,7 @@ impl GrpcClient {
             // TokenSpeed: text-only on the wire — see ``build_chat_request``.
             Self::TokenSpeed(client) => {
                 if multimodal_inputs.is_some() {
-                    return Err(
-                        "TokenSpeed backend does not support multimodal inputs".to_string()
-                    );
+                    return Err("TokenSpeed backend does not support multimodal inputs".to_string());
                 }
                 let req = client.build_generate_request_from_messages(
                     request_id,
