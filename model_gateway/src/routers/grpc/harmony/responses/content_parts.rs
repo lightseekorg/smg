@@ -96,9 +96,7 @@ const PDF_MAGIC: &[u8] = b"%PDF-";
     reason = "axum Response is the standard error type on the router-entry boundary; \
               matches the rest of the harmony Responses entry points"
 )]
-pub(super) fn validate_harmony_responses_input(
-    request: &ResponsesRequest,
-) -> Result<(), Response> {
+pub(super) fn validate_harmony_responses_input(request: &ResponsesRequest) -> Result<(), Response> {
     let items = match &request.input {
         ResponseInput::Text(_) => return Ok(()),
         ResponseInput::Items(items) => items,
@@ -369,8 +367,7 @@ mod tests {
         let bytes = to_bytes(body, usize::MAX)
             .await
             .expect("error body fits in memory");
-        let value: Value =
-            serde_json::from_slice(&bytes).expect("error body is always valid JSON");
+        let value: Value = serde_json::from_slice(&bytes).expect("error body is always valid JSON");
         value
             .get("error")
             .and_then(|e| e.get("message"))
@@ -431,9 +428,10 @@ mod tests {
 
     #[test]
     fn pure_input_text_items_are_accepted() {
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputText {
-            text: "Describe the weather.".to_string(),
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputText {
+                text: "Describe the weather.".to_string(),
+            }])]);
         validate_harmony_responses_input(&request).expect("InputText must pass");
     }
 
@@ -441,23 +439,25 @@ mod tests {
     fn input_image_data_url_is_rejected() {
         // R3 scope item: InputImage with a `data:` URL. The pre-R3
         // builder dropped this silently; R3 mandates a 400.
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputImage {
-            detail: Some(Detail::Auto),
-            file_id: None,
-            image_url: Some("data:image/jpeg;base64,/9j/4AAQSkZJRg==".to_string()),
-        }])]);
-        let err =
-            validate_harmony_responses_input(&request).expect_err("data-URL images must be rejected");
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputImage {
+                detail: Some(Detail::Auto),
+                file_id: None,
+                image_url: Some("data:image/jpeg;base64,/9j/4AAQSkZJRg==".to_string()),
+            }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("data-URL images must be rejected");
         assert_is_unsupported(err);
     }
 
     #[test]
     fn input_image_absolute_url_is_rejected() {
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputImage {
-            detail: None,
-            file_id: None,
-            image_url: Some("https://example.com/dog.jpg".to_string()),
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputImage {
+                detail: None,
+                file_id: None,
+                image_url: Some("https://example.com/dog.jpg".to_string()),
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("absolute-URL images must be rejected");
         assert_is_unsupported(err);
@@ -467,11 +467,12 @@ mod tests {
     fn input_image_file_id_is_rejected() {
         // R3 scope item: file_id is always unsupported in gRPC mode
         // (no Files API resolver).
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputImage {
-            detail: None,
-            file_id: Some("file-abc".to_string()),
-            image_url: None,
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputImage {
+                detail: None,
+                file_id: Some("file-abc".to_string()),
+                image_url: None,
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("file_id images must be rejected");
         assert_is_unsupported(err);
@@ -484,13 +485,14 @@ mod tests {
         // under R4 rather than a blanket rejection. We assert on the
         // message body (not just status/code) so the PDF-specific
         // branch is distinguishable from a generic file-data rejection.
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: Some(FileDetail::High),
-            file_data: Some("JVBERi0xLjQK".to_string()),
-            file_id: None,
-            file_url: None,
-            filename: Some("report.pdf".to_string()),
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: Some(FileDetail::High),
+                file_data: Some("JVBERi0xLjQK".to_string()),
+                file_id: None,
+                file_url: None,
+                filename: Some("report.pdf".to_string()),
+            }])]);
         let err =
             validate_harmony_responses_input(&request).expect_err("PDF file_data must be rejected");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -514,13 +516,14 @@ mod tests {
         // pipeline cannot route it — but *not* with the R4 message.
         // Asserts the generic file-data branch is taken so we do not
         // misdirect clients to the paused R4 task.
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: Some("/9j/4AAQSkZJRg==".to_string()),
-            file_id: None,
-            file_url: None,
-            filename: Some("photo.jpg".to_string()),
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some("/9j/4AAQSkZJRg==".to_string()),
+                file_id: None,
+                file_url: None,
+                filename: Some("photo.jpg".to_string()),
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("JPEG file_data must be rejected");
         let message = error_message(err).await;
@@ -536,13 +539,14 @@ mod tests {
 
     #[test]
     fn input_file_file_url_is_rejected() {
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: None,
-            file_id: None,
-            file_url: Some("https://example.com/report.pdf".to_string()),
-            filename: None,
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: None,
+                file_id: None,
+                file_url: Some("https://example.com/report.pdf".to_string()),
+                filename: None,
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("file_url attachments must be rejected");
         assert_is_unsupported(err);
@@ -550,13 +554,14 @@ mod tests {
 
     #[test]
     fn input_file_file_id_is_rejected() {
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: None,
-            file_id: Some("file-abc".to_string()),
-            file_url: None,
-            filename: None,
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: None,
+                file_id: Some("file-abc".to_string()),
+                file_url: None,
+                filename: None,
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("file_id attachments must be rejected");
         assert_is_unsupported(err);
@@ -633,13 +638,14 @@ mod tests {
         // (non-canonical but observed in the wild), the magic-byte
         // sniff must still catch it so the caller sees the R4-specific
         // message rather than a generic rejection.
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: Some("data:application/pdf;base64,JVBERi0xLjQK".to_string()),
-            file_id: None,
-            file_url: None,
-            filename: None,
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some("data:application/pdf;base64,JVBERi0xLjQK".to_string()),
+                file_id: None,
+                file_url: None,
+                filename: None,
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("data-URL-wrapped PDF file_data must be rejected");
         let message = error_message(err).await;
@@ -657,13 +663,14 @@ mod tests {
         // `;Base64,` would skip the strip, mis-routing the request into
         // the generic "file_data unsupported" path instead of the
         // PDF-specific R4 message.
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: Some("Data:application/pdf;Base64,JVBERi0xLjQK".to_string()),
-            file_id: None,
-            file_url: None,
-            filename: None,
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some("Data:application/pdf;Base64,JVBERi0xLjQK".to_string()),
+                file_id: None,
+                file_url: None,
+                filename: None,
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("mixed-case data-URL wrapper must still reach the PDF sniffer");
         let message = error_message(err).await;
@@ -686,13 +693,14 @@ mod tests {
         // `%PDF-1` → base64 `JVBERi0x` (the canonical PDF header).
         let mut payload = String::from("JVBERi0x");
         payload.push_str(&"A".repeat(65_536));
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: Some(payload),
-            file_id: None,
-            file_url: None,
-            filename: None,
-        }])]);
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some(payload),
+                file_id: None,
+                file_url: None,
+                filename: None,
+            }])]);
         let err = validate_harmony_responses_input(&request)
             .expect_err("large PDF file_data must still be rejected with the R4 message");
         let message = error_message(err).await;
@@ -718,16 +726,16 @@ mod tests {
         let mut payload = String::from("data:application/octet-stream;");
         payload.push_str(&"x".repeat(65_536)); // far beyond the header cap
         payload.push_str(",JVBERi0x"); // PDF magic in payload, no ;base64,
-        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
-            detail: None,
-            file_data: Some(payload),
-            file_id: None,
-            file_url: None,
-            filename: None,
-        }])]);
-        let err = validate_harmony_responses_input(&request).expect_err(
-            "adversarial data-URL without early separator must still be rejected",
-        );
+        let request =
+            request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+                detail: None,
+                file_data: Some(payload),
+                file_id: None,
+                file_url: None,
+                filename: None,
+            }])]);
+        let err = validate_harmony_responses_input(&request)
+            .expect_err("adversarial data-URL without early separator must still be rejected");
         // Generic file-data branch — the PDF sniffer couldn't decode
         // because the strip failed, which is the desired behavior
         // (fast rejection over DoS-adjacent full-string walk).
