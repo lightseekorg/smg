@@ -55,7 +55,9 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::worker::{KvEventMonitor, Worker, UNKNOWN_MODEL_ID};
+#[cfg(test)]
+use crate::worker::UNKNOWN_MODEL_ID;
+use crate::worker::{KvEventMonitor, Worker};
 
 /// Cache-aware routing policy
 ///
@@ -327,18 +329,8 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Normalize model_id for mesh synchronization
-    /// Converts empty model_id to UNKNOWN_MODEL_ID for consistency
-    fn normalize_mesh_model_id(model_id: &str) -> &str {
-        if model_id.is_empty() {
-            UNKNOWN_MODEL_ID
-        } else {
-            model_id
-        }
-    }
-
     pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &TreeOperation) {
-        let tree_key = Self::normalize_mesh_model_id(model_id);
+        let tree_key = normalize_model_key(model_id);
 
         match operation {
             TreeOperation::Insert(insert_op) => {
@@ -412,7 +404,7 @@ impl CacheAwarePolicy {
     fn sync_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
         let mesh_sync = self.mesh_sync.read().clone();
         if let Some(mesh_sync) = mesh_sync {
-            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            let mesh_model_id = normalize_model_key(model_id);
             mesh_sync.sync_tree_insert_hash(mesh_model_id, path_hash, tenant);
         }
     }
@@ -425,7 +417,7 @@ impl CacheAwarePolicy {
                 key: TreeKey::Tokens(tokens.to_vec()),
                 tenant: tenant.to_string(),
             });
-            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            let mesh_model_id = normalize_model_key(model_id);
             if let Err(error) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
                 warn!("Failed to sync tree insert operation to mesh: {}", error);
             }
@@ -435,7 +427,7 @@ impl CacheAwarePolicy {
     /// Merge remote tree state into local trees incrementally.
     /// Uses entry-based insertion to preserve existing local routing state.
     pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
         for operation in &tree_state.operations {
             if let TreeOperation::Insert(insert_op) = operation {
                 self.apply_insert_operation(model_id, insert_op);
@@ -452,7 +444,7 @@ impl CacheAwarePolicy {
         inserts: &[smg_mesh::TenantInsert],
         evictions: &[smg_mesh::TenantEvict],
     ) {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
 
         let string_tree = self
             .string_trees
@@ -494,7 +486,7 @@ impl CacheAwarePolicy {
         reason = "pop() after last_mut().is_some() is infallible"
     )]
     pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
         let tree = self.string_trees.get(model_id)?;
         let snapshot = tree.snapshot();
         if snapshot.nodes.is_empty() {
@@ -546,7 +538,7 @@ impl CacheAwarePolicy {
     /// which preserves shared prefixes and is much smaller than the flat
     /// `TreeState` returned by [`export_tree_state`].
     pub fn export_tree_snapshot(&self, model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
         let tree = self.string_trees.get(model_id)?;
         let snapshot = tree.snapshot();
         if snapshot.nodes.is_empty() {
@@ -690,6 +682,9 @@ pub trait TreeHandle: Send + Sync + std::fmt::Debug {
 
 impl TreeHandle for CacheAwarePolicy {
     fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool {
+        // Normalize empty → UNKNOWN_MODEL_ID so lookups match the
+        // key shape every populate site already uses.
+        let model_id = normalize_model_key(model_id);
         self.hash_index
             .get(model_id)
             .is_some_and(|entry| match tree_kind {
