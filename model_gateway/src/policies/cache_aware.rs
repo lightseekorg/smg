@@ -91,20 +91,14 @@ pub struct CacheAwarePolicy {
     /// correct.  Deferring to a follow-up to avoid changing the wire format.
     path_hash_index: Arc<DashMap<u64, String>>,
 
-    /// Mirror of `path_hash_index` for the token tree. Populated on
-    /// local token-based inserts and consulted by the v2
-    /// [`LocalHashResolver`] implementation so incoming token deltas
-    /// can be classified known/unknown without a repair round trip.
-    /// Value is the full `Vec<u32>` tokens for the hashed prefix —
-    /// mirrors the string side, which stores the matched prefix so
-    /// repair/apply paths can reconstruct the node from hash alone.
-    /// Bounded by the same periodic eviction as `path_hash_index`.
-    ///
-    /// v1's `apply_tenant_delta` only touches the string tree
-    /// (line 408 comment: "token-based inserts do NOT populate
-    /// path_hash_index"); the token side is entirely new v2
-    /// plumbing, so any pre-v2 gap here is preserved unchanged —
-    /// no remote token deltas existed to apply.
+    /// Token-tree counterpart to `path_hash_index`. Populated on
+    /// local token inserts and consulted by the [`TreeHandle`] impl
+    /// so incoming token deltas can be classified known/unknown.
+    /// Stores the full token sequence so future repair/apply paths
+    /// can reconstruct the node from hash alone. Bounded by the
+    /// same periodic eviction as `path_hash_index`. v1 had no token
+    /// hash index (v1's `apply_tenant_delta` only touched the
+    /// string tree), so the token side is entirely new v2 plumbing.
     token_path_hash_index: Arc<DashMap<u64, Vec<u32>>>,
 }
 
@@ -869,16 +863,11 @@ impl CacheAwarePolicy {
             if let Some(idx) = selected_idx {
                 tree.insert_tokens(tokens, workers[idx].url());
 
-                // v1 did not populate a token hash index — v1's
-                // `apply_tenant_delta` only touches the string tree,
-                // so there was nothing on the receiving side to
-                // resolve. v2's `TreeSyncAdapter` consults the
-                // `LocalHashResolver` impl below on every incoming
-                // token delta, so the token hash → tokens mapping
-                // has to be maintained alongside the string side.
-                // The `Vec<u32>` value mirrors the string side's
-                // matched-prefix value: future repair/apply paths can
-                // reconstruct the tree node from hash alone.
+                // v1 never populated a token hash index (its
+                // `apply_tenant_delta` only touched the string
+                // tree). v2's `TreeHandle` impl consults this map
+                // on every incoming token delta, so we maintain it
+                // alongside the string side.
                 self.token_path_hash_index
                     .insert(smg_mesh::hash_token_path(tokens), tokens.to_vec());
 
