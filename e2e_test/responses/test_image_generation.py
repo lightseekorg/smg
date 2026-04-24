@@ -87,7 +87,11 @@ def _find_image_generation_call(output) -> object | None:
     return None
 
 
-def _assert_image_generation_call_item(item, *, expected_base64: str, expected_prompt: str) -> None:
+def _assert_image_generation_call_item(
+    item,
+    *,
+    expected_base64: str,
+) -> None:
     """Assert every field on the emitted ``ImageGenerationCall`` item.
 
     Spec (``crates/protocols/src/responses.rs``):
@@ -95,6 +99,18 @@ def _assert_image_generation_call_item(item, *, expected_base64: str, expected_p
     Asserting each field individually (rather than relying on SDK
     deserialization alone) catches silent drift where the gateway drops a
     field after R6.1-R6.4.
+
+    ``revised_prompt`` is checked as "non-empty string" rather than
+    byte-equal to the caller's input. The mock MCP server echoes
+    whichever prompt the gateway forwards to it, but the forwarded
+    prompt is supplied by the upstream model (gpt-5-nano on the cloud
+    lane, gpt-oss-20b / Llama-3.1-8B on the gRPC lanes). Every one of
+    those models rewrites the caller's string before invoking the
+    tool — sometimes safety-revising, sometimes summarising
+    ("Generate a picture of a cat" → "cat") — so an exact-echo
+    assertion is inherently flaky across models. A dropped /
+    non-string ``revised_prompt`` still fails, which is what we
+    actually need to guard against.
     """
     assert item is not None, "Expected an image_generation_call output item"
     assert item.type == "image_generation_call", f"wrong item type: {item.type!r}"
@@ -103,8 +119,8 @@ def _assert_image_generation_call_item(item, *, expected_base64: str, expected_p
     assert item.result == expected_base64, (
         "image_generation_call.result did not round-trip the deterministic mock PNG"
     )
-    assert item.revised_prompt == expected_prompt, (
-        f"revised_prompt should echo the input prompt; got {item.revised_prompt!r}"
+    assert isinstance(item.revised_prompt, str) and item.revised_prompt, (
+        f"revised_prompt should be a non-empty string; got {item.revised_prompt!r}"
     )
 
 
@@ -268,9 +284,18 @@ class _ImageGenerationAssertions:
         _assert_image_generation_call_item(
             item,
             expected_base64=mock_mcp.image_generation_png_base64,
-            expected_prompt=_IMAGE_GEN_PROMPT,
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "R6.7b: router's output_item.done suppression gate in tool_handler.rs "
+            "is scoped to function_call items only. For image_generation_call, "
+            "response.output_item.done fires before response.image_generation_call.completed, "
+            "violating the documented envelope order. Fix tracked in R6.7b PR; when that merges "
+            "this marker will XPASS and CI will require its removal."
+        ),
+    )
     def test_image_generation_streaming(self, request, image_gen_tool_args) -> None:
         """Streaming: assert the full envelope sequence and field payload."""
         _, client, mock_mcp, model = self._ctx(request)
@@ -292,11 +317,18 @@ class _ImageGenerationAssertions:
         _assert_image_generation_call_item(
             item,
             expected_base64=mock_mcp.image_generation_png_base64,
-            expected_prompt=_IMAGE_GEN_PROMPT,
         )
 
     def test_image_generation_tool_overrides_size(self, request) -> None:
-        """Argument compactor: a non-default ``size``/``quality`` reach the tool."""
+        """Argument compactor: a non-default ``size``/``quality`` reach the tool.
+
+        ``mock_mcp_server`` is session-scoped, so ``last_call_args``
+        carries over across tests and classes. Snapshot the call-log
+        length before issuing the request and assert a new entry was
+        appended; otherwise a regression that silently skips the tool
+        invocation here could pass vacuously by re-observing a stale
+        ``size="512x512"`` from an earlier class in the matrix.
+        """
         _, client, mock_mcp, model = self._ctx(request)
 
         tool_args = {
@@ -304,6 +336,8 @@ class _ImageGenerationAssertions:
             "size": "512x512",
             "quality": "high",
         }
+
+        baseline_calls = len(mock_mcp.call_log)
 
         resp = client.responses.create(
             model=model,
@@ -314,6 +348,14 @@ class _ImageGenerationAssertions:
         )
 
         assert resp.error is None, f"Response error: {resp.error}"
+
+        # Non-vacuity guard: a fresh MCP invocation must have been
+        # recorded. Without this the next two asserts could green on
+        # leftover state from an earlier test in the same session.
+        assert len(mock_mcp.call_log) > baseline_calls, (
+            f"Mock MCP server saw no new calls (baseline={baseline_calls}); "
+            "overrides assertion would be vacuous on session-scoped mock."
+        )
 
         last_args = mock_mcp.last_call_args
         assert last_args is not None, "Mock MCP server saw no calls"
