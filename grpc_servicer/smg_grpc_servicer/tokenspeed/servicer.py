@@ -466,6 +466,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         sampling = self._sampling_params_from_proto(request.sampling_params)
 
         GenerateReqInput = _lazy_generate_req_input()
+        if _DEBUG_OUTPUT:
+            logger.warning(
+                "TS_DEBUG_SAMPLING rid=%s sampling_params=%s stream=%s logprob=%s",
+                request.request_id,
+                sampling,
+                bool(request.stream),
+                bool(request.return_logprob),
+            )
         obj = GenerateReqInput(
             input_ids=input_ids,
             sampling_params=sampling,
