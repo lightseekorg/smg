@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::routers::{
@@ -21,12 +21,16 @@ use crate::routers::{
 /// Unlike regular request building, this uses token_ids directly (Harmony encoding handles messages).
 pub(crate) struct HarmonyRequestBuildingStage {
     inject_pd_metadata: bool,
+    enable_message_hash: bool,
 }
 
 impl HarmonyRequestBuildingStage {
     /// Create a new Harmony request building stage
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, enable_message_hash: bool) -> Self {
+        Self {
+            inject_pd_metadata,
+            enable_message_hash,
+        }
     }
 }
 
@@ -72,10 +76,24 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             ClientSelection::Dual { prefill, .. } => prefill,
         };
 
-        // Generate request_id based on request type
+        // Generate request_id based on request type — use user-supplied request_id if provided
         let request_id = match &ctx.input.request_type {
-            RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
-            RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
+            RequestType::Chat(req) => {
+                if let Some(id) = req.request_id.clone() {
+                    info!(target: "smg::request", request_id = %id, "Using user-supplied request ID");
+                    id
+                } else {
+                    format!("chatcmpl-{}", Uuid::now_v7())
+                }
+            }
+            RequestType::Responses(req) => {
+                if let Some(id) = req.request_id.clone() {
+                    info!(target: "smg::request", request_id = %id, "Using user-supplied request ID");
+                    id
+                } else {
+                    format!("responses-{}", Uuid::now_v7())
+                }
+            }
             request_type @ (RequestType::Generate(_)
             | RequestType::Completion(_)
             | RequestType::Embedding(_)
@@ -92,6 +110,12 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 ));
             }
         };
+
+        if self.enable_message_hash {
+            if let RequestType::Chat(req) = &ctx.input.request_type {
+                helpers::compute_and_log_message_hashes(&request_id, &req.messages);
+            }
+        }
 
         // Build gRPC request using token_ids directly (Harmony encoding already handled message rendering)
         let placeholder_processed_text = "[harmony]".to_string();

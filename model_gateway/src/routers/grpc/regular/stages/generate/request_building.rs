@@ -22,7 +22,7 @@ pub(crate) struct GenerateRequestBuildingStage {
 }
 
 impl GenerateRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
+    pub fn new(inject_pd_metadata: bool, _enable_message_hash: bool) -> Self {
         Self { inject_pd_metadata }
     }
 }
