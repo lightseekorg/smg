@@ -63,19 +63,34 @@ use crate::routers::error;
 /// case where a PDF is base64-encoded without additional wrapping.
 const PDF_MAGIC: &[u8] = b"%PDF-";
 
-/// Validate that the user-supplied input in a ResponsesRequest contains
-/// only content parts the harmony Responses router can faithfully render.
+/// Validate that a ResponsesRequest's `input` contains only content
+/// parts the harmony Responses router can faithfully render.
 ///
 /// Returns `Ok(())` when the request is safe to dispatch, or a
 /// `400 unsupported_content` response otherwise. The error message is
 /// deliberately descriptive so callers can distinguish the rejection
 /// reason (image, file, PDF, refusal, file_id) at the HTTP layer.
 ///
-/// Only the caller-submitted `request.input` is inspected. Persisted
-/// history loaded via `previous_response_id` is skipped: it was
-/// validated when it was first submitted, may legitimately carry
-/// assistant-refusal replays, and is not something the caller can
-/// mutate on this request.
+/// # Two-phase invocation
+///
+/// The non-streaming and streaming entry points call this validator at
+/// **two** points on every request:
+///
+/// 1. On the raw `request` as submitted by the caller, before any
+///    history merge. Fresh-input issues surface as the caller's fault
+///    rather than appearing to come from the stored chain.
+/// 2. On the merged `current_request` produced by
+///    `load_previous_messages`. Stored threads may contain image/file
+///    content parts that were persisted by a sibling router supporting
+///    multimodal (notably R1's OpenAI-compat passthrough); replaying
+///    such a thread through the harmony backend would otherwise hit
+///    the same silent-drop regression this validator exists to close.
+///
+/// The validator's assistant-role-refusal exception means legitimate
+/// multi-turn output replay passes through the second phase unchanged
+/// — only non-assistant image/file/refusal parts in history are
+/// rejected. Both phases run the same code so the policy stays
+/// single-source.
 #[expect(
     clippy::result_large_err,
     reason = "axum Response is the standard error type on the router-entry boundary; \
@@ -191,6 +206,17 @@ fn validate_content_parts(role: &str, parts: &[ResponseContentPart]) -> Result<(
                          Responses backend",
                     ));
                 }
+                // Defense in depth: `ResponseContentPart::InputFile`
+                // declares `file_data`, `file_id`, and `file_url` as
+                // individually optional (see `crates/protocols/src/
+                // responses.rs`), so in principle an attachment could
+                // carry only `detail` / `filename` metadata with no
+                // content source at all. Protocol-level input
+                // validation does not currently enforce
+                // "at-least-one-source", so this arm is reachable via
+                // a crafted request. Rejecting it here keeps the
+                // validator exhaustive and avoids a silent-accept hole
+                // in case upstream validation is relaxed.
                 return Err(unsupported(
                     "input_file content parts are not supported on the harmony Responses backend",
                 ));
@@ -280,15 +306,31 @@ fn strip_data_url_prefix(input: &str) -> &str {
 }
 
 /// Locate the `;base64,` separator inside a data URL, matching
-/// case-insensitively. Uses a byte-window walk (no allocation) so the
-/// hot path stays allocation-free even on large payloads.
+/// case-insensitively. Uses a byte-window walk (no allocation) bounded
+/// to the first [`DATA_URL_HEADER_SCAN_LIMIT`] bytes so the hot path
+/// stays allocation- *and* CPU-free even on adversarial large payloads:
+/// a malformed `data:` string without an early separator would otherwise
+/// force a full linear scan over hundreds of megabytes (the router
+/// permits up to `max_payload_size` in
+/// `model_gateway/src/config/types.rs`), which would be a CPU-sink for
+/// what is otherwise a fast-path 400 rejection.
 fn find_base64_separator(input: &str) -> Option<usize> {
     const NEEDLE: &[u8] = b";base64,";
-    input
+    let header = input
         .as_bytes()
+        .get(..DATA_URL_HEADER_SCAN_LIMIT.min(input.len()))?;
+    header
         .windows(NEEDLE.len())
         .position(|window| window.eq_ignore_ascii_case(NEEDLE))
 }
+
+/// Upper bound on how many leading bytes we scan for a `;base64,`
+/// separator in a `data:` URL. RFC 2397 data-URL headers carry at most
+/// a MIME type plus a handful of parameters (`charset`, `boundary`,
+/// etc.); 256 bytes is comfortably larger than any realistic header and
+/// small enough that the scan is O(1) regardless of the payload size
+/// behind it.
+const DATA_URL_HEADER_SCAN_LIMIT: usize = 256;
 
 /// Build the standard `400 unsupported_content` response used by every
 /// rejection branch in this module.
@@ -657,6 +699,42 @@ mod tests {
         assert!(
             message.contains("PDF") && message.contains("R4"),
             "bounded-decode path must still emit the R4-specific message; got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn data_url_separator_scan_is_bounded_to_header_region() {
+        // Adversarial case: a `data:` payload without an early
+        // `;base64,` separator must not force a full linear scan over
+        // a multi-megabyte body. We construct a `data:` string with an
+        // oversize MIME header region and no separator, then assert
+        // the request is still rejected quickly (no panic, no timeout).
+        //
+        // This is a behavioral guard — the absence of a separator
+        // means the PDF sniffer falls through to the generic
+        // file-data rejection — but it locks in the
+        // `DATA_URL_HEADER_SCAN_LIMIT` cap so a future relaxation
+        // cannot quietly reintroduce the O(n) scan.
+        let mut payload = String::from("data:application/octet-stream;");
+        payload.push_str(&"x".repeat(65_536)); // far beyond the header cap
+        payload.push_str(",JVBERi0x"); // PDF magic in payload, no ;base64,
+        let request = request_with_items(vec![user_message(vec![ResponseContentPart::InputFile {
+            detail: None,
+            file_data: Some(payload),
+            file_id: None,
+            file_url: None,
+            filename: None,
+        }])]);
+        let err = validate_harmony_responses_input(&request).expect_err(
+            "adversarial data-URL without early separator must still be rejected",
+        );
+        // Generic file-data branch — the PDF sniffer couldn't decode
+        // because the strip failed, which is the desired behavior
+        // (fast rejection over DoS-adjacent full-string walk).
+        let message = error_message(err).await;
+        assert!(
+            !message.contains("R4"),
+            "bounded scan must not claim PDF identification when the separator is beyond the cap; got: {message}"
         );
     }
 
