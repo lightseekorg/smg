@@ -301,6 +301,8 @@ async fn test_non_streaming_mcp_e2e_accepts_forwardable_request_headers() {
             server_description: None,
             require_approval: None,
             allowed_tools: None,
+            connector_id: None,
+            defer_loading: None,
         })]),
         top_logprobs: Some(0),
         top_p: None,
