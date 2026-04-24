@@ -119,6 +119,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # Message hash logging for session reconstruction
+    enable_message_hash: bool = False
     # Storage hooks (WASM)
     storage_hook_wasm_path: str | None = None
     # History backend configuration
@@ -471,6 +473,12 @@ class RouterArgs:
             action="store_true",
             default=RouterArgs.log_json,
             help="Output logs in JSON format",
+        )
+        logging_group.add_argument(
+            f"--{prefix}enable-message-hash",
+            action="store_true",
+            default=RouterArgs.enable_message_hash,
+            help="Compute per-message SHA-256 hashes for session reconstruction logging",
         )
 
         # Service discovery configuration
