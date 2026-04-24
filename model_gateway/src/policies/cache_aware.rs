@@ -149,19 +149,30 @@ impl CacheAwarePolicy {
                             model_id, max_tree_size
                         );
                     }
-                    // Evict hash index if total entries exceed the
-                    // tree size limit. Entries are repopulated on
-                    // the next local insert.
-                    let hash_total: usize = hash_index_clone
-                        .iter()
-                        .map(|e| e.value().string_tree.len() + e.value().token_tree.len())
-                        .sum();
-                    if hash_total > max_tree_size {
-                        hash_index_clone.clear();
-                        debug!(
-                            "Hash index cleared (exceeded max_tree_size: {})",
-                            max_tree_size
-                        );
+                    // Evict hash index per model: `max_tree_size` is a
+                    // per-tree bound, so clearing one model's overflow
+                    // must not wipe other models' still-valid metadata.
+                    // Each tree kind is checked independently.
+                    let mut hash_total: usize = 0;
+                    for entry in hash_index_clone.iter() {
+                        let per_model = entry.value();
+                        if per_model.string_tree.len() > max_tree_size {
+                            per_model.string_tree.clear();
+                            debug!(
+                                model_id = entry.key(),
+                                "String hash index cleared (exceeded max_tree_size: {})",
+                                max_tree_size
+                            );
+                        }
+                        if per_model.token_tree.len() > max_tree_size {
+                            per_model.token_tree.clear();
+                            debug!(
+                                model_id = entry.key(),
+                                "Token hash index cleared (exceeded max_tree_size: {})",
+                                max_tree_size
+                            );
+                        }
+                        hash_total += per_model.string_tree.len() + per_model.token_tree.len();
                     }
 
                     // Log tree sizes — model counts + hash-index total.
@@ -566,15 +577,25 @@ impl CacheAwarePolicy {
                 model_id, max_size
             );
         }
-        // Evict hash index if total entries exceed tree size limit.
-        let hash_total: usize = self
-            .hash_index
-            .iter()
-            .map(|e| e.value().string_tree.len() + e.value().token_tree.len())
-            .sum();
-        if hash_total > max_size {
-            self.hash_index.clear();
-            debug!("Hash index cleared (exceeded max_size: {})", max_size);
+        // Evict hash index per model per tree kind. `max_size` is a
+        // per-tree bound; clearing one model's overflow must not wipe
+        // other models' still-valid metadata.
+        for entry in self.hash_index.iter() {
+            let per_model = entry.value();
+            if per_model.string_tree.len() > max_size {
+                per_model.string_tree.clear();
+                debug!(
+                    model_id = entry.key(),
+                    "String hash index cleared (exceeded max_size: {})", max_size
+                );
+            }
+            if per_model.token_tree.len() > max_size {
+                per_model.token_tree.clear();
+                debug!(
+                    model_id = entry.key(),
+                    "Token hash index cleared (exceeded max_size: {})", max_size
+                );
+            }
         }
     }
 
