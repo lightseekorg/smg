@@ -391,12 +391,23 @@ pub(crate) fn prepare_hosted_dispatch_args(
     request_tools: &[ResponseTool],
     request_user: Option<&str>,
 ) {
+    tracing::warn!(
+        response_format = ?response_format,
+        request_user = ?request_user,
+        request_tools_count = request_tools.len(),
+        is_object = arguments.is_object(),
+        "USER-FWD-DEBUG (helper enter): prepare_hosted_dispatch_args"
+    );
     if let Some(kind) = response_format.to_builtin_tool_type() {
         if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
             apply_hosted_tool_overrides(arguments, &overrides);
         }
     }
     inject_user_into_hosted_args(arguments, response_format, request_user);
+    tracing::warn!(
+        post_args = ?arguments,
+        "USER-FWD-DEBUG (helper exit): prepare_hosted_dispatch_args"
+    );
 }
 
 #[cfg(test)]

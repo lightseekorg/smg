@@ -256,6 +256,12 @@ pub(crate) async fn execute_streaming_tool_calls(
         // on image_generation) into dispatch args, then forward the request-
         // level `user` so a downstream MCP server can attribute per-user usage.
         // Both steps are no-ops for plain MCP function tools.
+        tracing::warn!(
+            tool = %call.name,
+            response_format = ?response_format,
+            request_user = ?request_user,
+            "USER-FWD-DEBUG (streaming): pre-prepare_hosted_dispatch_args"
+        );
         prepare_hosted_dispatch_args(
             &mut arguments,
             &response_format,
@@ -265,7 +271,11 @@ pub(crate) async fn execute_streaming_tool_calls(
 
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
-        debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
+        tracing::warn!(
+            "USER-FWD-DEBUG (streaming): post-dispatch args for '{}': {}",
+            call.name,
+            arguments
+        );
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -940,11 +950,11 @@ pub(crate) async fn execute_tool_loop(
             // can attribute per-user usage. Both steps are no-ops for plain
             // MCP function tools (Passthrough format).
             let response_format = session.tool_response_format(&call.name);
-            info!(
+            tracing::warn!(
                 tool = %call.name,
                 response_format = ?response_format,
                 request_user = ?original_body.user,
-                "non-streaming dispatch: about to call prepare_hosted_dispatch_args"
+                "USER-FWD-DEBUG (non-streaming): pre-prepare_hosted_dispatch_args"
             );
             prepare_hosted_dispatch_args(
                 &mut arguments,
@@ -959,8 +969,8 @@ pub(crate) async fn execute_tool_loop(
             let effective_arguments =
                 serde_json::to_string(&arguments).unwrap_or_else(|_| call.arguments.clone());
 
-            info!(
-                "Calling MCP tool '{}' with args: {}",
+            tracing::warn!(
+                "USER-FWD-DEBUG (non-streaming): post-dispatch args for '{}': {}",
                 call.name, effective_arguments
             );
             let tool_result = session
