@@ -1,28 +1,27 @@
 """Shared fixtures for the Responses API test suite.
 
-Hosts the ``image_generation`` test fixtures for the three engine lanes:
+Hosts the MCP-builtin gateway fixtures for the three hosted tools currently
+covered: ``image_generation`` (cloud + sglang harmony + vllm regular),
+``web_search_preview`` (cloud + sglang harmony), and ``code_interpreter``
+(cloud + sglang harmony). Each builtin gets its own
+``mock_mcp_config_file_*`` and ``gateway_with_mock_mcp_<tool>_<lane>``
+fixture pair so a single ``MockMcpServer`` instance can back all three
+suites concurrently in the same test session.
 
-* ``gateway_with_mock_mcp_cloud`` — OpenAI cloud backend (R6.2).
-* ``gateway_with_mock_mcp_grpc_sglang`` — local SGLang + gpt-oss-20b via
-  harmony (R6.3).
-* ``gateway_with_mock_mcp_grpc_vllm`` — local vLLM + Llama-3.1-8B-Instruct
-  via regular (R6.4).
-
-Each fixture wires the gateway's MCP client to an in-process
-``MockMcpServer`` so the image-generation path is exercised deterministically
-and without external-service dependencies. Future R6.x PRs can copy the
-gRPC fixture pattern to add ``web_search`` / ``file_search`` /
-``code_interpreter`` tests once the corresponding tool stubs in
-``infra/mock_mcp_server.py`` are uncommented.
+Each fixture wires the gateway's MCP client to the in-process
+``MockMcpServer`` so the hosted-tool path is exercised deterministically
+and without external-service dependencies. ``file_search`` is the only
+remaining hosted-tool builtin not yet covered — it requires vector-store
+provisioning, deferred to a follow-up.
 
 Design notes
 ------------
 * The gateway CLI exposes ``--mcp-config-path`` (see
   ``bindings/python/src/smg/router_args.py``) which takes a path to a YAML
   config deserialized into ``crates/mcp/src/core/config.rs::McpConfig``.
-  Setting ``builtin_type: image_generation`` on a server makes the gateway
-  route every ``{"type": "image_generation"}`` tool request through it
-  instead of passing the tool to the upstream model.
+  Setting ``builtin_type: <tool>`` on a server makes the gateway route
+  every ``{"type": "<tool>"}`` tool request through it instead of passing
+  the tool to the upstream model.
 * We connect with ``protocol: streamable`` which matches the ``FastMCP`` app
   produced by ``streamable_http_app()``. ``sse`` would also work but would
   require an extra event-stream hop per call.

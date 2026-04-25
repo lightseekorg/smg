@@ -25,14 +25,17 @@ coordinate in CI.
 
 Registering a new tool
 ----------------------
-To add a new tool (e.g., ``web_search``) for a future R6.x test, do two things:
+The currently registered tools are ``image_generation``, ``web_search``
+(bound to the ``web_search_preview`` builtin), and ``code_interpreter``.
+To add another (``file_search`` is the canonical follow-up), do two
+things:
 
 1. Write the tool function as a top-level ``@FastMCP.tool`` decorator inside
    ``_register_tools``. Return a plain ``dict`` or ``str`` — the SDK will wrap
    it into the MCP tool-result envelope.
 2. (Optional) If you want ``last_call_args`` introspection, append to
-   ``self._call_log`` inside the tool body. The existing ``image_generation``
-   tool shows the pattern.
+   ``self._call_log`` inside the tool body. The existing tools show the
+   pattern.
 
 The gateway wires the tool to an OpenAI built-in type via the MCP config
 ``builtin_type`` (``image_generation``, ``web_search_preview``, ``file_search``,
@@ -451,7 +454,10 @@ class MockMcpServer:
         # OpenAI ``web_search_preview`` built-in via
         # ``builtin_type: web_search_preview`` in the gateway config.
         # ``count`` mirrors the optional ``num_results`` knob OpenAI surfaces
-        # on the public preview tool.
+        # on the public preview tool. ``user`` is declared explicitly so a
+        # forward-compatible gateway change that propagates the request-level
+        # ``user`` field into MCP dispatch arguments does not have its
+        # dispatch rejected by FastMCP's schema validation.
         @fastmcp.tool(
             name="web_search",
             description=(
@@ -461,18 +467,33 @@ class MockMcpServer:
                 "results. Never calls out of process."
             ),
         )
-        def web_search(query: str, count: int = 3) -> dict[str, Any]:
+        def web_search(
+            query: str,
+            count: int = 3,
+            user: str | None = None,
+        ) -> dict[str, Any]:
+            # Honour ``count`` deterministically: slice when the caller asks
+            # for fewer entries than ``WEB_SEARCH_RESULTS`` carries, cycle
+            # through the canned entries when it asks for more. Negative or
+            # zero ``count`` collapses to an empty list — the tool would
+            # otherwise return more results than the caller requested, which
+            # masks any future regression that miscounts.
+            requested = max(int(count), 0)
+            results: list[dict[str, str]] = []
+            if requested and deterministic_search:
+                pool = deterministic_search
+                results = [pool[i % len(pool)] for i in range(requested)]
             record_call(
                 {
                     "tool": "web_search",
-                    "arguments": {"query": query, "count": count},
+                    "arguments": {"query": query, "count": count, "user": user},
                 }
             )
             return {
                 "query": query,
                 "queries": [query],
                 "status": "completed",
-                "results": deterministic_search,
+                "results": results,
             }
 
         # ``code_interpreter`` mirrors the field shape the transformer reads
@@ -481,6 +502,17 @@ class MockMcpServer:
         # populated. ``outputs`` is an array of ``{type, ...}`` objects, which
         # ``ResponseTransformer::extract_code_outputs`` walks to build the
         # protocol-level ``CodeInterpreterOutput`` enum.
+        #
+        # ``container`` and ``environment`` are the two
+        # ``CodeInterpreterTool`` knobs declared on the public Responses API
+        # request. The gateway's ``apply_hosted_tool_overrides`` merges them
+        # into MCP dispatch arguments verbatim (see
+        # ``crates/mcp/src/transform/overrides.rs``), so the mock has to
+        # accept them or FastMCP schema validation will reject the call. We
+        # do not need to act on either value — it is enough to record what
+        # the gateway forwarded so a future test can assert the merge.
+        # ``user`` follows the same forward-compat pattern as the other
+        # tools.
         @fastmcp.tool(
             name="code_interpreter",
             description=(
@@ -489,11 +521,21 @@ class MockMcpServer:
                 "process."
             ),
         )
-        def code_interpreter(code: str) -> dict[str, Any]:
+        def code_interpreter(
+            code: str,
+            container: Any | None = None,
+            environment: Any | None = None,
+            user: str | None = None,
+        ) -> dict[str, Any]:
             record_call(
                 {
                     "tool": "code_interpreter",
-                    "arguments": {"code": code},
+                    "arguments": {
+                        "code": code,
+                        "container": container,
+                        "environment": environment,
+                        "user": user,
+                    },
                 }
             )
             return {

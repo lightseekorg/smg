@@ -146,7 +146,11 @@ def _assert_code_interpreter_call_item(item) -> None:
 
     # Deeper-shape assertions, gated on the transformer actually surfacing
     # the corresponding fields (see docstring above for the gap detail).
-    if item.container_id == "unknown" and item.code is None and item.outputs is None:
+    # ``outputs`` is checked for falsy (None or empty list) — the
+    # transformer drops the wrapper to ``None`` when extraction returns an
+    # empty Vec today, but a future change that surfaces an empty list
+    # instead would still be the same gap.
+    if item.container_id == "unknown" and item.code is None and not item.outputs:
         pytest.skip(
             "Gateway transformer does not surface code/container_id/outputs from "
             "MCP text-block payloads onto code_interpreter_call. Once "

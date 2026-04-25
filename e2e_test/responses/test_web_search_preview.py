@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from infra import WEB_SEARCH_RESULTS
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,28 @@ def _action_type(action) -> str | None:
     return getattr(action, "type", None)
 
 
+def _action_sources(action):
+    """Return ``action.sources`` whether ``action`` is a dict or a Pydantic model.
+
+    Returns ``None`` when the field is missing/unset and a list otherwise so
+    callers can branch on truthiness without a separate ``hasattr`` probe.
+    """
+    if action is None:
+        return None
+    if isinstance(action, dict):
+        return action.get("sources")
+    return getattr(action, "sources", None)
+
+
+def _source_url(source) -> str | None:
+    """Return ``source.url`` whether ``source`` is a dict or a Pydantic model."""
+    if source is None:
+        return None
+    if isinstance(source, dict):
+        return source.get("url")
+    return getattr(source, "url", None)
+
+
 def _assert_web_search_call_item(item) -> None:
     """Assert the documented field shape on a ``web_search_call`` item.
 
@@ -126,6 +149,23 @@ def _assert_web_search_call_item(item) -> None:
     assert isinstance(query, str) and query, (
         f"action.query should be a non-empty string; got {query!r}"
     )
+
+    # ``sources`` is optional on the action — the production capture has
+    # it ``null`` (the cloud only fills it on certain backends) and the
+    # gateway transformer only populates it from an embedded
+    # ``openai_response.sources`` payload that the mock does not surface.
+    # When the field is populated we sanity-check the first entry against
+    # the deterministic mock fixtures so a future regression that mangles
+    # source extraction is caught; absent the field, the test stays
+    # tolerant.
+    sources = _action_sources(item.action)
+    if sources:
+        first_url = _source_url(sources[0])
+        expected_urls = {entry["url"] for entry in WEB_SEARCH_RESULTS}
+        assert first_url in expected_urls, (
+            f"web_search_call.action.sources[0].url should match a deterministic "
+            f"mock URL; got {first_url!r}, expected one of {sorted(expected_urls)!r}"
+        )
 
     # ``arguments`` is a function-call-style field that must NOT appear on
     # hosted-tool output items. The production capture confirms the shape is
