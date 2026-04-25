@@ -357,12 +357,19 @@ pub(crate) fn inject_user_into_hosted_args(
     let Value::Object(args_map) = arguments else {
         return;
     };
-    if args_map.contains_key("user") {
-        debug!(
-            "Hosted-tool dispatch args already include 'user'; preserving \
-             model-supplied value over request-level identifier"
-        );
-        return;
+    // Preserve a real model-supplied identifier, but treat an explicit
+    // null (or absent key) as "no value" — when the synthesized function
+    // tool exposes `user` as a parameter the model dutifully emits
+    // `{"user": null}` even though the caller provided no value, and that
+    // null should not block the request-level forwarding.
+    if let Some(existing) = args_map.get("user") {
+        if !existing.is_null() {
+            debug!(
+                "Hosted-tool dispatch args already include a non-null 'user'; \
+                 preserving model-supplied value over request-level identifier"
+            );
+            return;
+        }
     }
     args_map.insert("user".to_string(), json!(user_value));
 }
@@ -391,23 +398,12 @@ pub(crate) fn prepare_hosted_dispatch_args(
     request_tools: &[ResponseTool],
     request_user: Option<&str>,
 ) {
-    tracing::warn!(
-        response_format = ?response_format,
-        request_user = ?request_user,
-        request_tools_count = request_tools.len(),
-        is_object = arguments.is_object(),
-        "USER-FWD-DEBUG (helper enter): prepare_hosted_dispatch_args"
-    );
     if let Some(kind) = response_format.to_builtin_tool_type() {
         if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
             apply_hosted_tool_overrides(arguments, &overrides);
         }
     }
     inject_user_into_hosted_args(arguments, response_format, request_user);
-    tracing::warn!(
-        post_args = ?arguments,
-        "USER-FWD-DEBUG (helper exit): prepare_hosted_dispatch_args"
-    );
 }
 
 #[cfg(test)]
@@ -859,6 +855,21 @@ mod tests {
             tool_names: Some(vec!["mutating_tool".to_string()]),
         });
         assert_eq!(project_allowed_tools(Some(&value)), Some(Vec::new()));
+    }
+
+    /// When the synthesized function tool exposes `user` as a parameter,
+    /// the model emits `{"user": null}` even though no value is supplied.
+    /// That null must not block request-level forwarding — the helper
+    /// treats absent and null as equivalent for injection purposes.
+    #[test]
+    fn inject_user_hosted_format_overwrites_model_supplied_null() {
+        let mut args = json!({"prompt": "a cat", "user": null});
+        inject_user_into_hosted_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("user-123"),
+        );
+        assert_eq!(args.get("user"), Some(&json!("user-123")));
     }
 
     #[test]
