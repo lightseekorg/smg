@@ -329,6 +329,7 @@ impl GrpcClient {
         multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
         eos_token_ids: &[u32],
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
@@ -374,6 +375,7 @@ impl GrpcClient {
                     trtllm_mm,
                     tool_constraints,
                     eos_token_ids,
+                    message_hashes,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
@@ -403,6 +405,7 @@ impl GrpcClient {
         token_ids: Vec<u32>,
         multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
@@ -447,6 +450,7 @@ impl GrpcClient {
                     token_ids,
                     trtllm_mm,
                     tool_constraints,
+                    message_hashes,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
