@@ -245,7 +245,7 @@ def image_gen_tool_args() -> dict:
 
 def _start_cloud_gateway_with_mcp(
     *,
-    mock_mcp_server: MockMcpServer,
+    mcp_server: MockMcpServer,
     mcp_config_file: str,
     skip_label: str,
 ):
@@ -255,6 +255,11 @@ def _start_cloud_gateway_with_mcp(
     cloud-only lanes can be skipped without polluting the rest of the
     matrix. ``skip_label`` names the builtin tool the caller is testing for
     a friendly skip message. Returns ``(gateway, client)``.
+
+    Parameter is named ``mcp_server`` rather than ``mock_mcp_server`` to
+    avoid shadowing the module-level fixture import (which would trigger
+    ruff F811 even though it is intentional in the fixture-decorated
+    callers below).
     """
     api_key_env = "OPENAI_API_KEY"
     if not os.environ.get(api_key_env):
@@ -263,7 +268,7 @@ def _start_cloud_gateway_with_mcp(
     logger.info(
         "Launching OpenAI cloud gateway for %s with mock MCP config (url=%s, config=%s)",
         skip_label,
-        mock_mcp_server.url,
+        mcp_server.url,
         mcp_config_file,
     )
     gateway = launch_cloud_gateway(
@@ -294,7 +299,7 @@ def gateway_with_mock_mcp_cloud(
     ``OPENAI_API_KEY`` is absent.
     """
     gateway, client = _start_cloud_gateway_with_mcp(
-        mock_mcp_server=mock_mcp_server,
+        mcp_server=mock_mcp_server,
         mcp_config_file=mock_mcp_config_file,
         skip_label="image_generation",
     )
@@ -319,7 +324,7 @@ def gateway_with_mock_mcp_web_search_cloud(
     ``OPENAI_API_KEY`` is absent.
     """
     gateway, client = _start_cloud_gateway_with_mcp(
-        mock_mcp_server=mock_mcp_server,
+        mcp_server=mock_mcp_server,
         mcp_config_file=mock_mcp_config_file_web_search,
         skip_label="web_search_preview",
     )
@@ -340,7 +345,7 @@ def gateway_with_mock_mcp_code_interpreter_cloud(
     ``OPENAI_API_KEY`` is absent.
     """
     gateway, client = _start_cloud_gateway_with_mcp(
-        mock_mcp_server=mock_mcp_server,
+        mcp_server=mock_mcp_server,
         mcp_config_file=mock_mcp_config_file_code_interpreter,
         skip_label="code_interpreter",
     )
