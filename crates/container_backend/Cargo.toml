@@ -1,0 +1,35 @@
+[package]
+name = "smg-container-backend"
+version = "0.1.0"
+edition = "2021"
+description = "Vendor-agnostic container backend for SMG (OpenAI public + OCI OpenAI-compat in v1)."
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = ["Simo Lin <linsimo.mark@gmail.com>"]
+
+[lib]
+name = "smg_container_backend"
+
+[dependencies]
+# CB-1 — provides the OutboundAuth trait + impls (OpenAiApiKeyAuth, OciDelegatedAuth).
+smg-vendor-auth = { path = "../vendor_auth" }
+
+# Common
+async-trait.workspace = true
+bytes = "1"
+chrono = { workspace = true, features = ["clock"] }
+http.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url = "2.5"
+
+[dev-dependencies]
+httpmock = "0.7"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+secrecy = "0.10"
+
+[lints]
+workspace = true
