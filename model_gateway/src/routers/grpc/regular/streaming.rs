@@ -494,26 +494,7 @@ impl StreamingProcessor {
                             | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
                     );
                     if is_json_response {
-                        delta = delta
-                            .replace("```json", "")
-                            .replace("```JSON", "")
-                            .replace("```", "");
-                        let trimmed = delta.trim();
-                        if trimmed == "json" || trimmed == "JSON" {
-                            delta = String::new();
-                        }
-                        // Handle cross-chunk fence split: backticks were
-                        // stripped from the previous chunk, language tag
-                        // arrives at the start of this one.
-                        if fence_backticks_stripped {
-                            for tag in ["json\r\n", "JSON\r\n", "json\n", "JSON\n"] {
-                                if delta.starts_with(tag) {
-                                    delta = delta[tag.len()..].to_string();
-                                    break;
-                                }
-                            }
-                        }
-                        fence_backticks_stripped = delta.is_empty();
+                        delta = strip_json_fence(delta, &mut fence_backticks_stripped);
                     }
 
                     if !delta.is_empty() {
@@ -2793,5 +2774,86 @@ impl StreamingProcessor {
             buffer.extend_from_slice(error_msg.as_bytes());
         }
         buffer.extend_from_slice(b"\n\n");
+    }
+}
+
+fn strip_json_fence(mut delta: String, fence_backticks_stripped: &mut bool) -> String {
+    delta = delta
+        .replace("```json", "")
+        .replace("```JSON", "")
+        .replace("```", "");
+    let trimmed = delta.trim();
+    if trimmed == "json" || trimmed == "JSON" {
+        delta = String::new();
+    }
+    // Handle cross-chunk fence split: backticks were
+    // stripped from the previous chunk, language tag
+    // arrives at the start of this one.
+    if *fence_backticks_stripped {
+        for tag in ["json\r\n", "JSON\r\n", "json\n", "JSON\n"] {
+            if delta.starts_with(tag) {
+                delta = delta[tag.len()..].to_string();
+                break;
+            }
+        }
+    }
+    *fence_backticks_stripped = delta.is_empty();
+    delta
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_json_fence;
+
+    fn apply_chunks(chunks: &[&str]) -> String {
+        let mut fence_state = false;
+        let mut result = String::new();
+        for chunk in chunks {
+            let out = strip_json_fence(chunk.to_string(), &mut fence_state);
+            result.push_str(&out);
+        }
+        result
+    }
+
+    #[test]
+    fn full_fence_single_chunk() {
+        let out = apply_chunks(&["```json\n{\"a\":1}\n```"]);
+        assert_eq!(out, "\n{\"a\":1}\n");
+    }
+
+    #[test]
+    fn fence_split_backticks_then_language_tag() {
+        let out = apply_chunks(&["```", "json\n{\"a\":1}\n```"]);
+        assert_eq!(out, "{\"a\":1}\n");
+    }
+
+    #[test]
+    fn fence_split_backticks_then_language_tag_crlf() {
+        let out = apply_chunks(&["```", "json\r\n{\"a\":1}\r\n```"]);
+        assert_eq!(out, "{\"a\":1}\r\n");
+    }
+
+    #[test]
+    fn standalone_json_tag_dropped() {
+        let out = apply_chunks(&["json"]);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn no_fence_passthrough() {
+        let out = apply_chunks(&["{\"a\":", "1}"]);
+        assert_eq!(out, "{\"a\":1}");
+    }
+
+    #[test]
+    fn uppercase_fence() {
+        let out = apply_chunks(&["```JSON\n{\"a\":1}\n```"]);
+        assert_eq!(out, "\n{\"a\":1}\n");
+    }
+
+    #[test]
+    fn cross_chunk_uppercase() {
+        let out = apply_chunks(&["```", "JSON\n{\"a\":1}"]);
+        assert_eq!(out, "{\"a\":1}");
     }
 }
