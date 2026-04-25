@@ -1,0 +1,11 @@
+# Canonicalize commit author display for tools that honour `.mailmap`
+# (`git log --use-mailmap`, `git shortlog`, GitHub commit detail UI).
+#
+# Note: this file does NOT change GitHub's contributor list / contribution
+# graph. Those use the raw author email on each commit and match it against
+# verified emails on a GitHub account; `.mailmap` is bypassed there.
+#
+# Format: <canonical name> <canonical email> <old email>
+# See: https://git-scm.com/docs/gitmailmap
+
+Chang Su <8605658+CatherineSue@users.noreply.github.com> <chang.s.su@oracle.com>
