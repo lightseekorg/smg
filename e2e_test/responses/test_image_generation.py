@@ -383,6 +383,49 @@ class _ImageGenerationAssertions:
             f"Compactor did not pin quality override; got {received.get('quality')!r}"
         )
 
+    def test_image_generation_user_forwarded_to_mcp(self, request, image_gen_tool_args) -> None:
+        """Request-level ``user`` reaches the MCP server's dispatch args.
+
+        The OpenAI Responses API takes a top-level ``user`` field for
+        end-user attribution. The gateway forwards that into the
+        hosted-tool dispatch args (``routers/common/mcp_utils.rs::
+        prepare_hosted_dispatch_args``). The mock server records every
+        invocation in ``call_log``, so we can assert the value rode
+        through end-to-end without relying on side-channel logs.
+        """
+        _, client, mock_mcp, model = self._ctx(request)
+
+        user_value = "test-user-forward-abc123"
+        baseline_calls = len(mock_mcp.call_log)
+
+        resp = client.responses.create(
+            model=model,
+            input=_IMAGE_GEN_PROMPT,
+            tools=[image_gen_tool_args],
+            tool_choice=_FORCED_TOOL_CHOICE,
+            user=user_value,
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+
+        # Non-vacuity guard: at least one fresh MCP call was recorded.
+        # Without this the next assertion could pass on stale state
+        # from an earlier test in the same session.
+        assert len(mock_mcp.call_log) > baseline_calls, (
+            f"Mock MCP server saw no new calls (baseline={baseline_calls}); "
+            "user-forwarding assertion would be vacuous."
+        )
+
+        last_args = mock_mcp.last_call_args
+        assert last_args is not None, "Mock MCP server saw no calls"
+        received = last_args.get("arguments", {})
+        assert received.get("user") == user_value, (
+            f"Gateway did not forward request-level `user` into MCP dispatch args. "
+            f"Expected {user_value!r}, got {received.get('user')!r}. "
+            f"Full received args: {received!r}"
+        )
+
     def test_image_generation_compactor_strips_base64(self, request, image_gen_tool_args) -> None:
         """Multi-turn replay: base64 payload must not survive into stored context."""
         gateway, client, mock_mcp, model = self._ctx(request)

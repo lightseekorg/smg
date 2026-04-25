@@ -380,6 +380,7 @@ class MockMcpServer:
             quality: str = "standard",
             moderation: str = "auto",
             output_format: str = "png",
+            user: str | None = None,
         ) -> dict[str, str]:
             record_call(
                 {
@@ -390,6 +391,7 @@ class MockMcpServer:
                         "quality": quality,
                         "moderation": moderation,
                         "output_format": output_format,
+                        "user": user,
                     },
                 }
             )
