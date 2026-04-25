@@ -38,6 +38,27 @@ pub struct SkillVersionRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Immutable skill-version pin captured at request attach time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PinnedSkillVersion {
+    pub version: String,
+    pub version_number: u32,
+}
+
+/// Domain-level selector used when resolving a skill reference to a concrete
+/// immutable version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillVersionSelector<'a> {
+    /// Use the skill projection's current default version.
+    Default,
+    /// Use the skill projection's current latest version.
+    Latest,
+    /// Use an exact immutable version id.
+    Exact(&'a str),
+    /// Use a version-number lookup.
+    VersionNumber(u32),
+}
+
 /// File-level manifest entry stored alongside a normalized skill bundle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillFileRecord {
