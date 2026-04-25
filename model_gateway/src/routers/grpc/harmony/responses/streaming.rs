@@ -6,7 +6,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
 use serde_json::json;
-use smg_mcp::{McpServerBinding, McpToolSession};
+use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::{
     common::{
         build_next_request_with_tools, load_previous_messages,
-        strip_image_generation_from_request_tools, McpCallTracking,
+        strip_image_generation_from_request_tools, McpCallTracking, McpLoopInputs,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
@@ -22,7 +22,7 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{mcp_list_tools_bindings_to_emit, DEFAULT_MAX_ITERATIONS},
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
@@ -47,10 +47,12 @@ pub(crate) async fn serve_harmony_responses_stream(
     tenant_request_meta: TenantRequestMeta,
 ) -> Response {
     // Load previous conversation history if previous_response_id is set
-    let current_request = match load_previous_messages(ctx, request.clone()).await {
-        Ok(req) => req,
+    let loaded_history = match load_previous_messages(ctx, request.clone()).await {
+        Ok(history) => history,
         Err(err_response) => return err_response,
     };
+    let current_request = loaded_history.request;
+    let existing_mcp_list_tools_labels = loaded_history.existing_mcp_list_tools_labels;
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
@@ -100,8 +102,11 @@ pub(crate) async fn serve_harmony_responses_stream(
                 ctx,
                 current_request,
                 &request,
-                tenant_request_meta.clone(),
-                mcp_servers,
+                McpLoopInputs {
+                    tenant_request_meta: tenant_request_meta.clone(),
+                    mcp_servers,
+                    existing_mcp_list_tools_labels,
+                },
                 &mut emitter,
                 &tx,
             )
@@ -135,11 +140,16 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    tenant_request_meta: TenantRequestMeta,
-    mcp_servers: Vec<McpServerBinding>,
+    inputs: McpLoopInputs,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
+    let McpLoopInputs {
+        tenant_request_meta,
+        mcp_servers,
+        existing_mcp_list_tools_labels,
+    } = inputs;
+
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Note: For streaming, the emitter's original_request (set before spawn) preserves
@@ -173,13 +183,15 @@ async fn execute_mcp_tool_loop_streaming(
     strip_image_generation_from_request_tools(&mut current_request, &session);
 
     let mut mcp_tracking = McpCallTracking::new();
+    let list_tools_bindings =
+        mcp_list_tools_bindings_to_emit(&existing_mcp_list_tools_labels, session.mcp_servers());
 
     // Emit mcp_list_tools on first iteration
-    for binding in session.mcp_servers() {
-        let tools_for_server = session.list_tools_for_server(&binding.server_key);
+    for (server_label, server_key) in &list_tools_bindings {
+        let tools_for_server = session.list_tools_for_server(server_key);
 
         if emitter
-            .emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, tx)
+            .emit_mcp_list_tools_sequence(server_label, &tools_for_server, tx)
             .is_err()
         {
             return;
@@ -187,7 +199,7 @@ async fn execute_mcp_tool_loop_streaming(
     }
 
     debug!(
-        tool_count = mcp_tools.len(),
+        tool_count = list_tools_bindings.len(),
         "Emitted mcp_list_tools on first iteration"
     );
 

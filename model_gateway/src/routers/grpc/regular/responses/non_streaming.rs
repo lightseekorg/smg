@@ -5,7 +5,7 @@
 //! - `execute_tool_loop` - MCP tool loop execution
 //! - `execute_without_mcp` - Simple pipeline execution without MCP
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
@@ -27,7 +27,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{inject_mcp_output_items, DEFAULT_MAX_ITERATIONS},
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
@@ -49,7 +49,9 @@ pub(super) async fn route_responses_internal(
     params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
-    let modified_request = load_conversation_history(ctx, &request).await?;
+    let loaded_history = load_conversation_history(ctx, &request).await?;
+    let modified_request = loaded_history.request;
+    let existing_mcp_list_tools_labels = loaded_history.existing_mcp_list_tools_labels;
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -59,7 +61,15 @@ pub(super) async fn route_responses_internal(
         debug!("MCP tools detected, using tool loop");
 
         // Execute with MCP tool loop
-        execute_tool_loop(ctx, modified_request, &request, &params, mcp_servers).await?
+        execute_tool_loop(
+            ctx,
+            modified_request,
+            &request,
+            &params,
+            mcp_servers,
+            existing_mcp_list_tools_labels,
+        )
+        .await?
     } else {
         // No MCP tools - execute without MCP (may have function tools or no tools)
         execute_without_mcp(ctx, &modified_request, &request, params).await?
@@ -140,8 +150,12 @@ pub(super) async fn execute_tool_loop(
     original_request: &ResponsesRequest,
     params: &ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
+    existing_mcp_list_tools_labels: HashSet<String>,
 ) -> Result<ResponsesResponse, Response> {
-    let mut state = ToolLoopState::new(original_request.input.clone());
+    let mut state = ToolLoopState::new(
+        current_request.input.clone(),
+        existing_mcp_list_tools_labels,
+    );
 
     // Configuration: max iterations as safety limit
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
@@ -231,10 +245,12 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                session.inject_client_visible_mcp_output_items(
+                inject_mcp_output_items(
                     &mut responses_response.output,
                     state.mcp_call_items,
+                    &state.existing_mcp_list_tools_labels,
                     &user_function_names,
+                    &session,
                 );
 
                 trace!(
@@ -272,7 +288,7 @@ pub(super) async fn execute_tool_loop(
             // If ANY tool call is a function tool, return to caller immediately
             if !function_tool_calls.is_empty() {
                 // Convert chat response to responses format (includes all tool calls)
-                let responses_response = conversions::chat_to_responses(
+                let mut responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
                     params.response_id.clone(),
@@ -290,6 +306,14 @@ pub(super) async fn execute_tool_loop(
                         format!("Failed to convert to responses format: {e}"),
                     )
                 })?;
+
+                inject_mcp_output_items(
+                    &mut responses_response.output,
+                    state.mcp_call_items,
+                    &state.existing_mcp_list_tools_labels,
+                    &user_function_names,
+                    &session,
+                );
 
                 // Return response with function tool calls to caller
                 return Ok(responses_response);
@@ -334,6 +358,14 @@ pub(super) async fn execute_tool_loop(
                 // Mark as completed but with incomplete details
                 responses_response.status = ResponseStatus::Completed;
                 responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
+
+                inject_mcp_output_items(
+                    &mut responses_response.output,
+                    state.mcp_call_items,
+                    &state.existing_mcp_list_tools_labels,
+                    &user_function_names,
+                    &session,
+                );
 
                 return Ok(responses_response);
             }

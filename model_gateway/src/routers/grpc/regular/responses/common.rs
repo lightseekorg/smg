@@ -6,6 +6,8 @@
 //! - MCP metadata builders
 //! - Conversation history loading
 
+use std::collections::HashSet;
+
 use axum::{http, response::Response};
 use openai_protocol::{
     chat::ChatCompletionRequest,
@@ -24,7 +26,11 @@ use tracing::{debug, warn};
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::persistence_utils::split_stored_message_content, error,
+        common::{
+            mcp_utils::extract_mcp_list_tools_labels,
+            persistence_utils::split_stored_message_content,
+        },
+        error,
         grpc::common::responses::ResponsesContext,
     },
 };
@@ -39,7 +45,13 @@ pub(super) struct ToolLoopState {
     pub total_calls: usize,
     pub conversation_history: Vec<ResponseInputOutputItem>,
     pub original_input: ResponseInput,
+    pub existing_mcp_list_tools_labels: HashSet<String>,
     pub mcp_call_items: Vec<ResponseOutputItem>,
+}
+
+pub(super) struct LoadedConversationHistory {
+    pub request: ResponsesRequest,
+    pub existing_mcp_list_tools_labels: HashSet<String>,
 }
 
 /// Per-request parameters for chat pipeline execution.
@@ -52,12 +64,16 @@ pub(super) struct ResponsesCallContext {
 }
 
 impl ToolLoopState {
-    pub fn new(original_input: ResponseInput) -> Self {
+    pub fn new(
+        original_input: ResponseInput,
+        prior_mcp_list_tools_labels: HashSet<String>,
+    ) -> Self {
         Self {
             iteration: 0,
             total_calls: 0,
             conversation_history: Vec::new(),
             original_input,
+            existing_mcp_list_tools_labels: prior_mcp_list_tools_labels,
             mcp_call_items: Vec::new(),
         }
     }
@@ -165,9 +181,10 @@ pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> V
 pub(super) async fn load_conversation_history(
     ctx: &ResponsesContext,
     request: &ResponsesRequest,
-) -> Result<ResponsesRequest, Response> {
+) -> Result<LoadedConversationHistory, Response> {
     let mut modified_request = request.clone();
     let mut conversation_items: Option<Vec<ResponseInputOutputItem>> = None;
+    let mut existing_mcp_list_tools_labels = HashSet::new();
 
     // Handle previous_response_id by loading response chain
     if let Some(ref prev_id_str) = modified_request.previous_response_id {
@@ -180,6 +197,13 @@ pub(super) async fn load_conversation_history(
             Ok(chain) if !chain.responses.is_empty() => {
                 let mut items = Vec::new();
                 for stored in &chain.responses {
+                    existing_mcp_list_tools_labels.extend(extract_mcp_list_tools_labels(
+                        stored
+                            .raw_response
+                            .get("output")
+                            .unwrap_or(&serde_json::Value::Null),
+                    ));
+
                     // Convert input items from stored input (which is now a JSON array)
                     if let Some(input_arr) = stored.input.as_array() {
                         for item in input_arr {
@@ -358,7 +382,10 @@ pub(super) async fn load_conversation_history(
         "Loaded conversation history"
     );
 
-    Ok(modified_request)
+    Ok(LoadedConversationHistory {
+        request: modified_request,
+        existing_mcp_list_tools_labels,
+    })
 }
 
 /// Build next request with updated conversation history
