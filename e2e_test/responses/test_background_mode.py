@@ -317,3 +317,135 @@ class TestBackgroundModeUnsupportedBackend:
             },
         )
         _assert_handler_error(resp, 400, "background_not_supported")
+
+
+# ===========================================================================
+# Local engine coverage — gRPC router against sglang/vllm with a real model
+# ===========================================================================
+
+
+def _assert_queued_skeleton(resp_body: dict, expected_model: str) -> None:
+    """Shape assertions for the queued response skeleton.
+
+    Pinned at ``routers/common/background/create.rs::initial_queued_response``.
+    Shared between the cloud and local-engine test classes so they exercise
+    identical invariants on identical wire shape.
+    """
+    assert resp_body.get("status") == "queued", f"expected queued, got {resp_body.get('status')!r}"
+    assert resp_body.get("background") is True, (
+        f"expected background=True, got {resp_body.get('background')!r}"
+    )
+    assert resp_body.get("model") == expected_model, (
+        f"expected model {expected_model!r}, got {resp_body.get('model')!r}"
+    )
+    assert resp_body.get("output") == [], f"expected empty output, got {resp_body.get('output')!r}"
+    rid = resp_body.get("id", "")
+    assert isinstance(rid, str) and rid.startswith("resp_"), f"expected resp_ prefix, got {rid!r}"
+
+
+@pytest.mark.gpu(1)
+@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestBackgroundModeLocal:
+    """Background-mode enqueue against a local gRPC backend (sglang / vllm).
+
+    Validates the full request path with a real model and the gRPC router
+    selection — confirming the axum-layer dispatch (`server.rs::v1_responses`)
+    short-circuits before any router-specific code runs, regardless of which
+    engine backs the model.
+    """
+
+    def test_enqueue_returns_queued_skeleton_local(self, model, setup_backend):
+        _, model_path, _, gw = setup_backend
+        resp = _post_responses(
+            gw,
+            {
+                "model": model_path,
+                "input": "hello",
+                "background": True,
+                "store": True,
+                "max_output_tokens": 16,
+            },
+        )
+        assert resp.status_code == 200, f"expected 200, got {resp.status_code}: body={resp.text!r}"
+        _assert_queued_skeleton(resp.json(), model_path)
+
+    def test_queued_response_readable_via_get_local(self, model, setup_backend):
+        _, model_path, _, gw = setup_backend
+        create = _post_responses(
+            gw,
+            {
+                "model": model_path,
+                "input": "hello",
+                "background": True,
+                "store": True,
+                "max_output_tokens": 16,
+            },
+        )
+        assert create.status_code == 200
+        rid = create.json()["id"]
+
+        get = httpx.get(
+            f"{gw.base_url}/v1/responses/{rid}",
+            headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'sk-not-used')}"},
+            timeout=30.0,
+        )
+        assert get.status_code == 200, f"expected 200, got {get.status_code}: body={get.text!r}"
+        body = get.json()
+        assert body["id"] == rid
+        _assert_queued_skeleton(body, model_path)
+
+
+@pytest.mark.gpu(1)
+@pytest.mark.model("openai/gpt-oss-20b")
+@pytest.mark.gateway(extra_args=["--history-backend", "memory"])
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestBackgroundModeGptOss:
+    """Background-mode enqueue against gpt-oss-20b (Harmony) on local gRPC.
+
+    Same shape assertions as the dense-model class, exercising the
+    Harmony-protocol path through the axum dispatch. Background dispatch
+    is router-agnostic, so this should produce the identical queued
+    skeleton as the cloud OpenAI path.
+    """
+
+    def test_enqueue_returns_queued_skeleton_gpt_oss(self, model, setup_backend):
+        _, model_path, _, gw = setup_backend
+        resp = _post_responses(
+            gw,
+            {
+                "model": model_path,
+                "input": "hello",
+                "background": True,
+                "store": True,
+                "max_output_tokens": 16,
+            },
+        )
+        assert resp.status_code == 200, f"expected 200, got {resp.status_code}: body={resp.text!r}"
+        _assert_queued_skeleton(resp.json(), model_path)
+
+    def test_queued_response_readable_via_get_gpt_oss(self, model, setup_backend):
+        _, model_path, _, gw = setup_backend
+        create = _post_responses(
+            gw,
+            {
+                "model": model_path,
+                "input": "hello",
+                "background": True,
+                "store": True,
+                "max_output_tokens": 16,
+            },
+        )
+        assert create.status_code == 200
+        rid = create.json()["id"]
+
+        get = httpx.get(
+            f"{gw.base_url}/v1/responses/{rid}",
+            headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'sk-not-used')}"},
+            timeout=30.0,
+        )
+        assert get.status_code == 200
+        body = get.json()
+        assert body["id"] == rid
+        _assert_queued_skeleton(body, model_path)

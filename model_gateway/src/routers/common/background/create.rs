@@ -134,7 +134,13 @@ async fn resolve_snapshot(
 
     let request_input_json = serde_json::to_value(&request.input).unwrap_or(Value::Null);
     if let Some(arr) = request_input_json.as_array() {
-        items.extend(arr.iter().cloned());
+        // Each item must carry a stable `id` so subsequent
+        // `GET /v1/responses/{id}/input_items` calls return matching
+        // `first_id`/`last_id` instead of synthesizing fresh ids per read.
+        // Synchronous persistence does the same up-front normalisation.
+        for item in arr {
+            items.push(ensure_item_id(item.clone()));
+        }
     } else if !request_input_json.is_null() {
         // ResponseInput::String — wrap as a single user message the worker
         // can execute. Stable `id` matches the synchronous-persistence
@@ -192,7 +198,7 @@ async fn append_prev_chain_items(
     }
 
     for stored in &chain.responses {
-        if let Err(boxed) = check_prev_response_usable(stored, prev_id_str) {
+        if let Err(boxed) = check_prev_response_usable(stored) {
             return Err(*boxed);
         }
         append_stored_response_items(stored, items);
@@ -200,10 +206,11 @@ async fn append_prev_chain_items(
     Ok(())
 }
 
-fn check_prev_response_usable(
-    stored: &StoredResponse,
-    prev_id_str: &str,
-) -> Result<(), Box<Response>> {
+fn check_prev_response_usable(stored: &StoredResponse) -> Result<(), Box<Response>> {
+    // Use the stored response's own id, not the caller's
+    // `previous_response_id`, so an unusable *ancestor* surfaces with the
+    // accurate id rather than the chain leaf's.
+    let response_id = &stored.id.0;
     let status = stored
         .raw_response
         .get("status")
@@ -214,7 +221,7 @@ fn check_prev_response_usable(
             StatusCode::CONFLICT,
             "previous_response_not_ready",
             format!(
-                "Previous response '{prev_id_str}' is still {status}; \
+                "Previous response '{response_id}' is still {status}; \
                  cannot chain until it reaches a terminal state."
             ),
         ))),
@@ -222,7 +229,7 @@ fn check_prev_response_usable(
             StatusCode::CONFLICT,
             "previous_response_not_usable",
             format!(
-                "Previous response '{prev_id_str}' is {status}; \
+                "Previous response '{response_id}' is {status}; \
                  only completed or incomplete responses can be chained."
             ),
         ))),
@@ -382,6 +389,36 @@ fn conversation_item_to_snapshot_value(
             ))),
         },
         None => Ok(None),
+    }
+}
+
+/// Inject a synthetic `id` on an input item that lacks one, so the queued
+/// snapshot has stable identifiers for `GET /v1/responses/{id}/input_items`.
+/// Items that already carry an `id` are returned unchanged.
+fn ensure_item_id(mut item: Value) -> Value {
+    if let Some(obj) = item.as_object_mut() {
+        if !obj.contains_key("id") {
+            let prefix = obj
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(item_id_prefix)
+                .unwrap_or("msg");
+            obj.insert("id".to_string(), Value::String(generate_id(prefix)));
+        }
+    }
+    item
+}
+
+/// Map an input-item `type` discriminator to its conventional id prefix.
+/// Mirrors the prefixes used by the protocol so synthetic ids are
+/// indistinguishable from the ones a synchronous request would produce.
+fn item_id_prefix(item_type: &str) -> Option<&'static str> {
+    match item_type {
+        "message" => Some("msg"),
+        "function_call" => Some("fc"),
+        "function_call_output" => Some("fco"),
+        "reasoning" => Some("r"),
+        _ => None,
     }
 }
 
