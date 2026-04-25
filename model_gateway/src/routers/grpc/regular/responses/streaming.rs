@@ -34,10 +34,7 @@ use smg_data_connector::{
     ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
     ResponseStorage,
 };
-use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
-    ResponseFormat, ToolExecutionInput,
-};
+use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -53,7 +50,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::{inject_user_into_hosted_args, DEFAULT_MAX_ITERATIONS},
+        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -716,21 +713,10 @@ async fn execute_tool_loop_streaming_internal(
                     Ok(Value::Object(map)) => Value::Object(map),
                     _ => json!({}),
                 };
-                if let Some(kind) = response_format.to_builtin_tool_type() {
-                    if let Some(overrides) = extract_hosted_tool_overrides(
-                        original_request.tools.as_deref().unwrap_or(&[]),
-                        kind,
-                    ) {
-                        apply_hosted_tool_overrides(&mut arguments, &overrides);
-                    }
-                }
-                // Forward request-level `user` into hosted-tool dispatch args
-                // so the downstream MCP server can attribute per-user usage.
-                // Skips plain MCP function tools (Passthrough format) and
-                // never overwrites a model-supplied `user` value.
-                inject_user_into_hosted_args(
+                prepare_hosted_dispatch_args(
                     &mut arguments,
                     &response_format,
+                    original_request.tools.as_deref().unwrap_or(&[]),
                     original_request.user.as_deref(),
                 );
 

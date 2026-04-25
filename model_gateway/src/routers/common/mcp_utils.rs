@@ -8,8 +8,8 @@ use std::{
 use openai_protocol::responses::{McpAllowedTools, ResponseTool, ResponsesRequest};
 use serde_json::{json, Value};
 use smg_mcp::{
-    BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
-    ResponseFormat,
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, BuiltinToolType, McpOrchestrator,
+    McpServerBinding, McpServerConfig, McpTransport, ResponseFormat,
 };
 use tracing::{debug, warn};
 
@@ -365,6 +365,38 @@ pub(crate) fn inject_user_into_hosted_args(
         return;
     }
     args_map.insert("user".to_string(), json!(user_value));
+}
+
+/// Prepare an MCP dispatch payload for a hosted-tool call.
+///
+/// One call collapses the two per-dispatch mutations every router used to
+/// repeat:
+/// 1. Merge caller-declared hosted-tool overrides from `request_tools` into
+///    `arguments` (e.g. an `image_generation` request's `size`/`quality`
+///    pinning the model's tool-call args).
+/// 2. Forward the request-level `user` identifier into `arguments` for
+///    hosted tools so a downstream MCP server can attribute usage.
+///
+/// Both steps are no-ops when `response_format` is `Passthrough` (plain MCP
+/// function tools); they are also no-ops on individual missing inputs
+/// (no overrides, no `user`, non-object args, pre-existing `user`).
+///
+/// Routers should call this in place of the inline override + injection
+/// pair. Keeping it here (in `routers/common/mcp_utils.rs`) avoids leaking
+/// gateway-side concerns into `crates/mcp` while still giving every router
+/// a single chokepoint.
+pub(crate) fn prepare_hosted_dispatch_args(
+    arguments: &mut Value,
+    response_format: &ResponseFormat,
+    request_tools: &[ResponseTool],
+    request_user: Option<&str>,
+) {
+    if let Some(kind) = response_format.to_builtin_tool_type() {
+        if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
+            apply_hosted_tool_overrides(arguments, &overrides);
+        }
+    }
+    inject_user_into_hosted_args(arguments, response_format, request_user);
 }
 
 #[cfg(test)]

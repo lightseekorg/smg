@@ -6,15 +6,13 @@ use openai_protocol::{
     responses::{ResponseOutputItem, ResponseTool},
 };
 use serde_json::{from_str, json, Value};
-use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpToolSession, ToolExecutionInput,
-};
+use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::common::mcp_utils::inject_user_into_hosted_args,
+    routers::common::mcp_utils::prepare_hosted_dispatch_args,
 };
 
 /// Tool execution result
@@ -93,16 +91,7 @@ pub(super) async fn execute_mcp_tools(
                 }
             };
             let response_format = session.tool_response_format(&tc.function.name);
-            if let Some(kind) = response_format.to_builtin_tool_type() {
-                if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
-                    apply_hosted_tool_overrides(&mut args, &overrides);
-                }
-            }
-            // Forward request-level `user` into hosted-tool dispatch args so
-            // the downstream MCP server can attribute per-user usage. Skips
-            // plain MCP function tools (Passthrough format) and never
-            // overwrites a model-supplied `user` value.
-            inject_user_into_hosted_args(&mut args, &response_format, request_user);
+            prepare_hosted_dispatch_args(&mut args, &response_format, request_tools, request_user);
             ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),

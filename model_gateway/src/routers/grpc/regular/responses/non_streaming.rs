@@ -10,10 +10,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
-use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
-    ToolExecutionInput,
-};
+use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -27,7 +24,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::{inject_user_into_hosted_args, DEFAULT_MAX_ITERATIONS},
+        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
@@ -354,13 +351,12 @@ pub(super) async fn execute_tool_loop(
                             _ => json!({}),
                         };
                     let response_format = session.tool_response_format(&tc.name);
-                    if let Some(kind) = response_format.to_builtin_tool_type() {
-                        if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind)
-                        {
-                            apply_hosted_tool_overrides(&mut arguments, &overrides);
-                        }
-                    }
-                    inject_user_into_hosted_args(&mut arguments, &response_format, request_user);
+                    prepare_hosted_dispatch_args(
+                        &mut arguments,
+                        &response_format,
+                        request_tools,
+                        request_user,
+                    );
                     ToolExecutionInput {
                         call_id: tc.call_id,
                         tool_name: tc.name,
