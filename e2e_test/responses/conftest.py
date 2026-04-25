@@ -112,6 +112,47 @@ def mock_mcp_config_file(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # no
             os.unlink(path)
 
 
+def _regular_mcp_config(mock_mcp_url: str) -> dict:
+    """Build an MCP config that registers the mock server as a plain MCP
+    server — no ``builtin_type``, no ``builtin_tool_name``, no
+    ``response_format`` hint per tool. The tool literally named
+    ``image_generation`` is therefore exposed as a generic MCP function
+    tool, not as a hosted-tool surface.
+
+    This is the configuration that produced the wire shape an external
+    reviewer reported (``output`` field carrying a stringified MCP
+    payload + ``arguments`` field carrying the dispatched args).
+    Locking the behavior here so future "auto-detect from request
+    tools" attempts have to break a real test on purpose.
+    """
+    return {
+        "servers": [
+            {
+                "name": "mock-regular",
+                "protocol": "streamable",
+                "url": mock_mcp_url,
+            }
+        ]
+    }
+
+
+@pytest.fixture(scope="session")
+def mock_mcp_config_file_regular(mock_mcp_server: MockMcpServer) -> Iterator[str]:  # noqa: F811
+    """Counterpart to ``mock_mcp_config_file`` registering the same mock
+    server as a plain MCP server (no ``builtin_type`` tag).
+    """
+    config = _regular_mcp_config(mock_mcp_server.url)
+    fd, path = tempfile.mkstemp(suffix=".yaml", prefix="mock_mcp_regular_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.dump(config, f)
+        logger.info("MCP config for plain (no-builtin) mock at %s", path)
+        yield path
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
 # =============================================================================
 # Tool argument helpers
 # =============================================================================
@@ -185,6 +226,47 @@ def gateway_with_mock_mcp_cloud(
 # The rewritten suite prefers the explicit ``_cloud`` / ``_grpc_*`` names
 # but this preserves anyone who imported ``gateway_with_mock_mcp`` before.
 gateway_with_mock_mcp = gateway_with_mock_mcp_cloud
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mock_mcp_regular_cloud(
+    mock_mcp_server: MockMcpServer,  # noqa: F811
+    mock_mcp_config_file_regular: str,
+) -> Iterator[tuple]:
+    """Cloud gateway wired to the mock MCP server registered as a plain
+    MCP server (no ``builtin_type`` tag). Yields the same
+    ``(gateway, client, mock_mcp_server, model)`` tuple shape as
+    ``gateway_with_mock_mcp_cloud`` so existing helpers compose.
+    Skips when ``OPENAI_API_KEY`` is absent.
+    """
+    api_key_env = "OPENAI_API_KEY"
+    if not os.environ.get(api_key_env):
+        pytest.skip(f"{api_key_env} not set — regular-MCP cloud lane needs OpenAI")
+
+    logger.info(
+        "Launching OpenAI cloud gateway with regular (no-builtin) MCP config (url=%s, config=%s)",
+        mock_mcp_server.url,
+        mock_mcp_config_file_regular,
+    )
+    gateway = launch_cloud_gateway(
+        "openai",
+        history_backend="memory",
+        extra_args=["--mcp-config-path", mock_mcp_config_file_regular],
+    )
+
+    try:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=os.environ[api_key_env],
+        )
+    except Exception:
+        gateway.shutdown()
+        raise
+
+    try:
+        yield gateway, client, mock_mcp_server, "gpt-5-nano"
+    finally:
+        gateway.shutdown()
 
 
 # =============================================================================

@@ -488,3 +488,85 @@ class TestImageGenerationGrpcVllm(_ImageGenerationAssertions):
     """
 
     _fixture_name = "gateway_with_mock_mcp_grpc_vllm"
+
+
+# =============================================================================
+# Negative coverage: server NOT tagged with builtin_type
+# =============================================================================
+
+
+@pytest.mark.vendor("openai")
+@pytest.mark.gpu(0)
+@pytest.mark.e2e
+class TestImageGenerationRegularMcpServer:
+    """Locks the design: when the MCP server is registered as a plain MCP
+    server (no ``builtin_type`` tag) and the model invokes a tool that
+    happens to be named ``image_generation``, the gateway emits an
+    ``mcp_call``-shaped output item — NOT an ``image_generation_call``.
+
+    This is the wire shape an external reviewer reported (the ``output``
+    field carrying a stringified MCP payload + ``arguments`` field
+    carrying the dispatched args) and the configuration that produces
+    it. Server-side ``builtin_type`` is the authoritative knob for
+    surfacing a hosted-tool shape; absent that tag, the request's
+    ``tools: [{"type": "image_generation"}]`` declaration cannot
+    auto-promote a plain MCP tool into a hosted-tool output. Any future
+    change that auto-resolves response_format from the request tools
+    array would break this test on purpose.
+    """
+
+    def test_response_is_mcp_call_shape(self, request) -> None:
+        gateway, client, _mock, model = request.getfixturevalue(
+            "gateway_with_mock_mcp_regular_cloud"
+        )
+        del gateway
+
+        resp = client.responses.create(
+            model=model,
+            input=(
+                "Use the image_generation tool to produce a 1x1 pixel test image. "
+                "Reply with whatever the tool returns."
+            ),
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "mock-regular",
+                    "allowed_tools": ["image_generation"],
+                    "require_approval": "never",
+                }
+            ],
+            tool_choice={
+                "type": "mcp",
+                "server_label": "mock-regular",
+                "name": "image_generation",
+            },
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+        assert resp.output is not None
+
+        mcp_calls = [item for item in resp.output if getattr(item, "type", None) == "mcp_call"]
+        assert mcp_calls, (
+            f"Expected at least one mcp_call in response.output; got types "
+            f"{[getattr(i, 'type', None) for i in resp.output]}"
+        )
+
+        # Every dispatched plain-MCP call carries the mcp_call wire shape:
+        # `output` holds the stringified MCP payload and `arguments` holds
+        # the dispatched args — neither should be the hosted
+        # image_generation_call shape.
+        for call in mcp_calls:
+            assert call.name == "image_generation", f"unexpected mcp_call.name={call.name!r}"
+            assert hasattr(call, "output") and call.output is not None, (
+                f"mcp_call must carry an `output` field; got dump={call.model_dump()}"
+            )
+            assert hasattr(call, "arguments") and call.arguments is not None, (
+                f"mcp_call must carry an `arguments` field; got dump={call.model_dump()}"
+            )
+
+        assert _find_image_generation_call(resp.output) is None, (
+            "Plain MCP server (no builtin_type) MUST NOT auto-promote a tool "
+            "named `image_generation` into the hosted image_generation_call "
+            "output shape. Server-side builtin_type is the authoritative knob."
+        )
