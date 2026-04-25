@@ -87,9 +87,11 @@ impl PipelineStage for MessageRequestBuildingStage {
             info!(target: "smg::request", request_id = %request_id, "Using user-supplied request ID");
         }
 
-        if self.enable_message_hash {
-            helpers::compute_and_log_input_message_hashes(&request_id, &messages_request.messages);
-        }
+        let message_hashes = if self.enable_message_hash {
+            Some(helpers::compute_and_log_input_message_hashes(&request_id, &messages_request.messages))
+        } else {
+            None
+        };
 
         // Reject multimodal for backends that don't support it, before assembling
         if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
@@ -112,6 +114,7 @@ impl PipelineStage for MessageRequestBuildingStage {
                 token_ids,
                 multimodal_data,
                 tool_constraints,
+                message_hashes,
             )
             .map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to build generate request");

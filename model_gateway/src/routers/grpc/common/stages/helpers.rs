@@ -85,8 +85,11 @@ fn chat_message_text_content(msg: &ChatMessage) -> String {
 
 /// Compute per-message SHA-256 hashes matching TRT-LLM's `openai_server.py` format:
 /// `sha256(role + "\x00" + content).hexdigest()[:12]`
-pub(crate) fn compute_and_log_message_hashes(request_id: &str, messages: &[ChatMessage]) {
-    let hashes: Vec<(&str, String)> = messages
+pub(crate) fn compute_and_log_message_hashes(
+    request_id: &str,
+    messages: &[ChatMessage],
+) -> Vec<(String, String)> {
+    let hashes: Vec<(String, String)> = messages
         .iter()
         .map(|msg| {
             let role = chat_message_role(msg);
@@ -94,7 +97,7 @@ pub(crate) fn compute_and_log_message_hashes(request_id: &str, messages: &[ChatM
             let mut hasher = Sha256::new();
             hasher.update(format!("{role}\x00{content}").as_bytes());
             let hash = format!("{:x}", hasher.finalize());
-            (role, hash[..12].to_string())
+            (role.to_string(), hash[..12].to_string())
         })
         .collect();
     info!(
@@ -103,15 +106,16 @@ pub(crate) fn compute_and_log_message_hashes(request_id: &str, messages: &[ChatM
         message_hashes = ?hashes,
         "Request message hashes for session reconstruction"
     );
+    hashes
 }
 
 /// Compute per-message SHA-256 hashes from InputMessage (Messages API) format.
 pub(crate) fn compute_and_log_input_message_hashes(
     request_id: &str,
     messages: &[openai_protocol::messages::InputMessage],
-) {
+) -> Vec<(String, String)> {
     use openai_protocol::messages::Role;
-    let hashes: Vec<(&str, String)> = messages
+    let hashes: Vec<(String, String)> = messages
         .iter()
         .map(|msg| {
             let role = match msg.role {
@@ -135,7 +139,7 @@ pub(crate) fn compute_and_log_input_message_hashes(
             let mut hasher = Sha256::new();
             hasher.update(format!("{role}\x00{content}").as_bytes());
             let hash = format!("{:x}", hasher.finalize());
-            (role, hash[..12].to_string())
+            (role.to_string(), hash[..12].to_string())
         })
         .collect();
     info!(
@@ -144,4 +148,5 @@ pub(crate) fn compute_and_log_input_message_hashes(
         message_hashes = ?hashes,
         "Request message hashes for session reconstruction"
     );
+    hashes
 }

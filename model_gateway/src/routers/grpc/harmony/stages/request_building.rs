@@ -111,11 +111,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         };
 
-        if self.enable_message_hash {
+        let message_hashes = if self.enable_message_hash {
             if let RequestType::Chat(req) = &ctx.input.request_type {
-                helpers::compute_and_log_message_hashes(&request_id, &req.messages);
+                Some(helpers::compute_and_log_message_hashes(&request_id, &req.messages))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         // Build gRPC request using token_ids directly (Harmony encoding already handled message rendering)
         let placeholder_processed_text = "[harmony]".to_string();
@@ -224,6 +228,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 token_ids,
                                 None, // No multimodal in Harmony pipeline
                                 tool_constraints,
+                                &eos_ids,
+                                message_hashes,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
@@ -237,6 +243,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             placeholder_processed_text,
                             token_ids,
                             tool_constraints,
+                            None,
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request from responses");
