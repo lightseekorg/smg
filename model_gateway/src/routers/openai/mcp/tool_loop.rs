@@ -940,6 +940,12 @@ pub(crate) async fn execute_tool_loop(
             // can attribute per-user usage. Both steps are no-ops for plain
             // MCP function tools (Passthrough format).
             let response_format = session.tool_response_format(&call.name);
+            info!(
+                tool = %call.name,
+                response_format = ?response_format,
+                request_user = ?original_body.user,
+                "non-streaming dispatch: about to call prepare_hosted_dispatch_args"
+            );
             prepare_hosted_dispatch_args(
                 &mut arguments,
                 &response_format,
@@ -953,7 +959,7 @@ pub(crate) async fn execute_tool_loop(
             let effective_arguments =
                 serde_json::to_string(&arguments).unwrap_or_else(|_| call.arguments.clone());
 
-            debug!(
+            info!(
                 "Calling MCP tool '{}' with args: {}",
                 call.name, effective_arguments
             );
