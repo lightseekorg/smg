@@ -1,0 +1,54 @@
+[package]
+name = "smg-vendor-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Outbound (vendor) auth for SMG — OpenAI API key + OCI delegated (OBO)."
+# Mixed: original SMG-authored code is Apache-2.0; the `oci/` subtree is copied
+# verbatim from oci-rust-sdk under UPL-1.0 (per design doc D8). See src/oci/NOTICE.md.
+license = "Apache-2.0 AND UPL-1.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = ["Simo Lin <linsimo.mark@gmail.com>"]
+
+[lib]
+name = "smg_vendor_auth"
+
+[dependencies]
+# SMG public-surface deps
+async-trait.workspace = true
+anyhow.workspace = true
+bytes = "1"
+http.workspace = true
+secrecy = "0.10"
+thiserror.workspace = true
+tracing.workspace = true
+url = "2.5"
+
+# Direct deps inherited from copied oci/ subtree (per D8). Versions match
+# oci-rust-sdk/crates/common/Cargo.toml at the copy commit (0590d5dc).
+reqwest = { workspace = true, features = ["rustls-tls", "blocking", "json", "stream"] }
+openssl = "0.10"
+base64ct = { version = "1.6", features = ["alloc", "std"] }
+chrono = { workspace = true }
+sha2 = "0.10"
+sha256 = "1.0"
+hex = "0.4"
+rsa = "0.9"
+lazy_static = "1.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+futures = { workspace = true }
+futures-util = "0.3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+itertools = "0.13"
+dirs = "5.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"
+httpmock = "0.7"
+
+# Allow unwrap/expect/panic in copied oci/ subtree — these match upstream verbatim
+# (UPL-1.0 source). Workspace-level clippy denies still apply to crate-authored code.
+[lints]
+workspace = true
