@@ -88,6 +88,7 @@ tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors",
 serde_json = { version = "1.0", default-features = false, features = ["std", "preserve_order"] }
 bytes = "1.8.0"
 http-body = "1.0"
+http-body-util = "0.1"
 futures-util = "0.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 tracing-log = "0.2"
