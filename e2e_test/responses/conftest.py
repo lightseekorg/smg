@@ -247,7 +247,7 @@ def _start_cloud_gateway_with_mcp(
     mcp_server: MockMcpServer,
     mcp_config_file: str,
     skip_label: str,
-):
+) -> tuple:
     """Common cloud-gateway launch helper shared by the per-builtin fixtures.
 
     Skips (rather than fails) when ``OPENAI_API_KEY`` is absent so the

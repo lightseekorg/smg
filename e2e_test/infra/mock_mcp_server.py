@@ -411,6 +411,14 @@ class MockMcpServer:
         deterministic_code = self.code_interpreter_code
         deterministic_code_outputs = self.code_interpreter_outputs
 
+        # ``image_generation`` mirrors the full ``ImageGenerationTool`` field
+        # set so any caller-declared override the gateway forwards via
+        # ``apply_hosted_tool_overrides`` (see
+        # ``crates/mcp/src/transform/overrides.rs``) is accepted by FastMCP
+        # schema validation. ``user`` follows the same forward-compat
+        # pattern as the other hosted-tool mocks. The mock does not act on
+        # any of these values — they are recorded on the call log so a
+        # future test can assert what the gateway forwarded.
         @fastmcp.tool(
             name="image_generation",
             description=(
@@ -424,13 +432,15 @@ class MockMcpServer:
             quality: str = "standard",
             moderation: str = "auto",
             output_format: str = "png",
+            action: str | None = None,
+            background: str | None = None,
+            input_fidelity: str | None = None,
+            input_image_mask: Any | None = None,
+            model: str | None = None,
+            output_compression: int | None = None,
+            partial_images: int | None = None,
             user: str | None = None,
         ) -> dict[str, str]:
-            # ``user`` is declared explicitly so a forward-compatible
-            # gateway change that propagates the request-level ``user`` field
-            # into MCP dispatch arguments (currently a separate work item)
-            # does not have its dispatch rejected by FastMCP's schema
-            # validation. The field is recorded so tests can assert it.
             record_call(
                 {
                     "tool": "image_generation",
@@ -440,6 +450,13 @@ class MockMcpServer:
                         "quality": quality,
                         "moderation": moderation,
                         "output_format": output_format,
+                        "action": action,
+                        "background": background,
+                        "input_fidelity": input_fidelity,
+                        "input_image_mask": input_image_mask,
+                        "model": model,
+                        "output_compression": output_compression,
+                        "partial_images": partial_images,
                         "user": user,
                     },
                 }
@@ -453,11 +470,15 @@ class MockMcpServer:
         # ``web_search`` is the underlying MCP tool name bound to the
         # OpenAI ``web_search_preview`` built-in via
         # ``builtin_type: web_search_preview`` in the gateway config.
-        # ``count`` mirrors the optional ``num_results`` knob OpenAI surfaces
-        # on the public preview tool. ``user`` is declared explicitly so a
-        # forward-compatible gateway change that propagates the request-level
-        # ``user`` field into MCP dispatch arguments does not have its
-        # dispatch rejected by FastMCP's schema validation.
+        # ``count`` mirrors the optional ``num_results`` knob OpenAI
+        # surfaces on the public preview tool.
+        # ``search_context_size`` and ``user_location`` are the two
+        # ``WebSearchPreviewTool`` knobs the gateway can forward via
+        # ``apply_hosted_tool_overrides`` (see
+        # ``crates/mcp/src/transform/overrides.rs``); declaring them
+        # explicitly keeps FastMCP schema validation from rejecting
+        # dispatches when callers exercise either field. ``user`` follows
+        # the same forward-compat pattern as the other hosted-tool mocks.
         @fastmcp.tool(
             name="web_search",
             description=(
@@ -470,6 +491,8 @@ class MockMcpServer:
         def web_search(
             query: str,
             count: int = 3,
+            search_context_size: str | None = None,
+            user_location: Any | None = None,
             user: str | None = None,
         ) -> dict[str, Any]:
             # Honour ``count`` deterministically: slice when the caller asks
@@ -486,7 +509,13 @@ class MockMcpServer:
             record_call(
                 {
                     "tool": "web_search",
-                    "arguments": {"query": query, "count": count, "user": user},
+                    "arguments": {
+                        "query": query,
+                        "count": count,
+                        "search_context_size": search_context_size,
+                        "user_location": user_location,
+                        "user": user,
+                    },
                 }
             )
             return {
