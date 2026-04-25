@@ -278,6 +278,7 @@ impl TrtllmServiceClient {
         multimodal_input: Option<proto::MultimodalInput>,
         tool_call_constraint: Option<(String, String)>, // (constraint_type, constraint_value)
         eos_token_ids: &[u32],
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling config
         let sampling_config = Self::build_sampling_config_from_chat(body);
@@ -300,6 +301,14 @@ impl TrtllmServiceClient {
         } else {
             eos_token_ids.to_vec()
         };
+
+        let proto_message_hashes = message_hashes
+            .map(|h| {
+                h.into_iter()
+                    .map(|(role, hash)| proto::MessageHash { role, hash })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -328,6 +337,7 @@ impl TrtllmServiceClient {
             cache_salt_id: None,
             arrival_time: None,
             include_stop_token_in_output: false,
+            message_hashes: proto_message_hashes,
         };
 
         Ok(grpc_request)
@@ -411,6 +421,7 @@ impl TrtllmServiceClient {
             cache_salt_id: None,
             arrival_time: None,
             include_stop_token_in_output: false,
+            message_hashes: vec![],
         };
 
         Ok(grpc_request)
@@ -428,6 +439,7 @@ impl TrtllmServiceClient {
         processed_text: String,
         token_ids: Vec<u32>,
         constraint: Option<(String, String)>,
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<proto::GenerateRequest, String> {
         let sampling_config = Self::build_sampling_config_from_responses(body);
         let output_config = proto::OutputConfig {
@@ -443,6 +455,14 @@ impl TrtllmServiceClient {
         let guided_decoding = Self::build_guided_decoding_from_responses(constraint)?;
 
         let max_tokens = body.max_output_tokens.unwrap_or(2048);
+
+        let proto_message_hashes = message_hashes
+            .map(|h| {
+                h.into_iter()
+                    .map(|(role, hash)| proto::MessageHash { role, hash })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -471,6 +491,7 @@ impl TrtllmServiceClient {
             cache_salt_id: None,
             arrival_time: None,
             include_stop_token_in_output: false,
+            message_hashes: proto_message_hashes,
         };
 
         Ok(grpc_request)
@@ -663,6 +684,7 @@ impl TrtllmServiceClient {
         token_ids: Vec<u32>,
         multimodal_input: Option<proto::MultimodalInput>,
         tool_call_constraint: Option<(String, String)>,
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<proto::GenerateRequest, String> {
         let sampling_config = Self::build_sampling_config_from_messages(body);
         let output_config = proto::OutputConfig {
@@ -679,6 +701,14 @@ impl TrtllmServiceClient {
 
         let stop = body.stop_sequences.clone().unwrap_or_default();
         let max_tokens = body.max_tokens;
+
+        let proto_message_hashes = message_hashes
+            .map(|h| {
+                h.into_iter()
+                    .map(|(role, hash)| proto::MessageHash { role, hash })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -707,6 +737,7 @@ impl TrtllmServiceClient {
             cache_salt_id: None,
             arrival_time: None,
             include_stop_token_in_output: false,
+            message_hashes: proto_message_hashes,
         };
 
         Ok(grpc_request)
@@ -798,6 +829,7 @@ impl TrtllmServiceClient {
             cache_salt_id: None,
             arrival_time: None,
             include_stop_token_in_output: body.no_stop_trim,
+            message_hashes: vec![],
         };
 
         Ok(grpc_request)
