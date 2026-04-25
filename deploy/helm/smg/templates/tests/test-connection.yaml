@@ -13,5 +13,12 @@ spec:
       command:
         - curl
         - -sf
+        - --retry
+        - "10"
+        - --retry-connrefused
+        - --retry-delay
+        - "3"
+        - --retry-max-time
+        - "60"
         - http://{{ include "smg.fullname" . }}-router:{{ .Values.router.service.port }}/health
   restartPolicy: Never
