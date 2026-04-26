@@ -30,6 +30,9 @@ service SglangScheduler {
   // Get comprehensive load metrics
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
 
+  // Flush the KV cache on the scheduler
+  rpc FlushCache(FlushCacheRequest) returns (FlushCacheResponse);
+
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 
@@ -343,6 +346,17 @@ message AbortRequest {
 }
 
 message AbortResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message FlushCacheRequest {
+  // Timeout in seconds. 0 = flush immediately (fails if requests are running).
+  // >0 = wait up to this many seconds for idle state before flushing.
+  float timeout_s = 1;
+}
+
+message FlushCacheResponse {
   bool success = 1;
   string message = 2;
 }

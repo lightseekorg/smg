@@ -298,6 +298,20 @@ impl SglangSchedulerClient {
         Ok(response.into_inner())
     }
 
+    /// Flush the KV cache on the scheduler
+    pub async fn flush_cache(
+        &self,
+        timeout_s: f32,
+    ) -> Result<proto::FlushCacheResponse, tonic::Status> {
+        debug!("Requesting cache flush (timeout_s={timeout_s})");
+        let request = Request::new(proto::FlushCacheRequest { timeout_s });
+
+        let mut client = self.client.clone();
+        let response = client.flush_cache(request).await?;
+        debug!("Flush cache response received");
+        Ok(response.into_inner())
+    }
+
     crate::impl_get_tokenizer!();
     crate::impl_subscribe_kv_events!();
 
