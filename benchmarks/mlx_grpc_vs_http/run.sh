@@ -97,9 +97,11 @@ run_bench() {
 
     log "[$exp_name] genai-bench scenario=$scenario concurrency=$concurrency duration=${DURATION_MIN}m"
 
-    # genai-bench's --max-time-per-run is in SECONDS (despite the name).
-    local duration_s=$(( DURATION_MIN * 60 ))
-
+    # genai-bench's --max-time-per-run is in MINUTES — internally multiplied
+    # by 60 (see genai_bench/cli/cli.py: `max_time_per_run *= 60`). The
+    # comment in e2e_test/benchmarks/test_nightly_perf.py:30 calls the unit
+    # "seconds" but it's wrong; the existing tests pass `10` and get 10
+    # minutes, not 10 seconds.
     genai-bench benchmark \
         --api-backend openai \
         --api-base "$base_url" \
@@ -110,7 +112,7 @@ run_bench() {
         --num-concurrency "$concurrency" \
         --traffic-scenario "$scenario" \
         --max-requests-per-run "$MAX_REQUESTS" \
-        --max-time-per-run "$duration_s" \
+        --max-time-per-run "$DURATION_MIN" \
         --experiment-folder-name "$exp_name" \
         --experiment-base-dir "$RESULTS_DIR"
 }
