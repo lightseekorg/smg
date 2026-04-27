@@ -23,7 +23,7 @@ hours total.
 
 ## Running locally
 
-Apple Silicon Mac with Docker running:
+Apple Silicon Mac:
 
 ```bash
 # Build smg in release mode (much faster than the ci profile)
@@ -32,9 +32,8 @@ cargo build --release --bin smg
 # Install Python deps
 pip install -e ./crates/grpc_client/python
 pip install -e "./grpc_servicer[mlx]"
-
-# Pull the bench image
-docker pull ghcr.io/moirai-internal/genai-bench:0.0.4
+pip install "mlx-lm>=0.22.0"
+pip install "genai-bench>=0.0.4"
 
 # Run (takes ~2.7 hours by default)
 ./benchmarks/mlx_grpc_vs_http/run.sh
