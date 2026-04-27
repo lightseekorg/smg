@@ -463,6 +463,8 @@ impl SglangSchedulerClient {
         // (default) on tokenspeed worker even when the test sets top_p=0.8.
         // Surface what we actually see on the request struct to find the
         // drop point.
+        #[allow(deprecated)]
+        let max_tokens_deprecated = request.max_tokens;
         tracing::warn!(
             target: "smg::grpc::diag",
             "[EOS_DIAG] build_grpc_sampling_params_from_chat \
@@ -472,8 +474,7 @@ impl SglangSchedulerClient {
             request.temperature,
             request.top_k,
             request.max_completion_tokens,
-            #[expect(deprecated)]
-            request.max_tokens,
+            max_tokens_deprecated,
         );
 
         // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
