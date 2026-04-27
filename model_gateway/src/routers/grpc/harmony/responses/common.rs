@@ -18,7 +18,11 @@ use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
+use crate::routers::{
+    common::persistence_utils::{count_conversation_turn_info, ConversationTurnInfo},
+    error,
+    grpc::common::responses::ResponsesContext,
+};
 
 /// Record of a single MCP tool call execution
 ///
@@ -38,6 +42,12 @@ pub(super) struct McpCallRecord {
 pub(super) struct McpCallTracking {
     /// All tool call records across all iterations
     pub tool_calls: Vec<McpCallRecord>,
+}
+
+/// Loaded request bundle for Harmony Responses path.
+pub(super) struct LoadedRequest {
+    pub request: ResponsesRequest,
+    pub turn_info: Option<ConversationTurnInfo>,
 }
 
 impl McpCallTracking {
@@ -191,10 +201,16 @@ pub(super) fn inject_mcp_metadata(
 pub(super) async fn load_previous_messages(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
-) -> Result<ResponsesRequest, Response> {
+    stm_enabled: bool,
+) -> Result<LoadedRequest, Response> {
     let Some(ref prev_id_str) = request.previous_response_id else {
         // No previous_response_id, return request as-is
-        return Ok(request);
+        let turn_info = if stm_enabled {
+            Some(count_conversation_turn_info(&request.input))
+        } else {
+            None
+        };
+        return Ok(LoadedRequest { request, turn_info });
     };
 
     let prev_id = ResponseId::from(prev_id_str.as_str());
@@ -299,7 +315,16 @@ pub(super) async fn load_previous_messages(
     modified_request.input = ResponseInput::Items(all_items);
     modified_request.previous_response_id = None;
 
-    Ok(modified_request)
+    let turn_info = if stm_enabled {
+        Some(count_conversation_turn_info(&modified_request.input))
+    } else {
+        None
+    };
+
+    Ok(LoadedRequest {
+        request: modified_request,
+        turn_info,
+    })
 }
 
 /// Strip `ResponseTool::ImageGeneration` from a request's tools list once

@@ -60,7 +60,10 @@ pub(crate) async fn serve_harmony_responses(
     let original_request = request.clone();
 
     // Load previous conversation history if previous_response_id is set
-    let current_request = load_previous_messages(ctx, request).await?;
+    let loaded_request =
+        load_previous_messages(ctx, request, ctx.memory_execution_context.stm_enabled).await?;
+    let current_request = loaded_request.request;
+    let conversation_turn_info = loaded_request.turn_info;
 
     // Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -83,6 +86,7 @@ pub(crate) async fn serve_harmony_responses(
     persist_response_if_needed(
         &ctx.persistence,
         ctx.memory_execution_context.clone(),
+        conversation_turn_info,
         &response,
         &original_request,
         ctx.request_context.clone(),

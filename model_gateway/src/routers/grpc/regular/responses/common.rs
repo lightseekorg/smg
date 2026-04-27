@@ -24,7 +24,10 @@ use tracing::{debug, warn};
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::persistence_utils::split_stored_message_content, error,
+        common::persistence_utils::{
+            count_conversation_turn_info, split_stored_message_content, ConversationTurnInfo,
+        },
+        error,
         grpc::common::responses::ResponsesContext,
     },
 };
@@ -49,6 +52,12 @@ pub(super) struct ResponsesCallContext {
     pub model_id: String,
     pub response_id: Option<String>,
     pub tenant_request_meta: TenantRequestMeta,
+}
+
+/// Loaded request bundle for Regular Responses path.
+pub(super) struct LoadedRequest {
+    pub request: ResponsesRequest,
+    pub turn_info: Option<ConversationTurnInfo>,
 }
 
 impl ToolLoopState {
@@ -165,7 +174,8 @@ pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> V
 pub(super) async fn load_conversation_history(
     ctx: &ResponsesContext,
     request: &ResponsesRequest,
-) -> Result<ResponsesRequest, Response> {
+    stm_enabled: bool,
+) -> Result<LoadedRequest, Response> {
     let mut modified_request = request.clone();
     let mut conversation_items: Option<Vec<ResponseInputOutputItem>> = None;
 
@@ -359,7 +369,16 @@ pub(super) async fn load_conversation_history(
         "Loaded conversation history"
     );
 
-    Ok(modified_request)
+    let turn_info = if stm_enabled {
+        Some(count_conversation_turn_info(&modified_request.input))
+    } else {
+        None
+    };
+
+    Ok(LoadedRequest {
+        request: modified_request,
+        turn_info,
+    })
 }
 
 /// Build next request with updated conversation history

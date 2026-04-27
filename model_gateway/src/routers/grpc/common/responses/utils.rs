@@ -16,7 +16,8 @@ use crate::{
     memory::MemoryExecutionContext,
     routers::{
         common::{
-            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+            mcp_utils::ensure_request_mcp_client,
+            persistence_utils::{persist_conversation_items, ConversationTurnInfo},
         },
         error,
         grpc::common::responses::context::PersistenceHandles,
@@ -152,6 +153,7 @@ pub(crate) fn extract_tools_from_response_tools(
 pub(crate) async fn persist_response_if_needed(
     persistence: &PersistenceHandles,
     memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
     response: &ResponsesResponse,
     original_request: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -170,6 +172,7 @@ pub(crate) async fn persist_response_if_needed(
             original_request,
             request_context,
             memory_execution_context,
+            conversation_turn_info,
         )
         .await
         {

@@ -112,10 +112,15 @@ async fn route_responses_streaming(
     params: ResponsesCallContext,
 ) -> Response {
     // 1. Load conversation history
-    let modified_request = match load_conversation_history(ctx, &request).await {
-        Ok(req) => req,
-        Err(response) => return response, // Already a Response with proper status code
-    };
+    let loaded_request =
+        match load_conversation_history(ctx, &request, ctx.memory_execution_context.stm_enabled)
+            .await
+        {
+            Ok(req) => req,
+            Err(response) => return response, // Already a Response with proper status code
+        };
+    let modified_request = loaded_request.request;
+    let conversation_turn_info = loaded_request.turn_info;
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -133,6 +138,7 @@ async fn route_responses_streaming(
             &request,
             params,
             mcp_servers,
+            conversation_turn_info,
         );
     }
 
@@ -148,5 +154,12 @@ async fn route_responses_streaming(
     };
 
     // 4. Execute chat pipeline and convert streaming format (no MCP tools)
-    streaming::convert_chat_stream_to_responses_stream(ctx, chat_request, params, &request).await
+    streaming::convert_chat_stream_to_responses_stream(
+        ctx,
+        chat_request,
+        params,
+        &request,
+        conversation_turn_info,
+    )
+    .await
 }

@@ -19,7 +19,10 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
-            header_utils::ConversationMemoryConfig, persistence_utils::split_stored_message_content,
+            header_utils::ConversationMemoryConfig,
+            persistence_utils::{
+                count_conversation_turn_info, split_stored_message_content, ConversationTurnInfo,
+            },
         },
         error,
     },
@@ -28,6 +31,7 @@ use crate::{
 pub(crate) struct LoadedInputHistory {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub conversation_turn_info: Option<ConversationTurnInfo>,
 }
 
 /// Load conversation history and/or previous response chain into request input.
@@ -39,6 +43,7 @@ pub(crate) async fn load_input_history(
     conversation: Option<&str>,
     request_body: &mut ResponsesRequest,
     model: &str,
+    stm_enabled: bool,
 ) -> Result<LoadedInputHistory, Response> {
     let previous_response_id = request_body
         .previous_response_id
@@ -232,9 +237,16 @@ pub(crate) async fn load_input_history(
         request_body.input = ResponseInput::Items(items);
     }
 
+    let conversation_turn_info = if stm_enabled {
+        Some(count_conversation_turn_info(&request_body.input))
+    } else {
+        None
+    };
+
     Ok(LoadedInputHistory {
         previous_response_id,
         existing_mcp_list_tools_labels: existing_mcp_list_tools_labels.into_iter().collect(),
+        conversation_turn_info,
     })
 }
 

@@ -386,15 +386,37 @@ fn should_enqueue_stmo(user_turns: usize) -> bool {
     user_turns >= 4 && (user_turns - 1) % 3 == 0
 }
 
-fn count_user_turns(input_items: &[Value]) -> usize {
-    input_items
-        .iter()
-        .filter(|item| {
-            item.get("role")
-                .and_then(|v| v.as_str())
-                .is_some_and(|role| role.eq_ignore_ascii_case("user"))
-        })
-        .count()
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConversationTurnInfo {
+    pub user_turns: usize,
+    pub total_items: usize,
+}
+
+pub fn count_conversation_turn_info(input: &ResponseInput) -> ConversationTurnInfo {
+    match input {
+        ResponseInput::Text(_) => ConversationTurnInfo {
+            user_turns: 1,
+            total_items: 1,
+        },
+        ResponseInput::Items(items) => {
+            let user_turns = items
+                .iter()
+                .filter(|item| match item {
+                    ResponseInputOutputItem::SimpleInputMessage { role, .. } => {
+                        role.eq_ignore_ascii_case("user")
+                    }
+                    ResponseInputOutputItem::Message { role, .. } => {
+                        role.eq_ignore_ascii_case("user")
+                    }
+                    _ => false,
+                })
+                .count();
+            ConversationTurnInfo {
+                user_turns,
+                total_items: items.len(),
+            }
+        }
+    }
 }
 
 async fn maybe_schedule_stmo_after_persist(
@@ -454,15 +476,24 @@ async fn handle_stmo_after_persist(
     memory_execution_context: &MemoryExecutionContext,
     conversation_id: &ConversationId,
     response_id: &ResponseId,
-    input_items: &[Value],
-    output_items: &[Value],
+    conversation_turn_info: Option<ConversationTurnInfo>,
+    output_item_count: usize,
 ) {
     if !memory_execution_context.stm_enabled {
         return;
     }
 
-    let user_turns = count_user_turns(input_items);
-    let total_items = input_items.len() + output_items.len();
+    let Some(turn_info) = conversation_turn_info else {
+        debug!(
+            conversation_id = %conversation_id.0,
+            response_id = %response_id.0,
+            "STMO skipped: missing conversation turn info"
+        );
+        return;
+    };
+
+    let user_turns = turn_info.user_turns;
+    let total_items = turn_info.total_items + output_item_count;
 
     match maybe_schedule_stmo_after_persist(
         conversation_memory_writer,
@@ -523,6 +554,7 @@ pub async fn persist_conversation_items(
     original_body: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
     memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Result<(), String> {
     let inner = persist_conversation_items_inner(
         conversation_storage,
@@ -532,6 +564,7 @@ pub async fn persist_conversation_items(
         response_json,
         original_body,
         memory_execution_context,
+        conversation_turn_info,
     );
     match request_context {
         Some(ctx) => with_request_context(ctx, inner).await,
@@ -547,6 +580,7 @@ async fn persist_conversation_items_inner(
     response_json: &Value,
     original_body: &ResponsesRequest,
     memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Result<(), String> {
     // Respect store=false: skip persistence entirely (matches official API behavior)
     if !original_body.store.unwrap_or(true) {
@@ -611,8 +645,8 @@ async fn persist_conversation_items_inner(
             &memory_execution_context,
             &conv_id,
             &response_id,
-            &input_items,
-            &output_items,
+            conversation_turn_info,
+            output_items.len(),
         )
         .await;
 
@@ -652,35 +686,92 @@ mod tests {
 
     #[test]
     fn count_user_turns_case_insensitive() {
-        let items = vec![
-            json!({"role": "user", "type": "message"}),
-            json!({"role": "assistant", "type": "message"}),
-            json!({"role": "User", "type": "message"}), // uppercase variant
-            json!({"type": "function_call"}),           // no role — not counted
-        ];
-        assert_eq!(count_user_turns(&items), 2);
+        let input = ResponseInput::Items(vec![
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u1".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a1".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u2".to_string()),
+                role: "User".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::FunctionToolCall {
+                id: "fc_1".to_string(),
+                call_id: "call_1".to_string(),
+                name: "tool".to_string(),
+                arguments: "{}".to_string(),
+                output: None,
+                status: None,
+            },
+        ]);
+        let info = count_conversation_turn_info(&input);
+        assert_eq!(info.user_turns, 2);
+        assert_eq!(info.total_items, 4);
     }
 
     #[test]
     fn total_items_exceeds_user_turns() {
-        // Verifies that total_items accounts for non-user items (assistant turns,
-        // tool calls, etc.) so target_item_end in the STMO payload is correct.
-        let input_items = vec![
-            json!({"role": "user"}),
-            json!({"role": "assistant"}),
-            json!({"role": "user"}),
-            json!({"role": "assistant"}),
-            json!({"role": "user"}),
-            json!({"role": "assistant"}),
-            json!({"role": "user"}), // 4th user turn — triggers STMO
-        ];
-        let output_items = [json!({"type": "message"}), json!({"type": "function_call"})];
+        let input = ResponseInput::Items(vec![
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u1".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a1".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u2".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a2".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u3".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a3".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u4".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+        ]);
 
-        let user_turns = count_user_turns(&input_items);
-        let total_items = input_items.len() + output_items.len();
+        let info = count_conversation_turn_info(&input);
+        let target_item_end = info.total_items + 2; // response output contributes after load
 
-        assert_eq!(user_turns, 4);
-        assert_eq!(total_items, 9); // total > user_turns
-        assert!(should_enqueue_stmo(user_turns));
+        assert_eq!(info.user_turns, 4);
+        assert_eq!(info.total_items, 7);
+        assert_eq!(target_item_end, 9); // total > user turns
+        assert!(should_enqueue_stmo(info.user_turns));
     }
 }

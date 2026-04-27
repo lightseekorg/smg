@@ -48,7 +48,10 @@ use crate::{
     memory::MemoryExecutionContext,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+        common::{
+            mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+            persistence_utils::ConversationTurnInfo,
+        },
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -77,6 +80,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     chat_request: Arc<ChatCompletionRequest>,
     params: ResponsesCallContext,
     original_request: &ResponsesRequest,
+    conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Response {
     debug!("Converting chat SSE stream to responses SSE format");
 
@@ -115,6 +119,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             persistence,
             request_context,
             memory_execution_context,
+            conversation_turn_info,
             tx.clone(),
         )
         .await
@@ -138,6 +143,7 @@ async fn process_and_transform_sse_stream(
     persistence: PersistenceHandles,
     request_context: Option<StorageRequestContext>,
     memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     // Create accumulator for final response
@@ -228,6 +234,7 @@ async fn process_and_transform_sse_stream(
     persist_response_if_needed(
         &persistence,
         memory_execution_context,
+        conversation_turn_info,
         &final_response,
         &original_request,
         request_context,
@@ -426,6 +433,7 @@ pub(super) fn execute_tool_loop_streaming(
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
+    _conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();

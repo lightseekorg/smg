@@ -46,7 +46,10 @@ pub(super) async fn route_responses_internal(
     params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
-    let modified_request = load_conversation_history(ctx, &request).await?;
+    let loaded_request =
+        load_conversation_history(ctx, &request, ctx.memory_execution_context.stm_enabled).await?;
+    let modified_request = loaded_request.request;
+    let conversation_turn_info = loaded_request.turn_info;
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) =
@@ -66,6 +69,7 @@ pub(super) async fn route_responses_internal(
     persist_response_if_needed(
         &ctx.persistence,
         ctx.memory_execution_context.clone(),
+        conversation_turn_info,
         &responses_response,
         &request,
         ctx.request_context.clone(),
