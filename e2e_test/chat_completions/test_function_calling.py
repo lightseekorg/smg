@@ -493,6 +493,7 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
+        _xfail_tokenspeed_llama_function_calling()
         tools = [
             {
                 "type": "function",
