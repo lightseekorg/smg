@@ -40,9 +40,6 @@ concurrency:
   group: nightly-mlx-bench-${{ github.event_name }}
   cancel-in-progress: false
 
-env:
-  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
-
 jobs:
   bench:
     name: MLX HTTP vs Router+gRPC
@@ -74,16 +71,6 @@ jobs:
       - name: Install protoc
         run: brew install protobuf
 
-      - name: Install Docker (Colima)
-        # macos-latest runners don't ship Docker. Colima provides a Linux VM
-        # with the docker daemon. host.docker.internal resolves to the host
-        # automatically, which we use in run.sh to reach the inference
-        # servers running on the Mac host from inside the bench container.
-        run: |
-          brew install colima docker
-          colima start --cpu 2 --memory 4 --disk 20
-          docker version
-
       - name: Cache Cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
@@ -102,13 +89,16 @@ jobs:
       - name: Install mlx-lm CLI (for the direct-HTTP baseline)
         run: pip install "mlx-lm>=0.22.0"
 
-      - name: Verify smg + servicer are importable
+      - name: Install genai-bench
+        # Native pip install instead of the docker image — avoids the
+        # Colima-on-macos-latest VM hop, which is unstable in CI.
+        run: pip install "genai-bench>=0.0.4"
+
+      - name: Verify smg + servicer + bench are runnable
         run: |
           ./target/release/smg --help | head -5
           python3 -c "from smg_grpc_servicer.mlx.server import main; print('servicer OK')"
-
-      - name: Pull genai-bench image
-        run: docker pull "$GENAI_BENCH_IMAGE"
+          genai-bench --help | head -3
 
       - name: Run benchmark (this is the long step)
         run: ./benchmarks/mlx_grpc_vs_http/run.sh
