@@ -26,14 +26,15 @@ def _stats(d: dict[str, Any], key: str) -> dict[str, float]:
 
 def parse_experiment(folder: Path) -> dict[str, Any] | None:
     """Pull metrics out of a genai-bench experiment folder."""
-    json_files = [
+    json_files = sorted(
         p
         for p in folder.rglob("*.json")
         if "experiment_metadata" not in p.name and "gpu_utilization" not in p.name
-    ]
+    )
     if not json_files:
         return None
-    # Each cell produces one summary JSON; take the first.
+    # Each cell produces one summary JSON; sorted() makes the choice
+    # deterministic if a partial rerun left a stale file.
     data = json.loads(json_files[0].read_text())
     return {
         "ttft_mean": float(_stats(data, "ttft").get("mean", float("inf"))),
@@ -135,7 +136,9 @@ def main() -> None:
 
     results = collect(Path(args.results_dir))
     table = build_table(results, args.model)
-    Path(args.out).write_text(table)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(table)
     print(table)
 
 
