@@ -459,6 +459,23 @@ impl SglangSchedulerClient {
 
         let max_new_tokens = request.max_completion_tokens;
 
+        // DIAG(tokenspeed-eos-diag): observed top_p coming through as 1.0
+        // (default) on tokenspeed worker even when the test sets top_p=0.8.
+        // Surface what we actually see on the request struct to find the
+        // drop point.
+        tracing::warn!(
+            target: "smg::grpc::diag",
+            "[EOS_DIAG] build_grpc_sampling_params_from_chat \
+             top_p={:?} temperature={:?} top_k={:?} max_completion_tokens={:?} \
+             max_tokens(deprecated)={:?}",
+            request.top_p,
+            request.temperature,
+            request.top_k,
+            request.max_completion_tokens,
+            #[expect(deprecated)]
+            request.max_tokens,
+        );
+
         // Hardcode to true: gRPC backends return raw token IDs, not decoded text.
         // Detokenization happens on the SMG Rust side (StopDecoder/Sequence).
         let skip_special_tokens = true;
