@@ -1122,6 +1122,16 @@ class TestToolChoiceGptOss:
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
 
+    def test_previous_response_id_mcp_binding_behavior(self, model, api_client):
+        """Resumed turns should not relist existing MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client)
+
+    def test_previous_response_id_mcp_binding_behavior_streaming(self, model, api_client):
+        """Streaming resumed turns should only list newly added MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client)
+
 
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model) - Tool Choice
@@ -1411,3 +1421,13 @@ class TestToolChoiceLocal:
         assert len(mcp_calls) > 0
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
+
+    def test_previous_response_id_mcp_binding_behavior(self, model, api_client):
+        """Resumed turns should not relist existing MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client)
+
+    def test_previous_response_id_mcp_binding_behavior_streaming(self, model, api_client):
+        """Streaming resumed turns should only list newly added MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client)

@@ -5,11 +5,13 @@ use std::{
     sync::Arc,
 };
 
-use openai_protocol::responses::{McpAllowedTools, ResponseTool, ResponsesRequest};
+use openai_protocol::responses::{
+    McpAllowedTools, ResponseOutputItem, ResponseTool, ResponsesRequest,
+};
 use serde_json::{json, Value};
 use smg_mcp::{
     apply_hosted_tool_overrides, extract_hosted_tool_overrides, BuiltinToolType, McpOrchestrator,
-    McpServerBinding, McpServerConfig, McpTransport, ResponseFormat,
+    McpServerBinding, McpServerConfig, McpToolSession, McpTransport, ResponseFormat,
 };
 use tracing::{debug, warn};
 
@@ -42,6 +44,117 @@ pub(crate) fn project_allowed_tools(value: Option<&McpAllowedTools>) -> Option<V
             (None, None) => None,
         },
     })
+}
+
+/// Return only the MCP bindings that have not already been listed in prior output.
+pub fn mcp_list_tools_bindings_to_emit(
+    existing_labels: &HashSet<String>,
+    bindings: &[McpServerBinding],
+) -> Vec<(String, String)> {
+    bindings
+        .iter()
+        .filter(|binding| !existing_labels.contains(&binding.label))
+        .map(|binding| (binding.label.clone(), binding.server_key.clone()))
+        .collect()
+}
+
+/// Extract `mcp_list_tools.server_label` values from a stored response output array.
+pub fn extract_mcp_list_tools_labels(output: &Value) -> Vec<String> {
+    output
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    (item.get("type").and_then(|t| t.as_str()) == Some("mcp_list_tools"))
+                        .then(|| item.get("server_label").and_then(|v| v.as_str()))
+                        .flatten()
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Prepend already-rendered `mcp_list_tools` items and current-turn MCP
+/// calls to a response's output, filtering anything that should not
+/// reach the client (built-in / internal labels, internal tool names,
+/// caller-declared function names not exposed by the session).
+///
+/// Callers (the gRPC agent loop adapters) own the driver-collected
+/// `state.emitted_mcp_list_tools_items` and `state.mcp_output_items`
+/// vectors; this function does *not* re-derive those from
+/// `session.mcp_servers()` — see `mcp_list_tools_bindings_to_emit` for
+/// the legacy compute-from-session helper still used by the OpenAI
+/// passthrough path.
+pub fn inject_mcp_output_items(
+    output: &mut Vec<ResponseOutputItem>,
+    list_tools_items: Vec<ResponseOutputItem>,
+    tool_call_items: Vec<ResponseOutputItem>,
+    user_function_names: &HashSet<String>,
+    session: &McpToolSession<'_>,
+) {
+    let existing = std::mem::take(output);
+    output.reserve(list_tools_items.len() + tool_call_items.len() + existing.len());
+
+    output.extend(
+        list_tools_items
+            .into_iter()
+            .filter(|item| is_client_visible_output_item(session, item, user_function_names)),
+    );
+    output.extend(
+        tool_call_items
+            .into_iter()
+            .filter(|item| is_client_visible_output_item(session, item, user_function_names)),
+    );
+    output.extend(
+        existing
+            .into_iter()
+            .filter(|item| is_client_visible_output_item(session, item, user_function_names)),
+    );
+}
+
+fn is_client_visible_output_item(
+    session: &McpToolSession<'_>,
+    item: &ResponseOutputItem,
+    user_function_names: &HashSet<String>,
+) -> bool {
+    match item {
+        ResponseOutputItem::McpListTools { server_label, .. } => {
+            !session.is_builtin_server_label(server_label)
+                && !session.is_internal_non_builtin_server_label(server_label)
+        }
+        ResponseOutputItem::McpCall {
+            server_label, name, ..
+        }
+        | ResponseOutputItem::McpApprovalRequest {
+            server_label, name, ..
+        } => {
+            if session.has_exposed_tool(name) {
+                !session.is_internal_non_builtin_tool(name)
+            } else {
+                !session.is_internal_non_builtin_server_label(server_label)
+            }
+        }
+        ResponseOutputItem::FunctionToolCall { name, .. } => {
+            !session.is_internal_tool(name) || user_function_names.contains(name)
+        }
+        ResponseOutputItem::WebSearchCall { .. }
+        | ResponseOutputItem::CodeInterpreterCall { .. }
+        | ResponseOutputItem::FileSearchCall { .. }
+        | ResponseOutputItem::ImageGenerationCall { .. }
+        | ResponseOutputItem::ComputerCall { .. }
+        | ResponseOutputItem::ComputerCallOutput { .. }
+        | ResponseOutputItem::ShellCall { .. }
+        | ResponseOutputItem::ShellCallOutput { .. }
+        | ResponseOutputItem::ApplyPatchCall { .. }
+        | ResponseOutputItem::ApplyPatchCallOutput { .. }
+        | ResponseOutputItem::Message { .. }
+        | ResponseOutputItem::Reasoning { .. }
+        | ResponseOutputItem::Compaction { .. }
+        | ResponseOutputItem::LocalShellCall { .. }
+        | ResponseOutputItem::LocalShellCallOutput { .. } => true,
+    }
 }
 
 /// Protocol-agnostic MCP server descriptor for connection setup.
@@ -171,6 +284,39 @@ pub struct BuiltinToolRouting {
 /// * `tools` - Request tools to scan for built-in types
 ///
 /// # Returns
+/// Map a `ResponseTool` variant to its [`BuiltinToolType`] when the
+/// tool is one of the hosted builtins the gateway routes via MCP
+/// (web search, code interpreter, file search, image generation).
+/// Returns `None` for caller-declared function tools, MCP server
+/// tools, and any other variant — those do not flow through the
+/// builtin routing path.
+///
+/// **Single source of truth.** All callers that need to ask "is this
+/// tool a hosted builtin, and if so which one?" must go through this
+/// helper. Add a new builtin family by extending [`BuiltinToolType`]
+/// and the match arm below — every downstream consumer
+/// (`has_builtin_tools` connectivity gating, `collect_builtin_routing`
+/// MCP dispatch lookup, `extract_builtin_types`, the agent-loop
+/// `ToolPresentation` mapping) picks it up automatically.
+pub fn classify_builtin_tool(tool: &ResponseTool) -> Option<BuiltinToolType> {
+    match tool {
+        // Both `web_search_preview` and the non-preview
+        // `web_search` / `web_search_2025_08_26` shape route through
+        // the same `WebSearchPreview` builtin entry — they only
+        // differ in how the model is told the tool exists, not in
+        // how the gateway dispatches it.
+        ResponseTool::WebSearchPreview(_) | ResponseTool::WebSearch(_) => {
+            Some(BuiltinToolType::WebSearchPreview)
+        }
+        ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
+        ResponseTool::FileSearch(_) => Some(BuiltinToolType::FileSearch),
+        ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
+        // Function tools, MCP server tools, computer / custom /
+        // shell-family tools are not hosted-builtin-routed.
+        _ => None,
+    }
+}
+
 /// Vector of routing information for built-in tools that have configured MCP servers.
 /// Empty if no built-in tools are found or none have MCP server configurations.
 pub fn collect_builtin_routing(
@@ -184,11 +330,8 @@ pub fn collect_builtin_routing(
     let mut routing = Vec::new();
 
     for tool in tools {
-        let builtin_type = match tool {
-            ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
-            ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
-            ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
-            _ => continue,
+        let Some(builtin_type) = classify_builtin_tool(tool) else {
+            continue;
         };
 
         if let Some((server_name, tool_name, response_format)) =
@@ -223,15 +366,7 @@ pub fn collect_builtin_routing(
 /// Used by routers to determine which built-in tool types are present in
 /// a request, for passing to [`ensure_mcp_servers`].
 pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
-    tools
-        .iter()
-        .filter_map(|t| match t {
-            ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
-            ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
-            ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
-            _ => None,
-        })
-        .collect()
+    tools.iter().filter_map(classify_builtin_tool).collect()
 }
 
 /// Collect user-declared function tool names from a Responses request.
@@ -408,13 +543,16 @@ pub(crate) fn prepare_hosted_dispatch_args(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseTool,
-            WebSearchPreviewTool,
+            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseOutputItem,
+            ResponseTool, WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -697,6 +835,54 @@ mod tests {
             routing[0].response_format,
             ResponseFormat::ImageGenerationCall
         );
+    }
+
+    #[tokio::test]
+    async fn test_inject_mcp_output_items_prepends_pre_rendered_list_tools() {
+        // The new contract takes pre-rendered `mcp_list_tools` items
+        // straight from the agent loop's
+        // `state.emitted_mcp_list_tools_items` and prepends them in
+        // front of any existing output items. The driver is the one
+        // that decides which servers to list (skipping prior-chain
+        // duplicates); the injection helper just splices visibility-
+        // filtered items together.
+        let orchestrator = Arc::new(McpOrchestrator::new(McpConfig::default()).await.unwrap());
+        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+
+        let mut output = vec![ResponseOutputItem::Message {
+            id: "msg_123".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            status: "completed".to_string(),
+            phase: None,
+        }];
+
+        let list_tools_items = vec![ResponseOutputItem::McpListTools {
+            id: "mcpl_1".to_string(),
+            server_label: "deepwiki".to_string(),
+            tools: vec![],
+            error: None,
+        }];
+
+        inject_mcp_output_items(
+            &mut output,
+            list_tools_items,
+            Vec::new(),
+            &HashSet::new(),
+            &session,
+        );
+
+        let labels: Vec<&str> = output
+            .iter()
+            .filter_map(|item| match item {
+                ResponseOutputItem::McpListTools { server_label, .. } => {
+                    Some(server_label.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(labels, vec!["deepwiki"]);
     }
 
     // =========================================================================

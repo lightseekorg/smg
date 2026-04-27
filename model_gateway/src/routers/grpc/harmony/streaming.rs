@@ -20,7 +20,6 @@ use openai_protocol::{
     },
 };
 use serde_json::json;
-use smg_mcp::{McpToolSession, ResponseFormat, DEFAULT_SERVER_LABEL};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -30,43 +29,21 @@ use super::{
 };
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
-    routers::grpc::{
-        common::{
-            response_formatting::CompletionTokenTracker,
-            responses::{
-                build_sse_response,
-                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+    routers::{
+        common::agent_loop::{LoopEvent, StreamSink},
+        grpc::{
+            common::{
+                response_formatting::CompletionTokenTracker,
+                responses::{
+                    build_sse_response, streaming::OutputItemType, GrpcResponseStreamSink,
+                },
             },
+            context,
+            proto_wrapper::{ProtoResponseVariant, ProtoStream},
+            utils,
         },
-        context,
-        proto_wrapper::{ProtoResponseVariant, ProtoStream},
-        utils,
     },
 };
-
-/// Whether a tool call of this `ResponseFormat` streams its arguments via
-/// `mcp_call.arguments.delta` / `function_call.arguments.delta` events.
-///
-/// Hosted built-in tools (`web_search_call`, `code_interpreter_call`,
-/// `file_search_call`, `image_generation_call`) instead surface their
-/// progress through structured events emitted by the shared
-/// [`ResponseStreamEventEmitter`] helpers (`emit_tool_call_in_progress`,
-/// `emit_tool_call_searching`, `emit_tool_call_completed` — plus
-/// `emit_image_generation_partial_image` for the image_generation
-/// partial-image frame). Those builtins therefore skip argument
-/// streaming here.
-///
-/// `None` (plain function tools) and `Some(Passthrough)` (MCP `mcp_call`)
-/// are the only formats that stream arguments through this router.
-fn streams_arguments(response_format: Option<&ResponseFormat>) -> bool {
-    match response_format {
-        None | Some(ResponseFormat::Passthrough) => true,
-        Some(ResponseFormat::WebSearchCall)
-        | Some(ResponseFormat::CodeInterpreterCall)
-        | Some(ResponseFormat::FileSearchCall)
-        | Some(ResponseFormat::ImageGenerationCall) => false,
-    }
-}
 
 /// Processor for streaming Harmony responses
 ///
@@ -496,18 +473,16 @@ impl HarmonyStreamingProcessor {
     /// When no MCP context is provided, all tool calls are treated as function calls.
     pub async fn process_responses_iteration_stream(
         execution_result: context::ExecutionResult,
-        emitter: &mut ResponseStreamEventEmitter,
-        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        session: Option<&McpToolSession<'_>>,
+        sink: &mut GrpcResponseStreamSink,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(stream, emitter, tx, session, 0).await
+                Self::process_decode_stream(stream, sink, 0).await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(prefill, *decode, emitter, tx, session).await
+                Self::process_responses_dual_stream(prefill, *decode, sink).await
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
@@ -518,9 +493,7 @@ impl HarmonyStreamingProcessor {
     async fn process_responses_dual_stream(
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
-        emitter: &mut ResponseStreamEventEmitter,
-        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        session: Option<&McpToolSession<'_>>,
+        sink: &mut GrpcResponseStreamSink,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
@@ -534,9 +507,7 @@ impl HarmonyStreamingProcessor {
         let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
 
         // Phase 2: Process decode stream
-        let result =
-            Self::process_decode_stream(decode_stream, emitter, tx, session, prefill_cached_tokens)
-                .await;
+        let result = Self::process_decode_stream(decode_stream, sink, prefill_cached_tokens).await;
 
         prefill_stream.mark_completed();
         result
@@ -545,9 +516,7 @@ impl HarmonyStreamingProcessor {
     /// Process decode stream for tool call events.
     async fn process_decode_stream(
         mut decode_stream: ProtoStream,
-        emitter: &mut ResponseStreamEventEmitter,
-        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        session: Option<&McpToolSession<'_>>,
+        sink: &mut GrpcResponseStreamSink,
         prefill_cached_tokens: u32,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
@@ -557,14 +526,20 @@ impl HarmonyStreamingProcessor {
         let mut accumulated_final_text = String::new();
         let mut accumulated_tool_calls: Option<Vec<ToolCall>> = None;
 
-        let mut has_emitted_reasoning = false;
+        let mut accumulated_reasoning_text = String::new();
+        let mut reasoning_closed = false;
         let mut message_output_index: Option<usize> = None;
         let mut message_item_id: Option<String> = None;
         let mut has_emitted_content_part_added = false;
 
-        // Tool call tracking: call_index -> (output_index, item_id, response_format)
-        let mut tool_call_tracking: HashMap<usize, (usize, String, Option<ResponseFormat>)> =
-            HashMap::new();
+        // Per-call_index → call_id mapping. Harmony only carries
+        // `id` + `name` on a tool call's first chunk; subsequent
+        // fragments only carry `arguments`. The sink owns family
+        // classification and `output_index` / `item_id` allocation —
+        // the processor only needs to know which `call_id` each
+        // continuing fragment belongs to so it can address the
+        // matching `LoopEvent`.
+        let mut call_ids_by_index: HashMap<usize, String> = HashMap::new();
 
         // Metadata from Complete message; seed cached_tokens from prefill phase (dual-stream)
         let mut finish_reason: String;
@@ -595,16 +570,13 @@ impl HarmonyStreamingProcessor {
 
                     // Emit SSE events if there's a delta
                     if let Some(delta) = delta_result {
-                        // Analysis channel → Reasoning item (wrapper events only, emitted once)
-                        if let Some(_analysis_text) = &delta.analysis_delta {
-                            if !has_emitted_reasoning {
-                                // Emit reasoning item (added + done in one call)
-                                // Note: reasoning_content will be provided at finalize
-                                emitter
-                                    .emit_reasoning_item(tx, None)
-                                    .map_err(|e| format!("Failed to emit reasoning item: {e}"))?;
-
-                                has_emitted_reasoning = true;
+                        // Analysis channel → stream reasoning body events.
+                        if let Some(analysis_text) = &delta.analysis_delta {
+                            if !analysis_text.is_empty() {
+                                sink.emitter
+                                    .process_reasoning_delta(analysis_text, &sink.tx)
+                                    .map_err(|e| format!("Failed to emit reasoning delta: {e}"))?;
+                                accumulated_reasoning_text.push_str(analysis_text);
                                 has_analysis = true;
                             }
                         }
@@ -615,7 +587,7 @@ impl HarmonyStreamingProcessor {
                                 // Allocate message item if needed
                                 if message_output_index.is_none() {
                                     let (output_index, item_id) =
-                                        emitter.allocate_output_index(OutputItemType::Message);
+                                        sink.emitter.allocate_output_index(OutputItemType::Message);
                                     message_output_index = Some(output_index);
                                     message_item_id = Some(item_id.clone());
 
@@ -628,8 +600,9 @@ impl HarmonyStreamingProcessor {
                                     });
 
                                     // Emit output_item.added
-                                    let event = emitter.emit_output_item_added(output_index, &item);
-                                    emitter.send_event_best_effort(&event, tx);
+                                    let event =
+                                        sink.emitter.emit_output_item_added(output_index, &item);
+                                    sink.emitter.send_event_best_effort(&event, &sink.tx);
                                 }
 
                                 let Some(output_index) = message_output_index else {
@@ -642,166 +615,79 @@ impl HarmonyStreamingProcessor {
 
                                 // Emit content_part.added before first delta
                                 if !has_emitted_content_part_added {
-                                    let event = emitter.emit_content_part_added(
+                                    let event = sink.emitter.emit_content_part_added(
                                         output_index,
                                         item_id,
                                         content_index,
                                     );
-                                    emitter.send_event_best_effort(&event, tx);
+                                    sink.emitter.send_event_best_effort(&event, &sink.tx);
                                     has_emitted_content_part_added = true;
                                 }
 
                                 // Emit text delta
-                                let event = emitter.emit_text_delta(
+                                let event = sink.emitter.emit_text_delta(
                                     final_delta,
                                     output_index,
                                     item_id,
                                     content_index,
                                 );
-                                emitter.send_event_best_effort(&event, tx);
+                                sink.emitter.send_event_best_effort(&event, &sink.tx);
 
                                 accumulated_final_text.push_str(final_delta);
                             }
                         }
 
-                        // Commentary channel → Tool call streaming
+                        // Commentary channel → tool-call streaming.
+                        // Forward each fragment to the sink as
+                        // `LoopEvent::ToolCallEmission*`. The sink
+                        // classifies family (function_call / mcp_call /
+                        // hosted-builtin) by name lookup against its
+                        // session-derived snapshot, allocates the
+                        // `output_index` / `item_id`, and emits the
+                        // family-correct wire events. The processor
+                        // does **not** know or check policy.
                         if let Some(tc_delta) = &delta.commentary_delta {
                             let call_index = tc_delta.index;
-
-                            // New tool call (has id and name)
                             if let Some(call_id) = &tc_delta.id {
+                                // First chunk for this call_index.
                                 let tool_name = tc_delta
                                     .function
                                     .as_ref()
                                     .and_then(|f| f.name.as_ref())
                                     .map(|n| n.as_str())
                                     .unwrap_or("");
-
-                                // Determine response_format based on MCP context.
-                                let response_format = session.and_then(|s| {
-                                    if s.has_exposed_tool(tool_name) {
-                                        Some(s.tool_response_format(tool_name))
-                                    } else {
-                                        None
-                                    }
+                                call_ids_by_index.insert(call_index, call_id.clone());
+                                sink.emit(LoopEvent::ToolCallEmissionStarted {
+                                    call_id,
+                                    item_id: call_id,
+                                    name: tool_name,
                                 });
-
-                                // Determine output item type and JSON type string
-                                let output_item_type =
-                                    ResponseStreamEventEmitter::output_item_type_for_format(
-                                        response_format.as_ref(),
-                                    );
-                                let type_str = ResponseStreamEventEmitter::type_str_for_format(
-                                    response_format.as_ref(),
-                                );
-
-                                let (output_index, item_id) =
-                                    emitter.allocate_output_index(output_item_type);
-
-                                tool_call_tracking.insert(
-                                    call_index,
-                                    (output_index, item_id.clone(), response_format.clone()),
-                                );
-
-                                // Build output_item.added event
-                                let mut item = json!({
-                                    "id": item_id,
-                                    "type": type_str,
-                                    "name": tool_name,
-                                    "call_id": call_id,
-                                    "arguments": "",
-                                    "status": "in_progress"
-                                });
-
-                                let label = session
-                                    .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
-                                attach_mcp_server_label(
-                                    &mut item,
-                                    Some(label.as_str()),
-                                    response_format.as_ref(),
-                                );
-
-                                let event = emitter.emit_output_item_added(output_index, &item);
-                                emitter.send_event_best_effort(&event, tx);
-
-                                // Emit in_progress event for MCP tools
-                                if let Some(ref fmt) = response_format {
-                                    let event = emitter.emit_tool_call_in_progress(
-                                        output_index,
-                                        &item_id,
-                                        fmt,
-                                    );
-                                    emitter.send_event_best_effort(&event, tx);
-
-                                    // Emit searching/interpreting event for builtin tools
-                                    if let Some(event) = emitter.emit_tool_call_searching(
-                                        output_index,
-                                        &item_id,
-                                        fmt,
-                                    ) {
-                                        emitter.send_event_best_effort(&event, tx);
-                                    }
-                                }
-
-                                // Emit initial arguments delta for mcp_call / function_call
-                                // only. Hosted built-in tools (web_search_call,
-                                // code_interpreter_call, file_search_call,
-                                // image_generation_call) surface progress via
-                                // the structured `*.in_progress` /
-                                // `*.searching` / `*.generating` events emitted
-                                // above instead of streaming their arguments.
-                                if streams_arguments(response_format.as_ref()) {
-                                    let event = match &response_format {
-                                        Some(_) => emitter.emit_mcp_call_arguments_delta(
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        ),
-                                        None => emitter.emit_function_call_arguments_delta(
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        ),
-                                    };
-                                    emitter.send_event_best_effort(&event, tx);
-                                }
-                            } else {
-                                // Continuing tool call: emit arguments delta
-                                if let Some((output_index, item_id, response_format)) =
-                                    tool_call_tracking.get(&call_index)
+                                if let Some(args) = tc_delta
+                                    .function
+                                    .as_ref()
+                                    .and_then(|f| f.arguments.as_ref())
+                                    .filter(|s| !s.is_empty())
                                 {
-                                    // Only mcp_call / function_call stream
-                                    // arguments; hosted built-in tools
-                                    // (web_search_call, code_interpreter_call,
-                                    // file_search_call, image_generation_call)
-                                    // skip argument deltas — their progress
-                                    // rides on the structured events emitted
-                                    // around MCP dispatch.
-                                    if !streams_arguments(response_format.as_ref()) {
-                                        continue;
-                                    }
-
-                                    if let Some(args) = tc_delta
-                                        .function
-                                        .as_ref()
-                                        .and_then(|f| f.arguments.as_ref())
-                                        .filter(|a| !a.is_empty())
-                                    {
-                                        let event = match response_format {
-                                            Some(_) => emitter.emit_mcp_call_arguments_delta(
-                                                *output_index,
-                                                item_id,
-                                                args,
-                                            ),
-                                            None => emitter.emit_function_call_arguments_delta(
-                                                *output_index,
-                                                item_id,
-                                                args,
-                                            ),
-                                        };
-                                        emitter.send_event_best_effort(&event, tx);
-                                    }
+                                    sink.emit(LoopEvent::ToolCallArgumentsFragment {
+                                        call_id,
+                                        fragment: args,
+                                    });
+                                }
+                            } else if let Some(call_id) =
+                                call_ids_by_index.get(&call_index).cloned()
+                            {
+                                // Subsequent fragment for an in-flight
+                                // tool call.
+                                if let Some(args) = tc_delta
+                                    .function
+                                    .as_ref()
+                                    .and_then(|f| f.arguments.as_ref())
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    sink.emit(LoopEvent::ToolCallArgumentsFragment {
+                                        call_id: &call_id,
+                                        fragment: args,
+                                    });
                                 }
                             }
                         }
@@ -823,80 +709,114 @@ impl HarmonyStreamingProcessor {
                     // Responses API: no user-specified stop sequences
                     let final_output = parser.finalize(finish_reason.clone());
 
-                    // Store finalized output for later use
+                    // Store finalized output for later use, and flush any
+                    // reasoning text that only became visible at parser
+                    // finalize time.
+                    if let Some(final_analysis) = final_output.analysis.as_ref() {
+                        let missing = final_analysis
+                            .strip_prefix(&accumulated_reasoning_text)
+                            .unwrap_or(final_analysis.as_str());
+                        if !missing.is_empty() {
+                            sink.emitter
+                                .process_reasoning_delta(missing, &sink.tx)
+                                .map_err(|e| format!("Failed to emit finalized reasoning: {e}"))?;
+                            accumulated_reasoning_text.push_str(missing);
+                            has_analysis = true;
+                        }
+                    }
+                    if !reasoning_closed && !accumulated_reasoning_text.is_empty() {
+                        sink.emitter
+                            .finish_reasoning_item(&sink.tx)
+                            .map_err(|e| format!("Failed to finish reasoning item: {e}"))?;
+                        reasoning_closed = true;
+                    }
+
+                    let missing_final_text = final_output
+                        .final_text
+                        .strip_prefix(&accumulated_final_text)
+                        .unwrap_or(final_output.final_text.as_str());
+                    if !missing_final_text.is_empty() {
+                        if message_output_index.is_none() {
+                            let (output_index, item_id) =
+                                sink.emitter.allocate_output_index(OutputItemType::Message);
+                            message_output_index = Some(output_index);
+                            message_item_id = Some(item_id.clone());
+
+                            let item = json!({
+                                "id": item_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "content": []
+                            });
+                            let event = sink.emitter.emit_output_item_added(output_index, &item);
+                            sink.emitter.send_event_best_effort(&event, &sink.tx);
+                        }
+
+                        if let (Some(output_index), Some(item_id)) =
+                            (message_output_index, message_item_id.as_ref())
+                        {
+                            let content_index = 0;
+                            if !has_emitted_content_part_added {
+                                let event = sink.emitter.emit_content_part_added(
+                                    output_index,
+                                    item_id,
+                                    content_index,
+                                );
+                                sink.emitter.send_event_best_effort(&event, &sink.tx);
+                                has_emitted_content_part_added = true;
+                            }
+                            let event = sink.emitter.emit_text_delta(
+                                missing_final_text,
+                                output_index,
+                                item_id,
+                                content_index,
+                            );
+                            sink.emitter.send_event_best_effort(&event, &sink.tx);
+                            accumulated_final_text.push_str(missing_final_text);
+                        }
+                    }
+
                     finalized_analysis = final_output.analysis;
                     accumulated_tool_calls = final_output.commentary;
                     reasoning_token_count = final_output.reasoning_token_count;
 
-                    // Complete all tool calls if we have commentary
-                    if let Some(ref tool_calls) = accumulated_tool_calls {
-                        for (call_idx, tool_call) in tool_calls.iter().enumerate() {
-                            if let Some((output_index, item_id, response_format)) =
-                                tool_call_tracking.get(&call_idx)
-                            {
-                                let tool_name = &tool_call.function.name;
-                                let args_str =
-                                    tool_call.function.arguments.as_deref().unwrap_or("");
-
-                                // Emit arguments.done for mcp_call /
-                                // function_call only. Hosted built-in tools
-                                // (web_search_call, code_interpreter_call,
-                                // file_search_call, image_generation_call)
-                                // close out through the `*.completed`
-                                // structured event emitted below.
-                                if streams_arguments(response_format.as_ref()) {
-                                    let event = match response_format {
-                                        Some(_) => emitter.emit_mcp_call_arguments_done(
-                                            *output_index,
-                                            item_id,
-                                            args_str,
-                                        ),
-                                        None => emitter.emit_function_call_arguments_done(
-                                            *output_index,
-                                            item_id,
-                                            args_str,
-                                        ),
-                                    };
-                                    emitter.send_event_best_effort(&event, tx);
-                                }
-
-                                // Emit completed event for MCP tools
-                                if let Some(ref fmt) = response_format {
-                                    let event = emitter.emit_tool_call_completed(
-                                        *output_index,
-                                        item_id,
-                                        fmt,
-                                    );
-                                    emitter.send_event_best_effort(&event, tx);
-                                }
-
-                                // Determine type string for JSON
-                                let type_str = ResponseStreamEventEmitter::type_str_for_format(
-                                    response_format.as_ref(),
-                                );
-
-                                let mut item = json!({
-                                    "id": item_id,
-                                    "type": type_str,
-                                    "name": tool_name,
-                                    "call_id": &tool_call.id,
-                                    "arguments": args_str,
-                                    "status": "completed"
-                                });
-
-                                let label = session
-                                    .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
-                                attach_mcp_server_label(
-                                    &mut item,
-                                    Some(label.as_str()),
-                                    response_format.as_ref(),
-                                );
-
-                                let event = emitter.emit_output_item_done(*output_index, &item);
-                                emitter.complete_output_item(*output_index);
-                                emitter.send_event_best_effort(&event, tx);
+                    // The parser regenerates fresh UUID `call_…` ids
+                    // on each `parse_chunk` (streaming-time) AND on
+                    // `finalize` (post-stream), so the ids on
+                    // `accumulated_tool_calls` do **not** match the
+                    // `tc_delta.id` we already issued via
+                    // `LoopEvent::ToolCallEmissionStarted` to the sink.
+                    // Without this fix-up the sink's tracking misses
+                    // on `EmissionDone` (no `*_arguments.done` fires)
+                    // and on the post-execute `ToolCompleted` (no
+                    // `mcp_call.completed` + closing `output_item.done`
+                    // fires). Replace finalize-time ids with the
+                    // streaming-time ids by call index — the parser's
+                    // commentary always preserves emission order.
+                    if let Some(ref mut tool_calls) = accumulated_tool_calls {
+                        for (idx, tool_call) in tool_calls.iter_mut().enumerate() {
+                            if let Some(stream_id) = call_ids_by_index.get(&idx) {
+                                tool_call.id.clone_from(stream_id);
                             }
+                        }
+                    }
+
+                    // Close out every in-flight tool call's wire
+                    // lifecycle. Sink emits `*_arguments.done` for
+                    // streaming families and (caller fc only) the
+                    // closing `output_item.done(status=completed)`.
+                    // For gateway tools sink leaves tracking alive
+                    // so the post-execution `LoopEvent::ToolCompleted`
+                    // can fire `mcp_call.completed/.failed` +
+                    // `output_item.done(with output)` after the
+                    // executor returns.
+                    if let Some(ref tool_calls) = accumulated_tool_calls {
+                        for tool_call in tool_calls {
+                            let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
+                            sink.emit(LoopEvent::ToolCallEmissionDone {
+                                call_id: &tool_call.id,
+                                full_args: args_str,
+                            });
                         }
                     }
 
@@ -907,13 +827,18 @@ impl HarmonyStreamingProcessor {
                         let content_index = 0;
 
                         // Emit text_done
-                        let event = emitter.emit_text_done(output_index, item_id, content_index);
-                        emitter.send_event_best_effort(&event, tx);
+                        let event =
+                            sink.emitter
+                                .emit_text_done(output_index, item_id, content_index);
+                        sink.emitter.send_event_best_effort(&event, &sink.tx);
 
                         // Emit content_part.done
-                        let event =
-                            emitter.emit_content_part_done(output_index, item_id, content_index);
-                        emitter.send_event_best_effort(&event, tx);
+                        let event = sink.emitter.emit_content_part_done(
+                            output_index,
+                            item_id,
+                            content_index,
+                        );
+                        sink.emitter.send_event_best_effort(&event, &sink.tx);
 
                         // Emit output_item.done
                         let item = json!({
@@ -925,12 +850,12 @@ impl HarmonyStreamingProcessor {
                                 "text": accumulated_final_text.clone()
                             }]
                         });
-                        let event = emitter.emit_output_item_done(output_index, &item);
+                        let event = sink.emitter.emit_output_item_done(output_index, &item);
 
                         // Mark as completed before sending (so it's included in final output even if send fails)
-                        emitter.complete_output_item(output_index);
+                        sink.emitter.complete_output_item(output_index);
 
-                        emitter.send_event_best_effort(&event, tx);
+                        sink.emitter.send_event_best_effort(&event, &sink.tx);
                     }
                 }
                 ProtoResponseVariant::None => {}
@@ -967,71 +892,46 @@ impl HarmonyStreamingProcessor {
                 final_text_extracted.len()
             );
 
-            // Complete any pending tool calls with data from completed messages
-            if let Some(ref tool_calls) = accumulated_tool_calls {
-                for (call_idx, tool_call) in tool_calls.iter().enumerate() {
-                    if let Some((output_index, item_id, response_format)) =
-                        tool_call_tracking.get(&call_idx)
-                    {
-                        let tool_name = &tool_call.function.name;
-                        let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
-
-                        // Emit arguments.done for mcp_call / function_call
-                        // only. Hosted built-in tools (web_search_call,
-                        // code_interpreter_call, file_search_call,
-                        // image_generation_call) close out through the
-                        // `*.completed` structured event emitted below.
-                        if streams_arguments(response_format.as_ref()) {
-                            let event = match response_format {
-                                Some(_) => emitter.emit_mcp_call_arguments_done(
-                                    *output_index,
-                                    item_id,
-                                    args_str,
-                                ),
-                                None => emitter.emit_function_call_arguments_done(
-                                    *output_index,
-                                    item_id,
-                                    args_str,
-                                ),
-                            };
-                            emitter.send_event_best_effort(&event, tx);
-                        }
-
-                        // Emit completed event for MCP tools
-                        if let Some(ref fmt) = response_format {
-                            let event =
-                                emitter.emit_tool_call_completed(*output_index, item_id, fmt);
-                            emitter.send_event_best_effort(&event, tx);
-                        }
-
-                        let type_str = ResponseStreamEventEmitter::type_str_for_format(
-                            response_format.as_ref(),
-                        );
-
-                        let mut item = json!({
-                            "id": item_id,
-                            "type": type_str,
-                            "name": tool_name,
-                            "call_id": &tool_call.id,
-                            "arguments": args_str,
-                            "status": "completed"
-                        });
-
-                        let label = session
-                            .map(|s| s.resolve_tool_server_label(tool_name))
-                            .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
-                        attach_mcp_server_label(
-                            &mut item,
-                            Some(label.as_str()),
-                            response_format.as_ref(),
-                        );
-
-                        let event = emitter.emit_output_item_done(*output_index, &item);
-                        emitter.complete_output_item(*output_index);
-                        emitter.send_event_best_effort(&event, tx);
+            // Same id fix-up the Complete branch does, applied here
+            // for the case where the stream ended without a Complete
+            // message (post-loop `extract_incomplete_commentary`
+            // path). Without this, the parser-generated finalize-time
+            // call_id would not match the streaming-time id we
+            // already announced via `LoopEvent::ToolCallEmissionStarted`,
+            // so sink tracking would miss on `EmissionDone` /
+            // `ToolCompleted` and the wire would skip
+            // `*_arguments.done` + `mcp_call.completed` +
+            // `output_item.done`.
+            if let Some(ref mut tool_calls) = accumulated_tool_calls {
+                for (idx, tool_call) in tool_calls.iter_mut().enumerate() {
+                    if let Some(stream_id) = call_ids_by_index.get(&idx) {
+                        tool_call.id.clone_from(stream_id);
                     }
                 }
             }
+
+            // Close out any tool calls the parser surfaced. Sink
+            // takes a `LoopEvent::ToolCallEmissionDone` per call;
+            // it knows from its own tracking whether the call is a
+            // caller `function_call` (closes lifecycle now) or a
+            // gateway tool (leaves tracking alive for the
+            // post-execution `ToolCompleted` to finish). The
+            // processor stays family-blind here.
+            if let Some(ref tool_calls) = accumulated_tool_calls {
+                for tool_call in tool_calls {
+                    let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
+                    sink.emit(LoopEvent::ToolCallEmissionDone {
+                        call_id: &tool_call.id,
+                        full_args: args_str,
+                    });
+                }
+            }
+        }
+
+        if !reasoning_closed && !accumulated_reasoning_text.is_empty() {
+            sink.emitter
+                .finish_reasoning_item(&sink.tx)
+                .map_err(|e| format!("Failed to finish reasoning item: {e}"))?;
         }
 
         // Mark stream as completed successfully to prevent abort on drop
@@ -1053,7 +953,7 @@ impl HarmonyStreamingProcessor {
                     usage: Usage::from_counts(prompt_tokens, completion_tokens)
                         .with_cached_tokens(cached_tokens)
                         .with_reasoning_tokens(reasoning_token_count),
-                    request_id: emitter.response_id.clone(),
+                    request_id: sink.emitter.response_id.clone(),
                 });
             }
         }
@@ -1063,7 +963,7 @@ impl HarmonyStreamingProcessor {
         // Return a placeholder Completed result (caller ignores these fields in streaming mode)
         Ok(ResponsesIterationResult::Completed {
             response: Box::new(
-                ResponsesResponse::builder(&emitter.response_id, "")
+                ResponsesResponse::builder(&sink.emitter.response_id, "")
                     .status(ResponseStatus::Completed)
                     .usage(ResponsesUsage::Modern(ResponseUsage {
                         input_tokens: prompt_tokens,
@@ -1099,73 +999,14 @@ impl Default for HarmonyStreamingProcessor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
-    /// Compile-time exhaustiveness anchor.
-    ///
-    /// This helper exists solely to force every [`ResponseFormat`] variant
-    /// to flow through a non-wildcard `match`. If a new variant is added to
-    /// [`ResponseFormat`] without being classified, this function fails to
-    /// compile — which in turn breaks `streams_arguments_explicit_variants`
-    /// below, since both helpers iterate the same variant set.
-    ///
-    /// Intentionally *does not* call [`streams_arguments`] — this mirrors
-    /// the production classifier so a drift between the two is a separate
-    /// failure (runtime assertion miss) from a missing variant (compile
-    /// error here).
-    fn expected_streams_arguments(format: &ResponseFormat) -> bool {
-        match format {
-            ResponseFormat::Passthrough => true,
-            ResponseFormat::WebSearchCall
-            | ResponseFormat::CodeInterpreterCall
-            | ResponseFormat::FileSearchCall
-            | ResponseFormat::ImageGenerationCall => false,
-        }
-    }
-
-    // Locks the `streams_arguments` classification so the Harmony router
-    // keeps treating hosted built-in tools — including `image_generation`
-    // — as structured-event emitters rather than argument streamers.
-    //
-    // Every `ResponseFormat` variant is named explicitly (no `_` arm, no
-    // iteration over a hand-maintained array), so adding a new variant
-    // fails to compile in `expected_streams_arguments` above AND in every
-    // explicit `let ... = ResponseFormat::X;` binding here — which in
-    // turn ensures the production `streams_arguments` classifier must
-    // also be updated to compile.
-    #[test]
-    fn streams_arguments_explicit_variants() {
-        // `None` (plain function tool) streams arguments.
-        assert!(streams_arguments(None), "function_call should stream args");
-
-        // `Some(Passthrough)` (mcp_call) streams arguments.
-        let passthrough = ResponseFormat::Passthrough;
-        assert!(
-            streams_arguments(Some(&passthrough)),
-            "mcp_call (Passthrough) should stream args",
-        );
-        assert!(expected_streams_arguments(&passthrough));
-
-        // Hosted built-ins do *not* stream arguments — they surface
-        // progress via structured `*.in_progress` / `*.searching` /
-        // `*.generating` / `*.completed` events from the shared emitter.
-        let web_search = ResponseFormat::WebSearchCall;
-        assert!(!streams_arguments(Some(&web_search)));
-        assert!(!expected_streams_arguments(&web_search));
-
-        let code_interpreter = ResponseFormat::CodeInterpreterCall;
-        assert!(!streams_arguments(Some(&code_interpreter)));
-        assert!(!expected_streams_arguments(&code_interpreter));
-
-        let file_search = ResponseFormat::FileSearchCall;
-        assert!(!streams_arguments(Some(&file_search)));
-        assert!(!expected_streams_arguments(&file_search));
-
-        let image_generation = ResponseFormat::ImageGenerationCall;
-        assert!(
-            !streams_arguments(Some(&image_generation)),
-            "image_generation_call must ride the structured-event path",
-        );
-        assert!(!expected_streams_arguments(&image_generation));
-    }
+    // The argument-streaming classification used to live on a local
+    // helper (`streams_arguments`) because the harmony processor
+    // emitted tool-call args inline through the legacy
+    // `ResponseStreamEventEmitter` helpers. Both producer and
+    // classifier moved to `ToolPresentation` /
+    // `GrpcResponseStreamSink` after the agent-loop refactor; the
+    // classification lock-down test moved with them
+    // (`presentation::tests`). This module no longer needs to keep
+    // a parallel anchor.
 }

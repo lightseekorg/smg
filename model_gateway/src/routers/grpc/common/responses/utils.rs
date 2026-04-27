@@ -18,7 +18,8 @@ use tracing::{debug, error, warn};
 use crate::{
     routers::{
         common::{
-            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+            mcp_utils::{classify_builtin_tool, ensure_request_mcp_client},
+            persistence_utils::persist_conversation_items,
         },
         error,
     },
@@ -41,27 +42,17 @@ pub(crate) async fn ensure_mcp_connection(
         .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
         .unwrap_or(false);
 
-    // Check for builtin tools that MAY have MCP routing configured.
-    //
-    // `ImageGeneration` is included here because gpt-oss via the
-    // harmony pipeline, and Qwen/Llama via the regular pipeline, both
-    // dispatch hosted `image_generation` calls through the same MCP
-    // routing path — the only difference is how the tool is advertised in
-    // the prompt. Without this arm, the short-circuit below would return
-    // `(false, Vec::new())`, the MCP loop would never be entered, and the
-    // registered `image_generation` MCP server would receive zero
-    // dispatches.
+    // Check for hosted builtin tools that MAY have MCP routing
+    // configured. `classify_builtin_tool` is the single source of
+    // truth for "is this a hosted builtin?" — extending the set of
+    // routed builtins is one match-arm change there, not a fan-out
+    // across this file plus `collect_builtin_routing` plus
+    // `extract_builtin_types`. `WebSearchPreview` / `WebSearch` /
+    // `CodeInterpreter` / `FileSearch` / `ImageGeneration` all flow
+    // through the same MCP dispatch path; the distinction is only
+    // how the tool is advertised in the prompt.
     let has_builtin_tools = tools
-        .map(|t| {
-            t.iter().any(|tool| {
-                matches!(
-                    tool,
-                    ResponseTool::WebSearchPreview(_)
-                        | ResponseTool::CodeInterpreter(_)
-                        | ResponseTool::ImageGeneration(_)
-                )
-            })
-        })
+        .map(|t| t.iter().any(|tool| classify_builtin_tool(tool).is_some()))
         .unwrap_or(false);
 
     // Only process if we have MCP or builtin tools

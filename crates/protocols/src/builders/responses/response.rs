@@ -4,9 +4,12 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::responses::*;
+use crate::{
+    common::{ConversationRef, PromptCacheRetention},
+    responses::*,
+};
 
 /// Builder for ResponsesResponse
 ///
@@ -19,24 +22,33 @@ pub struct ResponsesResponseBuilder {
     created_at: i64,
     completed_at: Option<i64>,
     background: Option<bool>,
-    conversation: Option<String>,
+    conversation: Option<ConversationRef>,
     status: ResponseStatus,
     error: Option<Value>,
     incomplete_details: Option<Value>,
+    billing: Option<Value>,
     instructions: Option<String>,
     max_output_tokens: Option<u32>,
+    max_tool_calls: Option<u32>,
+    frequency_penalty: Option<f32>,
     model: String,
     output: Vec<ResponseOutputItem>,
     parallel_tool_calls: bool,
     previous_response_id: Option<String>,
-    reasoning: Option<ReasoningInfo>,
+    moderation: Option<Value>,
+    presence_penalty: Option<f32>,
+    prompt_cache_key: Option<String>,
+    prompt_cache_retention: Option<PromptCacheRetention>,
+    reasoning: Option<Value>,
     store: bool,
+    service_tier: Option<ServiceTier>,
     temperature: Option<f32>,
     text: Option<TextConfig>,
-    tool_choice: String,
+    tool_choice: Value,
     tools: Vec<ResponseTool>,
+    top_logprobs: Option<u32>,
     top_p: Option<f32>,
-    truncation: Option<String>,
+    truncation: Option<Truncation>,
     usage: Option<ResponsesUsage>,
     user: Option<String>,
     safety_identifier: Option<String>,
@@ -60,18 +72,27 @@ impl ResponsesResponseBuilder {
             status: ResponseStatus::InProgress,
             error: None,
             incomplete_details: None,
+            billing: None,
             instructions: None,
             max_output_tokens: None,
+            max_tool_calls: None,
+            frequency_penalty: None,
             model: model.into(),
             output: Vec::new(),
             parallel_tool_calls: true,
             previous_response_id: None,
+            moderation: None,
+            presence_penalty: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
             reasoning: None,
             store: true,
+            service_tier: None,
             temperature: None,
             text: None,
-            tool_choice: "auto".to_string(),
+            tool_choice: json!("auto"),
             tools: Vec::new(),
+            top_logprobs: None,
             top_p: None,
             truncation: None,
             usage: None,
@@ -87,29 +108,44 @@ impl ResponsesResponseBuilder {
     /// from the original request, making it easy to construct a response that mirrors
     /// the request parameters.
     ///
-    /// Note: `safety_identifier` is intentionally NOT copied as it is for content moderation
-    /// and should be set independently from the request's `user` field (which is for billing/tracking).
     pub fn copy_from_request(mut self, request: &ResponsesRequest) -> Self {
         self.instructions.clone_from(&request.instructions);
         self.max_output_tokens = request.max_output_tokens;
+        self.max_tool_calls = request.max_tool_calls;
+        self.frequency_penalty = request.frequency_penalty;
         self.parallel_tool_calls = request.parallel_tool_calls.unwrap_or(true);
         self.previous_response_id
             .clone_from(&request.previous_response_id);
+        self.presence_penalty = request.presence_penalty;
+        self.prompt_cache_key.clone_from(&request.prompt_cache_key);
+        self.prompt_cache_retention = request.prompt_cache_retention;
         self.store = request.store.unwrap_or(true);
+        self.service_tier.clone_from(&request.service_tier);
         self.background = request.background;
-        // ResponsesResponse stores `conversation` as a plain `Option<String>`
-        // (response side per spec is `optional { id }` only); flatten the
-        // request's union-typed reference down to its underlying id string.
-        self.conversation = request.conversation.as_ref().map(|c| c.as_id().to_string());
+        // OpenAI's response shape echoes `conversation` as
+        // `{ "id": "..." }`; render the canonical Object form
+        // regardless of whether the request used the `Id(...)` or
+        // `Object { id }` wire shape.
+        self.conversation = request
+            .conversation
+            .as_ref()
+            .map(|c| ConversationRef::Object {
+                id: c.as_id().to_string(),
+            });
         self.temperature = request.temperature;
-        self.tool_choice = if let Some(ref tc) = request.tool_choice {
-            serde_json::to_string(tc).unwrap_or_else(|_| "auto".to_string())
-        } else {
-            "auto".to_string()
-        };
+        self.tool_choice = ResponsesToolChoice::serialize_to_value(request.tool_choice.as_ref());
         self.tools = request.tools.clone().unwrap_or_default();
+        self.top_logprobs = request.top_logprobs;
         self.top_p = request.top_p;
+        self.truncation.clone_from(&request.truncation);
+        self.text.clone_from(&request.text);
         self.user.clone_from(&request.user);
+        self.safety_identifier
+            .clone_from(&request.safety_identifier);
+        self.reasoning = request
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| serde_json::to_value(reasoning).ok());
         self.metadata = request.metadata.clone().unwrap_or_default();
         self
     }
@@ -139,9 +175,20 @@ impl ResponsesResponseBuilder {
         self
     }
 
-    /// Set the linked conversation ID.
+    /// Set the linked conversation ID. Stored in `Object` form so the
+    /// echoed `conversation` field serializes as `{ "id": "..." }`,
+    /// matching OpenAI's response shape.
     pub fn conversation(mut self, conversation: impl Into<String>) -> Self {
-        self.conversation = Some(conversation.into());
+        self.conversation = Some(ConversationRef::Object {
+            id: conversation.into(),
+        });
+        self
+    }
+
+    /// Set the conversation directly from a [`ConversationRef`] —
+    /// preserves whichever wire shape the caller already had.
+    pub fn conversation_ref(mut self, conversation: ConversationRef) -> Self {
+        self.conversation = Some(conversation);
         self
     }
 
@@ -201,7 +248,7 @@ impl ResponsesResponseBuilder {
 
     /// Set reasoning information
     pub fn reasoning(mut self, reasoning: ReasoningInfo) -> Self {
-        self.reasoning = Some(reasoning);
+        self.reasoning = Some(json!(reasoning));
         self
     }
 
@@ -227,7 +274,7 @@ impl ResponsesResponseBuilder {
 
     /// Set tool choice setting
     pub fn tool_choice(mut self, tool_choice: impl Into<String>) -> Self {
-        self.tool_choice = tool_choice.into();
+        self.tool_choice = Value::String(tool_choice.into());
         self
     }
 
@@ -244,8 +291,8 @@ impl ResponsesResponseBuilder {
     }
 
     /// Set truncation strategy
-    pub fn truncation(mut self, truncation: impl Into<String>) -> Self {
-        self.truncation = Some(truncation.into());
+    pub fn truncation(mut self, truncation: Truncation) -> Self {
+        self.truncation = Some(truncation);
         self
     }
 
@@ -307,18 +354,27 @@ impl ResponsesResponseBuilder {
             status: self.status,
             error: self.error,
             incomplete_details: self.incomplete_details,
+            billing: self.billing,
             instructions: self.instructions,
             max_output_tokens: self.max_output_tokens,
+            max_tool_calls: self.max_tool_calls,
+            frequency_penalty: self.frequency_penalty,
             model: self.model,
             output: self.output,
             parallel_tool_calls: self.parallel_tool_calls,
             previous_response_id: self.previous_response_id,
+            moderation: self.moderation,
+            presence_penalty: self.presence_penalty,
+            prompt_cache_key: self.prompt_cache_key,
+            prompt_cache_retention: self.prompt_cache_retention,
             reasoning: self.reasoning,
             store: self.store,
+            service_tier: self.service_tier,
             temperature: self.temperature,
             text: self.text,
             tool_choice: self.tool_choice,
             tools: self.tools,
+            top_logprobs: self.top_logprobs,
             top_p: self.top_p,
             truncation: self.truncation,
             usage: self.usage,
