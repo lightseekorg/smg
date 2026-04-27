@@ -377,9 +377,17 @@ pub(in crate::routers::openai) async fn route_responses(
         return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
     }
 
+    let request_headers = headers.cloned().map(|mut headers| {
+        if endpoint_override.is_some() {
+            headers.remove("x-provider-endpoint");
+            headers.remove("x-model-provider");
+        }
+        headers
+    });
+
     let mut ctx = RequestContext::for_responses(
         Arc::new(body.clone()),
-        headers.cloned(),
+        request_headers,
         Some(model_id.to_string()),
         ComponentRefs::Responses(Arc::clone(deps.responses_components)),
     );
