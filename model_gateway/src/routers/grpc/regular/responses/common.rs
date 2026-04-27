@@ -178,6 +178,11 @@ pub(super) async fn load_conversation_history(
 ) -> Result<LoadedRequest, Response> {
     let mut modified_request = request.clone();
     let mut conversation_items: Option<Vec<ResponseInputOutputItem>> = None;
+    // Tracks the raw DB item count (all types) for the conversation path so
+    // that total_items in ConversationTurnInfo is not undercounted when
+    // function_call/function_call_output/MCP items are present in storage
+    // but filtered out of the inference window.
+    let mut raw_stored_item_count: Option<usize> = None;
 
     // Handle previous_response_id by loading response chain
     if let Some(ref prev_id_str) = modified_request.previous_response_id {
@@ -285,6 +290,7 @@ pub(super) async fn load_conversation_history(
             .await
         {
             Ok(stored_items) => {
+                raw_stored_item_count = Some(stored_items.len());
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {
                     if item.item_type == "message" {
@@ -370,7 +376,20 @@ pub(super) async fn load_conversation_history(
     );
 
     let turn_info = if stm_enabled {
-        Some(count_conversation_turn_info(&modified_request.input))
+        let mut info = count_conversation_turn_info(&modified_request.input);
+        // If we loaded from conversation storage, total_items from the
+        // assembled (message-only) input undercounts — function_call,
+        // function_call_output, and MCP items are in the DB but filtered
+        // out of the inference window. Use the raw DB count instead so
+        // target_item_end points at the correct absolute position.
+        if let Some(raw_count) = raw_stored_item_count {
+            let current_input_count = match &request.input {
+                ResponseInput::Text(_) => 1,
+                ResponseInput::Items(items) => items.len(),
+            };
+            info.total_items = raw_count + current_input_count;
+        }
+        Some(info)
     } else {
         None
     };

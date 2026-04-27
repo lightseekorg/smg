@@ -53,6 +53,12 @@ pub(crate) async fn load_input_history(
 
     // Load items from previous response chain if specified
     let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
+    let mut raw_stored_item_count: Option<usize> = None;
+    // Capture current request input count before history loading mutates request_body.input
+    let current_input_count = match &request_body.input {
+        ResponseInput::Text(_) => 1,
+        ResponseInput::Items(items) => items.len(),
+    };
     if let Some(prev_id_str) = &previous_response_id {
         let prev_id = ResponseId::from(prev_id_str.as_str());
         match components
@@ -155,6 +161,7 @@ pub(crate) async fn load_input_history(
             .await
         {
             Ok(stored_items) => {
+                raw_stored_item_count = Some(stored_items.len());
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {
                     match item.item_type.as_str() {
@@ -238,7 +245,15 @@ pub(crate) async fn load_input_history(
     }
 
     let conversation_turn_info = if stm_enabled {
-        Some(count_conversation_turn_info(&request_body.input))
+        let mut info = count_conversation_turn_info(&request_body.input);
+        // Correct total_items when loaded from conversation storage: reasoning
+        // items are skipped during load but are stored in the DB, so the
+        // assembled input underestimates the true conversation size. Use the
+        // raw DB count + current input item count for an accurate target_item_end.
+        if let Some(raw_count) = raw_stored_item_count {
+            info.total_items = raw_count + current_input_count;
+        }
+        Some(info)
     } else {
         None
     };
