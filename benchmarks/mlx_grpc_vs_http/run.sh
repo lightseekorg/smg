@@ -5,6 +5,11 @@
 # the SMG MLX servicer + SMG router and runs the same benchmark matrix.
 # Results land in $RESULTS_DIR for aggregate.py to summarize.
 #
+# Uses the genai-bench CLI installed via pip (not docker) — Docker on
+# macos-latest GitHub runners requires Colima, which boots a Linux VM
+# that is unstable in CI. Native pip install runs the same code without
+# the VM hop.
+#
 # Tunables via env (overridable from the workflow):
 #   MODEL                model id (default: mlx-community/gemma-3-4b-it-qat-4bit)
 #   CONCURRENCIES        space-separated (default: "1 4 16 64")
@@ -14,8 +19,6 @@
 #   MAX_REQUESTS         hard cap per cell (default: 100000, effectively
 #                        unbounded; duration is the real limit)
 #   RESULTS_DIR          output dir (default: bench-results)
-#   GENAI_BENCH_IMAGE    docker image (default: ghcr.io/moirai-internal/
-#                        genai-bench:0.0.4)
 #   HTTP_PORT            mlx-lm http port (default: 8001)
 #   GRPC_PORT            mlx grpc servicer port (default: 50051)
 #   ROUTER_PORT          smg router port (default: 30000)
@@ -29,7 +32,6 @@ SCENARIOS="${SCENARIOS:-D(100,256) D(2000,128)}"
 DURATION_MIN="${DURATION_MIN:-10}"
 MAX_REQUESTS="${MAX_REQUESTS:-100000}"
 RESULTS_DIR="${RESULTS_DIR:-bench-results}"
-GENAI_BENCH_IMAGE="${GENAI_BENCH_IMAGE:-ghcr.io/moirai-internal/genai-bench:0.0.4}"
 HTTP_PORT="${HTTP_PORT:-8001}"
 GRPC_PORT="${GRPC_PORT:-50051}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
@@ -95,32 +97,12 @@ run_bench() {
 
     log "[$exp_name] genai-bench scenario=$scenario concurrency=$concurrency duration=${DURATION_MIN}m"
 
-    # Mount HF cache so the bench reuses tokenizers we already have on disk.
-    local hf_home="${HF_HOME:-$HOME/.cache/huggingface}"
-    local hf_mount=()
-    if [ -d "$hf_home" ]; then
-        hf_mount+=( -v "$hf_home:$hf_home" -e "HF_HOME=$hf_home" )
-    fi
-
-    # genai-bench reaches the host via host.docker.internal because Docker
-    # for Mac (and Colima) run a Linux VM — `--network host` would attach
-    # to the VM's network, not the macOS host's. The base URL is rewritten
-    # accordingly: 127.0.0.1 → host.docker.internal.
-    local container_url="${base_url/127.0.0.1/host.docker.internal}"
-    container_url="${container_url/localhost/host.docker.internal}"
-
     # genai-bench's --max-time-per-run is in SECONDS (despite the name).
     local duration_s=$(( DURATION_MIN * 60 ))
 
-    docker run --rm \
-        --add-host=host.docker.internal:host-gateway \
-        -v "$(pwd):$(pwd)" \
-        -w "$(pwd)" \
-        "${hf_mount[@]}" \
-        "$GENAI_BENCH_IMAGE" \
-        benchmark \
+    genai-bench benchmark \
         --api-backend openai \
-        --api-base "$container_url" \
+        --api-base "$base_url" \
         --api-key dummy-token \
         --api-model-name "$MODEL" \
         --model-tokenizer "$MODEL" \
