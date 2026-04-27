@@ -4,7 +4,7 @@
 //! `router.rs` packs borrowed references into [`ResponsesRouterContext`] and
 //! delegates to [`route_responses`].
 
-use std::{sync::Arc, time::Instant};
+use std::{net::IpAddr, sync::Arc, time::Instant};
 
 use axum::{http::HeaderMap, response::Response};
 use openai_protocol::{
@@ -92,6 +92,28 @@ fn normalize_provider_endpoint(raw: &str) -> Option<(String, String)> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    let ip_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_host.parse::<IpAddr>() {
+        let blocked = match ip {
+            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+            IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+            }
+        };
+        if blocked {
+            return None;
+        }
+    }
     if parsed.path() == "/" {
         return None;
     }
@@ -120,7 +142,7 @@ fn endpoint_override_error_response(error: EndpointOverrideError) -> Response {
         ),
         EndpointOverrideError::InvalidEndpoint => error::bad_request(
             "invalid_request",
-            "x-provider-endpoint must be an absolute http(s) URL with a non-empty path".to_string(),
+            "x-provider-endpoint must be an absolute public http(s) URL with a non-empty path and no credentials".to_string(),
         ),
     }
 }
@@ -417,6 +439,49 @@ mod tests {
         },
     };
     use serde_json::{json, to_value};
+
+    use super::normalize_provider_endpoint;
+
+    #[test]
+    fn endpoint_override_normalization_accepts_public_url_and_strips_fragment() {
+        let Some((worker_base_url, target_url)) =
+            normalize_provider_endpoint("https://api.example.com/v1/responses?alt=sse#secret")
+        else {
+            panic!("public endpoint should be accepted");
+        };
+
+        assert_eq!(worker_base_url, "https://api.example.com");
+        assert_eq!(target_url, "https://api.example.com/v1/responses?alt=sse");
+    }
+
+    #[test]
+    fn endpoint_override_normalization_rejects_userinfo() {
+        assert!(
+            normalize_provider_endpoint("https://user:pass@api.example.com/v1/responses").is_none()
+        );
+        assert!(normalize_provider_endpoint("https://user@api.example.com/v1/responses").is_none());
+    }
+
+    #[test]
+    fn endpoint_override_normalization_rejects_local_and_private_hosts() {
+        for endpoint in [
+            "https://localhost/v1/responses",
+            "https://LOCALHOST/v1/responses",
+            "http://127.0.0.1/v1/responses",
+            "http://[::1]/v1/responses",
+            "http://10.0.0.1/v1/responses",
+            "http://172.16.0.1/v1/responses",
+            "http://192.168.1.1/v1/responses",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[fc00::1]/v1/responses",
+            "http://[fe80::1]/v1/responses",
+        ] {
+            assert!(
+                normalize_provider_endpoint(endpoint).is_none(),
+                "{endpoint} should be rejected"
+            );
+        }
+    }
 
     fn build_request_with_mixed_content() -> ResponsesRequest {
         ResponsesRequest {

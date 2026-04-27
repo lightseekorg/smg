@@ -317,7 +317,7 @@ async fn test_openai_router_models() {
 }
 
 #[tokio::test]
-async fn test_responses_endpoint_override_uses_exact_endpoint_and_strips_override_headers() {
+async fn test_responses_endpoint_override_rejects_loopback_endpoint_without_fallback() {
     let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
     let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
 
@@ -339,37 +339,9 @@ async fn test_responses_endpoint_override_uses_exact_endpoint_and_strips_overrid
             &request.model,
         )
         .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
     assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
-
-    let body = dedicated_state
-        .last_body
-        .lock()
-        .await
-        .clone()
-        .expect("dedicated request body captured");
-    assert_eq!(body["model"], json!("gpt-oss-20b"));
-    let uri = dedicated_state
-        .last_uri
-        .lock()
-        .await
-        .clone()
-        .expect("dedicated request URI captured");
-    assert_eq!(
-        uri,
-        "/v1beta/models/gemini-2.5-flash:generateContent?alt=sse"
-    );
-
-    let forwarded_headers = dedicated_state
-        .last_headers
-        .lock()
-        .await
-        .clone()
-        .expect("dedicated request headers captured");
-    assert!(forwarded_headers.get("x-provider-endpoint").is_none());
-    assert!(forwarded_headers.get("x-model-provider").is_none());
 }
 
 #[tokio::test]
@@ -412,7 +384,7 @@ async fn test_responses_endpoint_override_rejects_invalid_endpoint_urls_without_
 }
 
 #[tokio::test]
-async fn test_responses_endpoint_override_accepts_gpt_oss_as_openai_provider() {
+async fn test_responses_endpoint_override_rejects_loopback_for_gpt_oss_without_fallback() {
     let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
     let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
 
@@ -431,8 +403,8 @@ async fn test_responses_endpoint_override_accepts_gpt_oss_as_openai_provider() {
             &request.model,
         )
         .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
     assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
 }
 
@@ -472,7 +444,7 @@ async fn test_responses_endpoint_override_rejects_unknown_provider_without_fallb
 }
 
 #[tokio::test]
-async fn test_streaming_responses_endpoint_override_uses_dedicated_endpoint() {
+async fn test_streaming_responses_endpoint_override_rejects_loopback_without_fallback() {
     let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
     let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
 
@@ -491,19 +463,9 @@ async fn test_streaming_responses_endpoint_override_uses_dedicated_endpoint() {
             &request.model,
         )
         .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
     assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
-
-    let body = dedicated_state
-        .last_body
-        .lock()
-        .await
-        .clone()
-        .expect("dedicated streaming body captured");
-    assert_eq!(body["model"], json!("gpt-oss-20b"));
-    assert_eq!(body["stream"], json!(true));
 }
 
 #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
