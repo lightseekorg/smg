@@ -330,10 +330,19 @@ impl RouterManager {
                 model_id,
                 "Routing Responses endpoint override through OpenAI-compatible router"
             );
-            return self
+            let router = self
                 .routers
                 .get(&router_ids::HTTP_OPENAI)
                 .map(|r| r.clone());
+            if router.is_none() {
+                warn!(
+                    model_id,
+                    endpoint_override_present = true,
+                    router_id = router_ids::HTTP_OPENAI.as_str(),
+                    "Endpoint override requested but OpenAI-compatible router (HTTP_OPENAI) is not registered; endpoint overrides are unsupported in single-router mode"
+                );
+            }
+            return router;
         }
 
         self.select_router_for_request(headers, Some(model_id))

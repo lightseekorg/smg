@@ -170,6 +170,9 @@ fn endpoint_override_from_headers(
     headers: Option<&HeaderMap>,
 ) -> Result<Option<EndpointOverride>, EndpointOverrideError> {
     let Some(raw_endpoint) = extract_provider_endpoint(headers) else {
+        if extract_model_provider(headers).is_some() {
+            provider_from_header(headers)?;
+        }
         return Ok(None);
     };
 
@@ -439,6 +442,7 @@ mod tests {
     //! `to_value(&request_body)` site). These tests lock the shape that the
     //! post-P1 content-part variants produce, so any future change to the
     //! serde layer surfaces here before it reaches an upstream.
+    use axum::http::{HeaderMap, HeaderValue};
     use openai_protocol::{
         common::Detail,
         responses::{
@@ -448,7 +452,42 @@ mod tests {
     };
     use serde_json::{json, to_value};
 
-    use super::normalize_provider_endpoint;
+    use super::{
+        endpoint_override_from_headers, normalize_provider_endpoint, EndpointOverrideError,
+    };
+
+    fn headers_with_model_provider(provider: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-model-provider", HeaderValue::from_static(provider));
+        headers
+    }
+
+    #[test]
+    fn endpoint_override_without_endpoint_accepts_valid_provider_hint() {
+        let headers = headers_with_model_provider("openai");
+        let result = endpoint_override_from_headers(Some(&headers));
+
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn endpoint_override_without_endpoint_rejects_invalid_provider_hint() {
+        let headers = headers_with_model_provider("gemiin");
+        let result = endpoint_override_from_headers(Some(&headers));
+
+        assert!(matches!(
+            result,
+            Err(EndpointOverrideError::InvalidProvider)
+        ));
+    }
+
+    #[test]
+    fn endpoint_override_without_endpoint_or_provider_is_absent() {
+        let headers = HeaderMap::new();
+        let result = endpoint_override_from_headers(Some(&headers));
+
+        assert!(matches!(result, Ok(None)));
+    }
 
     #[test]
     fn endpoint_override_normalization_accepts_public_url_and_strips_fragment() {
