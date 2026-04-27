@@ -10,7 +10,10 @@ use smg_data_connector::{
 };
 use smg_mcp::McpOrchestrator;
 
-use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
+use crate::{
+    memory::MemoryExecutionContext,
+    routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
+};
 
 /// Context for /v1/responses endpoint
 ///
@@ -44,6 +47,14 @@ pub(crate) struct ResponsesContext {
 
     /// Maximum conversation history items to load into request context.
     pub max_conversation_history_items: usize,
+
+    /// Memory execution context derived from per-request headers.
+    ///
+    /// Controls whether LTM store/recall and STM condensation are active for
+    /// this request.  Built from `x-conversation-memory-config` + the runtime
+    /// feature flag at the gRPC entry point and threaded down to the persistence
+    /// layer so it can gate memory side-effects without re-parsing headers.
+    pub memory_execution_context: MemoryExecutionContext,
 }
 
 impl ResponsesContext {
@@ -62,6 +73,7 @@ impl ResponsesContext {
         mcp_orchestrator: Arc<McpOrchestrator>,
         request_context: Option<StorageRequestContext>,
         max_conversation_history_items: usize,
+        memory_execution_context: MemoryExecutionContext,
     ) -> Self {
         Self {
             pipeline,
@@ -73,6 +85,7 @@ impl ResponsesContext {
             mcp_orchestrator,
             request_context,
             max_conversation_history_items,
+            memory_execution_context,
         }
     }
 }

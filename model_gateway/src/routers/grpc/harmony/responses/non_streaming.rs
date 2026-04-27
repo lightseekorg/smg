@@ -83,10 +83,12 @@ pub(crate) async fn serve_harmony_responses(
     persist_response_if_needed(
         ctx.conversation_storage.clone(),
         ctx.conversation_item_storage.clone(),
+        ctx.conversation_memory_writer.clone(),
         ctx.response_storage.clone(),
         &response,
         &original_request,
         ctx.request_context.clone(),
+        ctx.memory_execution_context.clone(),
     )
     .await;
 

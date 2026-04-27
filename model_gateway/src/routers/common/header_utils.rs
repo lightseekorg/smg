@@ -21,6 +21,8 @@ pub struct MemoryHeaderView {
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
     pub extraction_model: Option<String>,
+    pub stm_enabled: bool,
+    pub stm_condenser_model_id: Option<String>,
 }
 
 impl MemoryHeaderView {
@@ -35,6 +37,7 @@ impl MemoryHeaderView {
             return Self::default();
         };
         let ltm_enabled = config.long_term_memory.enabled;
+        let stm_enabled = config.short_term_memory.enabled;
         let policy = if ltm_enabled {
             config
                 .long_term_memory
@@ -53,6 +56,10 @@ impl MemoryHeaderView {
                 .flatten(),
             extraction_model: ltm_enabled
                 .then_some(config.long_term_memory.extraction_model_id)
+                .flatten(),
+            stm_enabled,
+            stm_condenser_model_id: stm_enabled
+                .then_some(config.short_term_memory.condenser_model_id)
                 .flatten(),
         }
     }
@@ -543,6 +550,8 @@ mod tests {
         assert_eq!(view.subject_id, None);
         assert_eq!(view.embedding_model, None);
         assert_eq!(view.extraction_model, None);
+        assert!(!view.stm_enabled);
+        assert_eq!(view.stm_condenser_model_id, None);
     }
 
     #[test]
@@ -561,6 +570,8 @@ mod tests {
         assert_eq!(view.subject_id, None);
         assert_eq!(view.embedding_model, None);
         assert_eq!(view.extraction_model, None);
+        assert!(view.stm_enabled);
+        assert_eq!(view.stm_condenser_model_id.as_deref(), Some("cond-1"));
     }
 
     #[test]
@@ -582,6 +593,8 @@ mod tests {
             Some("text-embedding-3-small")
         );
         assert_eq!(view.extraction_model.as_deref(), Some("gpt-4.1-mini"));
+        assert!(!view.stm_enabled);
+        assert_eq!(view.stm_condenser_model_id, None);
     }
 
     #[test]

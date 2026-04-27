@@ -634,10 +634,12 @@ pub(super) async fn handle_simple_streaming_passthrough(
                 if let Err(err) = persist_conversation_items(
                     storage.conversation.clone(),
                     storage.conversation_item.clone(),
+                    storage.conversation_memory_writer.clone(),
                     storage.response.clone(),
                     &response_json,
                     &original_request,
                     storage.request_context.clone(),
+                    storage.memory_execution_context.clone(),
                 )
                 .await
                 {
@@ -962,10 +964,12 @@ pub(super) fn handle_streaming_with_tool_interception(
                     if let Err(err) = persist_conversation_items(
                         storage.conversation.clone(),
                         storage.conversation_item.clone(),
+                        storage.conversation_memory_writer.clone(),
                         storage.response.clone(),
                         &response_json,
                         &original_request,
                         storage.request_context.clone(),
+                        storage.memory_execution_context.clone(),
                     )
                     .await
                     {

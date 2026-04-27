@@ -10,10 +10,13 @@ use openai_protocol::responses::{
 use serde_json::{json, Value};
 use smg_data_connector::{
     with_request_context, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationStorage, NewConversationItem,
+    ConversationItemStorage, ConversationMemoryStatus, ConversationMemoryType,
+    ConversationMemoryWriter, ConversationStorage, NewConversationItem, NewConversationMemory,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
+
+use crate::memory::MemoryExecutionContext;
 
 // ============================================================================
 // Constants
@@ -375,6 +378,131 @@ async fn link_items_to_conversation(
     Ok(())
 }
 
+#[expect(
+    clippy::manual_is_multiple_of,
+    reason = "usize::is_multiple_of is not stable; % remainder check is the portable equivalent"
+)]
+fn should_enqueue_stmo(user_turns: usize) -> bool {
+    user_turns >= 4 && (user_turns - 1) % 3 == 0
+}
+
+fn count_user_turns(input_items: &[Value]) -> usize {
+    input_items
+        .iter()
+        .filter(|item| {
+            item.get("role")
+                .and_then(|v| v.as_str())
+                .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+        })
+        .count()
+}
+
+async fn maybe_schedule_stmo_after_persist(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: &ResponseId,
+    user_turns: usize,
+    total_items: usize,
+) -> Result<bool, String> {
+    if !memory_execution_context.stm_enabled {
+        return Ok(false);
+    }
+
+    if !should_enqueue_stmo(user_turns) {
+        return Ok(false);
+    }
+
+    let mut memory_config = json!({
+        "last_index": user_turns,
+        "target_item_end": total_items,
+    });
+
+    if let Some(model_id) = &memory_execution_context.stm_condenser_model_id {
+        memory_config["condenser_model"] = json!(model_id);
+    }
+
+    let memory_config = serde_json::to_string(&memory_config)
+        .map_err(|e| format!("Failed to serialize STMO memory config: {e}"))?;
+
+    let input = NewConversationMemory {
+        conversation_id: conversation_id.clone(),
+        conversation_version: None,
+        response_id: Some(response_id.clone()),
+        memory_type: ConversationMemoryType::Stmo,
+        status: ConversationMemoryStatus::Ready,
+        attempt: 0,
+        owner_id: None,
+        next_run_at: Utc::now(),
+        lease_until: None,
+        content: None,
+        memory_config: Some(memory_config),
+        scope_id: None,
+        error_msg: None,
+    };
+
+    conversation_memory_writer
+        .create_memory(input)
+        .await
+        .map_err(|e| format!("Failed to enqueue STMO memory: {e}"))?;
+
+    Ok(true)
+}
+
+async fn handle_stmo_after_persist(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: &ResponseId,
+    input_items: &[Value],
+    output_items: &[Value],
+) {
+    if !memory_execution_context.stm_enabled {
+        return;
+    }
+
+    let user_turns = count_user_turns(input_items);
+    let total_items = input_items.len() + output_items.len();
+
+    match maybe_schedule_stmo_after_persist(
+        conversation_memory_writer,
+        memory_execution_context,
+        conversation_id,
+        response_id,
+        user_turns,
+        total_items,
+    )
+    .await
+    {
+        Ok(true) => {
+            info!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                user_turns,
+                total_items,
+                "Enqueued STMO memory condensation job"
+            );
+        }
+        Ok(false) => {
+            debug!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                user_turns,
+                total_items,
+                "STMO not enqueued for this response boundary"
+            );
+        }
+        Err(e) => {
+            warn!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                error = %e,
+                "Failed to enqueue STMO memory job; continuing without failing response"
+            );
+        }
+    }
+}
+
 /// Persist conversation items to storage
 ///
 /// This function:
@@ -382,20 +510,28 @@ async fn link_items_to_conversation(
 /// 2. Extracts output items from the response
 /// 3. Stores ALL items in response storage (always)
 /// 4. If conversation provided, also links items to conversation
+#[expect(
+    clippy::too_many_arguments,
+    reason = "persistence entrypoint assembles all storage handles and request context in one call"
+)]
 pub async fn persist_conversation_items(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
+    memory_execution_context: MemoryExecutionContext,
 ) -> Result<(), String> {
     let inner = persist_conversation_items_inner(
         conversation_storage,
         item_storage,
+        conversation_memory_writer,
         response_storage,
         response_json,
         original_body,
+        memory_execution_context,
     );
     match request_context {
         Some(ctx) => with_request_context(ctx, inner).await,
@@ -406,9 +542,11 @@ pub async fn persist_conversation_items(
 async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
+    memory_execution_context: MemoryExecutionContext,
 ) -> Result<(), String> {
     // Respect store=false: skip persistence entirely (matches official API behavior)
     if !original_body.store.unwrap_or(true) {
@@ -467,6 +605,36 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
+
+        if memory_execution_context.stm_enabled {
+            let span = tracing::Span::current();
+            let writer = conversation_memory_writer.clone();
+            let mem_ctx = memory_execution_context.clone();
+            let conv_id = conv_id.clone();
+            let resp_id = response_id.clone();
+            let input_items = input_items.clone();
+            let output_items = output_items.clone();
+
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "STMO enqueue should run best-effort in the background without blocking response success"
+            )]
+            tokio::spawn(
+                async move {
+                    handle_stmo_after_persist(
+                        &writer,
+                        &mem_ctx,
+                        &conv_id,
+                        &resp_id,
+                        &input_items,
+                        &output_items,
+                    )
+                    .await;
+                }
+                .instrument(span),
+            );
+        }
+
         info!(
             conversation_id = %conv_id.0,
             response_id = %response_id.0,
