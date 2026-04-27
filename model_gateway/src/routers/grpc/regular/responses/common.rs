@@ -261,13 +261,11 @@ pub(super) async fn load_conversation_history(
         }
 
         // Load conversation history
-        const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
         let params = data_connector::ListParams {
-            limit: MAX_CONVERSATION_HISTORY_ITEMS,
+            limit: ctx.max_conversation_history_items,
             order: data_connector::SortOrder::Asc,
             after: None,
         };
-
         match ctx
             .conversation_item_storage
             .list_items(&conv_id, params)

@@ -25,8 +25,6 @@ use crate::{
     },
 };
 
-const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
-
 pub(crate) struct LoadedInputHistory {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
@@ -139,11 +137,13 @@ pub(crate) async fn load_input_history(
         }
 
         let params = ListParams {
-            limit: MAX_CONVERSATION_HISTORY_ITEMS,
+            limit: components
+                .shared
+                .router_config
+                .max_conversation_history_items,
             order: SortOrder::Asc,
             after: None,
         };
-
         match components
             .conversation_item_storage
             .list_items(&conv_id, params)

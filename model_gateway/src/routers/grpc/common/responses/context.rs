@@ -41,6 +41,9 @@ pub(crate) struct ResponsesContext {
 
     /// Storage hook request context extracted from HTTP headers by middleware.
     pub request_context: Option<StorageRequestContext>,
+
+    /// Maximum conversation history items to load into request context.
+    pub max_conversation_history_items: usize,
 }
 
 impl ResponsesContext {
@@ -58,6 +61,7 @@ impl ResponsesContext {
         conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
         mcp_orchestrator: Arc<McpOrchestrator>,
         request_context: Option<StorageRequestContext>,
+        max_conversation_history_items: usize,
     ) -> Self {
         Self {
             pipeline,
@@ -68,6 +72,7 @@ impl ResponsesContext {
             conversation_memory_writer,
             mcp_orchestrator,
             request_context,
+            max_conversation_history_items,
         }
     }
 }

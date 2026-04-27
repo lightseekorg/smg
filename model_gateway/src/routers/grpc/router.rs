@@ -47,6 +47,7 @@ pub struct GrpcRouter {
     shared_components: Arc<SharedComponents>,
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
+    max_conversation_history_items: usize,
     retry_config: RetryConfig,
 }
 
@@ -139,6 +140,7 @@ impl GrpcRouter {
 
         // Capture storage request context from middleware task-local (before any spawn)
         let storage_request_context = smg_data_connector::current_request_context();
+        let max_conversation_history_items = ctx.router_config.max_conversation_history_items;
 
         // Helper closure to create responses context with a given pipeline
         let create_responses_context = |pipeline: &RequestPipeline| {
@@ -151,6 +153,7 @@ impl GrpcRouter {
                 ctx.conversation_memory_writer.clone(),
                 mcp_orchestrator.clone(),
                 storage_request_context.clone(),
+                max_conversation_history_items,
             )
         };
 
@@ -169,6 +172,7 @@ impl GrpcRouter {
             shared_components,
             responses_context,
             harmony_responses_context,
+            max_conversation_history_items,
             retry_config: ctx.router_config.effective_retry_config(),
         })
     }
@@ -344,6 +348,7 @@ impl GrpcRouter {
                     .clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
                 smg_data_connector::current_request_context(),
+                self.max_conversation_history_items,
             );
 
             if body.stream.unwrap_or(false) {
