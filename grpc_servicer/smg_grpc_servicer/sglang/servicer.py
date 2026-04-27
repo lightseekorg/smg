@@ -212,6 +212,16 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         """Handle generation requests with streaming responses."""
         logger.info(f"Receive generation request: {request.request_id}")
 
+        # Reject new RPCs once drain has started. K8s removes the pod from
+        # Service Endpoints when health flips to NOT_SERVING, but persistent
+        # clients or direct pod traffic could otherwise keep feeding work
+        # into rid_to_state and stall the drain loop indefinitely.
+        if self.request_manager.gracefully_exit:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "Server is shutting down",
+            )
+
         try:
             # Convert gRPC request to internal format
             tokenized_req = self._convert_generate_request(request)
@@ -270,6 +280,13 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
     ) -> sglang_scheduler_pb2.EmbedResponse:
         """Handle embedding requests."""
         logger.info(f"Receive embedding request: {request.request_id}")
+
+        # Reject new RPCs once drain has started (same rationale as Generate).
+        if self.request_manager.gracefully_exit:
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "Server is shutting down",
+            )
 
         try:
             tokenized_req = self._convert_embed_request(request)
@@ -1097,6 +1114,17 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 **matched_stop_kwargs,
             ),
         )
+
+    def begin_drain(self) -> None:
+        """Mark the service as draining so health flips to NOT_SERVING.
+
+        Non-destructive: does not cancel in-flight requests. Safe to call
+        from a synchronous signal handler. Must be followed by shutdown()
+        (after the drain loop completes) for final cleanup.
+        """
+        if self.health_servicer:
+            self.health_servicer.set_not_serving()
+        self.request_manager.begin_drain()
 
     async def shutdown(self):
         """Shutdown the service."""
