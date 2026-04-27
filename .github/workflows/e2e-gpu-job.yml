@@ -127,11 +127,6 @@ jobs:
           SHOW_ROUTER_LOGS: "1"
           E2E_LOG_DIR: e2e-logs
           BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps && 'brave-search-mcp' || '' }}
-          # DIAG: surface tokenspeed RequestState.check_finished EOS state
-          # so we can see why Llama-3.2-1B is hitting FINISH_LENGTH instead
-          # of FINISH_MATCHED_TOKEN. Tied to the diagnostic branch pinned
-          # in scripts/ci_install_tokenspeed.sh; remove once fixed.
-          TOKENSPEED_EOS_DIAG: "1"
         run: |
           bash scripts/ci_killall_sglang.sh "nuke_gpus"
           pytest ${{ inputs.test_dirs }} \
