@@ -166,20 +166,21 @@ fn build_request_scoped_worker(
     base_url: &str,
     model: &str,
     provider: ProviderType,
-    http_client: reqwest::Client,
+    http_client: &reqwest::Client,
 ) -> Arc<dyn Worker> {
     let mut spec = WorkerSpec::new(base_url.to_string());
     spec.runtime_type = RuntimeType::External;
     spec.provider = Some(provider);
     spec.models = WorkerModels::from(vec![ModelCard::new(model)]);
 
+    // Reuse the router's shared client handle for both streaming and non-streaming overrides.
     Arc::new(
         BasicWorkerBuilder::from_spec(spec)
             .health_config(HealthCheckConfig {
                 disable_health_check: true,
                 ..Default::default()
             })
-            .http_client(http_client)
+            .http_client(http_client.clone())
             .build(),
     )
 }
@@ -244,7 +245,7 @@ pub(in crate::routers::openai) async fn route_responses(
             &endpoint_override.worker_base_url,
             model,
             endpoint_override.provider.clone(),
-            deps.responses_components.shared.client.clone(),
+            &deps.responses_components.shared.client,
         )
     } else {
         match WorkerSelector::new(
