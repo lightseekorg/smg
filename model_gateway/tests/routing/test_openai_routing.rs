@@ -457,6 +457,16 @@ async fn test_responses_endpoint_override_rejects_unknown_provider_without_fallb
         )
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let (_, body) = response.into_parts();
+    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .expect("error response body");
+    let body_json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("error response json");
+    assert_eq!(
+        body_json["error"]["message"],
+        json!("x-model-provider must be one of openai, gpt-oss, xai, google, anthropic")
+    );
     assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
     assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
 }

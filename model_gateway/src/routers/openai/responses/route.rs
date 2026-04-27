@@ -49,6 +49,44 @@ struct EndpointOverride {
     provider: ProviderType,
 }
 
+struct ProviderHeaderMapping {
+    header_value: &'static str,
+    provider: ProviderType,
+}
+
+fn provider_header_mappings() -> [ProviderHeaderMapping; 5] {
+    [
+        ProviderHeaderMapping {
+            header_value: ProviderType::OpenAI.as_str(),
+            provider: ProviderType::OpenAI,
+        },
+        ProviderHeaderMapping {
+            header_value: "gpt-oss",
+            provider: ProviderType::OpenAI,
+        },
+        ProviderHeaderMapping {
+            header_value: ProviderType::XAI.as_str(),
+            provider: ProviderType::XAI,
+        },
+        ProviderHeaderMapping {
+            header_value: "google",
+            provider: ProviderType::Gemini,
+        },
+        ProviderHeaderMapping {
+            header_value: ProviderType::Anthropic.as_str(),
+            provider: ProviderType::Anthropic,
+        },
+    ]
+}
+
+fn supported_provider_header_values() -> String {
+    provider_header_mappings()
+        .into_iter()
+        .map(|mapping| mapping.header_value)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn normalize_provider_endpoint(raw: &str) -> Option<(String, String)> {
     let mut parsed = Url::parse(raw.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -75,8 +113,10 @@ fn endpoint_override_error_response(error: EndpointOverrideError) -> Response {
     match error {
         EndpointOverrideError::InvalidProvider => error::bad_request(
             "invalid_request",
-            "x-model-provider must be one of openai, gpt-oss, xai, google, or anthropic"
-                .to_string(),
+            format!(
+                "x-model-provider must be one of {}",
+                supported_provider_header_values()
+            ),
         ),
         EndpointOverrideError::InvalidEndpoint => error::bad_request(
             "invalid_request",
@@ -97,13 +137,11 @@ fn provider_from_header(
         return Err(EndpointOverrideError::InvalidProvider);
     }
 
-    match provider.to_ascii_lowercase().as_str() {
-        "openai" | "gpt-oss" => Ok(ProviderType::OpenAI),
-        "xai" => Ok(ProviderType::XAI),
-        "google" => Ok(ProviderType::Gemini),
-        "anthropic" => Ok(ProviderType::Anthropic),
-        _ => Err(EndpointOverrideError::InvalidProvider),
-    }
+    provider_header_mappings()
+        .into_iter()
+        .find(|mapping| provider.eq_ignore_ascii_case(mapping.header_value))
+        .map(|mapping| mapping.provider)
+        .ok_or(EndpointOverrideError::InvalidProvider)
 }
 
 fn endpoint_override_from_headers(
