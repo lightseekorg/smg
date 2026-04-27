@@ -92,6 +92,16 @@ pub struct McpToolSession<'a> {
     builtin_server_keys: HashSet<String>,
     /// Internal, non-builtin server labels for this request snapshot.
     internal_non_builtin_server_labels: HashSet<String>,
+    /// Per-exposed-tool client-facing approval policy.
+    ///
+    /// Populated by [`McpToolSession::configure_approval_policy`] from
+    /// the request's `tools[].require_approval` settings. Queried by
+    /// [`McpToolSession::tool_requires_approval`] from the agent
+    /// loop's driver to gate dispatch — gating is a control-layer
+    /// decision and never reaches the orchestrator's execute path.
+    /// Tools missing from this map default to `false` (no approval
+    /// needed).
+    requires_approval: HashMap<String, bool>,
 }
 
 impl<'a> McpToolSession<'a> {
@@ -196,6 +206,7 @@ impl<'a> McpToolSession<'a> {
             internal_server_keys,
             builtin_server_keys,
             internal_non_builtin_server_labels,
+            requires_approval: HashMap::new(),
         }
     }
 
@@ -336,6 +347,100 @@ impl<'a> McpToolSession<'a> {
             .get(tool_name)
             .map(|binding| binding.server_label.clone())
             .unwrap_or_else(|| fallback_label.to_string())
+    }
+
+    /// Snapshot of `(exposed_tool_name, response_format)` pairs for
+    /// every tool this session would dispatch. The agent loop's common
+    /// presentation layer converts this into stream-transfer
+    /// descriptors, so sinks can translate tool calls without holding a
+    /// `&McpToolSession` reference. Tools not in the snapshot default
+    /// to the agent loop's caller-declared `OutputFamily::Function` at
+    /// the lookup site.
+    pub fn presentation_snapshot(&self) -> HashMap<String, ResponseFormat> {
+        self.exposed_name_map
+            .iter()
+            .map(|(name, binding)| (name.clone(), binding.response_format.clone()))
+            .collect()
+    }
+
+    /// Snapshot of `(exposed_tool_name, server_label)` pairs for streaming
+    /// sinks. This lets the sink render the initial `mcp_call` item with the
+    /// same label the executor will use later, without holding a session ref.
+    pub fn server_label_snapshot(&self) -> HashMap<String, String> {
+        self.exposed_name_map
+            .iter()
+            .map(|(name, binding)| (name.clone(), binding.server_label.clone()))
+            .collect()
+    }
+
+    /// Snapshot of `(exposed_tool_name, requires_approval)` pairs.
+    /// Pairs with [`presentation_snapshot`] in the agent loop's common
+    /// presentation layer to produce stream-transfer descriptors. Tools
+    /// not in the snapshot default to `false`.
+    pub fn approval_snapshot(&self) -> HashMap<String, bool> {
+        self.requires_approval.clone()
+    }
+
+    /// Return the client-facing approval policy for an exposed tool.
+    ///
+    /// Looked up against the policy map populated by
+    /// [`McpToolSession::configure_approval_policy`]. Tools not in the
+    /// map default to `false` — no approval required. The agent loop's
+    /// driver calls this at partition time to decide whether the call
+    /// surfaces as `mcp_approval_request` or proceeds to execution.
+    /// The session and orchestrator never gate execution themselves;
+    /// this query is the single source of truth for that decision.
+    pub fn tool_requires_approval(&self, tool_name: &str) -> bool {
+        self.requires_approval
+            .get(tool_name)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Populate the per-tool approval policy for this session from the
+    /// request's `tools[]` array. Mirrors the scoping rules of the
+    /// legacy [`McpToolSession::configure_response_tools_approval`]
+    /// (per `server_label` plus optional `allowed_tools` filter) but
+    /// stores the result in a dedicated boolean map instead of
+    /// mutating per-binding `approval_mode`. The agent loop calls this
+    /// once per request, before any iteration runs, so
+    /// [`tool_requires_approval`] reflects the active policy for the
+    /// rest of the loop.
+    pub fn configure_approval_policy(&mut self, tools: &[ResponseTool]) {
+        for tool in tools {
+            let ResponseTool::Mcp(mcp_tool) = tool else {
+                continue;
+            };
+
+            let needs_approval = matches!(
+                mcp_tool.require_approval.as_ref(),
+                Some(RequireApproval::Mode(RequireApprovalMode::Always))
+            );
+            if !needs_approval {
+                continue;
+            }
+
+            // Same union flattening as `configure_response_tools_approval`
+            // (List vs Filter forms; readOnlyHint-only filters fall
+            // through to "no name constraint" because gating wider is
+            // safer than gating narrower for approval prompts).
+            let allowed_tool_names: Option<&[String]> =
+                mcp_tool.allowed_tools.as_ref().and_then(|at| match at {
+                    McpAllowedTools::List(names) => Some(names.as_slice()),
+                    McpAllowedTools::Filter(filter) => filter.tool_names.as_deref(),
+                });
+            for (exposed_name, binding) in &self.exposed_name_map {
+                if binding.server_label != mcp_tool.server_label {
+                    continue;
+                }
+                if let Some(allowed) = allowed_tool_names {
+                    if !allowed.iter().any(|n| n == &binding.resolved_tool_name) {
+                        continue;
+                    }
+                }
+                self.requires_approval.insert(exposed_name.clone(), true);
+            }
+        }
     }
 
     /// Apply request-time approval configuration to exposed tools in this session.
@@ -991,6 +1096,94 @@ mod tests {
 
         let format = session.tool_response_format("nonexistent");
         assert!(matches!(format, ResponseFormat::Passthrough));
+    }
+
+    #[test]
+    fn tool_requires_approval_defaults_to_false() {
+        let orchestrator = McpOrchestrator::new_test();
+        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+
+        // Without `configure_approval_policy`, every tool defaults to
+        // false — the agent loop's driver only gates calls explicitly
+        // marked by the request's `tools[].require_approval` setting.
+        assert!(!session.tool_requires_approval("anything"));
+    }
+
+    #[test]
+    fn configure_approval_policy_marks_always_tools() {
+        let orchestrator = McpOrchestrator::new_test();
+        let tool = create_test_tool("gated_tool");
+        let entry = ToolEntry::from_server_tool("server1", tool);
+        orchestrator.tool_inventory().insert_entry(entry);
+
+        let mut session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "label1".to_string(),
+                server_key: "server1".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        session.configure_approval_policy(&[ResponseTool::Mcp(
+            openai_protocol::responses::McpTool {
+                server_url: Some("http://example.com/mcp".to_string()),
+                authorization: None,
+                headers: None,
+                server_label: "label1".to_string(),
+                server_description: None,
+                require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
+                allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
+            },
+        )]);
+
+        assert!(
+            session.tool_requires_approval("gated_tool"),
+            "Always policy must mark exposed tools on the matching server"
+        );
+        // The driver query is the single source of truth — `execute_tool`
+        // never re-checks. The policy storage is independent of
+        // `binding.approval_mode`, which stays at PolicyOnly so the
+        // orchestrator's execute path is a pure dispatcher.
+    }
+
+    #[test]
+    fn configure_approval_policy_skips_non_always_servers() {
+        let orchestrator = McpOrchestrator::new_test();
+        let tool = create_test_tool("loose_tool");
+        let entry = ToolEntry::from_server_tool("server1", tool);
+        orchestrator.tool_inventory().insert_entry(entry);
+
+        let mut session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "label1".to_string(),
+                server_key: "server1".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        // `Never` mode → no approval flag. Non-matching server label →
+        // also no flag.
+        session.configure_approval_policy(&[ResponseTool::Mcp(
+            openai_protocol::responses::McpTool {
+                server_url: Some("http://example.com/mcp".to_string()),
+                authorization: None,
+                headers: None,
+                server_label: "label1".to_string(),
+                server_description: None,
+                require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Never)),
+                allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
+            },
+        )]);
+
+        assert!(!session.tool_requires_approval("loose_tool"));
     }
 
     fn create_test_tool(name: &str) -> McpTool {

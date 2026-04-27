@@ -21,10 +21,12 @@
 //! - [`skill_resolution`] — request-local skill manifest resolution
 //!   before forwarding to provider-specific routers.
 
+pub mod agent_loop;
 pub mod background;
 pub mod header_utils;
 pub mod mcp_utils;
 pub mod persistence_utils;
 pub mod retry;
 pub mod skill_resolution;
+pub mod transcript_lower;
 pub mod worker_selection;

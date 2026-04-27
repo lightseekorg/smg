@@ -511,7 +511,8 @@ fn send_tool_call_intermediate_event(
         // it streams preview chunks; the tool_loop path only emits the coarse
         // in_progress → generating → completed sequence.
         ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
-        ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
+        // `Passthrough` (mcp_call) has no intermediate event.
+        ResponseFormat::Passthrough => return true,
     };
 
     let effective_output_index = call.effective_output_index();

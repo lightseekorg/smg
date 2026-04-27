@@ -5,29 +5,31 @@ use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
 use openai_protocol::{
     chat::ChatCompletionStreamResponse,
-    common::{Usage, UsageInfo},
+    common::Usage,
     event_types::{
         CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
         ImageGenerationCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
         WebSearchCallEvent,
     },
     responses::{
-        ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseOutputItem, ResponseStatus, ResponseUsage,
+        ResponsesRequest, ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::json;
-use smg_mcp::{self as mcp, ResponseFormat};
+use smg_mcp::{self as mcp};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::routers::grpc::harmony::responses::ToolResult;
+use crate::routers::common::agent_loop::OutputFamily;
 
 pub(crate) enum OutputItemType {
     Message,
     McpListTools,
     McpCall,
+    McpApprovalRequest,
     FunctionCall,
     Reasoning,
     WebSearchCall,
@@ -89,9 +91,25 @@ pub(crate) struct ResponseStreamEventEmitter {
     next_output_index: usize,
     current_message_output_index: Option<usize>,
     current_item_id: Option<String>,
+    current_reasoning_output_index: Option<usize>,
+    current_reasoning_item_id: Option<String>,
+    accumulated_reasoning_text: String,
+    has_emitted_reasoning_summary_part_added: bool,
     original_request: Option<ResponsesRequest>,
 }
 
+// Emitter primitives are exposed broadly so surface adapters can pick
+// the precise wire-event subset they need. Several helpers
+// (`emit_error`, `emit_mcp_list_tools_sequence`, `emit_mcp_call_failed`,
+// `finalize`, `tool_entries_to_json`) are kept on the impl for the
+// streaming adapters to draw on, even when no current caller in this
+// crate uses them — the alternative is to delete them on every
+// refactor wave and re-add them on the next, which is churn for no
+// review benefit.
+#[expect(
+    dead_code,
+    reason = "primitives kept on the impl for future surface adapters"
+)]
 impl ResponseStreamEventEmitter {
     pub fn new(response_id: String, model: String, created_at: u64) -> Self {
         let message_id = format!("msg_{}", Uuid::now_v7());
@@ -109,6 +127,10 @@ impl ResponseStreamEventEmitter {
             next_output_index: 0,
             current_message_output_index: None,
             current_item_id: None,
+            current_reasoning_output_index: None,
+            current_reasoning_item_id: None,
+            accumulated_reasoning_text: String::new(),
+            has_emitted_reasoning_summary_part_added: false,
             original_request: None,
         }
     }
@@ -116,44 +138,6 @@ impl ResponseStreamEventEmitter {
     /// Set the original request for including all fields in response.completed
     pub fn set_original_request(&mut self, request: ResponsesRequest) {
         self.original_request = Some(request);
-    }
-
-    /// Update tool call output items with tool execution results.
-    ///
-    /// Replaces each matched item's stored payload with the authoritative
-    /// `ResponseOutputItem` produced by `ResponseTransformer::transform`
-    /// (carried on `ToolResult::output_item`). That transformer is the
-    /// single source of truth for per-tool shape — e.g. `mcp_call`
-    /// receives `output: string`, `web_search_call` receives
-    /// `{status, action, ...}`, and `image_generation_call` receives
-    /// `result: base64`. The streaming emitter's initial
-    /// `output_item.added` carries a partial stub (tool-call id + arguments);
-    /// this call overwrites that stub once the MCP result is in hand, so
-    /// `response.completed.response.output` sees the same item a
-    /// non-streaming response would emit.
-    ///
-    /// Matching is by the original `call_id` the stub stored, since that
-    /// is the only identifier common to every tool-call item type.
-    pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
-        for tool_result in tool_results {
-            let Ok(item_value) = serde_json::to_value(&tool_result.output_item) else {
-                warn!(
-                    call_id = %tool_result.call_id,
-                    "Failed to serialize transformed tool output item; keeping streaming stub"
-                );
-                continue;
-            };
-            for item_state in &mut self.output_items {
-                if let Some(ref mut item_data) = item_state.item_data {
-                    if item_data.get("call_id").and_then(|c| c.as_str())
-                        == Some(&tool_result.call_id)
-                    {
-                        *item_data = item_value;
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     fn next_sequence(&mut self) -> u64 {
@@ -223,7 +207,8 @@ impl ResponseStreamEventEmitter {
             "output_index": output_index,
             "item_id": item_id,
             "content_index": content_index,
-            "delta": delta
+            "delta": delta,
+            "obfuscation": null
         })
     }
 
@@ -326,6 +311,15 @@ impl ResponseStreamEventEmitter {
                 "previous_response_id",
                 req.previous_response_id.as_ref(),
             );
+            // OpenAI Responses always echoes `conversation` as
+            // `{ "id": "conv_..." }`. The request's `ConversationRef`
+            // accepts either a bare string or the `Object` form via
+            // untagged serde — normalize the echo to the canonical
+            // object shape so the wire response is shape-stable
+            // regardless of which input form the client sent.
+            if let Some(conv) = req.conversation.as_ref() {
+                response_obj["conversation"] = json!({ "id": conv.as_id() });
+            }
             Self::add_optional_field(&mut response_obj, "reasoning", req.reasoning.as_ref());
             Self::add_optional_field(&mut response_obj, "temperature", req.temperature.as_ref());
             Self::add_optional_field(&mut response_obj, "top_p", req.top_p.as_ref());
@@ -411,7 +405,8 @@ impl ResponseStreamEventEmitter {
             "sequence_number": self.next_sequence(),
             "output_index": output_index,
             "item_id": item_id,
-            "delta": delta
+            "delta": delta,
+            "obfuscation": null
         })
     }
 
@@ -446,7 +441,7 @@ impl ResponseStreamEventEmitter {
     }
 
     // ========================================================================
-    // Generic Tool Call Event Emission (based on ResponseFormat)
+    // Generic Tool Call Event Emission (based on OutputFamily)
     // ========================================================================
 
     /// Emit a tool call event with the specified event type.
@@ -465,21 +460,28 @@ impl ResponseStreamEventEmitter {
         })
     }
 
-    /// Emit the appropriate in_progress event based on response format
+    /// Emit the appropriate in_progress event based on output family.
+    ///
+    /// Returns `None` for `Function` (caller-declared function tools)
+    /// because the OpenAI wire spec carries `function_call`'s
+    /// in-progress state only on `output_item.added`'s `status`
+    /// field, not as a separate event. Hosted-builtin and `McpCall`
+    /// families return `Some(event)`.
     pub fn emit_tool_call_in_progress(
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
-    ) -> serde_json::Value {
-        let event_type = match response_format {
-            ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
-            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
-            ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
-            ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
+        family: OutputFamily,
+    ) -> Option<serde_json::Value> {
+        let event_type = match family {
+            OutputFamily::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
+            OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
+            OutputFamily::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
+            OutputFamily::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
+            OutputFamily::McpCall => McpEvent::CALL_IN_PROGRESS,
+            OutputFamily::Function => return None,
         };
-        self.emit_tool_event(event_type, output_index, item_id)
+        Some(self.emit_tool_event(event_type, output_index, item_id))
     }
 
     /// Emit the searching/interpreting/generating event for builtin tool calls (no-op for passthrough).
@@ -492,14 +494,14 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        family: OutputFamily,
     ) -> Option<serde_json::Value> {
-        let event_type = match response_format {
-            ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
-            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
-            ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
-            ResponseFormat::Passthrough => return None,
+        let event_type = match family {
+            OutputFamily::WebSearchCall => WebSearchCallEvent::SEARCHING,
+            OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
+            OutputFamily::FileSearchCall => FileSearchCallEvent::SEARCHING,
+            OutputFamily::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
+            OutputFamily::McpCall | OutputFamily::Function => return None,
         };
         Some(self.emit_tool_event(event_type, output_index, item_id))
     }
@@ -507,7 +509,7 @@ impl ResponseStreamEventEmitter {
     /// Emit a `response.image_generation_call.partial_image` event.
     ///
     /// Returns `None` when `response_format` is anything other than
-    /// [`ResponseFormat::ImageGenerationCall`], mirroring how
+    /// [`OutputFamily::ImageGenerationCall`], mirroring how
     /// `emit_tool_call_searching` gates on format. The payload carries the
     /// base64-encoded partial image bytes plus a 0-based partial image index.
     ///
@@ -521,11 +523,11 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        family: OutputFamily,
         partial_image_index: u32,
         partial_image_b64: &str,
     ) -> Option<serde_json::Value> {
-        if !matches!(response_format, ResponseFormat::ImageGenerationCall) {
+        if !matches!(family, OutputFamily::ImageGenerationCall) {
             return None;
         }
         Some(json!({
@@ -538,48 +540,94 @@ impl ResponseStreamEventEmitter {
         }))
     }
 
-    /// Emit the appropriate completed event based on response format
+    /// Emit the appropriate completed event based on output family.
+    ///
+    /// Returns `None` for `Function` because `function_call` has no
+    /// `*_completed` event — its completion is signalled only by
+    /// `output_item.done`. Hosted-builtin and `McpCall` return
+    /// `Some(event)`.
     pub fn emit_tool_call_completed(
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
-    ) -> serde_json::Value {
-        let event_type = match response_format {
-            ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
-            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
-            ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
-            ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
+        family: OutputFamily,
+    ) -> Option<serde_json::Value> {
+        let event_type = match family {
+            OutputFamily::WebSearchCall => WebSearchCallEvent::COMPLETED,
+            OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
+            OutputFamily::FileSearchCall => FileSearchCallEvent::COMPLETED,
+            OutputFamily::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
+            OutputFamily::McpCall => McpEvent::CALL_COMPLETED,
+            OutputFamily::Function => return None,
         };
-        self.emit_tool_event(event_type, output_index, item_id)
+        Some(self.emit_tool_event(event_type, output_index, item_id))
     }
 
-    // ========================================================================
-    // Helper Methods for ResponseFormat
-    // ========================================================================
-
-    /// Get the type string for JSON based on response format.
-    pub fn type_str_for_format(response_format: Option<&ResponseFormat>) -> &'static str {
-        match response_format {
-            Some(ResponseFormat::WebSearchCall) => "web_search_call",
-            Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
-            Some(ResponseFormat::FileSearchCall) => "file_search_call",
-            Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
-            Some(ResponseFormat::Passthrough) => "mcp_call",
-            None => "function_call",
+    /// Emit a streaming `*_arguments.delta` event keyed on the
+    /// caller's [`OutputFamily`]. Returns `None` for families that
+    /// don't stream arguments on the wire (hosted builtins surface
+    /// progress through structured `*.in_progress` / `*.searching`
+    /// events instead).
+    pub fn emit_tool_call_arguments_delta(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        delta: &str,
+        family: OutputFamily,
+    ) -> Option<serde_json::Value> {
+        match family {
+            OutputFamily::Function => {
+                Some(self.emit_function_call_arguments_delta(output_index, item_id, delta))
+            }
+            OutputFamily::McpCall => {
+                Some(self.emit_mcp_call_arguments_delta(output_index, item_id, delta))
+            }
+            OutputFamily::WebSearchCall
+            | OutputFamily::CodeInterpreterCall
+            | OutputFamily::FileSearchCall
+            | OutputFamily::ImageGenerationCall => None,
         }
     }
 
-    /// Get the OutputItemType based on response format.
-    pub fn output_item_type_for_format(response_format: Option<&ResponseFormat>) -> OutputItemType {
-        match response_format {
-            Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
-            Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
-            Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
-            Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
-            Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
-            None => OutputItemType::FunctionCall,
+    /// Emit the closing `*_arguments.done` event keyed on
+    /// [`OutputFamily`]. Mirrors [`emit_tool_call_arguments_delta`].
+    pub fn emit_tool_call_arguments_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        arguments: &str,
+        family: OutputFamily,
+    ) -> Option<serde_json::Value> {
+        match family {
+            OutputFamily::Function => {
+                Some(self.emit_function_call_arguments_done(output_index, item_id, arguments))
+            }
+            OutputFamily::McpCall => {
+                Some(self.emit_mcp_call_arguments_done(output_index, item_id, arguments))
+            }
+            OutputFamily::WebSearchCall
+            | OutputFamily::CodeInterpreterCall
+            | OutputFamily::FileSearchCall
+            | OutputFamily::ImageGenerationCall => None,
+        }
+    }
+
+    // ========================================================================
+    // Helper Methods for OutputFamily
+    // ========================================================================
+
+    /// Map an [`OutputFamily`] (or absence) to the [`OutputItemType`]
+    /// the per-index allocator uses. Falls back to `FunctionCall` when
+    /// the caller has no family hint — caller-declared function tools
+    /// are the only family that legitimately reach this fallback path.
+    pub fn output_item_type_for_family(family: Option<OutputFamily>) -> OutputItemType {
+        match family {
+            Some(OutputFamily::WebSearchCall) => OutputItemType::WebSearchCall,
+            Some(OutputFamily::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
+            Some(OutputFamily::FileSearchCall) => OutputItemType::FileSearchCall,
+            Some(OutputFamily::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
+            Some(OutputFamily::McpCall) => OutputItemType::McpCall,
+            Some(OutputFamily::Function) | None => OutputItemType::FunctionCall,
         }
     }
 
@@ -598,7 +646,8 @@ impl ResponseStreamEventEmitter {
             "sequence_number": self.next_sequence(),
             "output_index": output_index,
             "item_id": item_id,
-            "delta": delta
+            "delta": delta,
+            "obfuscation": null
         })
     }
 
@@ -665,6 +714,9 @@ impl ResponseStreamEventEmitter {
         let id_prefix = match &item_type {
             OutputItemType::McpListTools => "mcpl",
             OutputItemType::McpCall => "mcp",
+            // `mcpr_` matches OpenAI's documented prefix for
+            // `mcp_approval_request` items.
+            OutputItemType::McpApprovalRequest => "mcpr",
             OutputItemType::FunctionCall => "fc",
             OutputItemType::Message => "msg",
             OutputItemType::Reasoning => "rs",
@@ -726,17 +778,20 @@ impl ResponseStreamEventEmitter {
 
         // Convert Usage to ResponsesUsage
         let responses_usage = usage.map(|u| {
-            let usage_info = UsageInfo {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
+            ResponsesUsage::Modern(ResponseUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
-                reasoning_tokens: u
-                    .completion_tokens_details
+                input_tokens_details: u
+                    .prompt_tokens_details
                     .as_ref()
-                    .and_then(|d| d.reasoning_tokens),
-                prompt_tokens_details: None,
-            };
-            ResponsesUsage::Classic(usage_info)
+                    .map(InputTokensDetails::from),
+                output_tokens_details: u.completion_tokens_details.as_ref().and_then(|d| {
+                    d.reasoning_tokens.map(|tokens| OutputTokensDetails {
+                        reasoning_tokens: tokens,
+                    })
+                }),
+            })
         });
 
         // Build response using builder
@@ -749,39 +804,114 @@ impl ResponseStreamEventEmitter {
             .build()
     }
 
-    /// Emit reasoning item wrapper events (added + done)
-    ///
-    /// Reasoning items in OpenAI format are simple placeholders emitted between tool iterations.
-    /// They don't have streaming content - just wrapper events with empty/null content.
-    pub fn emit_reasoning_item(
+    pub fn process_reasoning_delta(
+        &mut self,
+        delta: &str,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+
+        if self.current_reasoning_item_id.is_none() {
+            let (output_index, item_id) = self.allocate_output_index(OutputItemType::Reasoning);
+            self.current_reasoning_output_index = Some(output_index);
+            self.current_reasoning_item_id = Some(item_id.clone());
+
+            let item = json!({
+                "id": item_id,
+                "type": "reasoning",
+                "summary": [],
+                "content": [],
+                "encrypted_content": null,
+                "status": "in_progress"
+            });
+            let event = self.emit_output_item_added(output_index, &item);
+            self.send_event(&event, tx)?;
+        }
+
+        let Some(output_index) = self.current_reasoning_output_index else {
+            return Ok(());
+        };
+        let Some(item_id) = self.current_reasoning_item_id.clone() else {
+            return Ok(());
+        };
+
+        if !self.has_emitted_reasoning_summary_part_added {
+            let event = json!({
+                "type": "response.reasoning_summary_part.added",
+                "sequence_number": self.next_sequence(),
+                "output_index": output_index,
+                "item_id": item_id,
+                "summary_index": 0,
+                "part": { "type": "summary_text", "text": "" }
+            });
+            self.send_event(&event, tx)?;
+            self.has_emitted_reasoning_summary_part_added = true;
+        }
+
+        self.accumulated_reasoning_text.push_str(delta);
+        let event = json!({
+            "type": "response.reasoning_text.delta",
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "content_index": 0,
+            "delta": delta,
+            "obfuscation": null
+        });
+        self.send_event(&event, tx)
+    }
+
+    pub fn finish_reasoning_item(
         &mut self,
         tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
-        reasoning_content: Option<String>,
     ) -> Result<(), String> {
-        // Allocate output index and generate ID
-        let (output_index, item_id) = self.allocate_output_index(OutputItemType::Reasoning);
+        let (Some(output_index), Some(item_id)) = (
+            self.current_reasoning_output_index,
+            self.current_reasoning_item_id.clone(),
+        ) else {
+            return Ok(());
+        };
 
-        // Build reasoning item structure
+        let text = std::mem::take(&mut self.accumulated_reasoning_text);
+        let event = json!({
+            "type": "response.reasoning_text.done",
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "content_index": 0,
+            "text": text.clone()
+        });
+        self.send_event(&event, tx)?;
+
+        if self.has_emitted_reasoning_summary_part_added {
+            let event = json!({
+                "type": "response.reasoning_summary_part.done",
+                "sequence_number": self.next_sequence(),
+                "output_index": output_index,
+                "item_id": item_id,
+                "summary_index": 0,
+                "part": { "type": "summary_text", "text": "" }
+            });
+            self.send_event(&event, tx)?;
+        }
+
         let item = json!({
             "id": item_id,
             "type": "reasoning",
             "summary": [],
-            "content": reasoning_content,
+            "content": [{ "type": "reasoning_text", "text": text }],
             "encrypted_content": null,
-            "status": null
+            "status": "completed"
         });
-
-        // Emit output_item.added
-        let added_event = self.emit_output_item_added(output_index, &item);
-        self.send_event(&added_event, tx)?;
-
-        // Immediately emit output_item.done (no streaming for reasoning)
-        let done_event = self.emit_output_item_done(output_index, &item);
-        self.send_event(&done_event, tx)?;
-
-        // Mark as completed
+        let event = self.emit_output_item_done(output_index, &item);
+        self.send_event(&event, tx)?;
         self.complete_output_item(output_index);
 
+        self.current_reasoning_output_index = None;
+        self.current_reasoning_item_id = None;
+        self.has_emitted_reasoning_summary_part_added = false;
         Ok(())
     }
 
@@ -793,6 +923,10 @@ impl ResponseStreamEventEmitter {
     ) -> Result<(), String> {
         // Process content if present
         if let Some(choice) = chunk.choices.first() {
+            if let Some(reasoning) = &choice.delta.reasoning_content {
+                self.process_reasoning_delta(reasoning, tx)?;
+            }
+
             if let Some(content) = &choice.delta.content {
                 if !content.is_empty() {
                     // Allocate output_index and item_id for this message item (once per message)
@@ -844,6 +978,7 @@ impl ResponseStreamEventEmitter {
 
             // Check for finish_reason to emit completion events
             if let Some(reason) = &choice.finish_reason {
+                self.finish_reasoning_item(tx)?;
                 if reason == "stop" || reason == "length" {
                     if let (Some(output_index), Some(item_id)) = (
                         self.current_message_output_index,
@@ -1040,19 +1175,4 @@ pub(crate) fn build_sse_response(
         .header("Connection", HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
         .expect("infallible: static headers and valid status code")
-}
-
-/// Attach `server_label` to an MCP tool-call JSON item.
-///
-/// Only sets the field when `response_format` indicates a passthrough (mcp_call)
-/// type and a server label is provided, since built-in tool types
-/// (web_search_call, etc.) do not carry a server label.
-pub(crate) fn attach_mcp_server_label(
-    item: &mut serde_json::Value,
-    server_label: Option<&str>,
-    response_format: Option<&ResponseFormat>,
-) {
-    if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
-        item["server_label"] = json!(label);
-    }
 }
