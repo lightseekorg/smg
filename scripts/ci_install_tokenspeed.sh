@@ -28,7 +28,10 @@ fi
 # ``main`` includes lightseekorg/tokenspeed#357 (dense ``LlamaForCausalLM``
 # registration) so the e2e ``test_function_calling`` suite can run
 # meta-llama/Llama-3.2-1B-Instruct against the tokenspeed engine.
-TOKENSPEED_REF="${TOKENSPEED_REF:-main}"
+# DIAG: temporarily pinned to fix/llama3-eot-stop-detection to capture
+# why Llama-3.2-1B's check_finished hits FINISH_LENGTH despite correct
+# eos_token_ids. Revert to ``main`` once the root cause is fixed upstream.
+TOKENSPEED_REF="${TOKENSPEED_REF:-fix/llama3-eot-stop-detection}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"

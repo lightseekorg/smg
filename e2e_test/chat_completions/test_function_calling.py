@@ -10,44 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 import openai
 import pytest
 import smg_client
 
 logger = logging.getLogger(__name__)
-
-
-def _xfail_tokenspeed_llama_function_calling() -> None:
-    """xfail Llama-3.2-1B function-calling subtests on the TokenSpeed engine.
-
-    Two distinct integration gaps surface when running this suite against
-    TokenSpeed today:
-
-    1. ``tool_choice`` constraint plumbing — TokenSpeed ships an xgrammar
-       backend, but ``sampling_params.json_schema`` (which smg sets for
-       ``tool_choice=required`` and ``tool_choice={...}``) does not
-       reliably constrain the sampler in the regular path, so the model
-       can emit free-form text instead of the requested JSON shape.
-
-    2. Llama-3 stop-token handling — generation runs to ``max_tokens``
-       on TokenSpeed for plain Llama-3.2-1B-Instruct chat (``finish_reason``
-       comes back as ``length`` instead of ``stop``/``tool_calls``), even
-       though the HF generation_config exposes the correct EOT ids
-       ``[128001, 128008, 128009]``. SGLang/vLLM on the same gateway
-       finish with ``stop`` for the same prompt.
-
-    Both gaps are TokenSpeed-side and out of scope for the smg gRPC
-    servicer PR. They are tracked for follow-up (lightseekorg/tokenspeed#361
-    plus a new EOS-detection issue to be opened); once resolved, drop this
-    helper and the call sites.
-    """
-    if os.environ.get("E2E_ENGINE") == "tokenspeed":
-        pytest.xfail(
-            "TokenSpeed function-calling integration gap on Llama-3.2-1B "
-            "(json_schema constraint + Llama-3 EOT stop); tracked for follow-up"
-        )
 
 
 # =============================================================================
@@ -148,7 +116,6 @@ class TestOpenAIServerFunctionCalling:
 
         When returning a tool call, message.content should be None, and tool_calls should be a list.
         """
-        _xfail_tokenspeed_llama_function_calling()
 
         tools = [
             {
@@ -203,7 +170,6 @@ class TestOpenAIServerFunctionCalling:
         - Expect a function call to be found, and the function name to be correct.
         - Verify that streaming mode returns at least multiple chunks.
         """
-        _xfail_tokenspeed_llama_function_calling()
 
         tools = [
             {
@@ -280,7 +246,6 @@ class TestOpenAIServerFunctionCalling:
         - The user request requires multiple parameters.
         - AI may return the arguments in chunks that need to be concatenated.
         """
-        _xfail_tokenspeed_llama_function_calling()
 
         tools = [
             {
@@ -493,7 +458,6 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
-        _xfail_tokenspeed_llama_function_calling()
         tools = [
             {
                 "type": "function",
@@ -562,7 +526,6 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-        _xfail_tokenspeed_llama_function_calling()
         tools = [
             {
                 "type": "function",
@@ -635,7 +598,6 @@ class TestOpenAIServerFunctionCalling:
         - Expect no function call to be found.
         - Verify that finish_reason is stop
         """
-        _xfail_tokenspeed_llama_function_calling()
 
         tools = [
             {
