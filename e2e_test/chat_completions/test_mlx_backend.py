@@ -148,9 +148,9 @@ class TestMlxBackend:
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""
         full = content + reasoning
-        assert (
-            "3" in full
-        ), f"Expected '3' in response, got content={content!r} reasoning={reasoning!r}"
+        assert "3" in full, (
+            f"Expected '3' in response, got content={content!r} reasoning={reasoning!r}"
+        )
 
     def test_max_tokens_finish_reason(self, model, api_client):
         """When max_tokens is reached, finish_reason is 'length'."""
