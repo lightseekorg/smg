@@ -1,0 +1,135 @@
+name: PR Test (MLX)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/grpc_client/proto/mlx_engine.proto"
+      - "crates/grpc_client/src/mlx_engine.rs"
+      - "crates/grpc_client/python/**"
+      - "grpc_servicer/smg_grpc_servicer/mlx/**"
+      - "grpc_servicer/pyproject.toml"
+      - "e2e_test/chat_completions/test_mlx_backend.py"
+      - "e2e_test/infra/model_specs.py"
+      - "e2e_test/infra/worker.py"
+      - "e2e_test/infra/constants.py"
+      - ".github/workflows/pr-test-mlx.yml"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - "crates/grpc_client/proto/mlx_engine.proto"
+      - "crates/grpc_client/src/mlx_engine.rs"
+      - "crates/grpc_client/python/**"
+      - "grpc_servicer/smg_grpc_servicer/mlx/**"
+      - "grpc_servicer/pyproject.toml"
+      - "e2e_test/chat_completions/test_mlx_backend.py"
+      - "e2e_test/infra/model_specs.py"
+      - "e2e_test/infra/worker.py"
+      - "e2e_test/infra/constants.py"
+      - ".github/workflows/pr-test-mlx.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mlx-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e-mlx:
+    name: E2E (MLX on Apple Silicon)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      E2E_RUNTIME: mlx
+      E2E_ENGINE: mlx
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mlx-pr-test
+          cache-on-failure: true
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: hf-mlx-${{ runner.os }}-Qwen3-0.6B-4bit
+          restore-keys: |
+            hf-mlx-${{ runner.os }}-
+
+      - name: Install uv (for openapi codegen)
+        run: pip install uv
+
+      - name: Build smg-grpc-proto Python package (proto codegen)
+        run: pip install -e ./crates/grpc_client/python
+
+      - name: Install grpc_servicer with MLX extra (mlx + mlx-lm)
+        run: pip install -e "./grpc_servicer[mlx]"
+
+      - name: Build and install SMG Python bindings (ci profile)
+        working-directory: bindings/python
+        run: |
+          pip install maturin
+          # `ci` profile (opt-level=2, thin LTO, 16 codegen-units) — faster
+          # to compile than release, runtime still plenty fast for a
+          # correctness E2E test.
+          # Use `maturin build` + `pip install` (not `maturin develop`)
+          # because the GitHub-hosted runner's Python is not in a virtualenv.
+          maturin build --profile ci --out dist
+          pip install dist/*.whl
+
+      - name: Generate Python client types (required by e2e_test/conftest.py)
+        run: make generate-python-types
+
+      - name: Install smg-client
+        run: pip install ./clients/python
+
+      - name: Install E2E test dependencies
+        run: pip install ./e2e_test
+
+      - name: Verify imports
+        run: |
+          python -c "from smg_grpc_proto import mlx_engine_pb2, mlx_engine_pb2_grpc; print('proto OK')"
+          python -c "from smg_grpc_servicer.mlx.servicer import MlxEngineServicer; print('servicer OK')"
+          python -c "import smg; print('smg OK')"
+          python -c "from smg_client import SmgClient; print('smg_client OK')"
+          python -c "import mlx_lm; print('mlx-lm OK')"
+
+      - name: Run MLX E2E tests
+        env:
+          SHOW_WORKER_LOGS: "1"
+          SHOW_ROUTER_LOGS: "1"
+          E2E_LOG_DIR: e2e-logs
+        run: |
+          pytest e2e_test/chat_completions/test_mlx_backend.py \
+            -s -vv \
+            --reruns 1 --reruns-delay 5
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-mlx-logs
+          path: e2e-logs/
+          retention-days: 7
+          if-no-files-found: ignore
