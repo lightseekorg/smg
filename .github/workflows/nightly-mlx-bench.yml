@@ -74,6 +74,16 @@ jobs:
       - name: Install protoc
         run: brew install protobuf
 
+      - name: Install Docker (Colima)
+        # macos-latest runners don't ship Docker. Colima provides a Linux VM
+        # with the docker daemon. host.docker.internal resolves to the host
+        # automatically, which we use in run.sh to reach the inference
+        # servers running on the Mac host from inside the bench container.
+        run: |
+          brew install colima docker
+          colima start --cpu 2 --memory 4 --disk 20
+          docker version
+
       - name: Cache Cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:

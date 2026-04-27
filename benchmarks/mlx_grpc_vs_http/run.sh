@@ -102,15 +102,25 @@ run_bench() {
         hf_mount+=( -v "$hf_home:$hf_home" -e "HF_HOME=$hf_home" )
     fi
 
+    # genai-bench reaches the host via host.docker.internal because Docker
+    # for Mac (and Colima) run a Linux VM — `--network host` would attach
+    # to the VM's network, not the macOS host's. The base URL is rewritten
+    # accordingly: 127.0.0.1 → host.docker.internal.
+    local container_url="${base_url/127.0.0.1/host.docker.internal}"
+    container_url="${container_url/localhost/host.docker.internal}"
+
+    # genai-bench's --max-time-per-run is in SECONDS (despite the name).
+    local duration_s=$(( DURATION_MIN * 60 ))
+
     docker run --rm \
-        --network host \
+        --add-host=host.docker.internal:host-gateway \
         -v "$(pwd):$(pwd)" \
         -w "$(pwd)" \
         "${hf_mount[@]}" \
         "$GENAI_BENCH_IMAGE" \
         benchmark \
         --api-backend openai \
-        --api-base "$base_url" \
+        --api-base "$container_url" \
         --api-key dummy-token \
         --api-model-name "$MODEL" \
         --model-tokenizer "$MODEL" \
@@ -118,7 +128,7 @@ run_bench() {
         --num-concurrency "$concurrency" \
         --traffic-scenario "$scenario" \
         --max-requests-per-run "$MAX_REQUESTS" \
-        --max-time-per-run "$DURATION_MIN" \
+        --max-time-per-run "$duration_s" \
         --experiment-folder-name "$exp_name" \
         --experiment-base-dir "$RESULTS_DIR"
 }
@@ -144,7 +154,13 @@ done
 log "Stopping mlx-lm.server..."
 kill "$MLX_HTTP_PID" 2>/dev/null || true
 wait "$MLX_HTTP_PID" 2>/dev/null || true
-PIDS=("${PIDS[@]/$MLX_HTTP_PID}")
+# Rebuild PIDS without the stopped pid (pattern substitution with /
+# would leave an empty-string ghost entry, not actually remove it).
+new_pids=()
+for pid in "${PIDS[@]}"; do
+    [ "$pid" = "$MLX_HTTP_PID" ] || new_pids+=("$pid")
+done
+PIDS=("${new_pids[@]}")
 
 # ──────────────────────────────────────────────────────────────────────────
 # Phase 2: SMG router + MLX gRPC servicer
