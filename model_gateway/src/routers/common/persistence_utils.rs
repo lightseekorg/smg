@@ -14,7 +14,7 @@ use smg_data_connector::{
     ConversationMemoryWriter, ConversationStorage, NewConversationItem, NewConversationMemory,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
-use tracing::{debug, info, warn, Instrument};
+use tracing::{debug, info, warn};
 
 use crate::memory::MemoryExecutionContext;
 
@@ -606,34 +606,15 @@ async fn persist_conversation_items_inner(
         )
         .await?;
 
-        if memory_execution_context.stm_enabled {
-            let span = tracing::Span::current();
-            let writer = conversation_memory_writer.clone();
-            let mem_ctx = memory_execution_context.clone();
-            let conv_id = conv_id.clone();
-            let resp_id = response_id.clone();
-            let input_items = input_items.clone();
-            let output_items = output_items.clone();
-
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "STMO enqueue should run best-effort in the background without blocking response success"
-            )]
-            tokio::spawn(
-                async move {
-                    handle_stmo_after_persist(
-                        &writer,
-                        &mem_ctx,
-                        &conv_id,
-                        &resp_id,
-                        &input_items,
-                        &output_items,
-                    )
-                    .await;
-                }
-                .instrument(span),
-            );
-        }
+        handle_stmo_after_persist(
+            &conversation_memory_writer,
+            &memory_execution_context,
+            &conv_id,
+            &response_id,
+            &input_items,
+            &output_items,
+        )
+        .await;
 
         info!(
             conversation_id = %conv_id.0,

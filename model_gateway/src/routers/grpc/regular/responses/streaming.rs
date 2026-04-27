@@ -31,10 +31,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::RequestContext as StorageRequestContext;
-use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
-    ResponseFormat, ToolExecutionInput,
-};
+use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
