@@ -669,6 +669,10 @@ pub struct ChatCompletionResponse {
     pub choices: Vec<ChatChoice>,
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl ChatCompletionResponse {
@@ -692,6 +696,10 @@ pub struct ChatCompletionMessage {
     pub reasoning_content: Option<String>,
     // Note: function_call is deprecated and not included
     // Note: refusal, annotations, audio are not added yet
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -707,6 +715,10 @@ pub struct ChatChoice {
     /// Hidden states from the model (SGLang extension)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden_states: Option<Vec<f32>>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 #[serde_with::skip_serializing_none]
@@ -719,6 +731,10 @@ pub struct ChatCompletionStreamResponse {
     pub system_fingerprint: Option<String>,
     pub choices: Vec<ChatStreamChoice>,
     pub usage: Option<Usage>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -741,6 +757,10 @@ pub struct ChatMessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning_content: Option<String>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -751,4 +771,8 @@ pub struct ChatStreamChoice {
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_stop: Option<Value>,
+
+    /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
