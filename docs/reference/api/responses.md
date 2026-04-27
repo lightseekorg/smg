@@ -74,6 +74,28 @@ POST /v1/responses
 | `user` | string | No | End-user identifier |
 | `background` | boolean | No | Run request in background (not with streaming) |
 
+### Direct Endpoint Override
+
+For OpenAI-compatible Responses endpoints, a request can target a provider endpoint
+directly without registering a worker first:
+
+```bash
+curl http://localhost:30000/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "x-model-provider: gpt-oss" \
+  -H "x-provider-endpoint: https://provider.example.com/v1/responses" \
+  -d '{
+    "model": "gpt-oss-20b",
+    "input": "Hello"
+  }'
+```
+
+`x-provider-endpoint` must be a full `http` or `https` URL, including the
+upstream path. SMG sends the request to that URL for this request only.
+`x-model-provider` is a provider hint; `gpt-oss` is treated as an
+OpenAI-compatible provider. Provider-native endpoint shapes require matching
+provider adaptation and may not work through this override.
+
 ### Input Formats
 
 **Simple text input:**

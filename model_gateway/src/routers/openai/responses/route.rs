@@ -7,8 +7,14 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::{http::HeaderMap, response::Response};
-use openai_protocol::responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest};
+use openai_protocol::{
+    model_card::ModelCard,
+    responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest},
+    worker::{HealthCheckConfig, RuntimeType, WorkerModels, WorkerSpec},
+};
 use serde_json::to_value;
+use tracing::debug;
+use url::Url;
 
 use super::{
     super::{
@@ -26,13 +32,119 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         common::{
-            header_utils::extract_conversation_memory_config,
+            header_utils::{
+                extract_conversation_memory_config, extract_model_provider,
+                extract_provider_endpoint,
+            },
             worker_selection::{SelectWorkerRequest, WorkerSelector},
         },
         error,
     },
-    worker::{Endpoint, ProviderType, WorkerRegistry},
+    worker::{BasicWorkerBuilder, Endpoint, ProviderType, Worker, WorkerRegistry},
 };
+
+struct EndpointOverride {
+    worker_base_url: String,
+    target_url: String,
+    provider: ProviderType,
+}
+
+fn normalize_provider_endpoint(raw: &str) -> Option<(String, String)> {
+    let mut parsed = Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    if parsed.path().is_empty() || parsed.path() == "/" {
+        return None;
+    }
+
+    parsed.set_fragment(None);
+    let target_url = parsed.to_string();
+    let worker_base_url = parsed.origin().ascii_serialization();
+
+    Some((worker_base_url, target_url))
+}
+
+#[derive(Debug)]
+enum EndpointOverrideError {
+    InvalidProvider,
+    InvalidEndpoint,
+}
+
+fn endpoint_override_error_response(error: EndpointOverrideError) -> Response {
+    match error {
+        EndpointOverrideError::InvalidProvider => error::bad_request(
+            "invalid_request",
+            "x-model-provider must be one of openai, gpt-oss, xai, google, or anthropic"
+                .to_string(),
+        ),
+        EndpointOverrideError::InvalidEndpoint => error::bad_request(
+            "invalid_request",
+            "x-provider-endpoint must be an absolute http(s) URL with a non-empty path".to_string(),
+        ),
+    }
+}
+
+fn provider_from_header(
+    headers: Option<&HeaderMap>,
+) -> Result<ProviderType, EndpointOverrideError> {
+    let Some(raw_provider) = extract_model_provider(headers) else {
+        return Ok(ProviderType::OpenAI);
+    };
+
+    let provider = raw_provider.trim();
+    if provider.is_empty() {
+        return Err(EndpointOverrideError::InvalidProvider);
+    }
+
+    match provider.to_ascii_lowercase().as_str() {
+        "openai" | "gpt-oss" => Ok(ProviderType::OpenAI),
+        "xai" => Ok(ProviderType::XAI),
+        "google" => Ok(ProviderType::Gemini),
+        "anthropic" => Ok(ProviderType::Anthropic),
+        _ => Err(EndpointOverrideError::InvalidProvider),
+    }
+}
+
+fn endpoint_override_from_headers(
+    headers: Option<&HeaderMap>,
+) -> Result<Option<EndpointOverride>, EndpointOverrideError> {
+    let Some(raw_endpoint) = extract_provider_endpoint(headers) else {
+        return Ok(None);
+    };
+
+    let provider = provider_from_header(headers)?;
+    let (worker_base_url, target_url) =
+        normalize_provider_endpoint(raw_endpoint).ok_or(EndpointOverrideError::InvalidEndpoint)?;
+
+    Ok(Some(EndpointOverride {
+        worker_base_url,
+        target_url,
+        provider,
+    }))
+}
+
+fn build_request_scoped_worker(
+    base_url: &str,
+    model: &str,
+    provider: ProviderType,
+    http_client: reqwest::Client,
+) -> Arc<dyn Worker> {
+    let mut spec = WorkerSpec::new(base_url.to_string());
+    spec.runtime_type = RuntimeType::External;
+    spec.provider = Some(provider);
+    spec.models = WorkerModels::from(vec![ModelCard::new(model)]);
+
+    Arc::new(
+        BasicWorkerBuilder::from_spec(spec)
+            .health_config(HealthCheckConfig {
+                disable_health_check: true,
+                ..Default::default()
+            })
+            .http_client(http_client)
+            .build(),
+    )
+}
 
 /// Shared context passed to responses routing functions.
 pub(in crate::routers::openai) struct ResponsesRouterContext<'a> {
@@ -62,29 +174,65 @@ pub(in crate::routers::openai) async fn route_responses(
         bool_to_static_str(streaming),
     );
 
-    let worker = match WorkerSelector::new(
-        deps.worker_registry,
-        &deps.responses_components.shared.client,
-    )
-    .select_worker(&SelectWorkerRequest {
-        model_id: model,
-        headers,
-        provider: Some(ProviderType::OpenAI),
-        ..Default::default()
-    })
-    .await
-    {
-        Ok(w) => w,
-        Err(response) => {
+    let endpoint_override = match endpoint_override_from_headers(headers) {
+        Ok(override_url) => override_url,
+        Err(err) => {
+            debug!(
+                model,
+                error = ?err,
+                "Rejecting Responses endpoint override"
+            );
             Metrics::record_router_error(
                 metrics_labels::ROUTER_OPENAI,
                 metrics_labels::BACKEND_EXTERNAL,
                 metrics_labels::CONNECTION_HTTP,
                 model,
                 metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_NO_WORKERS,
+                metrics_labels::ERROR_VALIDATION,
             );
-            return response;
+            return endpoint_override_error_response(err);
+        }
+    };
+
+    let worker = if let Some(endpoint_override) = endpoint_override.as_ref() {
+        debug!(
+            model,
+            provider = ?endpoint_override.provider,
+            upstream_base_url = %endpoint_override.worker_base_url,
+            streaming,
+            "Using request-scoped Responses endpoint override"
+        );
+        build_request_scoped_worker(
+            &endpoint_override.worker_base_url,
+            model,
+            endpoint_override.provider.clone(),
+            deps.responses_components.shared.client.clone(),
+        )
+    } else {
+        match WorkerSelector::new(
+            deps.worker_registry,
+            &deps.responses_components.shared.client,
+        )
+        .select_worker(&SelectWorkerRequest {
+            model_id: model,
+            headers,
+            provider: Some(ProviderType::OpenAI),
+            ..Default::default()
+        })
+        .await
+        {
+            Ok(w) => w,
+            Err(response) => {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    metrics_labels::ENDPOINT_RESPONSES,
+                    metrics_labels::ERROR_NO_WORKERS,
+                );
+                return response;
+            }
         }
     };
 
@@ -184,7 +332,10 @@ pub(in crate::routers::openai) async fn route_responses(
 
     ctx.state.payload = Some(PayloadState {
         json: payload,
-        url: format!("{}/v1/responses", worker.url()),
+        url: endpoint_override
+            .as_ref()
+            .map(|endpoint_override| endpoint_override.target_url.clone())
+            .unwrap_or_else(|| format!("{}/v1/responses", worker.url())),
     });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,

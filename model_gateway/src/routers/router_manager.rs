@@ -45,7 +45,7 @@ use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::{
-            header_utils::apply_provider_headers,
+            header_utils::{apply_provider_headers, extract_provider_endpoint},
             skill_resolution::{resolve_messages_skill_manifest, resolve_responses_skill_manifest},
         },
         factory::{router_ids, RouterId},
@@ -315,6 +315,28 @@ impl RouterManager {
         }
 
         best_router
+    }
+
+    fn select_router_for_responses(
+        &self,
+        headers: Option<&HeaderMap>,
+        model_id: &str,
+    ) -> Option<Arc<dyn RouterTrait>> {
+        if extract_provider_endpoint(headers).is_some() {
+            // Direct endpoint overrides are implemented by the OpenAI-compatible
+            // Responses pipeline. Provider-specific payload adaptation happens
+            // inside that router via x-model-provider.
+            debug!(
+                model_id,
+                "Routing Responses endpoint override through OpenAI-compatible router"
+            );
+            return self
+                .routers
+                .get(&router_ids::HTTP_OPENAI)
+                .map(|r| r.clone());
+        }
+
+        self.select_router_for_request(headers, Some(model_id))
     }
 
     /// Build a response from self-hosted registry models (excludes external workers).
@@ -625,7 +647,7 @@ impl RouterTrait for RouterManager {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_responses(headers, model_id);
 
         if let Some(router) = router {
             let skill_manifest = match resolve_responses_skill_manifest(
