@@ -221,7 +221,6 @@ async fn start_capture_responses_server(status: StatusCode) -> (String, CaptureR
         axum::serve(listener, app).await.expect("capture server");
     });
 
-    sleep(Duration::from_millis(10)).await;
     (format!("http://{addr}"), state)
 }
 
@@ -417,7 +416,7 @@ async fn test_responses_endpoint_override_rejects_unknown_provider_without_fallb
     register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
-    let headers = endpoint_override_headers("gemiin", &format!("{dedicated_url}/v1/responses"));
+    let headers = endpoint_override_headers("gemini", &format!("{dedicated_url}/v1/responses"));
     let request = endpoint_override_request(false);
 
     let response = router

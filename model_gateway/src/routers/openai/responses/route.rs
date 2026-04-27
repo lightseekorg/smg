@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn endpoint_override_without_endpoint_rejects_invalid_provider_hint() {
-        let headers = headers_with_model_provider("gemiin");
+        let headers = headers_with_model_provider("gemini");
         let result = endpoint_override_from_headers(Some(&headers));
 
         assert!(matches!(
