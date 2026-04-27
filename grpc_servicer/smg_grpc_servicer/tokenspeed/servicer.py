@@ -500,6 +500,35 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         ``SamplingParams(**obj.sampling_params)``, so field names must match
         the Python class (``max_new_tokens``, ``stop``, ``stop_token_ids``, ...).
         """
+        # DIAG(tokenspeed-eos-diag): smg side logs top_p=0.8 going onto the
+        # wire but the engine sees top_p=1.0. Print the raw proto value as
+        # the servicer receives it to find the exact drop point.
+        import os as _os
+        if _os.environ.get("TOKENSPEED_EOS_DIAG"):
+            logger.warning(
+                "[EOS_DIAG] _sampling_params_from_proto raw "
+                "temperature=%r top_p=%r top_k=%r min_p=%r "
+                "frequency_penalty=%r presence_penalty=%r "
+                "repetition_penalty=%r max_new_tokens(has=%r,val=%r) "
+                "min_new_tokens=%r n=%r ignore_eos=%r skip_special_tokens=%r "
+                "stop=%r stop_token_ids=%r",
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                params.min_p,
+                params.frequency_penalty,
+                params.presence_penalty,
+                params.repetition_penalty,
+                params.HasField("max_new_tokens"),
+                params.max_new_tokens,
+                params.min_new_tokens,
+                params.n,
+                params.ignore_eos,
+                params.skip_special_tokens,
+                list(params.stop),
+                list(params.stop_token_ids),
+            )
+
         out: dict[str, Any] = {}
 
         # Proto3 scalars (temperature, top_p, ...) are always present with a
