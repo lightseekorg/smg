@@ -1,0 +1,123 @@
+name: Nightly MLX Benchmark
+
+on:
+  schedule:
+    # 09:17 UTC = ~02:17 PT — off-peak, off the round hour to dodge fleet load
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model id"
+        required: false
+        default: "mlx-community/gemma-3-4b-it-qat-4bit"
+      concurrencies:
+        description: "Space-separated concurrencies"
+        required: false
+        default: "1 4 16 64"
+      scenarios:
+        description: "Space-separated genai-bench scenarios, e.g. D(100,256) D(2000,128)"
+        required: false
+        default: "D(100,256) D(2000,128)"
+      duration_min:
+        description: "Minutes per cell"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-mlx-bench-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.4
+
+jobs:
+  bench:
+    name: MLX HTTP vs Router+gRPC
+    runs-on: macos-latest
+    # 4 concurrencies × 2 scenarios × 2 setups × 10 min ≈ 2.7 h, plus build
+    # and model download. Cap at 5h45m for safety.
+    timeout-minutes: 345
+    env:
+      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
+      CONCURRENCIES: ${{ github.event.inputs.concurrencies || '1 4 16 64' }}
+      SCENARIOS: ${{ github.event.inputs.scenarios || 'D(100,256) D(2000,128)' }}
+      DURATION_MIN: ${{ github.event.inputs.duration_min || '10' }}
+      RESULTS_DIR: bench-results
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mlx-bench
+          cache-on-failure: true
+
+      - name: Build smg (release)
+        run: cargo build --release --bin smg
+
+      - name: Build smg-grpc-proto Python package
+        run: pip install -e ./crates/grpc_client/python
+
+      - name: Install grpc_servicer with MLX extra
+        run: pip install -e "./grpc_servicer[mlx]"
+
+      - name: Install mlx-lm CLI (for the direct-HTTP baseline)
+        run: pip install "mlx-lm>=0.22.0"
+
+      - name: Verify smg + servicer are importable
+        run: |
+          ./target/release/smg --help | head -5
+          python3 -c "from smg_grpc_servicer.mlx.server import main; print('servicer OK')"
+
+      - name: Pull genai-bench image
+        run: docker pull "$GENAI_BENCH_IMAGE"
+
+      - name: Run benchmark (this is the long step)
+        run: ./benchmarks/mlx_grpc_vs_http/run.sh
+
+      - name: Aggregate results
+        if: always()
+        run: |
+          python3 benchmarks/mlx_grpc_vs_http/aggregate.py \
+            --results-dir "$RESULTS_DIR" \
+            --model "$MODEL" \
+            --out "$RESULTS_DIR/SUMMARY.md"
+          # Mirror to the job summary so it's visible in the run UI without
+          # downloading artifacts.
+          cat "$RESULTS_DIR/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw genai-bench output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-mlx-bench-${{ github.run_id }}
+          path: bench-results/
+          retention-days: 30
+
+      - name: Upload server logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-mlx-bench-logs-${{ github.run_id }}
+          path: |
+            bench-results/mlx-lm.log
+            bench-results/mlx-grpc.log
+            bench-results/smg-router.log
+          retention-days: 14
+          if-no-files-found: ignore
