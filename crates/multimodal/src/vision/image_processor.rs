@@ -406,13 +406,18 @@ impl ImageProcessorRegistry {
             Box::new(super::processors::LlavaProcessor::new()),
         );
 
-        // Register Qwen3-VL first (more specific pattern - must match before qwen2)
+        // Register Qwen3-VL first (more specific pattern - must match before qwen2).
+        // qwen3_5_moe uses the same vision encoder as Qwen3-VL.
         registry.register(
             "qwen3-vl",
             Box::new(super::processors::Qwen3VLProcessor::new()),
         );
         registry.register(
             "qwen3_vl",
+            Box::new(super::processors::Qwen3VLProcessor::new()),
+        );
+        registry.register(
+            "qwen3_5_moe",
             Box::new(super::processors::Qwen3VLProcessor::new()),
         );
 
@@ -617,6 +622,16 @@ mod tests {
         let processor = registry
             .find("Qwen3-VL-30B-A3B-Instruct", Some("qwen2_vl"))
             .expect("qwen3 processor by model_id");
+        assert_eq!(processor.model_name(), "qwen3-vl");
+    }
+
+    #[test]
+    fn test_registry_find_qwen3_5_moe_model_type() {
+        let registry = ImageProcessorRegistry::with_defaults();
+
+        let processor = registry
+            .find("shadow/qwen35-397b-smg-grpc", Some("qwen3_5_moe"))
+            .expect("qwen3.5 moe should find qwen3-vl processor via model_type");
         assert_eq!(processor.model_name(), "qwen3-vl");
     }
 

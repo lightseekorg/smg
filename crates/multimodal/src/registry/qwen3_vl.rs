@@ -28,10 +28,13 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         let id = metadata.model_id.to_ascii_lowercase();
-        id.contains("qwen3") && id.contains("vl")
-            || metadata
-                .config_model_type()
-                .is_some_and(|mt| mt == "qwen3_vl")
+        let has_vision = metadata.config.get("vision_config").is_some()
+            && metadata.config.get("image_token_id").is_some();
+
+        (id.contains("qwen3") && id.contains("vl"))
+            || metadata.config_model_type().is_some_and(|mt| {
+                mt == "qwen3_vl" || (mt == "qwen3_5_moe" && has_vision)
+            })
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -156,6 +159,44 @@ mod tests {
         let spec = registry.lookup(&metadata).expect("should match qwen3");
         // Must match qwen3_vl spec, not qwen_vl
         assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_5_moe_matches_with_vision_config() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 248056)]);
+        let config = json!({
+            "model_type": "qwen3_5_moe",
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "image_token_id": 248056,
+            "vision_start_token_id": 248053,
+            "vision_end_token_id": 248054,
+            "vision_config": {"patch_size": 16, "spatial_merge_size": 2}
+        });
+        let metadata = ModelMetadata {
+            model_id: "shadow/qwen35-397b-smg-grpc",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("qwen3.5 moe should match qwen3_vl spec");
+        assert_eq!(spec.name(), "qwen3_vl");
+        assert_eq!(spec.placeholder_token_id(&metadata).unwrap(), 248056);
+    }
+
+    #[test]
+    fn qwen3_5_moe_without_vision_does_not_match() {
+        let tokenizer = TestTokenizer::new(&[]);
+        let config = json!({
+            "model_type": "qwen3_5_moe",
+            "architectures": ["Qwen3_5MoeForCausalLM"]
+        });
+        let metadata = ModelMetadata {
+            model_id: "Qwen3.5-MoE-text-only",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        assert!(registry.lookup(&metadata).is_none());
     }
 
     #[test]
