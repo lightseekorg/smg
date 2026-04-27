@@ -4,9 +4,10 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use openai_protocol::{
     common::{GenerationRequest, UsageInfo},
     responses::{
-        CodeInterpreterTool, McpTool, ReasoningEffort, RequireApproval, RequireApprovalMode,
-        ResponseInput, ResponseReasoningParam, ResponseTool, ResponsesRequest, ResponsesToolChoice,
-        ServiceTier, ToolChoiceOptions, Truncation, WebSearchPreviewTool,
+        CodeInterpreterTool, McpAllowedTools, McpTool, ReasoningEffort, RequireApproval,
+        RequireApprovalMode, ResponseInput, ResponseInputOutputItem, ResponseReasoningParam,
+        ResponseTool, ResponsesRequest, ResponsesToolChoice, ServiceTier, ToolChoiceOptions,
+        Truncation, WebSearchPreviewTool,
     },
 };
 use smg::{
@@ -25,6 +26,58 @@ const TEST_INTERNAL_MCP_ERROR_MARKER: &str = "internal-mcp-failure-marker";
 
 fn test_tenant_meta() -> smg::middleware::TenantRequestMeta {
     RouteRequestMeta::new(TenantKey::from("test-tenant"))
+}
+
+fn build_required_approval_request(mcp_url: &str, request_id: &str) -> ResponsesRequest {
+    ResponsesRequest {
+        background: Some(false),
+        include: None,
+        input: ResponseInput::Text("search something".to_string()),
+        instructions: Some("Be brief".to_string()),
+        max_output_tokens: Some(64),
+        max_tool_calls: None,
+        metadata: None,
+        model: "mock-model".to_string(),
+        parallel_tool_calls: Some(true),
+        previous_response_id: None,
+        reasoning: None,
+        service_tier: Some(ServiceTier::Auto),
+        store: Some(true),
+        stream: Some(false),
+        temperature: Some(0.2),
+        tool_choice: Some(ResponsesToolChoice::default()),
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
+            server_url: Some(mcp_url.to_string()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
+            allowed_tools: None,
+            connector_id: None,
+            defer_loading: None,
+        })]),
+        top_logprobs: Some(0),
+        top_p: None,
+        truncation: Some(Truncation::Disabled),
+        text: None,
+        user: None,
+        request_id: Some(request_id.to_string()),
+        priority: 0,
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
+        stop: None,
+        prompt: None,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        safety_identifier: None,
+        stream_options: None,
+        context_management: None,
+        top_k: -1,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        conversation: None,
+    }
 }
 
 #[tokio::test]
@@ -516,6 +569,667 @@ async fn test_non_streaming_mcp_returns_approval_request_when_required() {
 }
 
 #[tokio::test]
+async fn test_non_streaming_mcp_approval_continues_with_previous_response_id() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req1 = build_required_approval_request(
+        mcp.url().as_str(),
+        "resp_test_mcp_approval_interrupt_prev_1",
+    );
+
+    let tenant_meta_prev = test_tenant_meta();
+    let resp1 = router
+        .route_responses(None, &tenant_meta_prev, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1_bytes = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body1_json: serde_json::Value =
+        serde_json::from_slice(&body1_bytes).expect("Failed to parse response JSON");
+
+    let approval_item = body1_json["output"]
+        .as_array()
+        .expect("response output missing")
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("mcp_approval_request"))
+        .expect("missing mcp_approval_request output item");
+    let approval_request_id = approval_item["id"]
+        .as_str()
+        .expect("approval request should have id")
+        .to_string();
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id: approval_request_id.clone(),
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(first_response_id),
+        request_id: Some("resp_test_mcp_approval_interrupt_prev_2".to_string()),
+        ..req1.clone()
+    };
+
+    let resp2 = router
+        .route_responses(None, &tenant_meta_prev, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    let body2_bytes = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body2_json: serde_json::Value =
+        serde_json::from_slice(&body2_bytes).expect("Failed to parse response JSON");
+
+    assert_eq!(body2_json["status"], "completed");
+
+    let output = body2_json["output"]
+        .as_array()
+        .expect("response output missing");
+    assert!(
+        output
+            .iter()
+            .all(|entry| entry.get("type").and_then(|v| v.as_str()) != Some("mcp_approval_request")),
+        "resumed response should not emit another approval request"
+    );
+    assert!(
+        output
+            .iter()
+            .all(|entry| entry.get("type").and_then(|v| v.as_str()) != Some("mcp_list_tools")),
+        "previous_response_id resume should not repeat mcp_list_tools"
+    );
+
+    let mcp_call = output
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("mcp_call"))
+        .expect("missing resumed mcp_call output item");
+    assert_eq!(
+        mcp_call.get("approval_request_id").and_then(|v| v.as_str()),
+        Some(approval_request_id.as_str())
+    );
+    assert_eq!(
+        mcp_call.get("server_label").and_then(|v| v.as_str()),
+        Some("mock")
+    );
+    assert_eq!(
+        mcp_call.get("name").and_then(|v| v.as_str()),
+        Some("brave_web_search")
+    );
+    assert!(mcp_call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| id.starts_with("mcp_")));
+    assert!(
+        output
+            .iter()
+            .any(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("message")),
+        "resumed response should include the final assistant message"
+    );
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
+async fn test_non_streaming_mcp_approval_rejects_denied_previous_response_id() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req1 =
+        build_required_approval_request(mcp.url().as_str(), "resp_test_mcp_approval_deny_prev_1");
+    let tenant_meta = test_tenant_meta();
+    let resp1 = router
+        .route_responses(None, &tenant_meta, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body1_json: serde_json::Value = serde_json::from_slice(&body1).expect("parse body");
+    let approval_request_id = body1_json["output"]
+        .as_array()
+        .expect("response output missing")
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("mcp_approval_request"))
+        .and_then(|entry| entry.get("id"))
+        .and_then(|v| v.as_str())
+        .expect("approval request should have id")
+        .to_string();
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id,
+            approve: false,
+            reason: Some("no".to_string()),
+        }]),
+        previous_response_id: Some(first_response_id),
+        request_id: Some("resp_test_mcp_approval_deny_prev_2".to_string()),
+        ..req1.clone()
+    };
+
+    let resp2 = router
+        .route_responses(None, &tenant_meta, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body2_json: serde_json::Value = serde_json::from_slice(&body2).expect("parse body");
+    assert_eq!(body2_json["error"]["code"], "invalid_mcp_approval_response");
+    assert!(body2_json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("approve=false")));
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
+async fn test_non_streaming_mcp_approval_rejects_consumed_approval_request_id() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req1 = build_required_approval_request(
+        mcp.url().as_str(),
+        "resp_test_mcp_approval_consumed_prev_1",
+    );
+    let tenant_meta = test_tenant_meta();
+    let resp1 = router
+        .route_responses(None, &tenant_meta, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body1_json: serde_json::Value = serde_json::from_slice(&body1).expect("parse body");
+    let approval_request_id = body1_json["output"]
+        .as_array()
+        .expect("response output missing")
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("mcp_approval_request"))
+        .and_then(|entry| entry.get("id"))
+        .and_then(|v| v.as_str())
+        .expect("approval request should have id")
+        .to_string();
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id: approval_request_id.clone(),
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(first_response_id),
+        request_id: Some("resp_test_mcp_approval_consumed_prev_2".to_string()),
+        ..req1.clone()
+    };
+
+    let resp2 = router
+        .route_responses(None, &tenant_meta, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body2_json: serde_json::Value = serde_json::from_slice(&body2).expect("parse body");
+    let second_response_id = body2_json["id"]
+        .as_str()
+        .expect("second response should have id")
+        .to_string();
+
+    let req3 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id,
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(second_response_id),
+        request_id: Some("resp_test_mcp_approval_consumed_prev_3".to_string()),
+        ..req1.clone()
+    };
+
+    let resp3 = router
+        .route_responses(None, &tenant_meta, &req3, req3.model.as_str())
+        .await;
+    assert_eq!(resp3.status(), StatusCode::BAD_REQUEST);
+
+    let body3 = axum::body::to_bytes(resp3.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body3_json: serde_json::Value = serde_json::from_slice(&body3).expect("parse body");
+    assert_eq!(body3_json["error"]["code"], "invalid_mcp_approval_response");
+    assert!(body3_json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("does not match any pending mcp_approval_request")));
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
+async fn test_non_streaming_mcp_approval_rejects_unknown_approval_request_id() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req1 = build_required_approval_request(
+        mcp.url().as_str(),
+        "resp_test_mcp_approval_unknown_prev_1",
+    );
+    let tenant_meta = test_tenant_meta();
+    let resp1 = router
+        .route_responses(None, &tenant_meta, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body1_json: serde_json::Value = serde_json::from_slice(&body1).expect("parse body");
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id: "mcpr_does_not_exist".to_string(),
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(first_response_id),
+        request_id: Some("resp_test_mcp_approval_unknown_prev_2".to_string()),
+        ..req1.clone()
+    };
+
+    let resp2 = router
+        .route_responses(None, &tenant_meta, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body2_json: serde_json::Value = serde_json::from_slice(&body2).expect("parse body");
+    assert_eq!(body2_json["error"]["code"], "invalid_mcp_approval_response");
+    assert!(body2_json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("does not match any pending mcp_approval_request")));
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
+async fn test_non_streaming_mcp_approval_rejects_removed_tool_binding() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req1 = build_required_approval_request(
+        mcp.url().as_str(),
+        "resp_test_mcp_approval_removed_prev_1",
+    );
+    let tenant_meta = test_tenant_meta();
+    let resp1 = router
+        .route_responses(None, &tenant_meta, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body1_json: serde_json::Value = serde_json::from_slice(&body1).expect("parse body");
+    let approval_request_id = body1_json["output"]
+        .as_array()
+        .expect("response output missing")
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("mcp_approval_request"))
+        .and_then(|entry| entry.get("id"))
+        .and_then(|v| v.as_str())
+        .expect("approval request should have id")
+        .to_string();
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id,
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(first_response_id),
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
+            server_url: Some(mcp.url()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
+            allowed_tools: Some(McpAllowedTools::List(vec![
+                "not_brave_web_search".to_string()
+            ])),
+            connector_id: None,
+            defer_loading: None,
+        })]),
+        request_id: Some("resp_test_mcp_approval_removed_prev_2".to_string()),
+        ..req1.clone()
+    };
+
+    let resp2 = router
+        .route_responses(None, &tenant_meta, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body2_json: serde_json::Value = serde_json::from_slice(&body2).expect("parse body");
+    assert_eq!(body2_json["error"]["code"], "invalid_mcp_approval_response");
+    assert!(body2_json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("is not available in this request")));
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
+async fn test_non_streaming_mcp_approval_rejects_replay_beyond_max_tool_calls() {
+    let mut mcp = MockMCPServer::start().await.expect("start mcp");
+
+    let mcp_yaml = format!(
+        "servers:\n  - name: mock\n    protocol: streamable\n    url: {}\n",
+        mcp.url()
+    );
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = dir.path().join("mcp.yaml");
+    std::fs::write(&cfg_path, mcp_yaml).expect("write mcp cfg");
+
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 0,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 0,
+        fail_rate: 0.0,
+    });
+    let worker_url = worker.start().await.expect("start worker");
+
+    let router_cfg = RouterConfig::builder()
+        .openai_mode(vec![worker_url])
+        .random_policy()
+        .host("127.0.0.1")
+        .port(0)
+        .max_payload_size(8 * 1024 * 1024)
+        .request_timeout_secs(60)
+        .worker_startup_timeout_secs(5)
+        .worker_startup_check_interval_secs(1)
+        .log_level("warn")
+        .max_concurrent_requests(32)
+        .queue_timeout_secs(5)
+        .build_unchecked();
+
+    let ctx =
+        crate::common::create_test_context_with_mcp_config(router_cfg, cfg_path.to_str().unwrap())
+            .await;
+    let router = RouterFactory::create_router(&ctx).await.expect("router");
+
+    let req1 =
+        build_required_approval_request(mcp.url().as_str(), "resp_test_mcp_approval_limit_prev_1");
+    let tenant_meta = test_tenant_meta();
+    let resp1 = router
+        .route_responses(None, &tenant_meta, &req1, req1.model.as_str())
+        .await;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body1_json: serde_json::Value = serde_json::from_slice(&body1).expect("parse body");
+    let approval_request_id = body1_json["output"]
+        .as_array()
+        .expect("response output missing")
+        .iter()
+        .find(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("mcp_approval_request"))
+        .and_then(|entry| entry.get("id"))
+        .and_then(|v| v.as_str())
+        .expect("approval request should have id")
+        .to_string();
+    let first_response_id = body1_json["id"]
+        .as_str()
+        .expect("first response should have id")
+        .to_string();
+
+    let req2 = ResponsesRequest {
+        input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+            id: None,
+            approval_request_id,
+            approve: true,
+            reason: None,
+        }]),
+        previous_response_id: Some(first_response_id),
+        max_tool_calls: Some(0),
+        request_id: Some("resp_test_mcp_approval_limit_prev_2".to_string()),
+        ..req1.clone()
+    };
+
+    let resp2 = router
+        .route_responses(None, &tenant_meta, &req2, req2.model.as_str())
+        .await;
+    assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body2_json: serde_json::Value = serde_json::from_slice(&body2).expect("parse body");
+    assert_eq!(body2_json["error"]["code"], "max_tool_calls_exceeded");
+    assert!(body2_json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("would exceed max_tool_calls")));
+
+    worker.stop().await;
+    mcp.stop().await;
+}
+
+#[tokio::test]
 async fn test_final_response_hides_internal_mcp_trace_items() {
     let mut mcp = MockMCPServer::start().await.expect("start mcp");
 
@@ -812,18 +1526,24 @@ async fn test_previous_response_id_does_not_repeat_mcp_list_tools_for_existing_b
     let output = body2_json["output"]
         .as_array()
         .expect("response output missing");
-    assert_eq!(
-        output.len(),
-        2,
-        "resume turn should return only current-turn MCP activity plus the final message: {body2_json}",
-    );
-    assert_eq!(output[0]["type"], "mcp_call");
-    assert_eq!(output[1]["type"], "message");
+    assert_eq!(body2_json["status"], "completed");
     assert!(
         output
             .iter()
             .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("mcp_list_tools")),
         "existing bindings should not repeat mcp_list_tools on previous_response_id turns"
+    );
+    assert!(
+        output
+            .iter()
+            .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("mcp_approval_request")),
+        "existing bindings should not emit a fresh mcp_approval_request on previous_response_id turns"
+    );
+    assert!(
+        output
+            .iter()
+            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("message")),
+        "resume turn should include a final assistant message: {body2_json}"
     );
 
     worker.stop().await;

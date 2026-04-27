@@ -21,7 +21,10 @@ use crate::routers::{
     error,
     openai::{
         context::{PayloadState, RequestContext, ResponsesPayloadState},
-        mcp::{execute_tool_loop, prepare_mcp_tools_as_functions, ToolLoopExecutionContext},
+        mcp::{
+            execute_tool_loop, prepare_mcp_tools_as_functions, ToolLoopError,
+            ToolLoopExecutionContext,
+        },
     },
 };
 
@@ -41,7 +44,14 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let ResponsesPayloadState {
         previous_response_id,
         existing_mcp_list_tools_labels,
-    } = ctx.take_responses_payload().unwrap_or_default();
+        approval_continuation,
+        upstream_input,
+    } = match ctx.take_responses_payload() {
+        Some(state) => state,
+        None => {
+            return error::internal_error("internal_error", "Responses payload not prepared");
+        }
+    };
 
     let original_body = match ctx.responses_request() {
         Some(r) => r,
@@ -68,6 +78,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     } else {
         None
     };
+
+    if let Some(continuation) = approval_continuation
+        .as_ref()
+        .filter(|_| mcp_servers.is_none())
+    {
+        return error::bad_request(
+            "invalid_mcp_approval_response",
+            format!(
+                "approved tool '{}' (approval_request_id={}) is not available in this request",
+                continuation.tool_name, continuation.approval_request_id
+            ),
+        );
+    }
 
     let mut response_json: Value;
 
@@ -96,7 +119,9 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             payload,
             ToolLoopExecutionContext {
                 original_body,
+                upstream_input: &upstream_input,
                 existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
+                approval_continuation: approval_continuation.as_ref(),
                 session: &session,
             },
         )
@@ -106,7 +131,13 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 worker.record_outcome(200);
                 response_json = resp;
             }
-            Err(err) => {
+            Err(ToolLoopError::InvalidApprovalResponse(err)) => {
+                return error::bad_request("invalid_mcp_approval_response", err);
+            }
+            Err(ToolLoopError::MaxToolCallsExceeded(err)) => {
+                return error::bad_request("max_tool_calls_exceeded", err);
+            }
+            Err(ToolLoopError::Execution(err)) => {
                 worker.record_outcome(502);
                 return error::internal_error("upstream_error", err);
             }

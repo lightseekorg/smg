@@ -579,8 +579,46 @@ class TestToolCallingCloud:
 
         assert_mcp_approval_interruption_non_streaming(resp)
 
-        # TODO: extend this same test in a follow-up PR with the approval continuation
-        # request and assert the resumed turn emits mcp_call plus the final assistant output.
+        approval_request = next(
+            item
+            for item in resp.output
+            if item.type == "mcp_approval_request" and item.server_label == "brave"
+        )
+
+        resumed = api_client.responses.create(
+            model=model,
+            input=[
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": approval_request.id,
+                    "approve": True,
+                }
+            ],
+            previous_response_id=resp.id,
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL_REQUIRE_APPROVAL_ALWAYS],
+            stream=False,
+            reasoning={"effort": "low"},
+        )
+
+        assert resumed.error is None
+        assert resumed.id is not None
+        assert resumed.status == "completed"
+        assert resumed.output is not None
+
+        resumed_output_types = [item.type for item in resumed.output]
+        assert "mcp_approval_request" not in resumed_output_types
+        assert "mcp_list_tools" not in resumed_output_types
+        assert "message" in resumed_output_types
+
+        resumed_mcp_calls = [item for item in resumed.output if item.type == "mcp_call"]
+        assert len(resumed_mcp_calls) > 0, "Expected resumed response to emit mcp_call"
+        brave_calls = [item for item in resumed_mcp_calls if item.server_label == "brave"]
+        assert len(brave_calls) > 0, "Expected resumed response to emit brave mcp_call"
+        for mcp_call in brave_calls:
+            assert mcp_call.approval_request_id == approval_request.id
+            assert mcp_call.id is not None
+            assert mcp_call.id.startswith("mcp_")
+            assert mcp_call.output is not None
 
     def test_mcp_multi_server_tool_call(self, model, api_client):
         """Test MCP tool call with multiple MCP servers (non-streaming)."""
