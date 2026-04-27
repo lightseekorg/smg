@@ -92,7 +92,7 @@ fn normalize_provider_endpoint(raw: &str) -> Option<(String, String)> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    if parsed.path().is_empty() || parsed.path() == "/" {
+    if parsed.path() == "/" {
         return None;
     }
 
