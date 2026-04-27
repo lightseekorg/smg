@@ -85,17 +85,25 @@ impl ModelIdSource {
     }
 }
 
+/// Runtime config for Kubernetes service discovery.
+///
+/// Each of `selectors`, `prefill_selectors`, and `decode_selectors` holds a
+/// list of **label-selector pools**. A pod is included if it matches any pool,
+/// and each pool AND's its own key/value pairs. This allows a single router
+/// to discover engines that carry different labels — for example, an
+/// LWS-deployed model alongside a plain Deployment — by configuring one pool
+/// per engine type.
 #[derive(Debug, Clone)]
 pub struct ServiceDiscoveryConfig {
     pub enabled: bool,
-    pub selector: HashMap<String, String>,
+    pub selectors: Vec<HashMap<String, String>>,
     pub check_interval: Duration,
     pub port: u16,
     pub namespace: Option<String>,
     // PD mode specific configuration
     pub pd_mode: bool,
-    pub prefill_selector: HashMap<String, String>,
-    pub decode_selector: HashMap<String, String>,
+    pub prefill_selectors: Vec<HashMap<String, String>>,
+    pub decode_selectors: Vec<HashMap<String, String>>,
     // Bootstrap port annotation specific to mooncake implementation
     pub bootstrap_port_annotation: String,
     // Router node discovery for mesh
@@ -105,48 +113,39 @@ pub struct ServiceDiscoveryConfig {
     pub model_id_source: Option<ModelIdSource>,
 }
 
-impl ServiceDiscoveryConfig {
-    /// Build a label selector string for K8s list calls.
-    ///
-    /// In regular mode, uses the worker selector directly.
-    /// In PD mode, uses labels common to both prefill and decode selectors
-    /// so a single list call covers both pod types. If there are no common
-    /// labels, returns an empty string (no server-side filtering).
-    fn list_label_selector(&self) -> String {
-        if self.pd_mode {
-            self.prefill_selector
-                .iter()
-                .filter(|(k, v)| self.decode_selector.get(*k) == Some(*v))
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            self.selector
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        }
-    }
-}
-
 impl Default for ServiceDiscoveryConfig {
     fn default() -> Self {
         ServiceDiscoveryConfig {
             enabled: false,
-            selector: HashMap::new(),
+            selectors: Vec::new(),
             check_interval: Duration::from_secs(60),
             port: 8000,
             namespace: None,
             pd_mode: false,
-            prefill_selector: HashMap::new(),
-            decode_selector: HashMap::new(),
+            prefill_selectors: Vec::new(),
+            decode_selectors: Vec::new(),
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
             model_id_source: None,
         }
     }
+}
+
+fn format_selector_pools(pools: &[HashMap<String, String>]) -> String {
+    if pools.is_empty() {
+        return "[]".to_string();
+    }
+    let rendered = pools
+        .iter()
+        .map(|pool| {
+            let mut pairs: Vec<String> = pool.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            pairs.sort();
+            format!("{{{}}}", pairs.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("[{rendered}]")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -202,20 +201,26 @@ impl PodInfo {
             .is_some_and(|labels| selector.iter().all(|(k, v)| labels.get(k) == Some(v)))
     }
 
+    /// Returns true if the pod matches any selector pool in the list. An empty
+    /// list (no pools configured) matches nothing.
+    fn matches_any(pod: &Pod, pools: &[HashMap<String, String>]) -> bool {
+        pools.iter().any(|pool| Self::matches_selector(pod, pool))
+    }
+
     pub fn should_include(pod: &Pod, config: &ServiceDiscoveryConfig) -> bool {
         if config.pd_mode {
-            if config.prefill_selector.is_empty() && config.decode_selector.is_empty() {
-                warn!("PD mode enabled but both prefill_selector and decode_selector are empty");
+            if config.prefill_selectors.is_empty() && config.decode_selectors.is_empty() {
+                warn!("PD mode enabled but both prefill_selectors and decode_selectors are empty");
                 return false;
             }
-            Self::matches_selector(pod, &config.prefill_selector)
-                || Self::matches_selector(pod, &config.decode_selector)
+            Self::matches_any(pod, &config.prefill_selectors)
+                || Self::matches_any(pod, &config.decode_selectors)
         } else {
-            if config.selector.is_empty() {
-                warn!("Regular mode enabled but selector is empty");
+            if config.selectors.is_empty() {
+                warn!("Regular mode enabled but selectors list is empty");
                 return false;
             }
-            Self::matches_selector(pod, &config.selector)
+            Self::matches_any(pod, &config.selectors)
         }
     }
 
@@ -246,9 +251,9 @@ impl PodInfo {
 
         let pod_type = if let Some(config) = config {
             if config.pd_mode {
-                if Self::matches_selector(pod, &config.prefill_selector) {
+                if Self::matches_any(pod, &config.prefill_selectors) {
                     Some(PodType::Prefill)
-                } else if Self::matches_selector(pod, &config.decode_selector) {
+                } else if Self::matches_any(pod, &config.decode_selectors) {
                     Some(PodType::Decode)
                 } else {
                     Some(PodType::Regular)
@@ -346,35 +351,15 @@ pub async fn start_service_discovery(
 
     // Log the appropriate selectors based on mode
     if config.pd_mode {
-        let prefill_selector = config
-            .prefill_selector
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let decode_selector = config
-            .decode_selector
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(",");
-
         info!(
-            "Starting K8s service discovery | PD mode | prefill: '{}' | decode: '{}'",
-            prefill_selector, decode_selector
+            "Starting K8s service discovery | PD mode | prefill: {} | decode: {}",
+            format_selector_pools(&config.prefill_selectors),
+            format_selector_pools(&config.decode_selectors),
         );
     } else {
-        let label_selector = config
-            .selector
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(",");
-
         info!(
-            "Starting K8s service discovery | selector: '{}'",
-            label_selector
+            "Starting K8s service discovery | selectors: {}",
+            format_selector_pools(&config.selectors),
         );
     }
 
@@ -881,12 +866,11 @@ async fn reconcile_pods(
     port: u16,
 ) {
     let reconcile_start = time::Instant::now();
-    let label_selector = config.list_label_selector();
-    let list_params = if label_selector.is_empty() {
-        ListParams::default()
-    } else {
-        ListParams::default().labels(&label_selector)
-    };
+    // No server-side label filter: the configured selector pools can be a
+    // disjunction (e.g. different engine labels across LWS and non-LWS pods),
+    // which the apiserver's single labelSelector query cannot express. List
+    // all pods in scope and filter client-side via `PodInfo::should_include`.
+    let list_params = ListParams::default();
     let pod_list = match pods.list(&list_params).await {
         Ok(list) => list,
         Err(e) => {
@@ -1306,13 +1290,13 @@ mod tests {
 
         ServiceDiscoveryConfig {
             enabled: true,
-            selector: HashMap::new(),
+            selectors: Vec::new(),
             check_interval: Duration::from_secs(60),
             port: 8080,
             namespace: None,
             pd_mode: true,
-            prefill_selector,
-            decode_selector,
+            prefill_selectors: vec![prefill_selector],
+            decode_selectors: vec![decode_selector],
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
@@ -1333,11 +1317,13 @@ mod tests {
         let unmatched_pod = create_pd_k8s_pod("other-pod", "10.0.0.3", "other", None);
         assert!(!PodInfo::should_include(&unmatched_pod, &config));
 
-        let mut regular_config = ServiceDiscoveryConfig::default();
-        regular_config
-            .selector
-            .insert("app".to_string(), "sglang".to_string());
-        regular_config.pd_mode = false;
+        let mut pool = HashMap::new();
+        pool.insert("app".to_string(), "sglang".to_string());
+        let regular_config = ServiceDiscoveryConfig {
+            selectors: vec![pool],
+            pd_mode: false,
+            ..ServiceDiscoveryConfig::default()
+        };
 
         let regular_pod = create_pd_k8s_pod("worker-pod", "10.0.0.4", "worker", None);
         assert!(PodInfo::should_include(&regular_pod, &regular_config));
@@ -1347,13 +1333,13 @@ mod tests {
     fn test_service_discovery_config_default() {
         let config = ServiceDiscoveryConfig::default();
         assert!(!config.enabled);
-        assert!(config.selector.is_empty());
+        assert!(config.selectors.is_empty());
         assert_eq!(config.check_interval, Duration::from_secs(60));
         assert_eq!(config.port, 8000);
         assert!(config.namespace.is_none());
         assert!(!config.pd_mode);
-        assert!(config.prefill_selector.is_empty());
-        assert!(config.decode_selector.is_empty());
+        assert!(config.prefill_selectors.is_empty());
+        assert!(config.decode_selectors.is_empty());
         assert_eq!(config.bootstrap_port_annotation, "sglang.ai/bootstrap-port");
     }
 
@@ -2108,7 +2094,7 @@ mod tests {
         selector.insert("app".to_string(), "sglang".to_string());
         ServiceDiscoveryConfig {
             enabled: true,
-            selector,
+            selectors: vec![selector],
             pd_mode: false,
             ..Default::default()
         }
@@ -2465,50 +2451,112 @@ mod tests {
         assert!(tracker.contains(&new_pod));
     }
 
+    fn pod_with_labels(name: &str, labels: &[(&str, &str)]) -> Pod {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in labels {
+            map.insert((*k).to_string(), (*v).to_string());
+        }
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                labels: Some(map),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn test_list_label_selector_regular_mode() {
-        let mut selector = HashMap::new();
-        selector.insert("app".to_string(), "sglang".to_string());
+    fn test_should_include_matches_any_pool() {
+        // Two disjoint engine pools, e.g. an existing sglang deployment plus a
+        // new LWS-deployed engine that carries a different label.
+        let mut pool_a = HashMap::new();
+        pool_a.insert("engine".to_string(), "sglang".to_string());
+        let mut pool_b = HashMap::new();
+        pool_b.insert("engine".to_string(), "deepseek-v4-pro".to_string());
+        pool_b.insert(
+            "leaderworkerset.sigs.k8s.io/name".to_string(),
+            "deepseek-v4-pro".to_string(),
+        );
+
         let config = ServiceDiscoveryConfig {
-            selector,
+            selectors: vec![pool_a, pool_b],
             pd_mode: false,
             ..Default::default()
         };
-        assert_eq!(config.list_label_selector(), "app=sglang");
+
+        let pod_sglang = pod_with_labels("w1", &[("engine", "sglang")]);
+        let pod_lws = pod_with_labels(
+            "w2",
+            &[
+                ("engine", "deepseek-v4-pro"),
+                ("leaderworkerset.sigs.k8s.io/name", "deepseek-v4-pro"),
+            ],
+        );
+        let pod_other = pod_with_labels("w3", &[("engine", "something-else")]);
+        let pod_partial_lws = pod_with_labels("w4", &[("engine", "deepseek-v4-pro")]);
+
+        assert!(PodInfo::should_include(&pod_sglang, &config));
+        assert!(PodInfo::should_include(&pod_lws, &config));
+        assert!(!PodInfo::should_include(&pod_other, &config));
+        // Partial match on pool_b must fail: each pool still AND's its keys.
+        assert!(!PodInfo::should_include(&pod_partial_lws, &config));
     }
 
     #[test]
-    fn test_list_label_selector_pd_mode_common_labels() {
-        let mut prefill = HashMap::new();
-        prefill.insert("app".to_string(), "sglang".to_string());
-        prefill.insert("component".to_string(), "prefill".to_string());
-        let mut decode = HashMap::new();
-        decode.insert("app".to_string(), "sglang".to_string());
-        decode.insert("component".to_string(), "decode".to_string());
+    fn test_should_include_pd_mode_multi_pool() {
+        let mut p_a = HashMap::new();
+        p_a.insert("role".to_string(), "prefill".to_string());
+        p_a.insert("engine".to_string(), "sglang".to_string());
+        let mut p_b = HashMap::new();
+        p_b.insert("role".to_string(), "prefill".to_string());
+        p_b.insert("engine".to_string(), "deepseek-v4-pro".to_string());
+        let mut d_a = HashMap::new();
+        d_a.insert("role".to_string(), "decode".to_string());
+        d_a.insert("engine".to_string(), "sglang".to_string());
+
         let config = ServiceDiscoveryConfig {
             pd_mode: true,
-            prefill_selector: prefill,
-            decode_selector: decode,
+            prefill_selectors: vec![p_a, p_b],
+            decode_selectors: vec![d_a],
             ..Default::default()
         };
-        // Only the common label "app=sglang" should be in the selector.
-        assert_eq!(config.list_label_selector(), "app=sglang");
+
+        let prefill_sglang = pod_with_labels("p1", &[("role", "prefill"), ("engine", "sglang")]);
+        let prefill_dsv4 =
+            pod_with_labels("p2", &[("role", "prefill"), ("engine", "deepseek-v4-pro")]);
+        let decode_sglang = pod_with_labels("d1", &[("role", "decode"), ("engine", "sglang")]);
+        let decode_dsv4 =
+            pod_with_labels("d2", &[("role", "decode"), ("engine", "deepseek-v4-pro")]);
+
+        assert!(PodInfo::should_include(&prefill_sglang, &config));
+        assert!(PodInfo::should_include(&prefill_dsv4, &config));
+        assert!(PodInfo::should_include(&decode_sglang, &config));
+        // decode_dsv4 has no matching decode pool → excluded.
+        assert!(!PodInfo::should_include(&decode_dsv4, &config));
     }
 
     #[test]
-    fn test_list_label_selector_pd_mode_no_common_labels() {
-        let mut prefill = HashMap::new();
-        prefill.insert("role".to_string(), "prefill".to_string());
-        let mut decode = HashMap::new();
-        decode.insert("role".to_string(), "decode".to_string());
+    fn test_empty_selectors_excludes_everything() {
         let config = ServiceDiscoveryConfig {
-            pd_mode: true,
-            prefill_selector: prefill,
-            decode_selector: decode,
+            selectors: Vec::new(),
+            pd_mode: false,
             ..Default::default()
         };
-        // No common labels → empty selector (falls back to listing all pods).
-        assert!(config.list_label_selector().is_empty());
+        let pod = pod_with_labels("any", &[("engine", "sglang")]);
+        assert!(!PodInfo::should_include(&pod, &config));
+    }
+
+    #[test]
+    fn test_format_selector_pools_is_stable() {
+        let mut pool = HashMap::new();
+        pool.insert("engine".to_string(), "sglang".to_string());
+        pool.insert("role".to_string(), "worker".to_string());
+        assert_eq!(
+            format_selector_pools(&[pool]),
+            "[{engine=sglang,role=worker}]"
+        );
+        assert_eq!(format_selector_pools(&[]), "[]");
     }
 
     #[test]
