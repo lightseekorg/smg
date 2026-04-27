@@ -5,6 +5,7 @@ pub mod mesh;
 pub mod middleware;
 pub mod observability;
 pub mod policies;
+pub mod rate_limit;
 pub mod routers;
 pub mod server;
 pub mod service_discovery;
