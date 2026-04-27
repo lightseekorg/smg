@@ -113,7 +113,7 @@ impl PipelineStage for ChatRequestBuildingStage {
                 token_ids,
                 multimodal_data,
                 tool_constraints,
-                &eos_token_ids,
+                &[], // EOS handled by sglang/vllm internally
                 message_hashes,
             )
             .map_err(|e| {

@@ -228,7 +228,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 token_ids,
                                 None, // No multimodal in Harmony pipeline
                                 tool_constraints,
-                                &eos_ids,
+                                &[], // EOS handled by engine internally
                                 message_hashes,
                             )
                             .map_err(|e| {
