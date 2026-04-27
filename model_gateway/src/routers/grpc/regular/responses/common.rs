@@ -173,6 +173,7 @@ pub(super) async fn load_conversation_history(
     if let Some(ref prev_id_str) = modified_request.previous_response_id {
         let prev_id = ResponseId::from(prev_id_str.as_str());
         match ctx
+            .persistence
             .response_storage
             .get_response_chain(&prev_id, None)
             .await
@@ -241,6 +242,7 @@ pub(super) async fn load_conversation_history(
 
         // Check if conversation exists - return error if not found
         let conversation = ctx
+            .persistence
             .conversation_storage
             .get_conversation(&conv_id)
             .await
@@ -267,6 +269,7 @@ pub(super) async fn load_conversation_history(
             after: None,
         };
         match ctx
+            .persistence
             .conversation_item_storage
             .list_items(&conv_id, params)
             .await

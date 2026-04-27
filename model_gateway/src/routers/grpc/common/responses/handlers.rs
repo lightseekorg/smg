@@ -16,7 +16,12 @@ pub(crate) async fn cancel_response_impl(ctx: &ResponsesContext, response_id: &s
     let resp_id = ResponseId::from(response_id);
 
     // Check if response exists
-    match ctx.response_storage.get_response(&resp_id).await {
+    match ctx
+        .persistence
+        .response_storage
+        .get_response(&resp_id)
+        .await
+    {
         Ok(Some(stored_response)) => {
             let current_status = stored_response
                 .raw_response

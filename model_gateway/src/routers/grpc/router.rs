@@ -14,7 +14,8 @@ use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
+        handlers::cancel_response_impl, utils::validate_worker_availability, PersistenceHandles,
+        ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -153,10 +154,12 @@ impl GrpcRouter {
             ResponsesContext::new(
                 Arc::new(pipeline.clone()),
                 shared_components.clone(),
-                ctx.response_storage.clone(),
-                ctx.conversation_storage.clone(),
-                ctx.conversation_item_storage.clone(),
-                ctx.conversation_memory_writer.clone(),
+                PersistenceHandles {
+                    response_storage: ctx.response_storage.clone(),
+                    conversation_storage: ctx.conversation_storage.clone(),
+                    conversation_item_storage: ctx.conversation_item_storage.clone(),
+                    conversation_memory_writer: ctx.conversation_memory_writer.clone(),
+                },
                 mcp_orchestrator.clone(),
                 storage_request_context.clone(),
                 max_conversation_history_items,
@@ -355,14 +358,7 @@ impl GrpcRouter {
             let harmony_ctx = ResponsesContext::new(
                 Arc::new(self.harmony_pipeline.clone()),
                 self.shared_components.clone(),
-                self.harmony_responses_context.response_storage.clone(),
-                self.harmony_responses_context.conversation_storage.clone(),
-                self.harmony_responses_context
-                    .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context
-                    .conversation_memory_writer
-                    .clone(),
+                self.harmony_responses_context.persistence.clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
                 smg_data_connector::current_request_context(),
                 self.max_conversation_history_items,
@@ -386,10 +382,7 @@ impl GrpcRouter {
             let regular_ctx = ResponsesContext::new(
                 Arc::new(self.pipeline.clone()),
                 self.shared_components.clone(),
-                self.responses_context.response_storage.clone(),
-                self.responses_context.conversation_storage.clone(),
-                self.responses_context.conversation_item_storage.clone(),
-                self.responses_context.conversation_memory_writer.clone(),
+                self.responses_context.persistence.clone(),
                 self.responses_context.mcp_orchestrator.clone(),
                 smg_data_connector::current_request_context(),
                 self.max_conversation_history_items,

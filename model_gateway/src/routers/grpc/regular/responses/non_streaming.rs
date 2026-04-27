@@ -64,14 +64,11 @@ pub(super) async fn route_responses_internal(
 
     // 5. Persist response to storage if store=true
     persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.conversation_memory_writer.clone(),
-        ctx.response_storage.clone(),
+        &ctx.persistence,
+        ctx.memory_execution_context.clone(),
         &responses_response,
         &request,
         ctx.request_context.clone(),
-        ctx.memory_execution_context.clone(),
     )
     .await;
 

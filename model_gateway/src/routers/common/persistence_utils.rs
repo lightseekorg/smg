@@ -675,7 +675,7 @@ mod tests {
             json!({"role": "user", "type": "message"}),
             json!({"role": "assistant", "type": "message"}),
             json!({"role": "User", "type": "message"}), // uppercase variant
-            json!({"type": "function_call"}),            // no role — not counted
+            json!({"type": "function_call"}),           // no role — not counted
         ];
         assert_eq!(count_user_turns(&items), 2);
     }
@@ -693,10 +693,7 @@ mod tests {
             json!({"role": "assistant"}),
             json!({"role": "user"}), // 4th user turn — triggers STMO
         ];
-        let output_items = [
-            json!({"type": "message"}),
-            json!({"type": "function_call"}),
-        ];
+        let output_items = [json!({"type": "message"}), json!({"type": "function_call"})];
 
         let user_turns = count_user_turns(&input_items);
         let total_items = input_items.len() + output_items.len();

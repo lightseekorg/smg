@@ -30,11 +30,11 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, Value};
-use smg_data_connector::{
-    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
-    RequestContext as StorageRequestContext, ResponseStorage,
+use smg_data_connector::RequestContext as StorageRequestContext;
+use smg_mcp::{
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, McpServerBinding, McpToolSession,
+    ResponseFormat, ToolExecutionInput,
 };
-use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -56,7 +56,7 @@ use crate::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
                 streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
-                ResponsesContext,
+                PersistenceHandles, ResponsesContext,
             },
             utils,
         },
@@ -103,10 +103,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 
     // Spawn background task to transform stream
     let original_request_clone = original_request.clone();
-    let response_storage = ctx.response_storage.clone();
-    let conversation_storage = ctx.conversation_storage.clone();
-    let conversation_item_storage = ctx.conversation_item_storage.clone();
-    let conversation_memory_writer = ctx.conversation_memory_writer.clone();
+    let persistence = ctx.persistence.clone();
     let request_context = ctx.request_context.clone();
     let memory_execution_context = ctx.memory_execution_context.clone();
 
@@ -118,10 +115,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
         if let Err(e) = process_and_transform_sse_stream(
             body,
             original_request_clone,
-            response_storage,
-            conversation_storage,
-            conversation_item_storage,
-            conversation_memory_writer,
+            persistence,
             request_context,
             memory_execution_context,
             tx.clone(),
@@ -141,17 +135,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 }
 
 /// Process chat SSE stream and transform to responses format
-#[expect(
-    clippy::too_many_arguments,
-    reason = "streaming path threads independent handles; grouping them would obscure ownership"
-)]
 async fn process_and_transform_sse_stream(
     body: Body,
     original_request: ResponsesRequest,
-    response_storage: Arc<dyn ResponseStorage>,
-    conversation_storage: Arc<dyn ConversationStorage>,
-    conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    persistence: PersistenceHandles,
     request_context: Option<StorageRequestContext>,
     memory_execution_context: MemoryExecutionContext,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
@@ -242,14 +229,11 @@ async fn process_and_transform_sse_stream(
     // Finalize and persist accumulated response
     let final_response = accumulator.finalize();
     persist_response_if_needed(
-        conversation_storage,
-        conversation_item_storage,
-        conversation_memory_writer,
-        response_storage,
+        &persistence,
+        memory_execution_context,
         &final_response,
         &original_request,
         request_context,
-        memory_execution_context,
     )
     .await;
 
