@@ -50,7 +50,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     let loaded_request = match load_previous_messages(
         ctx,
         request.clone(),
-        ctx.memory_execution_context.stm_enabled,
+        ctx.memory_execution_context.stm_enabled.active(),
     )
     .await
     {

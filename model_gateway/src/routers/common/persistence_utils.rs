@@ -427,7 +427,7 @@ async fn maybe_schedule_stmo_after_persist(
     user_turns: usize,
     total_items: usize,
 ) -> Result<bool, String> {
-    if !memory_execution_context.stm_enabled {
+    if !memory_execution_context.stm_enabled.active() {
         return Ok(false);
     }
 
@@ -479,7 +479,7 @@ async fn handle_stmo_after_persist(
     conversation_turn_info: Option<ConversationTurnInfo>,
     output_item_count: usize,
 ) {
-    if !memory_execution_context.stm_enabled {
+    if !memory_execution_context.stm_enabled.active() {
         return;
     }
 

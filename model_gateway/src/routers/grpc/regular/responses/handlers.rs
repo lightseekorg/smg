@@ -112,13 +112,16 @@ async fn route_responses_streaming(
     params: ResponsesCallContext,
 ) -> Response {
     // 1. Load conversation history
-    let loaded_request =
-        match load_conversation_history(ctx, &request, ctx.memory_execution_context.stm_enabled)
-            .await
-        {
-            Ok(req) => req,
-            Err(response) => return response, // Already a Response with proper status code
-        };
+    let loaded_request = match load_conversation_history(
+        ctx,
+        &request,
+        ctx.memory_execution_context.stm_enabled.active(),
+    )
+    .await
+    {
+        Ok(req) => req,
+        Err(response) => return response, // Already a Response with proper status code
+    };
     let modified_request = loaded_request.request;
     let conversation_turn_info = loaded_request.turn_info;
 

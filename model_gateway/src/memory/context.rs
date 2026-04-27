@@ -48,7 +48,7 @@ pub struct MemoryExecutionContext {
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
     pub extraction_model: Option<String>,
-    pub stm_enabled: bool,
+    pub stm_enabled: MemoryExecutionState,
     pub stm_condenser_model_id: Option<String>,
 }
 
@@ -70,7 +70,8 @@ impl MemoryExecutionContext {
         }
         let store_ltm_requested = policy.allows_ltm_store();
         let recall_requested = policy.allows_recall();
-        let stm_enabled = headers.stm_enabled && runtime.enabled;
+        let stm_enabled =
+            MemoryExecutionState::from_requested_and_runtime(headers.stm_enabled, runtime.enabled);
 
         Self {
             store_ltm: MemoryExecutionState::from_requested_and_runtime(
@@ -87,6 +88,7 @@ impl MemoryExecutionContext {
             extraction_model: headers.extraction_model.clone(),
             stm_enabled,
             stm_condenser_model_id: stm_enabled
+                .active()
                 .then_some(headers.stm_condenser_model_id.clone())
                 .flatten(),
         }
@@ -168,7 +170,7 @@ mod tests {
         assert_eq!(ctx.store_ltm, MemoryExecutionState::GatedOff);
         assert_eq!(ctx.recall, MemoryExecutionState::GatedOff);
         assert_eq!(ctx.policy_mode, MemoryPolicyMode::StoreAndRecall);
-        assert!(!ctx.stm_enabled);
+        assert_eq!(ctx.stm_enabled, MemoryExecutionState::GatedOff);
         assert_eq!(ctx.stm_condenser_model_id, None);
     }
 
@@ -193,7 +195,7 @@ mod tests {
             Some("text-embedding-3-small")
         );
         assert_eq!(ctx.extraction_model.as_deref(), Some("gpt-4.1-mini"));
-        assert!(ctx.stm_enabled);
+        assert_eq!(ctx.stm_enabled, MemoryExecutionState::Active);
         assert_eq!(ctx.stm_condenser_model_id.as_deref(), Some("condense-1"));
     }
 }

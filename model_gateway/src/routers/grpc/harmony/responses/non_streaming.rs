@@ -60,8 +60,12 @@ pub(crate) async fn serve_harmony_responses(
     let original_request = request.clone();
 
     // Load previous conversation history if previous_response_id is set
-    let loaded_request =
-        load_previous_messages(ctx, request, ctx.memory_execution_context.stm_enabled).await?;
+    let loaded_request = load_previous_messages(
+        ctx,
+        request,
+        ctx.memory_execution_context.stm_enabled.active(),
+    )
+    .await?;
     let current_request = loaded_request.request;
     let conversation_turn_info = loaded_request.turn_info;
 
