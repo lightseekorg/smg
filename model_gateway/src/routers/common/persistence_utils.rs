@@ -653,3 +653,56 @@ async fn persist_conversation_items_inner(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stmo_fires_at_boundary_turns() {
+        // Fires at 4, 7, 10 — not before or between
+        assert!(!should_enqueue_stmo(3));
+        assert!(should_enqueue_stmo(4));
+        assert!(!should_enqueue_stmo(5));
+        assert!(!should_enqueue_stmo(6));
+        assert!(should_enqueue_stmo(7));
+        assert!(should_enqueue_stmo(10));
+    }
+
+    #[test]
+    fn count_user_turns_case_insensitive() {
+        let items = vec![
+            json!({"role": "user", "type": "message"}),
+            json!({"role": "assistant", "type": "message"}),
+            json!({"role": "User", "type": "message"}), // uppercase variant
+            json!({"type": "function_call"}),            // no role — not counted
+        ];
+        assert_eq!(count_user_turns(&items), 2);
+    }
+
+    #[test]
+    fn total_items_exceeds_user_turns() {
+        // Verifies that total_items accounts for non-user items (assistant turns,
+        // tool calls, etc.) so target_item_end in the STMO payload is correct.
+        let input_items = vec![
+            json!({"role": "user"}),
+            json!({"role": "assistant"}),
+            json!({"role": "user"}),
+            json!({"role": "assistant"}),
+            json!({"role": "user"}),
+            json!({"role": "assistant"}),
+            json!({"role": "user"}), // 4th user turn — triggers STMO
+        ];
+        let output_items = [
+            json!({"type": "message"}),
+            json!({"type": "function_call"}),
+        ];
+
+        let user_turns = count_user_turns(&input_items);
+        let total_items = input_items.len() + output_items.len();
+
+        assert_eq!(user_turns, 4);
+        assert_eq!(total_items, 9); // total > user_turns
+        assert!(should_enqueue_stmo(user_turns));
+    }
+}
