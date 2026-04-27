@@ -138,13 +138,10 @@ done
 log "Stopping mlx-lm.server..."
 kill "$MLX_HTTP_PID" 2>/dev/null || true
 wait "$MLX_HTTP_PID" 2>/dev/null || true
-# Rebuild PIDS without the stopped pid (pattern substitution with /
-# would leave an empty-string ghost entry, not actually remove it).
-new_pids=()
-for pid in "${PIDS[@]}"; do
-    [ "$pid" = "$MLX_HTTP_PID" ] || new_pids+=("$pid")
-done
-PIDS=("${new_pids[@]}")
+# Reset PIDS — mlx-lm was the only one running in phase 1, so an empty
+# array is correct. Using `PIDS=()` avoids the `${new_pids[@]}` empty-
+# array unbound-variable error under `set -u`.
+PIDS=()
 
 # ──────────────────────────────────────────────────────────────────────────
 # Phase 2: SMG router + MLX gRPC servicer
