@@ -49,11 +49,13 @@ jobs:
     timeout-minutes: 345
     env:
       MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
-      # PR runs use a smoke matrix (~12 min) to validate the harness.
-      # Schedule + workflow_dispatch use the full matrix (~2.7 h).
-      CONCURRENCIES: ${{ github.event.inputs.concurrencies || (github.event_name == 'pull_request' && '1 4' || '1 4 16 64') }}
-      SCENARIOS: ${{ github.event.inputs.scenarios || (github.event_name == 'pull_request' && 'D(100,100)' || 'D(100,256) D(2000,128)') }}
-      DURATION_MIN: ${{ github.event.inputs.duration_min || (github.event_name == 'pull_request' && '2' || '10') }}
+      # TEMPORARY: PR runs use the full matrix (~2.7 h) so we can collect
+      # real numbers on this PR before merging. Switch back to the smoke
+      # matrix (or just remove the `pull_request:` trigger entirely) before
+      # merge — see the trigger block above.
+      CONCURRENCIES: ${{ github.event.inputs.concurrencies || '1 4 16 64' }}
+      SCENARIOS: ${{ github.event.inputs.scenarios || 'D(100,256) D(2000,128)' }}
+      DURATION_MIN: ${{ github.event.inputs.duration_min || '10' }}
       RESULTS_DIR: bench-results
       PYTHONUNBUFFERED: "1"
     steps:
