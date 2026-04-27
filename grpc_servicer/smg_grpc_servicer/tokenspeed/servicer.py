@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     # Type-only imports — not resolved at module load so the servicer is
     # importable in test environments that stub AsyncLLM / ServerArgs.
     from tokenspeed.runtime.engine.async_llm import AsyncLLM
-    from tokenspeed.runtime.server_args import ServerArgs
+    from tokenspeed.runtime.utils.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 
