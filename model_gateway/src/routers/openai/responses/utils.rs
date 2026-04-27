@@ -279,9 +279,31 @@ pub(super) fn restore_original_tools(
     session: Option<&McpToolSession<'_>>,
 ) {
     let user_function_names = collect_user_function_names(original_body);
-    strip_internal_mcp_output_items(resp, session, &user_function_names);
-    strip_internal_mcp_tools(resp, session, &user_function_names);
+    strip_internal_mcp_artifacts_with_names(resp, session, &user_function_names);
     restore_client_tool_view(resp, original_body, session, &user_function_names);
+}
+
+/// Strip internal MCP artifacts without restoring request-level client tool view.
+///
+/// Live streaming envelopes should redact leaked internals in-place, but they
+/// should not synthesize `tools` / `tool_choice` fields that upstream omitted.
+pub(super) fn strip_internal_mcp_artifacts(
+    resp: &mut Value,
+    original_body: &ResponsesRequest,
+    session: Option<&McpToolSession<'_>>,
+) {
+    let user_function_names = collect_user_function_names(original_body);
+    strip_internal_mcp_artifacts_with_names(resp, session, &user_function_names);
+}
+
+fn strip_internal_mcp_artifacts_with_names(
+    resp: &mut Value,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<String>,
+) {
+    strip_internal_mcp_output_items(resp, session, user_function_names);
+    strip_internal_mcp_tools(resp, session, user_function_names);
+    strip_internal_mcp_tool_choice(resp, session, user_function_names);
 }
 
 fn restore_client_tool_view(
@@ -378,6 +400,26 @@ fn strip_internal_mcp_tools(
     tools.retain(|tool| {
         !session.is_some_and(|s| s.should_hide_tool_json(tool, user_function_names))
     });
+}
+
+fn strip_internal_mcp_tool_choice(
+    resp: &mut Value,
+    session: Option<&McpToolSession<'_>>,
+    user_function_names: &HashSet<String>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let Some(obj) = resp.as_object_mut() else {
+        return;
+    };
+    let should_hide_tool_choice = obj
+        .get("tool_choice")
+        .is_some_and(|tool_choice| session.should_hide_tool_json(tool_choice, user_function_names));
+
+    if should_hide_tool_choice {
+        obj.insert("tool_choice".to_string(), json!("auto"));
+    }
 }
 
 fn strip_internal_mcp_output_items(
@@ -501,7 +543,10 @@ mod tests {
                     "required": ["query"]
                 }
             }],
-            "tool_choice": "auto"
+            "tool_choice": {
+                "type": "function",
+                "name": "internal_search"
+            }
         });
 
         restore_original_tools(&mut response, &original_body, Some(&session));
