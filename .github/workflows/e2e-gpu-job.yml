@@ -6,7 +6,7 @@ on:
       engine:
         required: true
         type: string
-        description: "Engine to test: sglang, vllm, or trtllm"
+        description: "Engine to test: sglang, vllm, trtllm, or tokenspeed"
       gpu_tier:
         required: true
         type: string
@@ -67,6 +67,14 @@ jobs:
       - name: Setup TRT-LLM backend
         if: inputs.engine == 'trtllm'
         uses: ./.github/actions/setup-trtllm
+
+      - name: Setup TokenSpeed backend
+        if: inputs.engine == 'tokenspeed'
+        uses: ./.github/actions/setup-tokenspeed
+        with:
+          # lightseekorg/tokenspeed is private; ``secrets: inherit`` on the
+          # caller (pr-test-rust.yml) makes this secret available here.
+          github-token: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
 
       # Artifact downloads
       - name: Download wheel artifact

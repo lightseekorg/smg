@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 # Shared Tool Definitions
 # =============================================================================
 
-# System message for Llama3.2 function calling
+# System message for Llama3.2 function calling — prescribes the
+# {"name": ..., "parameters": ...} JSON shape that the ``llama`` tool
+# parser looks for. Used by ``TestToolChoiceLlama`` below.
 LLAMA_SYSTEM_MESSAGE = (
     "You are a helpful assistant with tool calling capabilities. "
     "Only reply with a tool call if the function exists in the library provided by the user. "
@@ -100,14 +102,14 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestOpenAIServerFunctionCalling:
-    """Tests for OpenAI-compatible function calling with Llama tool parser."""
+    """Tests for OpenAI-compatible function calling with the llama tool parser."""
 
     def test_function_calling_format(self, model, api_client):
         """Test: Whether the function call format returned by the AI is correct.
@@ -265,8 +267,8 @@ class TestOpenAIServerFunctionCalling:
                         },
                         "required": ["a", "b"],
                     },
-                    # Llama-3.2-1B is flaky in tool call. It won't always respond with
-                    # parameters unless we set strict.
+                    # Llama-3.2-1B is flaky in tool call format, so we force it
+                    # with strict mode.
                     "strict": True,
                 },
             }
@@ -377,7 +379,6 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice == "required", the model should return one or more tool_calls.
         """
-
         tools = [
             {
                 "type": "function",
@@ -457,7 +458,6 @@ class TestOpenAIServerFunctionCalling:
 
         - When tool_choice is a specific ToolChoice, the model should return one or more tool_calls.
         """
-
         tools = [
             {
                 "type": "function",
@@ -526,7 +526,6 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-
         tools = [
             {
                 "type": "function",

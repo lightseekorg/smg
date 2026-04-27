@@ -1,0 +1,23 @@
+name: 'Setup TokenSpeed Backend'
+description: 'Create Python venv and install TokenSpeed (engine + kernel + scheduler) from source.'
+
+inputs:
+  github-token:
+    description: >-
+      GitHub token with read access to the (private) lightseekorg/tokenspeed
+      repository. Forwarded to ``ci_install_tokenspeed.sh`` as
+      ``TOKENSPEED_GITHUB_TOKEN`` so the clone uses HTTPS basic auth.
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python venv
+      shell: bash
+      run: bash scripts/ci_setup_python_venv.sh
+
+    - name: Install TokenSpeed
+      shell: bash
+      env:
+        TOKENSPEED_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: bash scripts/ci_install_tokenspeed.sh

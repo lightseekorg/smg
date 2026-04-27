@@ -42,6 +42,13 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "tool_choice"],
     },
+    # Qwen3 small chat model — used as a TokenSpeed-supported substitute
+    # while TokenSpeed's model registry does not cover LlamaForCausalLM.
+    "Qwen/Qwen3-4B": {
+        "model": _resolve_model_path("Qwen/Qwen3-4B"),
+        "tp": 1,
+        "features": ["chat", "streaming", "function_calling", "tool_choice"],
+    },
     # Function calling specialist
     "Qwen/Qwen2.5-7B-Instruct": {
         "model": _resolve_model_path("Qwen/Qwen2.5-7B-Instruct"),
@@ -61,11 +68,21 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "reasoning"],
     },
-    # Thinking/reasoning model (larger)
+    # Thinking/reasoning model (larger).
+    # Also used by TestOpenAIServerFunctionCalling as a TokenSpeed-supported
+    # substitute while TokenSpeed's model registry does not cover plain
+    # LlamaForCausalLM (only MoE / Eagle3 variants). Arch: Qwen3MoeForCausalLM.
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
         "tp": 1,
-        "features": ["chat", "streaming", "thinking", "reasoning"],
+        "features": [
+            "chat",
+            "streaming",
+            "thinking",
+            "reasoning",
+            "function_calling",
+            "tool_choice",
+        ],
         "vllm_args": [] if _is_nightly else ["--enforce-eager"],
         "trtllm_extra_config": {"kv_cache_config": {"free_gpu_memory_fraction": 0.8}},
     },

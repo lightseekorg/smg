@@ -96,6 +96,16 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
                     "MLX embedding is not supported via gRPC",
                 ));
             }
+            GrpcClient::TokenSpeed(_) => {
+                error!(
+                    function = "EmbeddingRequestBuildingStage::execute",
+                    "TokenSpeed backend does not support embeddings"
+                );
+                return Err(error::not_implemented(
+                    "unsupported_backend",
+                    "TokenSpeed backend does not support embeddings",
+                ));
+            }
         };
 
         ctx.state.proto_request = Some(ProtoRequest::Embed(proto_req));
