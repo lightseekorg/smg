@@ -15,7 +15,7 @@ from typing import Any
 
 from tokenspeed.runtime.engine.async_llm import AsyncLLM
 from tokenspeed.runtime.entrypoints.engine import _launch_subprocesses
-from tokenspeed.runtime.server_args import PortArgs, ServerArgs
+from tokenspeed.runtime.utils.server_args import PortArgs, ServerArgs
 
 logger = logging.getLogger(__name__)
 

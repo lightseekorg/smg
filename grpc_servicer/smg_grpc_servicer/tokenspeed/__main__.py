@@ -4,7 +4,7 @@ Usage::
 
     python -m smg_grpc_servicer.tokenspeed --model-path <model> --host 127.0.0.1 --port 50051
 
-All :class:`tokenspeed.runtime.server_args.ServerArgs` flags are accepted
+All :class:`tokenspeed.runtime.utils.server_args.ServerArgs` flags are accepted
 verbatim (we reuse TokenSpeed's own ``prepare_server_args`` so there is no
 flag drift between the HTTP and gRPC frontends).
 """
@@ -16,7 +16,7 @@ import logging
 import sys
 
 import uvloop
-from tokenspeed.runtime.server_args import prepare_server_args
+from tokenspeed.runtime.utils.server_args import prepare_server_args
 
 from smg_grpc_servicer.tokenspeed.server import serve_grpc
 
