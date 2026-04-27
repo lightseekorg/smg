@@ -141,6 +141,10 @@ pub(crate) async fn serve_harmony_responses_stream(
 /// - Loops through tool execution iterations
 /// - Emits final response.completed event
 /// - Persists response internally
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming MCP loop threads ctx, requests, MCP state, turn info, emitter, and tx together"
+)]
 async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,

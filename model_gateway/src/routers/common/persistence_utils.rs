@@ -572,6 +572,10 @@ pub async fn persist_conversation_items(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inner persistence fn assembles all storage handles, memory context, and turn info in one flow"
+)]
 async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,

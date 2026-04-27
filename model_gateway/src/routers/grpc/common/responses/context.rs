@@ -83,15 +83,4 @@ impl ResponsesContext {
             memory_execution_context,
         }
     }
-
-    /// Clone this context while swapping in a request-scoped storage context.
-    ///
-    /// Mirrors the pattern from PR #1357 to avoid duplicated constructor wiring
-    /// at call sites that need to attach a per-request storage hook context.
-    pub fn with_request_context(&self, request_context: Option<StorageRequestContext>) -> Self {
-        Self {
-            request_context,
-            ..self.clone()
-        }
-    }
 }
