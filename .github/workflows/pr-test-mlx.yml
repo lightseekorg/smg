@@ -69,14 +69,6 @@ jobs:
           shared-key: mlx-pr-test
           cache-on-failure: true
 
-      - name: Cache HuggingFace models
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface/hub
-          key: hf-mlx-${{ runner.os }}-Qwen3-0.6B-4bit
-          restore-keys: |
-            hf-mlx-${{ runner.os }}-
-
       - name: Install uv (for openapi codegen)
         run: pip install uv
 
