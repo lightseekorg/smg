@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use memchr::memmem;
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-    common::{InputIds, StringOrArray},
+    common::{GenerationRequest, InputIds, StringOrArray},
     completion::CompletionRequest,
     generate::GenerateRequest,
     rerank::RerankRequest,
@@ -45,13 +45,31 @@ use crate::{
     worker::{HashRing, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
 };
 
-#[derive(Debug)]
 pub struct PDRouter {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
     pub client: Client,
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
+    tokenizer_registry: Arc<llm_tokenizer::registry::TokenizerRegistry>,
+    app_token_rate_limiter: Option<Arc<crate::rate_limit::LocalTokenRateLimiter>>,
+}
+
+impl std::fmt::Debug for PDRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PDRouter")
+            .field("worker_registry", &self.worker_registry)
+            .field("policy_registry", &self.policy_registry)
+            .field("client", &self.client)
+            .field("retry_config", &self.retry_config)
+            .field("api_key", &self.api_key.as_ref().map(|_| "configured"))
+            .field("tokenizer_registry", &"configured")
+            .field(
+                "app_token_rate_limiter",
+                &self.app_token_rate_limiter.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +84,37 @@ struct PDRequestContext<'a> {
 }
 
 impl PDRouter {
+    fn count_tokens<T: GenerationRequest>(&self, body: &T, model_id: &str) -> u32 {
+        let text = body.extract_text_for_routing();
+        if text.is_empty() {
+            return 1;
+        }
+
+        let Some(tokenizer) = self.tokenizer_registry.get(model_id) else {
+            return ((text.chars().count() as u32) / 4).max(1);
+        };
+
+        tokenizer
+            .encode(&text, false)
+            .map(|encoding| encoding.token_ids().len() as u32)
+            .unwrap_or_else(|_| ((text.chars().count() as u32) / 4).max(1))
+            .max(1)
+    }
+
+    fn enforce_token_rate_limit<T: GenerationRequest>(
+        &self,
+        tenant_meta: &TenantRequestMeta,
+        body: &T,
+        model_id: &str,
+    ) -> Option<Response> {
+        let limiter = self.app_token_rate_limiter.as_ref()?;
+        let estimated_tokens = self.count_tokens(body, model_id);
+        limiter
+            .check_and_consume(tenant_meta.tenant_key().as_str(), estimated_tokens)
+            .err()
+            .map(crate::rate_limit::rate_limit_exceeded_response)
+    }
+
     async fn proxy_to_first_prefill_worker(
         &self,
         endpoint: &str,
@@ -168,6 +217,8 @@ impl PDRouter {
             client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
+            tokenizer_registry: ctx.tokenizer_registry.clone(),
+            app_token_rate_limiter: ctx.token_rate_limiter.clone(),
         })
     }
 
@@ -1278,10 +1329,13 @@ impl RouterTrait for PDRouter {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         let is_stream = body.stream;
         let return_logprob = body.return_logprob.unwrap_or(false);
 
@@ -1309,10 +1363,13 @@ impl RouterTrait for PDRouter {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         let is_stream = body.stream;
         let return_logprob = body.logprobs;
 
@@ -1352,10 +1409,13 @@ impl RouterTrait for PDRouter {
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         let is_stream = body.stream;
         let return_logprob = body.logprobs.is_some();
 
@@ -1387,10 +1447,13 @@ impl RouterTrait for PDRouter {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         // Extract text for cache-aware routing
         let req_text = if self.policies_need_request_text() {
             Some(body.query.clone())
@@ -1434,6 +1497,8 @@ mod tests {
             client: Client::new(),
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
+            tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
+            app_token_rate_limiter: None,
         }
     }
 

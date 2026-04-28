@@ -1295,6 +1295,13 @@ impl CliArgs {
             let tpm = parts.next().and_then(|s| s.parse::<u32>().ok());
             let tenant_key = parts.next();
             if let (Some(tenant_key), Some(tpm), Some(rpm)) = (tenant_key, tpm, rpm) {
+                if tenant_key.is_empty() {
+                    return Err(ConfigError::ValidationFailed {
+                        reason: format!(
+                            "invalid --tenant-rate-limit '{spec}'; expected tenant_key:tpm:rpm"
+                        ),
+                    });
+                }
                 builder = builder.tenant_rate_limit(tenant_key, tpm, rpm);
             } else {
                 return Err(ConfigError::ValidationFailed {

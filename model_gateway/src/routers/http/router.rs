@@ -1234,11 +1234,14 @@ impl RouterTrait for Router {
     async fn route_audio_transcriptions(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &TranscriptionRequest,
         audio: AudioFile,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_multipart_transcription(
             headers,
             body,
@@ -1252,10 +1255,13 @@ impl RouterTrait for Router {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         let response = self
             .route_typed_request(headers, body, "/v1/rerank", model_id)
             .await;
