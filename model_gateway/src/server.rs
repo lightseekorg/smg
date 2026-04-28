@@ -204,7 +204,7 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
         .client
         .post(&probe_url)
         .json(&probe_body)
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(60))
         .send()
         .await;
     let duration_ms = start.elapsed().as_millis();
