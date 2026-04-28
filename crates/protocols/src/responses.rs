@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_with::DefaultOnNull;
 use validator::{Validate, ValidationError};
 
 use super::{
@@ -264,13 +265,23 @@ impl Default for ResponsesToolChoice {
 }
 
 impl ResponsesToolChoice {
-    /// Serialize tool_choice to string for ResponsesResponse payloads.
+    /// Serialize tool_choice to the ResponsesResponse payload shape.
     ///
-    /// Returns the JSON-serialized tool_choice or `"auto"` as default.
-    pub fn serialize_to_string(tool_choice: Option<&ResponsesToolChoice>) -> String {
+    /// Bare options stay bare strings (`"auto"`), object variants stay objects.
+    pub fn serialize_to_value(tool_choice: Option<&ResponsesToolChoice>) -> Value {
         tool_choice
-            .map(|tc| serde_json::to_string(tc).unwrap_or_else(|_| "auto".to_string()))
-            .unwrap_or_else(|| "auto".to_string())
+            .and_then(|tc| serde_json::to_value(tc).ok())
+            .unwrap_or_else(|| Value::String("auto".to_string()))
+    }
+
+    /// Serialize tool_choice to a plain string for legacy call sites.
+    /// Object variants are returned as compact JSON text; bare options return
+    /// the unquoted option value.
+    pub fn serialize_to_string(tool_choice: Option<&ResponsesToolChoice>) -> String {
+        match Self::serialize_to_value(tool_choice) {
+            Value::String(s) => s,
+            other => other.to_string(),
+        }
     }
 
     /// Return the pinned function name for the `Function` variant, regardless
@@ -1629,6 +1640,38 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// `type: "web_search_call"` — round-trip form for a prior hosted web
+    /// search output item.
+    #[serde(rename = "web_search_call")]
+    WebSearchCall {
+        id: String,
+        status: WebSearchCallStatus,
+        action: WebSearchAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<WebSearchResult>>,
+    },
+    /// `type: "code_interpreter_call"` — round-trip form for a prior hosted
+    /// code-interpreter output item.
+    #[serde(rename = "code_interpreter_call")]
+    CodeInterpreterCall {
+        id: String,
+        status: CodeInterpreterCallStatus,
+        container_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outputs: Option<Vec<CodeInterpreterOutput>>,
+    },
+    /// `type: "file_search_call"` — round-trip form for a prior hosted file
+    /// search output item.
+    #[serde(rename = "file_search_call")]
+    FileSearchCall {
+        id: String,
+        status: FileSearchCallStatus,
+        queries: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<FileSearchResult>>,
+    },
     /// `type: "image_generation_call"` — round-trip form for an image generated
     /// in a prior turn. Spec (OpenAI Responses API, multi-turn image-edit
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
@@ -2145,12 +2188,16 @@ pub enum ResponseOutputItem {
         id: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         summary: Vec<SummaryTextContent>,
+        // `content` is kept on the type for input round-trip but omitted
+        // from terminal output items per spec.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<ResponseReasoningContent>,
         /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
         /// Opaque to SMG; preserved verbatim.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         encrypted_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
     #[serde(rename = "function_call")]
@@ -2179,6 +2226,7 @@ pub enum ResponseOutputItem {
     McpCall {
         id: String,
         status: String,
+        #[serialize_always]
         approval_request_id: Option<String>,
         arguments: String,
         error: Option<String>,
@@ -3135,6 +3183,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::FunctionCallOutput { .. }
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. }
+                        | ResponseInputOutputItem::WebSearchCall { .. }
+                        | ResponseInputOutputItem::CodeInterpreterCall { .. }
+                        | ResponseInputOutputItem::FileSearchCall { .. }
                         | ResponseInputOutputItem::ImageGenerationCall { .. }
                         | ResponseInputOutputItem::Compaction { .. }
                         | ResponseInputOutputItem::ComputerCall { .. }
@@ -3331,20 +3382,31 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         return Err(e);
     }
 
-    // 5. Validate input items structure
+    // 5. Validate input items structure.
+    //
+    // The request must drive the loop forward in some way. A fresh
+    // user turn does that with a `Message` / `SimpleInputMessage`.
+    // An approval continuation does it with `McpApprovalResponse`(s)
+    // — there is no new user message in that shape, only the
+    // user's approve/deny decision for a previously paused tool.
+    // Either kind alone is sufficient; the agent loop's
+    // `prime_pending_from_approval` will reject orphan approval
+    // responses that have no matching `mcp_approval_request` in the
+    // chain at request time.
     if let ResponseInput::Items(items) = &request.input {
-        // Check for at least one valid input message
         let has_valid_input = items.iter().any(|item| {
             matches!(
                 item,
                 ResponseInputOutputItem::Message { .. }
                     | ResponseInputOutputItem::SimpleInputMessage { .. }
+                    | ResponseInputOutputItem::McpApprovalResponse { .. }
             )
         });
 
         if !has_valid_input {
             let mut e = ValidationError::new("input_missing_user_message");
-            e.message = Some("Input items must contain at least one message".into());
+            e.message =
+                Some("Input items must contain at least one message or approval response".into());
             return Err(e);
         }
     }
@@ -3421,6 +3483,9 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::FunctionToolCall { .. } => {}
         ResponseInputOutputItem::McpApprovalRequest { .. } => {}
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+        ResponseInputOutputItem::WebSearchCall { .. } => {}
+        ResponseInputOutputItem::CodeInterpreterCall { .. } => {}
+        ResponseInputOutputItem::FileSearchCall { .. } => {}
         ResponseInputOutputItem::ImageGenerationCall { .. } => {}
         ResponseInputOutputItem::Compaction { .. } => {}
         ResponseInputOutputItem::ComputerCall { .. } => {}
@@ -3611,7 +3676,7 @@ pub fn generate_id(prefix: &str) -> String {
     format!("{prefix}_{hex_string}")
 }
 
-#[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct ResponsesResponse {
@@ -3634,9 +3699,12 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub background: Option<bool>,
 
-    /// Conversation this response is linked to, if any.
-    #[serde(default)]
-    pub conversation: Option<String>,
+    /// Conversation this response is linked to. Always serialized as
+    /// `{ "id": "..." }`; deserialize accepts both that shape and the
+    /// bare-string form via [`ConversationRef`]'s `untagged` enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde_as(serialize_as = "Option<ConversationAsObject>")]
+    pub conversation: Option<ConversationRef>,
 
     /// Response status
     pub status: ResponseStatus,
@@ -3647,11 +3715,21 @@ pub struct ResponsesResponse {
     /// Incomplete details if response was truncated
     pub incomplete_details: Option<Value>,
 
+    /// Billing information. Present for OpenAI Responses schema parity;
+    /// currently not populated by SMG.
+    pub billing: Option<Value>,
+
     /// System instructions used
     pub instructions: Option<String>,
 
     /// Max output tokens setting
     pub max_output_tokens: Option<u32>,
+
+    /// Maximum number of tool calls requested by the caller.
+    pub max_tool_calls: Option<u32>,
+
+    /// Frequency penalty setting used.
+    pub frequency_penalty: Option<f32>,
 
     /// Model name
     pub model: String,
@@ -3667,12 +3745,27 @@ pub struct ResponsesResponse {
     /// Previous response ID if this is a continuation
     pub previous_response_id: Option<String>,
 
+    /// Top-level moderation info. Present for schema parity; currently null.
+    pub moderation: Option<Value>,
+
+    /// Presence penalty setting used.
+    pub presence_penalty: Option<f32>,
+
+    /// Stable prompt cache key echoed from request.
+    pub prompt_cache_key: Option<String>,
+
+    /// Prompt cache retention echoed from request.
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+
     /// Reasoning information
-    pub reasoning: Option<ReasoningInfo>,
+    pub reasoning: Option<Value>,
 
     /// Whether the response is stored
     #[serde(default = "default_true")]
     pub store: bool,
+
+    /// Service tier used for the request.
+    pub service_tier: Option<ServiceTier>,
 
     /// Temperature setting used
     pub temperature: Option<f32>,
@@ -3682,17 +3775,20 @@ pub struct ResponsesResponse {
 
     /// Tool choice setting
     #[serde(default = "default_tool_choice")]
-    pub tool_choice: String,
+    pub tool_choice: Value,
 
-    /// Available tools
-    #[serde(default)]
+    /// Available tools. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ResponseTool>,
+
+    /// Number of top logprobs requested.
+    pub top_logprobs: Option<u32>,
 
     /// Top-p setting used
     pub top_p: Option<f32>,
 
     /// Truncation strategy used
-    pub truncation: Option<String>,
+    pub truncation: Option<Truncation>,
 
     /// Usage information
     pub usage: Option<ResponsesUsage>,
@@ -3703,8 +3799,10 @@ pub struct ResponsesResponse {
     /// Safety identifier for content moderation
     pub safety_identifier: Option<String>,
 
-    /// Additional metadata
+    /// Additional metadata. Accepts `null` from upstream (OpenAI cloud
+    /// emits `"metadata": null` for empty maps).
     #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnNull")]
     pub metadata: HashMap<String, Value>,
 }
 
@@ -3712,8 +3810,24 @@ fn default_object_type() -> String {
     "response".to_string()
 }
 
-fn default_tool_choice() -> String {
-    "auto".to_string()
+fn default_tool_choice() -> Value {
+    Value::String("auto".to_string())
+}
+
+/// `serde_with` adapter forcing response-side `conversation` to always
+/// emit `{ "id": "..." }`.
+pub struct ConversationAsObject;
+
+impl serde_with::SerializeAs<ConversationRef> for ConversationAsObject {
+    fn serialize_as<S>(source: &ConversationRef, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ConversationRef", 1)?;
+        s.serialize_field("id", source.as_id())?;
+        s.end()
+    }
 }
 
 impl ResponsesResponse {

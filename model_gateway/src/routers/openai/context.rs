@@ -3,18 +3,22 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
-use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest},
+};
 use serde_json::Value;
 use smg_data_connector::{
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
     RequestContext as StorageRequestContext, ResponseStorage,
 };
-use smg_mcp::{McpOrchestrator, McpToolSession};
+use smg_mcp::McpOrchestrator;
 
 use super::provider::Provider;
 use crate::{
     config::RouterConfig, memory::MemoryExecutionContext, middleware,
-    middleware::TenantRequestMeta, worker::Worker,
+    middleware::TenantRequestMeta, routers::common::agent_loop::ToolTransferDescriptor,
+    worker::Worker,
 };
 
 pub struct RequestContext {
@@ -132,6 +136,8 @@ pub struct PayloadState {
 pub struct ResponsesPayloadState {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub prepared_input: Option<ResponseInput>,
+    pub control_items: Vec<ResponseInputOutputItem>,
 }
 
 impl RequestContext {
@@ -256,72 +262,12 @@ pub struct StorageHandles {
     pub response: Arc<dyn ResponseStorage>,
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
-    /// Conversation memory writer (can be NoOp depending on backend).
-    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub request_context: Option<StorageRequestContext>,
-    pub memory_execution_context: MemoryExecutionContext,
-}
-
-pub struct OwnedStreamingContext {
-    pub url: String,
-    pub payload: Value,
-    pub original_body: ResponsesRequest,
-    pub previous_response_id: Option<String>,
-    pub existing_mcp_list_tools_labels: Vec<String>,
-    pub storage: StorageHandles,
-}
-
-impl RequestContext {
-    pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
-        let payload_state = self.take_payload().ok_or("Payload not prepared")?;
-        let responses_payload_state = self.take_responses_payload().unwrap_or_default();
-        let original_body = self
-            .responses_request()
-            .ok_or("Expected responses request")?
-            .clone();
-        let response = self
-            .components
-            .response_storage()
-            .ok_or("Response storage required")?
-            .clone();
-        let conversation = self
-            .components
-            .conversation_storage()
-            .ok_or("Conversation storage required")?
-            .clone();
-        let conversation_item = self
-            .components
-            .conversation_item_storage()
-            .ok_or("Conversation item storage required")?
-            .clone();
-        let conversation_memory_writer = self
-            .components
-            .conversation_memory_writer()
-            .ok_or("Conversation memory writer required")?
-            .clone();
-
-        Ok(OwnedStreamingContext {
-            url: payload_state.url,
-            payload: payload_state.json,
-            original_body,
-            previous_response_id: responses_payload_state.previous_response_id,
-            existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
-            storage: StorageHandles {
-                response,
-                conversation,
-                conversation_item,
-                conversation_memory_writer,
-                request_context: self.storage_request_context,
-                memory_execution_context: self.memory_execution_context,
-            },
-        })
-    }
 }
 
 pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
-    pub session: Option<&'a McpToolSession<'a>>,
+    pub tool_transfers: &'a std::collections::HashMap<String, ToolTransferDescriptor>,
+    pub tool_server_labels: &'a std::collections::HashMap<String, String>,
 }
-
-pub type StreamingRequest = OwnedStreamingContext;

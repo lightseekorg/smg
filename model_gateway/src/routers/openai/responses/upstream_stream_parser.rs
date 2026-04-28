@@ -1,4 +1,4 @@
-//! Streaming tool call handling for MCP interception.
+//! OpenAI upstream Responses SSE parser.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,14 +12,10 @@ use crate::routers::openai::responses::{
     extract_output_index, get_event_type, StreamingResponseAccumulator,
 };
 
-/// Item-type discriminators for output items that the streaming tool loop
-/// closes with its own `output_item.done` umbrella event. Upstream emits its
-/// own duplicate umbrella before the structured `<type>.completed` sub-event,
-/// which would violate the spec requirement that `output_item.done` is the
-/// LAST event for a given item (see `.claude/_audit/openai-responses-api-spec.md`
-/// §streaming). Whenever an `output_item.done` arrives for one of these types
-/// while a tool call is pending, we suppress the upstream copy and let the
-/// tool loop emit the umbrella at the correct position.
+/// Item-type discriminators for output items whose upstream umbrella
+/// `output_item.done` may arrive before the structured `<type>.completed`
+/// sub-event. The parser suppresses the early duplicate so the sink can emit
+/// the terminal umbrella in the right position.
 const TOOL_CALL_ITEM_TYPES: &[&str] = &[
     ItemType::FUNCTION_CALL,
     ItemType::FUNCTION_TOOL_CALL,
@@ -30,36 +26,29 @@ const TOOL_CALL_ITEM_TYPES: &[&str] = &[
 ];
 
 /// Check whether an item-type string designates a tool-call item whose
-/// umbrella `output_item.done` is re-emitted by the tool loop (and therefore
+/// umbrella `output_item.done` is re-emitted by the sink (and therefore
 /// must be suppressed when forwarded by upstream).
 fn is_tool_call_item_type(item_type: &str) -> bool {
     TOOL_CALL_ITEM_TYPES.contains(&item_type)
 }
 
-/// Action to take based on streaming event processing
+/// Action to take based on upstream SSE parsing.
 #[derive(Debug)]
-pub(crate) enum StreamAction {
+pub(crate) enum StreamParserAction {
     /// Pass this event to the client.
     Forward,
     /// Accumulate the event for tool execution, do not send downstream.
     Buffer,
-    /// Drop the upstream event from the wire without triggering tool
-    /// execution.
+    /// Drop the upstream event from the wire.
     ///
-    /// Used for the R6.7c native-passthrough suppression: when the upstream
-    /// OpenAI cloud API emits a hosted tool-call item (e.g.
-    /// `image_generation_call`) directly and the accompanying umbrella
-    /// `output_item.done` arrives BEFORE `response.<type>.completed`,
-    /// forwarding the umbrella would violate the spec ordering invariant
-    /// (see `.claude/_audit/openai-responses-api-spec.md` §streaming). The
-    /// handler drops the duplicated/mis-ordered envelope; the subsequent
-    /// `<type>.completed` still reaches the client and upstream re-emits the
-    /// correctly-ordered umbrella later on the wire. Unlike
-    /// [`StreamAction::ExecuteTools`], this variant does NOT kick the tool
-    /// loop — native passthrough items are not tracked in the handler's
-    /// pending-call registry, so there is nothing to dispatch.
+    /// Used for native hosted-tool passthrough: the first upstream umbrella can
+    /// be an early duplicate. Dropping it preserves event ordering while
+    /// allowing the later correctly-ordered umbrella through.
     Drop,
-    /// The upstream signalled tool-call completion — run the MCP tool now.
+    /// The upstream signalled that at least one tool-call item reached its
+    /// emission boundary. The adapter may forward the triggering event, but it
+    /// must keep draining the upstream turn; the common driver decides when
+    /// execution happens after the full turn is parsed.
     ///
     /// `forward_triggering_event` distinguishes two upstream shapes:
     ///
@@ -71,11 +60,10 @@ pub(crate) enum StreamAction {
     ///   item, forwarding it would emit a duplicate umbrella
     ///   `response.output_item.done` event that fires BEFORE the sub-event
     ///   `response.<type>.completed` — violating the spec sub-event ordering
-    ///   (spec §streaming: the umbrella `output_item.done` is always the
-    ///   LAST event for a given item). The tool_loop's
-    ///   `send_tool_call_completion_events` emits the correct umbrella
-    ///   `output_item.done` in its proper position.
-    ExecuteTools { forward_triggering_event: bool },
+    ///   (spec: the umbrella `output_item.done` is always the LAST event for a
+    ///   given item). The common sink emits the correct umbrella in its proper
+    ///   position after execution.
+    ToolCallReady { forward_triggering_event: bool },
 }
 
 /// Maps upstream output indices to sequential downstream indices
@@ -106,20 +94,18 @@ impl OutputIndexMapper {
         self.assigned.get(&upstream_index).copied()
     }
 
-    pub fn allocate_synthetic(&mut self) -> usize {
-        let assigned = self.next_index;
-        self.next_index += 1;
-        assigned
-    }
-
     pub fn next_index(&self) -> usize {
         self.next_index
     }
+
+    pub fn advance_to(&mut self, next_index: usize) {
+        self.next_index = self.next_index.max(next_index);
+    }
 }
 
-/// Represents a function call being accumulated across delta events
+/// Function call accumulated across upstream delta events.
 #[derive(Debug, Clone)]
-pub(crate) struct FunctionCallInProgress {
+pub(crate) struct ParsedFunctionCall {
     pub call_id: String,
     pub name: String,
     pub arguments_buffer: String,
@@ -129,7 +115,7 @@ pub(crate) struct FunctionCallInProgress {
     pub assigned_output_index: Option<usize>,
 }
 
-impl FunctionCallInProgress {
+impl ParsedFunctionCall {
     pub fn new(call_id: String, output_index: usize) -> Self {
         Self {
             call_id,
@@ -151,29 +137,29 @@ impl FunctionCallInProgress {
     }
 }
 
-/// Handles streaming responses with MCP tool call interception
-pub(crate) struct StreamingToolHandler {
+/// Parses streaming Responses events and accumulates function calls.
+pub(crate) struct OpenAiUpstreamStreamParser {
     /// Accumulator for response persistence
     pub accumulator: StreamingResponseAccumulator,
     /// Function calls being built from deltas
-    pub pending_calls: Vec<FunctionCallInProgress>,
+    pub pending_calls: Vec<ParsedFunctionCall>,
     /// Manage output_index remapping so they increment per item
     output_index_mapper: OutputIndexMapper,
     /// Original response id captured from the first response.created event
     pub original_response_id: Option<String>,
     /// Output indices whose `output_item.added` carried a known tool-call
-    /// item type that the MCP-dispatch registry does NOT track (i.e. upstream
+    /// item type that the intercepted-call registry does NOT track (i.e. upstream
     /// emitted a native hosted-tool item directly — `image_generation_call`,
     /// `web_search_call`, `code_interpreter_call`, `file_search_call` — rather
     /// than wrapping it as a `function_call` that [`handle_output_item_added`]
     /// would register in `pending_calls`). Recorded so the
-    /// `output_item.done` gate can recognise the R6.7c "native passthrough"
-    /// path and drop the duplicate/mis-ordered umbrella without kicking the
-    /// tool loop.
+    /// `output_item.done` gate can recognise the native passthrough
+    /// path and drop the duplicate/mis-ordered umbrella without entering the
+    /// intercepted-call path.
     native_passthrough_tool_call_indices: HashSet<usize>,
 }
 
-impl StreamingToolHandler {
+impl OpenAiUpstreamStreamParser {
     pub fn with_starting_index(start: usize) -> Self {
         Self {
             accumulator: StreamingResponseAccumulator::new(),
@@ -192,12 +178,12 @@ impl StreamingToolHandler {
         self.output_index_mapper.lookup(upstream_index)
     }
 
-    pub fn allocate_synthetic_output_index(&mut self) -> usize {
-        self.output_index_mapper.allocate_synthetic()
-    }
-
     pub fn next_output_index(&self) -> usize {
         self.output_index_mapper.next_index()
+    }
+
+    pub fn advance_next_output_index_to(&mut self, next_index: usize) {
+        self.output_index_mapper.advance_to(next_index);
     }
 
     pub fn original_response_id(&self) -> Option<&str> {
@@ -210,8 +196,8 @@ impl StreamingToolHandler {
         self.accumulator.snapshot_final_response()
     }
 
-    /// Process an SSE event and determine what action to take
-    pub fn process_event(&mut self, event_name: Option<&str>, data: &str) -> StreamAction {
+    /// Process an SSE event and determine what action to take.
+    pub fn process_event(&mut self, event_name: Option<&str>, data: &str) -> StreamParserAction {
         // Always feed to accumulator for storage
         self.accumulator.ingest_block(&format!(
             "{}data: {}",
@@ -223,7 +209,7 @@ impl StreamingToolHandler {
 
         let parsed: Value = match serde_json::from_str(data) {
             Ok(v) => v,
-            Err(_) => return StreamAction::Forward,
+            Err(_) => return StreamParserAction::Forward,
         };
 
         match get_event_type(event_name, &parsed) {
@@ -235,9 +221,9 @@ impl StreamingToolHandler {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                 }
-                StreamAction::Forward
+                StreamParserAction::Forward
             }
-            ResponseEvent::COMPLETED => StreamAction::Forward,
+            ResponseEvent::COMPLETED => StreamParserAction::Forward,
             OutputItemEvent::ADDED => self.handle_output_item_added(&parsed),
             FunctionCallEvent::ARGUMENTS_DELTA => self.handle_arguments_delta(&parsed),
             FunctionCallEvent::ARGUMENTS_DONE => self.handle_arguments_done(&parsed),
@@ -267,22 +253,22 @@ impl StreamingToolHandler {
                     .and_then(|item| item.get("type"))
                     .and_then(|value| value.as_str())
                     .is_some_and(is_tool_call_item_type);
-                // R6.7b MCP-dispatch guard: require the done event's
+                // Intercepted-call guard: require the done event's
                 // `output_index` to match one of our pending calls. Without
                 // this, a mixed stream that carries a function_call the
                 // handler intercepts plus a native hosted-tool item at a
                 // different output_index could have its hosted-tool
                 // `output_item.done` suppressed via the wrong arm — the
-                // tool loop only re-emits umbrellas for items it
+                // sink only re-emits umbrellas for items it
                 // dispatched, so routing a passthrough item through the
-                // MCP-dispatch arm would drop it permanently. The
-                // output_index match ensures the MCP-dispatch arm only
-                // kicks in for items tracked by `pending_calls`.
+                // intercepted-call arm would drop it permanently. The
+                // output_index match ensures that arm only applies to items
+                // tracked by `pending_calls`.
                 let belongs_to_pending_call = done_output_index
                     .is_some_and(|idx| self.pending_calls.iter().any(|c| c.output_index == idx));
-                // R6.7c native-passthrough guard: an upstream
+                // Native-passthrough guard: an upstream
                 // `output_item.added` for a known hosted tool-call item
-                // type that the MCP-dispatch path does NOT track
+                // type that the intercepted-call path does NOT track
                 // registered this output_index in
                 // `native_passthrough_tool_call_indices`. When the
                 // matching `output_item.done` arrives — mis-ordered BEFORE
@@ -290,8 +276,8 @@ impl StreamingToolHandler {
                 // the upstream envelope rather than forwarding it, so the
                 // wire order the client sees satisfies the spec invariant
                 // that `output_item.done` is the LAST event for a given
-                // item. Unlike the MCP-dispatch arm, this path does NOT
-                // kick the tool loop (there is nothing to dispatch — the
+                // item. Unlike the intercepted-call arm, this path does NOT
+                // run execution (there is nothing to dispatch; the
                 // item was not intercepted).
                 //
                 // We `take()` the index out of the set (via `remove`) so
@@ -304,63 +290,56 @@ impl StreamingToolHandler {
                 // dropped and the client would never receive a final
                 // umbrella for the passthrough item.
                 if is_tool_call_done && belongs_to_pending_call && self.has_complete_calls() {
-                    // MCP-dispatch path (R6.7b): suppress the upstream
-                    // umbrella event and kick the tool loop — it will emit
-                    // its own `output_item.done` at the correct position,
+                    // Intercepted-call path: suppress the upstream umbrella
+                    // event. The sink will emit its own `output_item.done`,
                     // AFTER `response.<type>.completed`.
-                    StreamAction::ExecuteTools {
+                    StreamParserAction::ToolCallReady {
                         forward_triggering_event: false,
                     }
                 } else if is_tool_call_done
                     && done_output_index
                         .is_some_and(|idx| self.native_passthrough_tool_call_indices.remove(&idx))
                 {
-                    // Native passthrough path (R6.7c): drop the upstream
-                    // umbrella without running the tool loop. The
+                    // Native passthrough path: drop the upstream
+                    // umbrella without running execution. The
                     // downstream `<type>.completed` event still reaches
                     // the client, and upstream's subsequent
                     // correctly-ordered `output_item.done` is forwarded
                     // (the index was removed above so this branch will
                     // not match a second time for the same item).
-                    StreamAction::Drop
+                    StreamParserAction::Drop
                 } else {
-                    StreamAction::Forward
+                    StreamParserAction::Forward
                 }
             }
-            _ => StreamAction::Forward,
+            _ => StreamParserAction::Forward,
         }
     }
 
-    fn handle_output_item_added(&mut self, parsed: &Value) -> StreamAction {
+    fn handle_output_item_added(&mut self, parsed: &Value) -> StreamParserAction {
         let cached_output_index = extract_output_index(parsed);
         if let Some(output_index) = cached_output_index {
             self.ensure_output_index(output_index);
         }
 
         let Some(item) = parsed.get("item") else {
-            return StreamAction::Forward;
+            return StreamParserAction::Forward;
         };
         let Some(item_type) = item.get("type").and_then(|v| v.as_str()) else {
-            return StreamAction::Forward;
+            return StreamParserAction::Forward;
         };
 
         if !is_function_call_type(item_type) {
-            // R6.7c: when upstream emits a hosted tool-call item directly
-            // (e.g. `image_generation_call` from OpenAI cloud native
-            // passthrough), record the output_index so the matching
-            // `output_item.done` gate can recognise the item as native
-            // passthrough rather than an MCP-dispatched call. This is the
-            // counterpart to the `belongs_to_pending_call` guard added in
-            // R6.7b — together they let the gate distinguish
-            // MCP-dispatch (tracked in `pending_calls`) from native
-            // passthrough (tracked here) without confusing the two.
+            // Native hosted-tool passthrough: record the output_index so the
+            // matching `output_item.done` can be treated as an upstream-owned
+            // item rather than an intercepted function call.
             if is_tool_call_item_type(item_type) {
                 if let Some(output_index) = cached_output_index {
                     self.native_passthrough_tool_call_indices
                         .insert(output_index);
                 }
             }
-            return StreamAction::Forward;
+            return StreamParserAction::Forward;
         }
 
         let Some(output_index) = cached_output_index else {
@@ -368,7 +347,7 @@ impl StreamingToolHandler {
                 "Missing output_index in function_call added event, \
                  forwarding without processing for tool execution"
             );
-            return StreamAction::Forward;
+            return StreamParserAction::Forward;
         };
 
         let assigned_index = self.ensure_output_index(output_index);
@@ -384,12 +363,12 @@ impl StreamingToolHandler {
             .map(|id| id.to_string());
         call.assigned_output_index = Some(assigned_index);
 
-        StreamAction::Forward
+        StreamParserAction::Forward
     }
 
-    fn handle_arguments_delta(&mut self, parsed: &Value) -> StreamAction {
+    fn handle_arguments_delta(&mut self, parsed: &Value) -> StreamParserAction {
         let Some(output_index) = extract_output_index(parsed) else {
-            return StreamAction::Forward;
+            return StreamParserAction::Forward;
         };
 
         let assigned_index = self.ensure_output_index(output_index);
@@ -405,10 +384,10 @@ impl StreamingToolHandler {
                 }
             }
         }
-        StreamAction::Forward
+        StreamParserAction::Forward
     }
 
-    fn handle_arguments_done(&mut self, parsed: &Value) -> StreamAction {
+    fn handle_arguments_done(&mut self, parsed: &Value) -> StreamParserAction {
         if let Some(output_index) = extract_output_index(parsed) {
             let assigned_index = self.ensure_output_index(output_index);
             if let Some(call) = self.find_call_mut(output_index) {
@@ -423,28 +402,28 @@ impl StreamingToolHandler {
             // becomes `mcp_call_arguments.done` which is a sub-event
             // belonging BEFORE `response.<type>.completed` and therefore
             // safe to forward inline here.
-            StreamAction::ExecuteTools {
+            StreamParserAction::ToolCallReady {
                 forward_triggering_event: true,
             }
         } else {
-            StreamAction::Forward
+            StreamParserAction::Forward
         }
     }
 
-    fn find_call_mut(&mut self, output_index: usize) -> Option<&mut FunctionCallInProgress> {
+    fn find_call_mut(&mut self, output_index: usize) -> Option<&mut ParsedFunctionCall> {
         self.pending_calls
             .iter_mut()
             .find(|c| c.output_index == output_index)
     }
 
     /// Process output delta events to detect and accumulate function calls
-    fn process_output_delta(&mut self, event: &Value) -> StreamAction {
+    fn process_output_delta(&mut self, event: &Value) -> StreamParserAction {
         let output_index = extract_output_index(event).unwrap_or(0);
         let assigned_index = self.ensure_output_index(output_index);
 
         let delta = match event.get("delta") {
             Some(d) => d,
-            None => return StreamAction::Forward,
+            None => return StreamParserAction::Forward,
         };
 
         let item_type = delta.get("type").and_then(|v| v.as_str());
@@ -471,17 +450,17 @@ impl StreamingToolHandler {
                 call.last_obfuscation = Some(obfuscation.to_string());
             }
 
-            return StreamAction::Buffer;
+            return StreamParserAction::Buffer;
         }
 
-        StreamAction::Forward
+        StreamParserAction::Forward
     }
 
     fn get_or_create_call(
         &mut self,
         output_index: usize,
         delta: &Value,
-    ) -> &mut FunctionCallInProgress {
+    ) -> &mut ParsedFunctionCall {
         if let Some(pos) = self
             .pending_calls
             .iter()
@@ -496,7 +475,7 @@ impl StreamingToolHandler {
             .unwrap_or("")
             .to_string();
 
-        let mut call = FunctionCallInProgress::new(call_id, output_index);
+        let mut call = ParsedFunctionCall::new(call_id, output_index);
         if let Some(obfuscation) = delta.get("obfuscation").and_then(|v| v.as_str()) {
             call.last_obfuscation = Some(obfuscation.to_string());
         }
@@ -515,7 +494,7 @@ impl StreamingToolHandler {
         !self.pending_calls.is_empty() && self.pending_calls.iter().all(|c| c.is_complete())
     }
 
-    pub fn take_pending_calls(&mut self) -> Vec<FunctionCallInProgress> {
+    pub fn take_pending_calls(&mut self) -> Vec<ParsedFunctionCall> {
         std::mem::take(&mut self.pending_calls)
     }
 }
@@ -528,7 +507,7 @@ mod tests {
     //! The bug: when the upstream signalled tool completion with a direct
     //! `response.output_item.done` event (no preceding
     //! `response.function_call_arguments.done`), the streaming layer used
-    //! to forward that upstream event to the client. The tool loop then
+    //! to forward that upstream event to the client. The sink then
     //! emitted its own umbrella `output_item.done` AFTER emitting the
     //! `<tool>.completed` sub-event — producing the wire sequence
     //!
@@ -537,18 +516,16 @@ mod tests {
     //!     response.output_item.done       ← duplicate (upstream-forwarded)
     //!     response.<tool>.generating
     //!     response.<tool>.completed
-    //!     response.output_item.done       ← tool-loop synthesized
+    //!     response.output_item.done       ← sink synthesized
     //!
     //! which violates the spec invariant that `response.output_item.done`
-    //! is the LAST event emitted for a given item (see
-    //! `.claude/_audit/openai-responses-api-spec.md` §streaming, events
-    //! L1054-L1072).
+    //! is the last event emitted for a given item.
 
     use super::*;
 
     /// Feed an `output_item.added` for a function_call item so the handler
     /// has a complete pending call registered.
-    fn bootstrap_function_call_added(handler: &mut StreamingToolHandler) {
+    fn bootstrap_function_call_added(handler: &mut OpenAiUpstreamStreamParser) {
         let data = r#"{
           "type": "response.output_item.added",
           "output_index": 0,
@@ -563,14 +540,14 @@ mod tests {
     }
 
     #[test]
-    fn output_item_done_triggers_execute_tools_without_forwarding() {
+    fn output_item_done_marks_call_ready_without_forwarding() {
         // When the upstream signals tool-call completion via
         // `output_item.done` for a function_call item (no preceding
         // `function_call_arguments.done`), the handler must ask the
-        // caller NOT to forward the triggering event — the tool loop
-        // will emit its own umbrella `output_item.done` at the correct
+        // caller NOT to forward the triggering event — the sink will
+        // emit its own umbrella `output_item.done` at the correct
         // position after `response.<tool>.completed`.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
         bootstrap_function_call_added(&mut handler);
 
         let done_event = r#"{
@@ -589,25 +566,25 @@ mod tests {
         let action = handler.process_event(Some("response.output_item.done"), done_event);
 
         match action {
-            StreamAction::ExecuteTools {
+            StreamParserAction::ToolCallReady {
                 forward_triggering_event,
             } => assert!(
                 !forward_triggering_event,
                 "output_item.done must be suppressed to avoid a duplicate umbrella event"
             ),
-            other => panic!("expected ExecuteTools, got {other:?}"),
+            other => panic!("expected ToolCallReady, got {other:?}"),
         }
     }
 
     /// Assert that an `output_item.done` for `item_type` is suppressed (the
-    /// gate returns `ExecuteTools { forward_triggering_event: false }`) when
+    /// gate returns `ToolCallReady { forward_triggering_event: false }`) when
     /// a tool call is already pending. The gate must match every hosted
     /// tool-call item type — OpenAI cloud passthrough of native hosted
     /// tools (which emits the item directly with its hosted-tool type) would
     /// otherwise slip through and send a duplicate umbrella event to the
     /// wire.
     fn assert_output_item_done_suppressed_for_hosted_tool(item_type: &str) {
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
         bootstrap_function_call_added(&mut handler);
 
         let done_event = format!(
@@ -625,13 +602,13 @@ mod tests {
         let action = handler.process_event(Some("response.output_item.done"), &done_event);
 
         match action {
-            StreamAction::ExecuteTools {
+            StreamParserAction::ToolCallReady {
                 forward_triggering_event,
             } => assert!(
                 !forward_triggering_event,
                 "output_item.done for {item_type} must be suppressed to avoid a duplicate umbrella event"
             ),
-            other => panic!("expected ExecuteTools for {item_type}, got {other:?}"),
+            other => panic!("expected ToolCallReady for {item_type}, got {other:?}"),
         }
     }
 
@@ -640,14 +617,14 @@ mod tests {
         // OpenAI cloud passthrough emits the `image_generation_call` item
         // directly — the umbrella `output_item.done` that upstream sends
         // before `response.image_generation_call.completed` must be
-        // suppressed so the tool loop's umbrella lands at the right spot.
+        // suppressed so the sink's umbrella lands at the right spot.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::IMAGE_GENERATION_CALL);
     }
 
     #[test]
     fn output_item_done_suppressed_for_web_search_call() {
         // Hosted `web_search_call` items emitted directly by upstream
-        // must also trigger suppression — the tool loop emits
+        // must also trigger suppression — the sink emits
         // `response.web_search_call.completed` followed by its own
         // `output_item.done` at the correct position.
         assert_output_item_done_suppressed_for_hosted_tool(ItemType::WEB_SEARCH_CALL);
@@ -669,8 +646,8 @@ mod tests {
 
     #[test]
     fn output_item_done_for_unobserved_hosted_tool_output_index_forwards() {
-        // When the handler has seen NEITHER a function_call_added (MCP
-        // dispatch path) NOR an output_item.added for a hosted tool-call
+        // When the parser has seen NEITHER a function_call_added
+        // (intercepted-call path) NOR an output_item.added for a hosted tool-call
         // type (native passthrough path) at the done event's
         // output_index, the gate must forward. Dropping the umbrella
         // without having observed the item's start would silently
@@ -680,12 +657,12 @@ mod tests {
         // This scenario models a truly spurious/unexpected
         // `output_item.done` whose matching `output_item.added` never
         // arrived — the safe action is to forward it rather than drop.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
-        // Pending function_call at output_index 0 (MCP dispatch).
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        // Pending function_call at output_index 0 (intercepted-call path).
         bootstrap_function_call_added(&mut handler);
 
         // `output_item.done` at output_index 1 with NO preceding
-        // `output_item.added` — neither MCP-dispatch nor native
+        // `output_item.added` — neither intercepted-call nor native
         // passthrough tracking recorded this index.
         let done_event = r#"{
           "type": "response.output_item.done",
@@ -701,18 +678,18 @@ mod tests {
         let action = handler.process_event(Some("response.output_item.done"), done_event);
 
         assert!(
-            matches!(action, StreamAction::Forward),
+            matches!(action, StreamParserAction::Forward),
             "output_item.done for an index the handler never observed via output_item.added \
              must forward — suppressing here would drop the umbrella permanently; got {action:?}"
         );
     }
 
     #[test]
-    fn arguments_done_triggers_execute_tools_with_forwarding() {
+    fn arguments_done_marks_call_ready_with_forwarding() {
         // Forwarding is safe for `function_call_arguments.done` because it
         // becomes `mcp_call_arguments.done` — a sub-event that belongs
         // BEFORE `response.<tool>.completed` per spec sub-event ordering.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
         bootstrap_function_call_added(&mut handler);
 
         let args_done = r#"{
@@ -726,13 +703,13 @@ mod tests {
             handler.process_event(Some("response.function_call_arguments.done"), args_done);
 
         match action {
-            StreamAction::ExecuteTools {
+            StreamParserAction::ToolCallReady {
                 forward_triggering_event,
             } => assert!(
                 forward_triggering_event,
                 "function_call_arguments.done forwards as mcp_call_arguments.done"
             ),
-            other => panic!("expected ExecuteTools, got {other:?}"),
+            other => panic!("expected ToolCallReady, got {other:?}"),
         }
     }
 
@@ -744,9 +721,9 @@ mod tests {
         // message / reasoning / mcp_list_tools block arrives, the umbrella
         // event for that sibling item must pass through untouched so the
         // client sees its completion. Only the function_call's own
-        // `output_item.done` should be suppressed (the tool loop will emit
+        // `output_item.done` should be suppressed (the sink will emit
         // the correct umbrella at its proper position).
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
         bootstrap_function_call_added(&mut handler);
 
         let done_event = r#"{
@@ -764,7 +741,7 @@ mod tests {
         let action = handler.process_event(Some("response.output_item.done"), done_event);
 
         assert!(
-            matches!(action, StreamAction::Forward),
+            matches!(action, StreamParserAction::Forward),
             "sibling output_item.done must forward even while a function_call is pending; got {action:?}"
         );
     }
@@ -775,7 +752,7 @@ mod tests {
         // mcp_list_tools items, etc.) must pass through unchanged. This
         // prevents regressing the path where the assistant emits a plain
         // text message after tool execution completes.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
 
         let done_event = r#"{
           "type": "response.output_item.done",
@@ -792,35 +769,21 @@ mod tests {
         let action = handler.process_event(Some("response.output_item.done"), done_event);
 
         assert!(
-            matches!(action, StreamAction::Forward),
+            matches!(action, StreamParserAction::Forward),
             "expected Forward for an umbrella output_item.done on a non-tool item, got {action:?}"
         );
     }
 
-    // ========================================================================
-    // R6.7c — native passthrough suppression.
-    //
-    // When OpenAI cloud passthrough streams a hosted tool-call item
-    // directly (e.g. `image_generation_call` emitted end-to-end rather
-    // than wrapped as a `function_call` we intercept), R6.7b's
-    // `belongs_to_pending_call` guard short-circuits the gate because
-    // `handle_output_item_added` only registers `function_call` /
-    // `function_tool_call` types in `pending_calls`. The duplicate
-    // umbrella then reached the wire mis-ordered before
-    // `response.<type>.completed` and broke the spec invariant.
-    //
-    // R6.7c extends the gate with an OR-branch: an `output_item.added`
-    // for a hosted tool-call type records the output_index in
-    // `native_passthrough_tool_call_indices`, and the matching
-    // `output_item.done` returns `StreamAction::Drop` so the caller
-    // drops the upstream envelope without kicking the tool loop. The
-    // R6.7b MCP-dispatch arm is untouched — both paths coexist.
-    // ========================================================================
+    // Native passthrough suppression: OpenAI can stream a hosted tool-call
+    // item directly, rather than wrapping it as an intercepted function_call.
+    // The parser records the output_index from `output_item.added` and drops
+    // the first early umbrella `output_item.done`; the later correctly ordered
+    // umbrella still forwards.
 
     /// Feed an `output_item.added` for a hosted tool-call type so the
     /// handler records the index in `native_passthrough_tool_call_indices`.
     fn bootstrap_native_hosted_tool_added(
-        handler: &mut StreamingToolHandler,
+        handler: &mut OpenAiUpstreamStreamParser,
         item_type: &str,
         output_index: usize,
         item_id: &str,
@@ -840,14 +803,14 @@ mod tests {
     }
 
     /// Assert that an `output_item.done` for a hosted tool-call item at
-    /// `output_index` is dropped (the gate returns `StreamAction::Drop`)
+    /// `output_index` is dropped (the gate returns `StreamParserAction::Drop`)
     /// after the corresponding upstream `output_item.added` was observed.
-    /// This is the R6.7c native-passthrough case: no MCP dispatch, no
+    /// This is the native-passthrough case: no intercepted function_call, no
     /// pending call — just upstream emitting the item directly and the
     /// gate needing to drop the mis-ordered umbrella.
     fn assert_native_passthrough_done_drops(item_type: &str) {
-        let mut handler = StreamingToolHandler::with_starting_index(0);
-        // Only upstream's `output_item.added` — no MCP-dispatched function
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        // Only upstream's `output_item.added` — no intercepted function
         // call is pending.
         bootstrap_native_hosted_tool_added(&mut handler, item_type, 0, "native_test");
 
@@ -866,7 +829,7 @@ mod tests {
         let action = handler.process_event(Some("response.output_item.done"), &done_event);
 
         assert!(
-            matches!(action, StreamAction::Drop),
+            matches!(action, StreamParserAction::Drop),
             "output_item.done for native-passthrough {item_type} must be dropped — \
              upstream emits a duplicate/mis-ordered umbrella, dropping preserves wire \
              ordering; got {action:?}"
@@ -875,10 +838,9 @@ mod tests {
 
     #[test]
     fn output_item_done_dropped_for_native_passthrough_image_generation_call() {
-        // R6.7c: OpenAI cloud passthrough emits `image_generation_call`
-        // directly. With R6.7b alone the mis-ordered umbrella leaked to
-        // the wire because the item was not tracked in `pending_calls`.
-        // The R6.7c arm drops it based on the observed `output_item.added`.
+        // OpenAI cloud passthrough emits `image_generation_call` directly;
+        // the observed `output_item.added` lets the parser drop the early
+        // umbrella.
         assert_native_passthrough_done_drops(ItemType::IMAGE_GENERATION_CALL);
     }
 
@@ -899,15 +861,15 @@ mod tests {
 
     #[test]
     fn native_passthrough_gate_coexists_with_mcp_dispatch_gate() {
-        // R6.7c invariant: both arms of the gate must fire correctly when
-        // a single stream carries an MCP-dispatched function_call at one
+        // Both arms of the gate must fire correctly when a single stream
+        // carries an intercepted function_call at one
         // output_index AND a native-passthrough hosted tool-call at
         // another. The function_call's done goes through the
-        // `ExecuteTools` arm (R6.7b); the hosted tool-call's done goes
-        // through the `Drop` arm (R6.7c). Neither re-narrows the other.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        // `ToolCallReady` arm; the hosted tool-call's done goes through the
+        // `Drop` arm. Neither re-narrows the other.
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
 
-        // MCP-dispatch path: function_call at output_index 0.
+        // Intercepted-call path: function_call at output_index 0.
         bootstrap_function_call_added(&mut handler);
 
         // Native passthrough path: image_generation_call at output_index 1.
@@ -930,13 +892,12 @@ mod tests {
         }"#;
         let action = handler.process_event(Some("response.output_item.done"), passthrough_done);
         assert!(
-            matches!(action, StreamAction::Drop),
+            matches!(action, StreamParserAction::Drop),
             "native passthrough hosted-tool done must Drop; got {action:?}"
         );
 
         // Second done — function_call at output_index 0 should
-        // ExecuteTools (the MCP-dispatch arm). This confirms R6.7c did
-        // not accidentally funnel the function_call into the new branch.
+        // ToolCallReady (the intercepted-call arm), not the passthrough branch.
         let function_call_done = r#"{
           "type": "response.output_item.done",
           "output_index": 0,
@@ -951,28 +912,28 @@ mod tests {
         }"#;
         let action = handler.process_event(Some("response.output_item.done"), function_call_done);
         match action {
-            StreamAction::ExecuteTools {
+            StreamParserAction::ToolCallReady {
                 forward_triggering_event,
             } => assert!(
                 !forward_triggering_event,
-                "MCP-dispatch arm must still suppress the upstream umbrella"
+                "intercepted-call arm must still suppress the upstream umbrella"
             ),
             other => panic!(
-                "function_call done must go through MCP-dispatch arm (ExecuteTools), got {other:?}"
+                "function_call done must go through intercepted-call arm (ToolCallReady), got {other:?}"
             ),
         }
     }
 
     #[test]
     fn native_passthrough_done_drops_even_when_pending_function_call_complete() {
-        // R6.7c must not depend on `pending_calls` being empty. When an
-        // MCP-dispatched function_call is in-flight (has_complete_calls()
+        // Passthrough suppression must not depend on `pending_calls` being
+        // empty. When an intercepted function_call is in-flight (has_complete_calls()
         // is true) AND a native passthrough hosted-tool done arrives at
         // a different output_index, the passthrough path must still
         // Drop — `belongs_to_pending_call` for the done's own index is
-        // false, so the R6.7b arm cleanly declines and the R6.7c arm
-        // fires.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        // false, so the intercepted-call arm cleanly declines and passthrough
+        // suppression fires.
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
         bootstrap_function_call_added(&mut handler); // complete pending call @ idx 0
         bootstrap_native_hosted_tool_added(&mut handler, ItemType::WEB_SEARCH_CALL, 2, "ws_native");
 
@@ -989,7 +950,7 @@ mod tests {
 
         let action = handler.process_event(Some("response.output_item.done"), done_event);
         assert!(
-            matches!(action, StreamAction::Drop),
+            matches!(action, StreamParserAction::Drop),
             "native passthrough done at a non-pending-call index must Drop even when a \
              function_call is pending elsewhere; got {action:?}"
         );
@@ -997,11 +958,11 @@ mod tests {
 
     #[test]
     fn output_item_added_for_native_passthrough_still_forwards() {
-        // R6.7c records the output_index for later drop-gating but must
+        // The parser records the output_index for later drop-gating but must
         // still forward the `output_item.added` itself so the client
         // sees the item come into existence. Only the mis-ordered
         // `output_item.done` is dropped.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
 
         let added_event = r#"{
           "type": "response.output_item.added",
@@ -1015,14 +976,14 @@ mod tests {
 
         let action = handler.process_event(Some("response.output_item.added"), added_event);
         assert!(
-            matches!(action, StreamAction::Forward),
+            matches!(action, StreamParserAction::Forward),
             "native passthrough output_item.added must still forward; got {action:?}"
         );
     }
 
     #[test]
     fn native_passthrough_second_output_item_done_forwards_after_first_dropped() {
-        // R6.7c one-shot invariant (CodeRabbit P1 fix): the first
+        // One-shot invariant: the first
         // (mis-ordered) upstream `output_item.done` for a native
         // passthrough item is dropped, but upstream then re-emits a
         // correctly-ordered `output_item.done` after
@@ -1034,7 +995,7 @@ mod tests {
         // The implementation removes the passthrough index from
         // `native_passthrough_tool_call_indices` on the first drop, so
         // the second done falls through to the `Forward` arm.
-        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
         bootstrap_native_hosted_tool_added(
             &mut handler,
             ItemType::IMAGE_GENERATION_CALL,
@@ -1056,7 +1017,7 @@ mod tests {
         // must be dropped.
         let first_action = handler.process_event(Some("response.output_item.done"), done_event);
         assert!(
-            matches!(first_action, StreamAction::Drop),
+            matches!(first_action, StreamParserAction::Drop),
             "first output_item.done for native passthrough must Drop; got {first_action:?}"
         );
 
@@ -1065,7 +1026,7 @@ mod tests {
         // the terminal umbrella.
         let second_action = handler.process_event(Some("response.output_item.done"), done_event);
         assert!(
-            matches!(second_action, StreamAction::Forward),
+            matches!(second_action, StreamParserAction::Forward),
             "second output_item.done for native passthrough must Forward after the first \
              dropped envelope consumed the passthrough-index entry; got {second_action:?}"
         );

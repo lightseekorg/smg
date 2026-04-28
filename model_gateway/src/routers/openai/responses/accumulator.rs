@@ -39,18 +39,6 @@ impl StreamingResponseAccumulator {
     }
 
     /// Consume the accumulator and produce the best-effort final response value.
-    pub fn into_final_response(mut self) -> Option<Value> {
-        if self.completed_response.is_some() {
-            return self.completed_response;
-        }
-
-        self.build_fallback_response()
-    }
-
-    pub fn encountered_error(&self) -> Option<&Value> {
-        self.encountered_error.as_ref()
-    }
-
     pub fn original_response_id(&self) -> Option<&str> {
         self.initial_response
             .as_ref()
@@ -126,22 +114,5 @@ impl StreamingResponseAccumulator {
             }
             _ => {}
         }
-    }
-
-    fn build_fallback_response(&mut self) -> Option<Value> {
-        let mut response = self.initial_response.clone()?;
-
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert("status".to_string(), Value::String("completed".to_string()));
-
-            self.output_items.sort_by_key(|(index, _)| *index);
-            let outputs: Vec<Value> = std::mem::take(&mut self.output_items)
-                .into_iter()
-                .map(|(_, item)| item)
-                .collect();
-            obj.insert("output".to_string(), Value::Array(outputs));
-        }
-
-        Some(response)
     }
 }

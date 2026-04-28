@@ -1,289 +1,76 @@
-//! Shared helpers and state tracking for Harmony Responses
+//! Shared helpers for the gRPC Harmony Responses surface.
+//!
+//! This module keeps the Harmony-specific history loader and
+//! image-generation tool normalization.
+//!
+//! - `load_previous_messages` — surface-side wrapper around the shared
+//!   `load_request_history` primitive that resolves
+//!   `previous_response_id` **or** `conversation` (mutually exclusive,
+//!   validated upstream) and merges the lowered transcript into the
+//!   request's input.
+//! - `strip_image_generation_from_request_tools` — harmony-specific
+//!   builder workaround for the
+//!   [`openai_protocol::responses::ResponseTool::ImageGeneration`] tag
+//!   when an MCP server has taken ownership of `image_generation`.
 
 use std::collections::HashSet;
 
 use axum::response::Response;
-use openai_protocol::{
-    common::ToolCall,
-    responses::{
-        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent, ResponseTool, ResponsesRequest, ResponsesResponse,
-        ResponsesToolChoice, StringOrContentParts, ToolChoiceOptions,
-    },
+use openai_protocol::responses::{
+    ResponseInput, ResponseInputOutputItem, ResponseTool, ResponsesRequest, StringOrContentParts,
 };
-use serde_json::{from_value, to_string, Value};
-use smg_data_connector::{ResponseId, ResponseStorageError};
 use smg_mcp::{McpToolSession, ResponseFormat};
-use tracing::{debug, error, warn};
-use uuid::Uuid;
+use tracing::debug;
 
-use super::execution::ToolResult;
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
+use crate::routers::{
+    common::transcript_lower::{
+        extract_control_items, extract_mcp_list_tools_server_labels, lower_transcript,
+    },
+    grpc::common::responses::{load_request_history, ResponsesContext},
+};
 
-/// Record of a single MCP tool call execution
-///
-/// Stores the transformed output item for Responses API format.
-/// The output_item respects the tool's response_format configuration.
-#[derive(Debug, Clone)]
-pub(super) struct McpCallRecord {
-    /// Transformed output item (McpCall, WebSearchCall, etc.)
-    pub output_item: ResponseOutputItem,
+pub(super) struct LoadedResponsesHistory {
+    pub request: ResponsesRequest,
+    pub existing_mcp_list_tools_labels: HashSet<String>,
+    /// Control items collected from both the resolved history and the
+    /// caller's hand-stitched input. Drives approval-continuation
+    /// validation at the loop entry — see
+    /// [`crate::routers::common::agent_loop`] for the full set of
+    /// control vocabulary types.
+    pub control_items: Vec<ResponseInputOutputItem>,
 }
 
-/// Tracking structure for MCP tool calls across iterations
-///
-/// Accumulates all MCP tool call metadata during multi-turn conversation
-/// so we can build proper mcp_list_tools and mcp_call output items.
-#[derive(Debug, Clone)]
-pub(super) struct McpCallTracking {
-    /// All tool call records across all iterations
-    pub tool_calls: Vec<McpCallRecord>,
-}
-
-impl McpCallTracking {
-    pub fn new() -> Self {
-        Self {
-            tool_calls: Vec::new(),
-        }
-    }
-
-    pub fn record_call(&mut self, output_item: ResponseOutputItem) {
-        self.tool_calls.push(McpCallRecord { output_item });
-    }
-
-    pub fn total_calls(&self) -> usize {
-        self.tool_calls.len()
-    }
-}
-
-/// Build next request with tool results appended to history
-///
-/// Constructs a new ResponsesRequest with:
-/// 1. Original input items (preserved)
-/// 2. Assistant message with analysis (reasoning) + partial_text + tool_calls
-/// 3. Tool result messages for each tool execution
-pub(super) fn build_next_request_with_tools(
-    mut request: ResponsesRequest,
-    tool_calls: Vec<ToolCall>,
-    tool_results: Vec<ToolResult>,
-    analysis: Option<String>, // Analysis channel content (becomes reasoning content)
-    partial_text: String,     // Final channel content (becomes message content)
-) -> ResponsesRequest {
-    // Get current input items (or empty vec if Text variant)
-    let mut items = match request.input {
-        ResponseInput::Items(items) => items,
-        ResponseInput::Text(text) => {
-            // Convert text to items format
-            vec![ResponseInputOutputItem::SimpleInputMessage {
-                content: StringOrContentParts::String(text),
-                role: "user".to_string(),
-                r#type: None,
-                phase: None,
-            }]
-        }
-    };
-
-    // Build assistant response item with reasoning + content + tool calls
-    // This represents what the model generated in this iteration
-    let assistant_id = format!("msg_{}", Uuid::now_v7());
-
-    // Add reasoning if present (from analysis channel)
-    if let Some(analysis_text) = analysis {
-        items.push(ResponseInputOutputItem::new_reasoning(
-            format!("reasoning_{assistant_id}"),
-            vec![],
-            vec![ResponseReasoningContent::ReasoningText {
-                text: analysis_text,
-            }],
-            Some("completed".to_string()),
-        ));
-    }
-
-    // Add message content if present (from final channel)
-    if !partial_text.is_empty() {
-        items.push(ResponseInputOutputItem::Message {
-            id: assistant_id.clone(),
-            role: "assistant".to_string(),
-            content: vec![ResponseContentPart::OutputText {
-                text: partial_text,
-                annotations: vec![],
-                logprobs: None,
-            }],
-            status: Some("completed".to_string()),
-            phase: None,
-        });
-    }
-
-    // Add function tool calls (from commentary channel)
-    for tool_call in tool_calls {
-        items.push(ResponseInputOutputItem::FunctionToolCall {
-            id: tool_call.id.clone(),
-            call_id: tool_call.id.clone(),
-            name: tool_call.function.name.clone(),
-            arguments: tool_call
-                .function
-                .arguments
-                .unwrap_or_else(|| "{}".to_string()),
-            output: None, // Output will be added next
-            status: Some("in_progress".to_string()),
-        });
-    }
-
-    // Add tool results
-    for tool_result in tool_results {
-        // Serialize tool output to string
-        let output_str = to_string(&tool_result.output)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
-
-        // Update the corresponding tool call with output and completed status
-        // Find and update the matching FunctionToolCall
-        if let Some(ResponseInputOutputItem::FunctionToolCall {
-            output,
-            status,
-            ..
-        }) = items
-            .iter_mut()
-            .find(|item| matches!(item, ResponseInputOutputItem::FunctionToolCall { call_id, .. } if call_id == &tool_result.call_id))
-        {
-            *output = Some(output_str);
-            *status = if tool_result.is_error {
-                Some("failed".to_string())
-            } else {
-                Some("completed".to_string())
-            };
-        }
-    }
-
-    // Update request with new items
-    request.input = ResponseInput::Items(items);
-
-    // Switch tool_choice to "auto" for subsequent iterations
-    // This prevents infinite loops when original tool_choice was "required" or specific function
-    // After receiving tool results, the model should be free to decide whether to call more tools or finish
-    request.tool_choice = Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto));
-
-    request
-}
-
-pub(super) fn inject_mcp_metadata(
-    response: &mut ResponsesResponse,
-    tracking: &McpCallTracking,
-    session: &McpToolSession<'_>,
-    user_function_names: &HashSet<String>,
-) {
-    let tool_output_items: Vec<ResponseOutputItem> = tracking
-        .tool_calls
-        .iter()
-        .map(|record| record.output_item.clone())
-        .collect();
-
-    session.inject_client_visible_mcp_output_items(
-        &mut response.output,
-        tool_output_items,
-        user_function_names,
-    );
-}
-
-/// Load previous conversation messages from storage
-///
-/// If the request has `previous_response_id`, loads the response chain from storage
-/// and prepends the conversation history to the request input items.
+/// Resolve `previous_response_id` or `conversation` (whichever is set)
+/// and merge the resulting items in front of the request's input.
 pub(super) async fn load_previous_messages(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
-) -> Result<ResponsesRequest, Response> {
-    let Some(ref prev_id_str) = request.previous_response_id else {
-        // No previous_response_id, return request as-is
-        return Ok(request);
-    };
+) -> Result<LoadedResponsesHistory, Response> {
+    let loaded = load_request_history(ctx, &request).await?;
+    let mut existing_mcp_list_tools_labels = loaded.existing_mcp_list_tools_labels;
+    let mut control_items = loaded.control_items;
 
-    let prev_id = ResponseId::from(prev_id_str.as_str());
-
-    // Load response chain from storage
-    let chain = match ctx
-        .response_storage
-        .get_response_chain(&prev_id, None)
-        .await
-    {
-        Ok(chain) => chain,
-        Err(ResponseStorageError::ResponseNotFound(_)) => {
-            return Err(error::bad_request(
-                "previous_response_not_found",
-                format!("Previous response with id '{prev_id_str}' not found."),
-            ));
-        }
-        Err(e) => {
-            error!(
-                function = "load_previous_messages",
-                prev_id = %prev_id_str,
-                error = %e,
-                "Failed to load previous response chain from storage"
-            );
-            return Err(error::internal_error(
-                "load_previous_response_chain_failed",
-                format!("Failed to load previous response chain for {prev_id_str}: {e}"),
-            ));
-        }
-    };
-
-    if chain.responses.is_empty() {
-        return Err(error::bad_request(
-            "previous_response_not_found",
-            format!("Previous response with id '{prev_id_str}' not found."),
-        ));
-    }
-
-    // Build conversation history from stored responses
-    let mut history_items = Vec::new();
-
-    // Helper to deserialize and collect items from a JSON array
-    let deserialize_items = |arr: &Value, item_type: &str| -> Vec<ResponseInputOutputItem> {
-        arr.as_array()
-            .into_iter()
-            .flat_map(|items| items.iter())
-            .filter_map(|item| {
-                from_value::<ResponseInputOutputItem>(item.clone())
-                    .map_err(|e| {
-                        warn!(
-                            "Failed to deserialize stored {} item: {}. Item: {}",
-                            item_type, e, item
-                        );
-                    })
-                    .ok()
-            })
-            .collect()
-    };
-
-    for stored in &chain.responses {
-        history_items.extend(deserialize_items(&stored.input, "input"));
-        history_items.extend(deserialize_items(
-            stored
-                .raw_response
-                .get("output")
-                .unwrap_or(&Value::Array(vec![])),
-            "output",
-        ));
-    }
-
-    debug!(
-        previous_response_id = %prev_id_str,
-        history_items_count = history_items.len(),
-        "Loaded conversation history from previous response"
-    );
-
-    // Build modified request with history prepended
     let mut modified_request = request;
+    let mut history_items = loaded.items;
 
-    // Convert current input to items format
-    let all_items = match modified_request.input {
+    let combined = match modified_request.input {
         ResponseInput::Items(items) => {
-            // Prepend history to existing items
-            let mut combined = history_items;
-            combined.extend(items);
-            combined
+            // Hand-stitched input: a caller may inline a prior turn's
+            // `mcp_list_tools` item directly into `input` instead of
+            // resolving it from `previous_response_id` / `conversation`.
+            // Treat that the same way as history-loaded items so the
+            // agent loop does not re-emit a fresh listing for the same
+            // server label downstream.
+            existing_mcp_list_tools_labels.extend(extract_mcp_list_tools_server_labels(&items));
+            // Pick up approval-pair / list_tools control items from the
+            // current request body too. Both history and hand-stitched
+            // paths feed the same `control_items` vec so the driver
+            // entry only has to look in one place.
+            control_items.extend(extract_control_items(&items));
+            history_items.extend(items);
+            history_items
         }
         ResponseInput::Text(text) => {
-            // Convert text to item and prepend history
             history_items.push(ResponseInputOutputItem::SimpleInputMessage {
                 content: StringOrContentParts::String(text),
                 role: "user".to_string(),
@@ -294,51 +81,39 @@ pub(super) async fn load_previous_messages(
         }
     };
 
-    // Update request with combined items and clear previous_response_id
-    modified_request.input = ResponseInput::Items(all_items);
+    // Lower once over the combined transcript: hand-stitched
+    // current-turn items get the same projection (mcp_call →
+    // function_call pair, hosted-tool metadata dropped) as items
+    // loaded from prev_response_id / conversation history.
+    modified_request.input = ResponseInput::Items(lower_transcript(combined));
+    // Subsequent in-loop sub-calls must not re-resolve history.
     modified_request.previous_response_id = None;
+    modified_request.conversation = None;
 
-    Ok(modified_request)
+    Ok(LoadedResponsesHistory {
+        request: modified_request,
+        existing_mcp_list_tools_labels,
+        control_items,
+    })
 }
 
-/// Strip `ResponseTool::ImageGeneration` from a request's tools list once
-/// the MCP session has exposed an MCP-routed replacement.
+/// Strip `ResponseTool::ImageGeneration` once an MCP session exposes an
+/// MCP-routed replacement.
 ///
 /// The harmony builder synthesizes a function-tool description named
-/// `image_generation` from
-/// [`openai_protocol::responses::ResponseTool::ImageGeneration`]. That is
-/// the right advertisement when no MCP server is configured, but once the
-/// MCP loop injects a `ResponseTool::Function` for the MCP-exposed
-/// image-generation tool (via `convert_mcp_tools_to_response_tools`), two
-/// function-tool entries can end up in the developer-message `namespace
-/// functions { … }`. Worse, if the MCP server is configured with a
-/// non-canonical `builtin_tool_name` (e.g. `generate_image`), the
-/// advertised `image_generation` synthesis will not be recognized as
-/// MCP-exposed by `McpToolSession::has_exposed_tool`, so any call the
-/// model makes against the synthesized name falls through to the
-/// unresolved function-call path instead of dispatching.
-///
-/// Removing the `ResponseTool::ImageGeneration` tag once the MCP loop has
-/// taken ownership keeps the advertisement single-source (the MCP-exposed
-/// Function tool) and guarantees the model only sees a name the session
-/// can dispatch against.
+/// Once an MCP server takes ownership of `image_generation`, the MCP-exposed
+/// function tool is the single advertisement the model should see.
 pub(super) fn strip_image_generation_from_request_tools(
     request: &mut ResponsesRequest,
     session: &McpToolSession<'_>,
 ) {
-    // Check whether any MCP tool in the session carries the
-    // `ImageGenerationCall` response format — this is the authoritative
-    // signal that an MCP server is routed for the hosted
-    // `image_generation` tool in this request.
     let mcp_has_image_generation = session
         .mcp_tools()
         .iter()
         .any(|entry| matches!(entry.response_format, ResponseFormat::ImageGenerationCall));
-
     if !mcp_has_image_generation {
         return;
     }
-
     if let Some(tools) = request.tools.as_mut() {
         let before = tools.len();
         tools.retain(|t| !matches!(t, ResponseTool::ImageGeneration(_)));

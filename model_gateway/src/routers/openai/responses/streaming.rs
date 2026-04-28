@@ -1,68 +1,86 @@
-//! Streaming response handling for OpenAI-compatible responses
+//! Streaming response handling for OpenAI-compatible responses.
 //!
 //! This module handles all streaming-related functionality including:
 //! - SSE (Server-Sent Events) parsing and forwarding
 //! - Streaming response accumulation for persistence
-//! - Tool call detection and interception during streaming
-//! - MCP tool execution loops within streaming responses
+//! - Upstream tool-call parsing during streaming
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::io;
 
 use axum::{
     body::Body,
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
+    response::Response,
 };
 use bytes::Bytes;
-use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
-        ResponseEvent, WebSearchCallEvent,
+        is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
+        OutputItemEvent, ResponseEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{
-    mcp_response_item_id, McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat,
-};
+use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
 
 use super::{
-    accumulator::StreamingResponseAccumulator,
-    common::{extract_output_index, get_event_type, parse_sse_block, ChunkProcessor},
-    utils::{
-        patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
-        rewrite_streaming_block,
-    },
+    common::{extract_output_index, get_event_type},
+    utils::response_tool_to_value,
 };
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
-use crate::{
-    observability::metrics::Metrics,
-    routers::{
-        common::{
-            header_utils::{
-                extract_forwardable_request_headers, preserve_response_headers, ApiProvider,
-            },
-            mcp_utils::DEFAULT_MAX_ITERATIONS,
-            persistence_utils::persist_conversation_items,
+use crate::routers::{
+    common::{
+        agent_loop::{
+            normalize_output_item_id, OutputFamily, ToolTransferDescriptor, ToolVisibility,
         },
-        error,
-        openai::{
-            context::{RequestContext, StreamingEventContext, StreamingRequest},
-            mcp::{
-                build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
-                mcp_list_tools_bindings_to_emit, prepare_mcp_tools_as_functions,
-                send_mcp_list_tools_events, StreamAction, StreamingToolHandler, ToolLoopState,
-            },
-        },
+        responses_streaming::ResponseStreamEventEmitter,
+    },
+    error,
+    openai::{
+        context::{RequestContext, StreamingEventContext},
+        responses::upstream_stream_parser::OpenAiUpstreamStreamParser,
     },
 };
+
+fn output_item_type_for_family(family: OutputFamily) -> &'static str {
+    match family {
+        OutputFamily::McpCall => ItemType::MCP_CALL,
+        OutputFamily::WebSearchCall => ItemType::WEB_SEARCH_CALL,
+        OutputFamily::CodeInterpreterCall => ItemType::CODE_INTERPRETER_CALL,
+        OutputFamily::FileSearchCall => ItemType::FILE_SEARCH_CALL,
+        OutputFamily::ImageGenerationCall => ItemType::IMAGE_GENERATION_CALL,
+        OutputFamily::Function => ItemType::FUNCTION_CALL,
+    }
+}
+
+fn transfer_descriptor_for(ctx: &StreamingEventContext<'_>, name: &str) -> ToolTransferDescriptor {
+    ctx.tool_transfers
+        .get(name)
+        .copied()
+        .unwrap_or_else(ToolTransferDescriptor::caller_function)
+}
+
+fn argument_event_names(family: OutputFamily) -> Option<(&'static str, &'static str)> {
+    match family {
+        OutputFamily::Function => Some((
+            FunctionCallEvent::ARGUMENTS_DELTA,
+            FunctionCallEvent::ARGUMENTS_DONE,
+        )),
+        OutputFamily::McpCall => Some((
+            McpEvent::CALL_ARGUMENTS_DELTA,
+            McpEvent::CALL_ARGUMENTS_DONE,
+        )),
+        OutputFamily::WebSearchCall
+        | OutputFamily::CodeInterpreterCall
+        | OutputFamily::FileSearchCall
+        | OutputFamily::ImageGenerationCall => None,
+    }
+}
 
 /// Apply all transformations to event data in-place (rewrite + transform)
 /// Optimized to parse JSON only once instead of multiple times
@@ -136,42 +154,32 @@ pub(super) fn apply_event_transformations_inplace(
             if let Some(item) = parsed_data.get_mut("item") {
                 if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
                     if is_function_call_type(item_type) {
-                        // Look up response_format for the tool
                         let tool_name = item
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
 
-                        // Only transform if this is an MCP tool; keep function_call unchanged
-                        if let Some(session) =
-                            ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
+                        let descriptor = transfer_descriptor_for(ctx, &tool_name);
+                        if !matches!(descriptor.family, OutputFamily::Function)
+                            && matches!(descriptor.visibility, ToolVisibility::Visible)
                         {
-                            let response_format = session.tool_response_format(&tool_name);
-
-                            // Determine item type and ID prefix based on response_format
-                            let (new_type, id_prefix) = match response_format {
-                                ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                                ResponseFormat::ImageGenerationCall => {
-                                    (ItemType::IMAGE_GENERATION_CALL, "ig_")
-                                }
-                                _ => (ItemType::MCP_CALL, "mcp_"),
-                            };
+                            let family = descriptor.family;
+                            let new_type = output_item_type_for_family(family);
 
                             item["type"] = json!(new_type);
                             if new_type == ItemType::MCP_CALL {
-                                let label = session.resolve_tool_server_label(&tool_name);
+                                let label = ctx
+                                    .tool_server_labels
+                                    .get(&tool_name)
+                                    .cloned()
+                                    .unwrap_or_default();
                                 item["server_label"] = json!(label);
                             }
 
-                            // Transform ID from fc_* to appropriate prefix
+                            // Normalize to the shared family-specific external id.
                             if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                if new_type == ItemType::MCP_CALL {
-                                    item["id"] = json!(mcp_response_item_id(id));
-                                } else if let Some(stripped) = id.strip_prefix("fc_") {
-                                    let new_id = format!("{id_prefix}{stripped}");
-                                    item["id"] = json!(new_id);
-                                }
+                                item["id"] = json!(normalize_output_item_id(family, id));
                             }
 
                             changed = true;
@@ -179,16 +187,6 @@ pub(super) fn apply_event_transformations_inplace(
                     }
                 }
             }
-        }
-        FunctionCallEvent::ARGUMENTS_DONE => {
-            parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
-
-            // Transform item_id from fc_* to mcp_*
-            if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
-                parsed_data["item_id"] = json!(mcp_response_item_id(item_id));
-            }
-
-            changed = true;
         }
         _ => {}
     }
@@ -224,27 +222,24 @@ fn send_sse_event(
     tx.send(Ok(Bytes::from(block))).is_ok()
 }
 
-/// Map function_call event names to mcp_call event names
-#[inline]
-fn map_event_name(event_name: &str) -> &str {
-    match event_name {
-        FunctionCallEvent::ARGUMENTS_DELTA => McpEvent::CALL_ARGUMENTS_DELTA,
-        FunctionCallEvent::ARGUMENTS_DONE => McpEvent::CALL_ARGUMENTS_DONE,
-        other => other,
-    }
+enum BufferedArgumentsResult {
+    ForwardCurrent,
+    DropCurrent,
+    Disconnected,
 }
 
 /// Send buffered function call arguments as a synthetic delta event.
 /// Returns false if client disconnected.
 fn send_buffered_arguments(
     parsed_data: &mut Value,
-    handler: &StreamingToolHandler,
+    handler: &OpenAiUpstreamStreamParser,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    sequence_number: &mut u64,
+    ctx: &StreamingEventContext<'_>,
+    emitter: &mut ResponseStreamEventEmitter,
     mapped_output_index: &mut Option<usize>,
-) -> bool {
+) -> BufferedArgumentsResult {
     let Some(output_index) = extract_output_index(parsed_data) else {
-        return true;
+        return BufferedArgumentsResult::ForwardCurrent;
     };
 
     let assigned_index = handler
@@ -257,7 +252,15 @@ fn send_buffered_arguments(
         .iter()
         .find(|c| c.output_index == output_index)
     else {
-        return true;
+        return BufferedArgumentsResult::ForwardCurrent;
+    };
+
+    let descriptor = transfer_descriptor_for(ctx, &call.name);
+    if matches!(descriptor.visibility, ToolVisibility::SuppressedForApproval) {
+        return BufferedArgumentsResult::DropCurrent;
+    }
+    let Some((delta_event_name, done_event_name)) = argument_event_names(descriptor.family) else {
+        return BufferedArgumentsResult::DropCurrent;
     };
 
     let arguments_value = if call.arguments_buffer.is_empty() {
@@ -269,19 +272,25 @@ fn send_buffered_arguments(
     // Update the done event with full arguments
     parsed_data["arguments"] = Value::String(arguments_value.clone());
 
-    // Transform item_id
     let item_id = parsed_data
         .get("item_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let mcp_item_id = mcp_response_item_id(item_id);
+        .or(call.item_id.as_deref())
+        .unwrap_or(call.call_id.as_str());
+    let transformed_item_id = if matches!(descriptor.family, OutputFamily::Function) {
+        item_id.to_string()
+    } else {
+        normalize_output_item_id(descriptor.family, item_id)
+    };
+    parsed_data["type"] = json!(done_event_name);
+    parsed_data["item_id"] = Value::String(transformed_item_id.clone());
 
     // Build synthetic delta event
     let mut delta_event = json!({
-        "type": McpEvent::CALL_ARGUMENTS_DELTA,
-        "sequence_number": *sequence_number,
+        "type": delta_event_name,
+        "sequence_number": emitter.next_sequence(),
         "output_index": assigned_index,
-        "item_id": mcp_item_id,
+        "item_id": transformed_item_id,
         "delta": arguments_value,
     });
 
@@ -298,12 +307,11 @@ fn send_buffered_arguments(
         }
     }
 
-    if !send_sse_event(tx, McpEvent::CALL_ARGUMENTS_DELTA, &delta_event) {
-        return false;
+    if !send_sse_event(tx, delta_event_name, &delta_event) {
+        return BufferedArgumentsResult::Disconnected;
     }
 
-    *sequence_number += 1;
-    true
+    BufferedArgumentsResult::ForwardCurrent
 }
 
 /// An SSE event to be forwarded to the client, with optional pre-parsed JSON.
@@ -315,14 +323,31 @@ pub(super) struct SseEventData<'a> {
     pub pre_parsed: Option<Value>,
 }
 
+fn is_suppressed_function_call_item(parsed_data: &Value, ctx: &StreamingEventContext<'_>) -> bool {
+    let Some(item) = parsed_data.get("item") else {
+        return false;
+    };
+    let Some(item_type) = item.get("type").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if !is_function_call_type(item_type) {
+        return false;
+    }
+    let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    matches!(
+        transfer_descriptor_for(ctx, tool_name).visibility,
+        ToolVisibility::SuppressedForApproval
+    )
+}
+
 /// Forward and transform a streaming event to the client.
 /// Returns false if client disconnected.
 pub(super) fn forward_streaming_event(
     event: SseEventData<'_>,
-    handler: &mut StreamingToolHandler,
+    handler: &mut OpenAiUpstreamStreamParser,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
-    sequence_number: &mut u64,
+    emitter: &mut ResponseStreamEventEmitter,
 ) -> bool {
     let SseEventData {
         raw_block,
@@ -330,6 +355,10 @@ pub(super) fn forward_streaming_event(
         data,
         pre_parsed,
     } = event;
+
+    if data.trim() == "[DONE]" {
+        return true;
+    }
 
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) {
         return true;
@@ -352,18 +381,27 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
+    if matches!(event_type, OutputItemEvent::ADDED | OutputItemEvent::DONE)
+        && is_suppressed_function_call_item(&parsed_data, ctx)
+    {
+        return true;
+    }
+
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
-        && !send_buffered_arguments(
+    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE) {
+        match send_buffered_arguments(
             &mut parsed_data,
             handler,
             tx,
-            sequence_number,
+            ctx,
+            emitter,
             &mut mapped_output_index,
-        )
-    {
-        return false;
+        ) {
+            BufferedArgumentsResult::ForwardCurrent => {}
+            BufferedArgumentsResult::DropCurrent => return true,
+            BufferedArgumentsResult::Disconnected => return false,
+        }
     }
 
     if mapped_output_index.is_none() {
@@ -387,8 +425,7 @@ pub(super) fn forward_streaming_event(
     }
 
     if parsed_data.get("sequence_number").is_some() {
-        parsed_data["sequence_number"] = json!(*sequence_number);
-        *sequence_number += 1;
+        parsed_data["sequence_number"] = json!(emitter.next_sequence());
     }
 
     let final_data = match serde_json::to_string(&parsed_data) {
@@ -400,7 +437,15 @@ pub(super) fn forward_streaming_event(
     };
 
     let final_block = match event_name {
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
+        Some(FunctionCallEvent::ARGUMENTS_DONE) => format!(
+            "event: {}\ndata: {}\n\n",
+            parsed_data
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or(FunctionCallEvent::ARGUMENTS_DONE),
+            final_data
+        ),
+        Some(evt) => format!("event: {evt}\ndata: {final_data}\n\n"),
         None => format!("data: {final_data}\n\n"),
     };
 
@@ -409,7 +454,7 @@ pub(super) fn forward_streaming_event(
     }
 
     if event_name == Some(OutputItemEvent::ADDED)
-        && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
+        && !maybe_inject_tool_in_progress(&parsed_data, tx, emitter)
     {
         return false;
     }
@@ -424,7 +469,7 @@ pub(super) fn forward_streaming_event(
 fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    sequence_number: &mut u64,
+    emitter: &mut ResponseStreamEventEmitter,
 ) -> bool {
     let Some(item) = parsed_data.get("item") else {
         return true;
@@ -432,13 +477,12 @@ fn maybe_inject_tool_in_progress(
 
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Determine the in_progress event type based on item type
-    let event_type = match item_type {
-        ItemType::MCP_CALL => McpEvent::CALL_IN_PROGRESS,
-        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
-        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
-        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
-        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
+    let family = match item_type {
+        ItemType::MCP_CALL => OutputFamily::McpCall,
+        ItemType::WEB_SEARCH_CALL => OutputFamily::WebSearchCall,
+        ItemType::CODE_INTERPRETER_CALL => OutputFamily::CodeInterpreterCall,
+        ItemType::FILE_SEARCH_CALL => OutputFamily::FileSearchCall,
+        ItemType::IMAGE_GENERATION_CALL => OutputFamily::ImageGenerationCall,
         _ => return true, // Not a tool call item, nothing to inject
     };
 
@@ -449,608 +493,185 @@ fn maybe_inject_tool_in_progress(
         return true;
     };
 
-    let event = json!({
-        "type": event_type,
-        "sequence_number": *sequence_number,
-        "output_index": output_index,
-        "item_id": item_id
-    });
-    *sequence_number += 1;
-
+    let Some(event) = emitter.emit_tool_call_in_progress(output_index as usize, item_id, family)
+    else {
+        return true;
+    };
+    let event_type = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("message");
     send_sse_event(tx, event_type, &event)
 }
 
-/// Send final response.completed event to client
-/// Returns false if client disconnected
-pub(super) fn send_final_response_event(
-    handler: &StreamingToolHandler,
-    tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    sequence_number: &mut u64,
-    state: &ToolLoopState,
-    ctx: &StreamingEventContext<'_>,
-) -> bool {
-    let mut final_response = match handler.snapshot_final_response() {
-        Some(resp) => resp,
-        None => {
-            warn!("Final response snapshot unavailable; skipping synthetic completion event");
-            return true;
-        }
+/// Main entry point for streaming responses.
+pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use serde_json::to_value;
+    use uuid::Uuid;
+
+    use super::agent_loop_adapter::{
+        OpenAiResponseStreamSink, OpenAiStreamingAdapter, OpenAiUpstreamHandle,
+    };
+    use crate::routers::{
+        common::{
+            agent_loop::{
+                run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
+                ToolTransferDescriptor,
+            },
+            header_utils::extract_forwardable_request_headers,
+            mcp_utils::ensure_mcp_connection,
+            persistence_utils::persist_conversation_items,
+            responses_streaming::ResponseStreamEventEmitter,
+        },
+        openai::context::{ResponsesPayloadState, StorageHandles},
     };
 
-    if let Some(original_id) = handler.original_response_id() {
-        if let Some(obj) = final_response.as_object_mut() {
-            obj.insert("id".to_string(), Value::String(original_id.to_string()));
-        }
-    }
-
-    if let Some(session) = ctx.session {
-        inject_mcp_metadata_streaming(&mut final_response, state, session);
-    }
-
-    restore_original_tools(&mut final_response, ctx.original_request, None);
-    patch_response_with_request_metadata(
-        &mut final_response,
-        ctx.original_request,
-        ctx.previous_response_id,
-    );
-
-    if let Some(obj) = final_response.as_object_mut() {
-        obj.insert("status".to_string(), Value::String("completed".to_string()));
-    }
-
-    let completed_payload = json!({
-        "type": ResponseEvent::COMPLETED,
-        "sequence_number": *sequence_number,
-        "response": final_response
-    });
-    *sequence_number += 1;
-
-    let completed_event = format!(
-        "event: {}\ndata: {}\n\n",
-        ResponseEvent::COMPLETED,
-        completed_payload
-    );
-    tx.send(Ok(Bytes::from(completed_event))).is_ok()
-}
-
-/// Simple pass-through streaming without MCP interception
-pub(super) async fn handle_simple_streaming_passthrough(
-    client: &reqwest::Client,
-    worker: &Arc<dyn crate::worker::Worker>,
-    headers: Option<&HeaderMap>,
-    req: StreamingRequest,
-) -> Response {
-    let mut request_builder = client.post(&req.url).json(&req.payload);
-    let provider = ApiProvider::from_url(&req.url);
-    let auth_header = provider.extract_auth_header(headers, worker.api_key());
-    request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
-
-    request_builder = request_builder.header("Accept", "text/event-stream");
-
-    let response = match request_builder.send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            worker.record_outcome(502);
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to forward request to OpenAI: {err}"),
-            )
-                .into_response();
-        }
+    let payload_state = match ctx.take_payload() {
+        Some(state) => state,
+        None => return error::internal_error("internal_error", "Payload not prepared"),
+    };
+    let ResponsesPayloadState {
+        previous_response_id: _,
+        existing_mcp_list_tools_labels,
+        prepared_input,
+        control_items,
+    } = ctx.take_responses_payload().unwrap_or_default();
+    let original_request = match ctx.responses_request() {
+        Some(request) => request.clone(),
+        None => return error::internal_error("internal_error", "Expected responses request"),
+    };
+    let prepared_input = prepared_input.unwrap_or_else(|| original_request.input.clone());
+    let worker = match ctx.worker() {
+        Some(worker) => worker.clone(),
+        None => return error::internal_error("internal_error", "Worker not selected"),
+    };
+    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
+        Some(orchestrator) => orchestrator.clone(),
+        None => return error::internal_error("internal_error", "MCP orchestrator required"),
     };
 
-    let status = response.status();
-    let status_code =
-        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
-    worker.record_outcome(status.as_u16());
-
-    if !status.is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|err| format!("Failed to read upstream error body: {err}"));
-        let error_body = error::sanitize_error_body(&error_body);
-        return (status_code, error_body).into_response();
-    }
-
-    let preserved_headers = preserve_response_headers(response.headers());
-    let mut upstream_stream = response.bytes_stream();
-
-    let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-
-    let should_store = req.original_body.store.unwrap_or(true);
-    let original_request = req.original_body;
-    let previous_response_id = req.previous_response_id;
-    let storage = req.storage;
-
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "fire-and-forget stream processing; gateway shutdown need not wait for individual response streams"
-    )]
-    tokio::spawn(async move {
-        let mut accumulator = StreamingResponseAccumulator::new();
-        let mut upstream_failed = false;
-        let mut receiver_connected = true;
-        let mut chunk_processor = ChunkProcessor::new();
-
-        while let Some(chunk_result) = upstream_stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    chunk_processor.push_chunk(&chunk);
-
-                    while let Some(raw_block) = chunk_processor.next_block() {
-                        let block_cow = match rewrite_streaming_block(
-                            &raw_block,
-                            &original_request,
-                            previous_response_id.as_deref(),
-                        ) {
-                            Some(modified) => Cow::Owned(modified),
-                            None => Cow::Borrowed(raw_block.as_str()),
-                        };
-
-                        if should_store {
-                            accumulator.ingest_block(&block_cow);
-                        }
-
-                        if receiver_connected {
-                            let chunk_to_send = format!("{block_cow}\n\n");
-                            if tx.send(Ok(Bytes::from(chunk_to_send))).is_err() {
-                                receiver_connected = false;
-                            }
-                        }
-
-                        if !receiver_connected && !should_store {
-                            break;
-                        }
-                    }
-
-                    if !receiver_connected && !should_store {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    upstream_failed = true;
-                    let io_err = io::Error::other(err);
-                    let _ = tx.send(Err(io_err));
-                    break;
-                }
-            }
-        }
-
-        if should_store && !upstream_failed {
-            if chunk_processor.has_remaining() {
-                accumulator.ingest_block(&chunk_processor.take_remaining());
-            }
-            let encountered_error = accumulator.encountered_error().cloned();
-            if let Some(mut response_json) = accumulator.into_final_response() {
-                patch_response_with_request_metadata(
-                    &mut response_json,
-                    &original_request,
-                    previous_response_id.as_deref(),
-                );
-
-                // Always persist conversation items and response (even without conversation)
-                if let Err(err) = persist_conversation_items(
-                    storage.conversation.clone(),
-                    storage.conversation_item.clone(),
-                    storage.response.clone(),
-                    &response_json,
-                    &original_request,
-                    storage.request_context.clone(),
-                )
-                .await
-                {
-                    warn!("Failed to persist conversation items (stream): {}", err);
-                }
-            } else if let Some(error_payload) = encountered_error {
-                warn!("Upstream streaming error payload: {}", error_payload);
-            } else {
-                warn!("Streaming completed without a final response payload");
-            }
-        }
-    });
-
-    let body_stream = UnboundedReceiverStream::new(rx);
-    let mut response = Response::new(Body::from_stream(body_stream));
-    *response.status_mut() = status_code;
-
-    let headers_mut = response.headers_mut();
-    for (name, value) in &preserved_headers {
-        headers_mut.insert(name, value.clone());
-    }
-
-    if !headers_mut.contains_key(CONTENT_TYPE) {
-        headers_mut.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    }
-
-    response
-}
-
-/// Handle streaming WITH MCP tool call interception and execution
-pub(super) fn handle_streaming_with_tool_interception(
-    client: &reqwest::Client,
-    worker_api_key: Option<String>,
-    headers: Option<&HeaderMap>,
-    req: StreamingRequest,
-    orchestrator: &Arc<McpOrchestrator>,
-    mcp_servers: Vec<McpServerBinding>,
-) -> Response {
-    let payload = req.payload;
-
-    let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-    let should_store = req.original_body.store.unwrap_or(true);
-    let original_request = req.original_body;
-    let previous_response_id = req.previous_response_id;
-    let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
-    let url = req.url;
-    let storage = req.storage;
-
-    let client_clone = client.clone();
-    let url_clone = url.clone();
-    let headers_opt = headers.cloned();
-    let payload_clone = payload.clone();
-    let orchestrator_clone = Arc::clone(orchestrator);
-    let forwarded_headers = extract_forwardable_request_headers(headers);
-
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
-    )]
-    tokio::spawn(async move {
-        let mut state = ToolLoopState::new(
-            original_request.input.clone(),
-            existing_mcp_list_tools_labels,
-        );
-        let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
-
-        // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
-        let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
-        let session = McpToolSession::new_with_headers(
-            &orchestrator_clone,
-            mcp_servers.clone(),
-            &session_request_id,
-            forwarded_headers.clone(),
-        );
-        let mut current_payload = payload_clone;
-        prepare_mcp_tools_as_functions(&mut current_payload, &session);
-        let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));
-        let base_payload = current_payload.clone();
-        let mut mcp_list_tools_sent = false;
-        let mut is_first_iteration = true;
-        let mut sequence_number: u64 = 0;
-        let mut next_output_index: usize = 0;
-        let mut preserved_response_id: Option<String> = None;
-        let list_tools_bindings = mcp_list_tools_bindings_to_emit(
-            &state.existing_mcp_list_tools_labels,
-            session.mcp_servers(),
-        );
-
-        let streaming_ctx = StreamingEventContext {
-            original_request: &original_request,
-            previous_response_id: previous_response_id.as_deref(),
-            session: Some(&session),
+    let (_has_gateway_tools, mcp_servers) =
+        match ensure_mcp_connection(&mcp_orchestrator, original_request.tools.as_deref()).await {
+            Ok(result) => result,
+            Err(response) => return response,
         };
-        let provider = ApiProvider::from_url(&url_clone);
-        let auth_header =
-            provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
-        loop {
-            // Make streaming request
-            let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
-            request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
-            request_builder = request_builder.header("Accept", "text/event-stream");
+    let prepared = PreparedLoopInput::new(prepared_input, control_items);
+    let state = AgentLoopState::new(
+        prepared.upstream_input.clone(),
+        existing_mcp_list_tools_labels.into_iter().collect(),
+    );
+    let loop_ctx_max_tool_calls = original_request.max_tool_calls.map(|value| value as usize);
+    let loop_ctx_request = original_request.clone();
+    let session_request_id = original_request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("resp_{}", Uuid::now_v7()));
+    let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
+    let client = ctx.components.client().clone();
+    let request_headers = ctx.headers().cloned();
 
-            let response = match request_builder.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ =
-                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                let body = error::sanitize_error_body(&body);
-                let _ = send_sse_event(
-                    &tx,
-                    "error",
-                    &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
-                );
-                return;
+    let storage = match (
+        ctx.components.response_storage(),
+        ctx.components.conversation_storage(),
+        ctx.components.conversation_item_storage(),
+        ctx.components.conversation_memory_writer(),
+    ) {
+        (Some(response), Some(conversation), Some(conversation_item), Some(_memory_writer)) => {
+            StorageHandles {
+                response: response.clone(),
+                conversation: conversation.clone(),
+                conversation_item: conversation_item.clone(),
+                request_context: ctx.storage_request_context.clone(),
             }
+        }
+        _ => {
+            return error::internal_error(
+                "internal_error",
+                "Streaming storage handles are not configured",
+            );
+        }
+    };
+    let upstream = OpenAiUpstreamHandle {
+        client,
+        url: payload_state.url,
+        headers: request_headers,
+        api_key: worker.api_key().cloned(),
+        base_payload: payload_state.json,
+    };
 
-            let mut upstream_stream = response.bytes_stream();
-            let mut handler = StreamingToolHandler::with_starting_index(next_output_index);
-            if let Some(ref id) = preserved_response_id {
-                handler.original_response_id = Some(id.clone());
-            }
-            let mut chunk_processor = ChunkProcessor::new();
-            let mut tool_calls_detected = false;
-            let mut seen_in_progress = false;
+    let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
 
-            while let Some(chunk_result) = upstream_stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        chunk_processor.push_chunk(&chunk);
-
-                        while let Some(raw_block) = chunk_processor.next_block() {
-                            // Parse event
-                            let (event_name, data) = parse_sse_block(&raw_block);
-
-                            if data.is_empty() {
-                                continue;
-                            }
-
-                            // Process through handler
-                            let action = handler.process_event(event_name, data.as_ref());
-
-                            match action {
-                                StreamAction::Forward => {
-                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
-                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
-
-                                    // Skip response.created and response.in_progress on subsequent iterations
-                                    let should_skip = if is_first_iteration {
-                                        false
-                                    } else {
-                                        parsed.as_ref().is_some_and(|v| {
-                                            matches!(
-                                                v.get("type").and_then(|t| t.as_str()),
-                                                Some(ResponseEvent::CREATED)
-                                                    | Some(ResponseEvent::IN_PROGRESS)
-                                            )
-                                        })
-                                    };
-
-                                    // Check in_progress before moving parsed into SseEventData
-                                    let is_in_progress = !seen_in_progress
-                                        && parsed.as_ref().is_some_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str())
-                                                == Some(ResponseEvent::IN_PROGRESS)
-                                        });
-
-                                    if !should_skip {
-                                        // Forward the event with pre-parsed value (moved, not cloned)
-                                        if !forward_streaming_event(
-                                            SseEventData {
-                                                raw_block: &raw_block,
-                                                event_name,
-                                                data: data.as_ref(),
-                                                pre_parsed: parsed,
-                                            },
-                                            &mut handler,
-                                            &tx,
-                                            &streaming_ctx,
-                                            &mut sequence_number,
-                                        ) {
-                                            return;
-                                        }
-                                    }
-
-                                    if is_in_progress {
-                                        seen_in_progress = true;
-                                        if !mcp_list_tools_sent {
-                                            for (server_label, server_key) in &list_tools_bindings {
-                                                let list_tools_index =
-                                                    handler.allocate_synthetic_output_index();
-                                                if !send_mcp_list_tools_events(
-                                                    &tx,
-                                                    &session,
-                                                    server_label,
-                                                    list_tools_index,
-                                                    &mut sequence_number,
-                                                    server_key,
-                                                ) {
-                                                    // Client disconnected
-                                                    return;
-                                                }
-                                            }
-                                            mcp_list_tools_sent = true;
-                                        }
-                                    }
-                                }
-                                StreamAction::Buffer => {
-                                    // Don't forward, just buffer
-                                }
-                                StreamAction::Drop => {
-                                    // R6.7c native passthrough: upstream
-                                    // emitted an `output_item.done` for a
-                                    // hosted tool-call item that we did
-                                    // NOT wrap as a function_call (and so
-                                    // did not track in `pending_calls`).
-                                    // The upstream envelope arrives
-                                    // mis-ordered BEFORE
-                                    // `response.<type>.completed`, so we
-                                    // drop it here to preserve the wire
-                                    // invariant that `output_item.done`
-                                    // is the LAST event for a given item.
-                                    // Unlike `ExecuteTools`, this does NOT
-                                    // kick the tool loop — there is no
-                                    // dispatched call to finish.
-                                }
-                                StreamAction::ExecuteTools {
-                                    forward_triggering_event,
-                                } => {
-                                    // When the upstream signals tool completion via
-                                    // `output_item.done` (instead of a preceding
-                                    // `function_call_arguments.done`), forwarding the
-                                    // event here would emit an umbrella
-                                    // `response.output_item.done` BEFORE
-                                    // `response.<tool>.completed`, violating spec
-                                    // sub-event ordering. The tool loop emits its own
-                                    // `output_item.done` at the correct position after
-                                    // the `.completed` sub-event; suppress here.
-                                    if forward_triggering_event
-                                        && !forward_streaming_event(
-                                            SseEventData {
-                                                raw_block: &raw_block,
-                                                event_name,
-                                                data: data.as_ref(),
-                                                pre_parsed: None,
-                                            },
-                                            &mut handler,
-                                            &tx,
-                                            &streaming_ctx,
-                                            &mut sequence_number,
-                                        )
-                                    {
-                                        return;
-                                    }
-                                    tool_calls_detected = true;
-                                    break; // Exit stream processing to execute tools
-                                }
-                            }
-                        }
-
-                        if tool_calls_detected {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = send_sse_event(
-                            &tx,
-                            "error",
-                            &json!({"error": {"message": format!("Stream error: {}", e)}}),
-                        );
-                        return;
-                    }
-                }
-            }
-
-            next_output_index = handler.next_output_index();
-            if let Some(id) = handler.original_response_id().map(|s| s.to_string()) {
-                preserved_response_id = Some(id);
-            }
-
-            // If no tool calls, we're done - stream is complete
-            if !tool_calls_detected {
-                if !send_final_response_event(
-                    &handler,
-                    &tx,
-                    &mut sequence_number,
-                    &state,
-                    &streaming_ctx,
-                ) {
-                    return;
-                }
-
-                let final_response_json = if should_store {
-                    handler.accumulator.into_final_response()
-                } else {
-                    None
-                };
-
-                if let Some(mut response_json) = final_response_json {
-                    if let Some(ref id) = preserved_response_id {
-                        if let Some(obj) = response_json.as_object_mut() {
-                            obj.insert("id".to_string(), Value::String(id.clone()));
-                        }
-                    }
-                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
-
-                    restore_original_tools(&mut response_json, &original_request, Some(&session));
-                    patch_response_with_request_metadata(
-                        &mut response_json,
-                        &original_request,
-                        previous_response_id.as_deref(),
-                    );
-
-                    // Always persist conversation items and response (even without conversation)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fire-and-forget streaming loop; gateway shutdown need not wait for individual response streams"
+    )]
+    tokio::spawn(async move {
+        let mut session = McpToolSession::new_with_headers(
+            &mcp_orchestrator,
+            mcp_servers,
+            &session_request_id,
+            forwarded_headers,
+        );
+        if let Some(tools) = loop_ctx_request.tools.as_deref() {
+            session.configure_approval_policy(tools);
+        }
+        let loop_ctx = AgentLoopContext {
+            prepared: &prepared,
+            session: Some(&session),
+            original_request: &loop_ctx_request,
+            max_tool_calls: loop_ctx_max_tool_calls,
+        };
+        let adapter = OpenAiStreamingAdapter::new(&loop_ctx_request, upstream);
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let emitter = ResponseStreamEventEmitter::new(
+            session_request_id.clone(),
+            loop_ctx_request.model.clone(),
+            created_at,
+        );
+        let sink = OpenAiResponseStreamSink::new(
+            tx.clone(),
+            emitter,
+            ToolTransferDescriptor::map_from_mcp_snapshots(
+                session.presentation_snapshot(),
+                session.approval_snapshot(),
+            ),
+            session.server_label_snapshot(),
+        );
+        match run_agent_loop(adapter, loop_ctx, state, sink).await {
+            Ok(response) => match to_value(&response) {
+                Ok(response_json) => {
                     if let Err(err) = persist_conversation_items(
                         storage.conversation.clone(),
                         storage.conversation_item.clone(),
                         storage.response.clone(),
                         &response_json,
-                        &original_request,
+                        &loop_ctx_request,
                         storage.request_context.clone(),
                     )
                     .await
                     {
-                        warn!(
-                            "Failed to persist conversation items (stream + MCP): {}",
-                            err
-                        );
+                        warn!("Failed to persist streaming response items: {}", err);
                     }
                 }
-
-                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
-                return;
-            }
-
-            // Execute tools
-            let pending_calls = handler.take_pending_calls();
-
-            // Check iteration limit
-            state.iteration += 1;
-            state.total_calls += pending_calls.len();
-
-            // Record tool loop iteration metric
-            Metrics::record_mcp_tool_iteration(&original_request.model);
-
-            let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
-                None => DEFAULT_MAX_ITERATIONS,
-            };
-
-            if state.total_calls > effective_limit {
-                warn!(
-                    "Reached tool call limit during streaming: {}",
-                    effective_limit
-                );
-                send_sse_event(
-                    &tx,
-                    "error",
-                    &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
-                );
-                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
-                return;
-            }
-
-            // Execute all pending tool calls. Pass the caller-declared tools so
-            // hosted-tool overrides (e.g. image_generation size/quality) are
-            // merged into dispatch args before MCP execution. The request-level
-            // `user` is also forwarded into hosted-tool dispatch args.
-            if !execute_streaming_tool_calls(
-                pending_calls,
-                &session,
-                &tx,
-                &mut state,
-                &mut sequence_number,
-                &original_request.model,
-                original_request.tools.as_deref().unwrap_or(&[]),
-                original_request.user.as_deref(),
-            )
-            .await
-            {
-                return;
-            }
-
-            // Build resume payload
-            match build_resume_payload(
-                &base_payload,
-                &state.conversation_history,
-                &state.original_input,
-                &tools_json,
-                true, // is_streaming = true
-            ) {
-                Ok(resume_payload) => {
-                    current_payload = resume_payload;
-                    is_first_iteration = false;
-                }
-                Err(e) => {
-                    send_sse_event(
-                        &tx,
-                        "error",
-                        &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
+                Err(err) => {
+                    warn!(
+                        "Failed to serialize streaming response for persistence: {}",
+                        err
                     );
-                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
-                    return;
                 }
+            },
+            Err(err) => {
+                let _ = send_sse_event(&tx, "error", &json!({"error": {"message": err.message()}}));
             }
         }
+
+        let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
     });
 
     let body_stream = UnboundedReceiverStream::new(rx);
@@ -1060,57 +681,4 @@ pub(super) fn handle_streaming_with_tool_interception(
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
     response
-}
-
-/// Main entry point for streaming responses
-pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::common::mcp_utils::ensure_request_mcp_client;
-
-    let worker = match ctx.worker() {
-        Some(w) => w.clone(),
-        None => {
-            return error::internal_error("internal_error", "Worker not selected");
-        }
-    };
-    let headers = ctx.headers().cloned();
-    let original_body = match ctx.responses_request() {
-        Some(r) => r,
-        None => {
-            return error::internal_error("internal_error", "Expected responses request");
-        }
-    };
-    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP orchestrator required");
-        }
-    };
-
-    // Check for MCP tools and create request context if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(&mcp_orchestrator, tools).await
-    } else {
-        None
-    };
-
-    let client = ctx.components.client().clone();
-    let req = match ctx.into_streaming_context() {
-        Ok(r) => r,
-        Err(msg) => {
-            return error::internal_error("internal_error", msg);
-        }
-    };
-
-    let Some(mcp_servers) = mcp_servers else {
-        return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
-    };
-
-    handle_streaming_with_tool_interception(
-        &client,
-        worker.api_key().cloned(),
-        headers.as_ref(),
-        req,
-        &mcp_orchestrator,
-        mcp_servers,
-    )
 }

@@ -294,22 +294,125 @@ impl ToolExecutionResult {
 }
 
 impl ToolExecutionOutput {
+    /// Build a synthetic error output for rendering when the gateway
+    /// rejects a tool call before it reaches the orchestrator (e.g.
+    /// malformed arguments parsed before dispatch). Routes through the
+    /// same [`Self::to_response_item`] pipeline as real executions, so
+    /// `apply_error_overrides` shapes the failed item identically — no
+    /// separate render path lives outside this struct.
+    pub fn synthetic_error(
+        call_id: String,
+        tool_name: String,
+        server_label: String,
+        arguments_str: String,
+        response_format: ResponseFormat,
+        error_message: String,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_name,
+            server_key: server_label.clone(),
+            server_label,
+            arguments_str,
+            output: serde_json::json!({ "error": &error_message }),
+            is_error: true,
+            error_message: Some(error_message),
+            response_format,
+            duration: Duration::default(),
+        }
+    }
+
     /// Get the transformed ResponseOutputItem.
     ///
     /// Transforms the raw output to the appropriate ResponseOutputItem type
     /// based on the tool's configured response format (WebSearchCall,
-    /// CodeInterpreterCall, FileSearchCall, or Passthrough/McpCall).
+    /// CodeInterpreterCall, FileSearchCall, or Passthrough/McpCall). On
+    /// error executions the success-path transformer output is
+    /// post-processed to flip `status: "failed"`, populate `error`,
+    /// and clear `output` so a failing tool does not appear successful
+    /// downstream — the streaming sink and non-streaming injection
+    /// path both consume this rendered item directly.
     ///
     /// Uses `server_label` (user-facing) for the output, not `server_key` (internal).
     pub fn to_response_item(&self) -> ResponseOutputItem {
-        ResponseTransformer::transform(
+        let mut item = ResponseTransformer::transform(
             &self.output,
             &self.response_format,
             &self.call_id,
             &self.server_label,
             &self.tool_name,
             &self.arguments_str,
-        )
+        );
+        if self.is_error {
+            apply_error_overrides(&mut item, self.error_message.as_deref());
+        }
+        item
+    }
+}
+
+/// Mark a transformer-rendered output item as failed and stamp the
+/// error message into the family-specific failure slot. Each
+/// `ResponseFormat` family carries its own status / error / output
+/// fields, so the override knows the exact shape to touch:
+///
+/// - `mcp_call` → `status="failed"`, `error=<msg>`, `output=""`
+/// - `web_search_call` → `status=Failed`
+/// - `code_interpreter_call` → `status=Failed`, `outputs=[]`
+/// - `file_search_call` → `status=Failed`, `results=None`
+/// - `image_generation_call` → `status=Failed`, `result=None`
+fn apply_error_overrides(item: &mut ResponseOutputItem, error_message: Option<&str>) {
+    use openai_protocol::responses::{
+        CodeInterpreterCallStatus, FileSearchCallStatus, ImageGenerationCallStatus,
+        WebSearchCallStatus,
+    };
+
+    let msg = error_message
+        .filter(|s| !s.is_empty())
+        .unwrap_or("tool execution failed")
+        .to_string();
+    match item {
+        ResponseOutputItem::McpCall {
+            status,
+            error,
+            output,
+            ..
+        } => {
+            *status = "failed".to_string();
+            *error = Some(msg);
+            output.clear();
+        }
+        ResponseOutputItem::WebSearchCall {
+            status, results, ..
+        } => {
+            *status = WebSearchCallStatus::Failed;
+            // Drop the success-path hits the transformer wrote
+            // alongside the (now-failed) status so wire consumers
+            // don't see `status: "failed"` co-existing with a
+            // populated `results` array. Aligns with the
+            // `CodeInterpreterCall` / `FileSearchCall` /
+            // `ImageGenerationCall` arms below.
+            *results = None;
+        }
+        ResponseOutputItem::CodeInterpreterCall {
+            status, outputs, ..
+        } => {
+            *status = CodeInterpreterCallStatus::Failed;
+            *outputs = None;
+        }
+        ResponseOutputItem::FileSearchCall {
+            status, results, ..
+        } => {
+            *status = FileSearchCallStatus::Failed;
+            *results = None;
+        }
+        ResponseOutputItem::ImageGenerationCall { status, result, .. } => {
+            *status = ImageGenerationCallStatus::Failed;
+            result.clear();
+        }
+        // Other variants either are not produced by `ResponseTransformer`
+        // (FunctionToolCall, Message, …) or do not have a documented
+        // failure slot; leave them as the transformer rendered them.
+        _ => {}
     }
 }
 
@@ -413,14 +516,17 @@ impl McpOrchestrator {
         Ok(orchestrator)
     }
 
-    /// Create a simplified orchestrator for testing.
-    #[cfg(test)]
+    /// Create a simplified orchestrator for testing. Exported so
+    /// downstream crates' unit tests (e.g. `smg`'s agent-loop driver
+    /// tests) can build a session against an empty orchestrator
+    /// without dragging in a full MCP wiring stack.
     pub fn new_test() -> Self {
         Self::new_test_with_config(McpConfig::default())
     }
 
-    /// Create a simplified orchestrator with a specific config for testing.
-    #[cfg(test)]
+    /// Create a simplified orchestrator with a specific config for
+    /// testing. See [`McpOrchestrator::new_test`] for the rationale
+    /// behind exporting the helpers.
     pub fn new_test_with_config(config: McpConfig) -> Self {
         use crate::approval::{audit::AuditLog, policy::PolicyEngine};
 
