@@ -539,17 +539,17 @@ async fn test_openai_router_responses_streaming_with_mock() {
         sleep(Duration::from_millis(10)).await;
     };
 
-    // Input is now stored as a JSON array of items
+    // Persistence stores only the caller turn for previous_response_id requests.
+    // The replay chain is retained by stored.previous_response_id and reloaded
+    // from response storage on the next turn; storing replay-expanded input
+    // here would duplicate history every hop.
     assert!(stored.input.is_array());
     let input_items = stored.input.as_array().unwrap();
-    assert_eq!(input_items.len(), 2);
+    assert_eq!(input_items.len(), 1);
     assert_eq!(input_items[0]["type"], "message");
-    assert_eq!(input_items[0]["role"], "assistant");
-    assert_eq!(input_items[0]["content"][0]["text"], "Earlier answer");
-    assert_eq!(input_items[1]["type"], "message");
-    assert_eq!(input_items[1]["role"], "user");
+    assert_eq!(input_items[0]["role"], "user");
     assert_eq!(
-        input_items[1]["content"][0]["text"],
+        input_items[0]["content"][0]["text"],
         "Tell me a bedtime story."
     );
 

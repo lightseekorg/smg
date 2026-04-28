@@ -33,11 +33,11 @@ pub(super) fn build_persistence_request_body(
     client_body: &ResponsesRequest,
 ) -> ResponsesRequest {
     let mut persistence_body = request_body.clone();
-    if client_body.conversation.is_some() {
-        // Conversation item storage should append only the current client turn.
-        // The normalized request body already contains replayed conversation
-        // history, and relinking those historical items can collide in durable
-        // stores that enforce item id uniqueness.
+    if client_body.conversation.is_some() || client_body.previous_response_id.is_some() {
+        // Persistence should append only the current client turn for stateful
+        // requests. The normalized request body already contains replayed
+        // history; persisting it would relink historical conversation items or
+        // duplicate response-chain context on the next resume.
         persistence_body.input = client_body.input.clone();
     }
     persistence_body
@@ -454,7 +454,8 @@ mod tests {
     };
 
     use super::{
-        patch_response_with_request_metadata, restore_original_tools, rewrite_streaming_block,
+        build_persistence_request_body, patch_response_with_request_metadata,
+        restore_original_tools, rewrite_streaming_block,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -476,6 +477,36 @@ mod tests {
             icons: None,
             annotations: None,
         }
+    }
+
+    #[test]
+    fn persistence_body_keeps_previous_response_id_without_replay_expanded_input() {
+        let request_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Items(vec![]),
+            previous_response_id: None,
+            store: Some(false),
+            ..Default::default()
+        };
+        let client_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("current turn".to_string()),
+            previous_response_id: Some("resp_prev".to_string()),
+            store: Some(true),
+            ..Default::default()
+        };
+
+        let persistence_body = build_persistence_request_body(&request_body, &client_body);
+
+        assert_eq!(
+            persistence_body.previous_response_id.as_deref(),
+            Some("resp_prev")
+        );
+        assert!(matches!(
+            persistence_body.input,
+            ResponseInput::Text(ref text) if text == "current turn"
+        ));
+        assert_eq!(persistence_body.store, Some(true));
     }
 
     #[tokio::test]

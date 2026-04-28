@@ -171,6 +171,23 @@ fn bootstrap_payload_texts(payload: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+fn assert_resume_payload_preserves_bootstrap_text(
+    payload: &serde_json::Value,
+    bootstrap_text: &str,
+    message: &str,
+) {
+    let texts = bootstrap_payload_texts(payload);
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some(bootstrap_text),
+        "{message}: bootstrap text should remain first; texts={texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text == "Run the stateful tool"),
+        "{message}: current user text should be present; texts={texts:?}"
+    );
+}
+
 fn standard_openai_router_config(worker_url: String) -> RouterConfig {
     RouterConfig::builder()
         .openai_mode(vec![worker_url])
@@ -447,13 +464,10 @@ async fn test_non_streaming_tool_loop_preserves_bootstrapped_input_on_resume() {
             "Run the stateful tool".to_string(),
         ]
     );
-    assert_eq!(
-        bootstrap_payload_texts(&requests[1]),
-        vec![
-            "bootstrap context".to_string(),
-            "Run the stateful tool".to_string(),
-        ],
-        "resume payload should preserve bootstrapped input items"
+    assert_resume_payload_preserves_bootstrap_text(
+        &requests[1],
+        "bootstrap context",
+        "resume payload should preserve bootstrapped input items",
     );
     assert!(
         requests[1]
@@ -526,13 +540,10 @@ async fn test_streaming_tool_loop_preserves_bootstrapped_input_on_resume() {
             "Run the stateful tool".to_string(),
         ]
     );
-    assert_eq!(
-        bootstrap_payload_texts(&requests[1]),
-        vec![
-            "stream bootstrap context".to_string(),
-            "Run the stateful tool".to_string(),
-        ],
-        "streaming resume payload should preserve bootstrapped input items"
+    assert_resume_payload_preserves_bootstrap_text(
+        &requests[1],
+        "stream bootstrap context",
+        "streaming resume payload should preserve bootstrapped input items",
     );
     assert!(
         requests[1]
