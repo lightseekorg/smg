@@ -61,16 +61,16 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
+        // Keep 1 placeholder per image — TRT-LLM's KimiK25InputProcessor
+        // handles expansion to N vision tokens server-side based on grid_thws.
+        // SMG must NOT pre-expand or the engine will see N placeholders and
+        // attempt to expand each one again.
         Ok(preprocessed
             .num_img_tokens
             .iter()
-            .map(|&num_tokens| {
-                PromptReplacement::repeated(
-                    Modality::Image,
-                    &placeholder_token,
-                    pad_token_id,
-                    num_tokens,
-                )
+            .map(|_| {
+                let tokens = vec![pad_token_id; 1];
+                PromptReplacement::sequence(Modality::Image, &placeholder_token, tokens)
             })
             .collect())
     }
@@ -142,9 +142,10 @@ mod tests {
             )
             .unwrap();
 
-        // 256 pad tokens (no start/end wrapper — SGLang handles that in the chat template)
-        assert_eq!(replacements[0].tokens.len(), 256);
-        assert!(replacements[0].tokens.iter().all(|&t| t == 163605));
+        // 1 placeholder per image (engine expands to N vision tokens server-side)
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].tokens.len(), 1);
+        assert_eq!(replacements[0].tokens[0], 163605);
     }
 
     #[test]
@@ -173,9 +174,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(replacements.len(), 2);
-        assert_eq!(replacements[0].tokens.len(), 256);
-        assert_eq!(replacements[1].tokens.len(), 64);
-        assert!(replacements[1].tokens.iter().all(|&t| t == 163605));
+        assert_eq!(replacements[0].tokens.len(), 1);
+        assert_eq!(replacements[1].tokens.len(), 1);
+        assert_eq!(replacements[0].tokens[0], 163605);
     }
 
     #[test]
