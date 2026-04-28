@@ -126,19 +126,21 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
 
     let level_filter = level_to_str(config.level);
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        let filter_string = match &config.log_targets {
-            Some(targets) if !targets.is_empty() => build_filter_string(targets, level_filter),
-            _ => {
-                // Default: external deps at WARN, all workspace crates at configured level.
-                // This ensures logs from imported crates (tool_parser, kv_index, etc.)
-                // are visible while suppressing noisy external deps (hyper, h2, tonic, etc.).
-                build_workspace_filter(level_filter)
-            }
-        };
-
-        EnvFilter::new(filter_string)
-    });
+    let filter_string = match &config.log_targets {
+        Some(targets) if !targets.is_empty() => {
+            format!(
+                "{level_filter},{}",
+                build_filter_string(targets, level_filter)
+            )
+        }
+        _ => {
+            // Default: external deps at WARN, all workspace crates at configured level.
+            // This ensures logs from imported crates (tool_parser, kv_index, etc.)
+            // are visible while suppressing noisy external deps (hyper, h2, tonic, etc.).
+            build_workspace_filter(level_filter)
+        }
+    };
+    let env_filter = EnvFilter::new(filter_string);
 
     let mut layers = Vec::with_capacity(3);
 

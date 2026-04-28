@@ -36,7 +36,9 @@ use crate::{
             mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
         },
         error,
+        openai::provider::Provider,
     },
+    worker::Endpoint,
 };
 
 /// State for tracking multi-turn tool calling loop
@@ -796,6 +798,7 @@ pub(crate) struct ToolLoopExecutionContext<'a> {
     pub original_body: &'a ResponsesRequest,
     pub existing_mcp_list_tools_labels: &'a [String],
     pub session: &'a McpToolSession<'a>,
+    pub provider: Option<&'a dyn Provider>,
 }
 
 /// Execute the tool calling loop
@@ -811,6 +814,7 @@ pub(crate) async fn execute_tool_loop(
         original_body,
         existing_mcp_list_tools_labels,
         session,
+        provider: provider_hook,
     } = tool_loop_ctx;
 
     let mut state = ToolLoopState::new(
@@ -826,12 +830,15 @@ pub(crate) async fn execute_tool_loop(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
         max_tool_calls, DEFAULT_MAX_ITERATIONS
     );
-    let provider = ApiProvider::from_url(url);
-    let auth_header = provider.extract_auth_header(headers, worker_api_key);
+    let api_provider = ApiProvider::from_url(url);
+    let auth_header = api_provider.extract_auth_header(headers, worker_api_key);
 
     loop {
-        let request_builder = client.post(url).json(&current_payload);
-        let request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+        let mut request_builder = client.post(url).json(&current_payload);
+        request_builder = api_provider.apply_headers(request_builder, auth_header.as_ref());
+        if let Some(provider) = provider_hook {
+            request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+        }
 
         let response = request_builder
             .send()
@@ -849,6 +856,11 @@ pub(crate) async fn execute_tool_loop(
             .json::<Value>()
             .await
             .map_err(|e| format!("parse response: {e}"))?;
+        if let Some(provider) = provider_hook {
+            provider
+                .transform_response(&mut response_json, Endpoint::Responses)
+                .map_err(|e| format!("provider transform response: {e}"))?;
+        }
 
         let function_calls = extract_function_calls(&response_json);
         if function_calls.is_empty() {

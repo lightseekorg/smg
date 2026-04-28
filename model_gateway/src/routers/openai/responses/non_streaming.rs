@@ -12,17 +12,20 @@ use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::utils::{patch_response_with_request_metadata, restore_original_tools};
-use crate::routers::{
-    common::{
-        header_utils::{extract_forwardable_request_headers, ApiProvider},
-        mcp_utils::ensure_request_mcp_client,
-        persistence_utils::persist_conversation_items,
+use crate::{
+    routers::{
+        common::{
+            header_utils::{extract_forwardable_request_headers, ApiProvider},
+            mcp_utils::ensure_request_mcp_client,
+            persistence_utils::persist_conversation_items,
+        },
+        error,
+        openai::{
+            context::{PayloadState, RequestContext, ResponsesPayloadState},
+            mcp::{execute_tool_loop, prepare_mcp_tools_as_functions, ToolLoopExecutionContext},
+        },
     },
-    error,
-    openai::{
-        context::{PayloadState, RequestContext, ResponsesPayloadState},
-        mcp::{execute_tool_loop, prepare_mcp_tools_as_functions, ToolLoopExecutionContext},
-    },
+    worker::Endpoint,
 };
 
 /// Handle a non-streaming responses request
@@ -61,9 +64,10 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
+    let selected_provider = ctx.state.worker.as_ref().map(|w| w.provider.as_ref());
 
     // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+    let mcp_servers_opt = if let Some(tools) = original_body.tools.as_deref() {
         ensure_request_mcp_client(mcp_orchestrator, tools).await
     } else {
         None
@@ -71,7 +75,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
 
     let mut response_json: Value;
 
-    if let Some(mcp_servers) = mcp_servers {
+    if let Some(mcp_servers) = mcp_servers_opt {
         let session_request_id = original_body
             .request_id
             .clone()
@@ -98,6 +102,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 original_body,
                 existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
                 session: &session,
+                provider: selected_provider,
             },
         )
         .await
@@ -111,13 +116,17 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 return error::internal_error("upstream_error", err);
             }
         }
-
         restore_original_tools(&mut response_json, original_body, Some(&session));
     } else {
         let mut request_builder = ctx.components.client().post(&url).json(&payload);
-        let provider = ApiProvider::from_url(&url);
-        let auth_header = provider.extract_auth_header(ctx.headers(), worker.api_key());
-        request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+        let api_provider = ApiProvider::from_url(&url);
+        let auth_header = api_provider.extract_auth_header(ctx.headers(), worker.api_key());
+        request_builder = api_provider.apply_headers(request_builder, auth_header.as_ref());
+        if let Some(selection) = &ctx.state.worker {
+            request_builder = selection
+                .provider
+                .apply_headers(request_builder, auth_header.as_ref());
+        }
 
         let response = match request_builder.send().await {
             Ok(r) => r,
@@ -137,7 +146,6 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
 
         let status = response.status();
         worker.record_outcome(status.as_u16());
-
         if !status.is_success() {
             let status =
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -155,6 +163,14 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 );
             }
         };
+        if let Some(provider) = selected_provider {
+            if let Err(e) = provider.transform_response(&mut response_json, Endpoint::Responses) {
+                return error::internal_error(
+                    "provider_transform_error",
+                    format!("Failed to transform provider response: {e}"),
+                );
+            }
+        }
 
         restore_original_tools(&mut response_json, original_body, None);
     }

@@ -13,7 +13,7 @@ use openai_protocol::{
 };
 use serde_json::{json, to_value, Value};
 
-use super::{OpenAIProvider, Provider, XAIProvider};
+use super::{openai::OpenAIProvider, provider_trait::Provider, xai::XAIProvider};
 use crate::worker::Endpoint;
 
 /// Build a `ResponsesRequest` whose single input message carries every
