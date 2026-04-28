@@ -467,8 +467,12 @@ impl GoogleProvider {
                                                     json!({"inlineData": {"data": data, "mimeType": mime}}),
                                                 );
                                             } else {
-                                                parts_out
-                                                    .push(json!({"inlineData": {"data": data}}));
+                                                parts_out.push(json!({
+                                                    "inlineData": {
+                                                        "data": data,
+                                                        "mimeType": "application/octet-stream"
+                                                    }
+                                                }));
                                             }
                                         }
                                     }
