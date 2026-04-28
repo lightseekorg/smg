@@ -42,7 +42,7 @@ use super::{
 };
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
-use super::super::provider::Provider;
+use super::super::provider::{Provider, ProviderError};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
@@ -70,7 +70,7 @@ fn maybe_transform_final_response_for_persistence(
     response: &mut Value,
     provider: Option<&dyn Provider>,
     model_id: &str,
-) {
+) -> Result<(), ProviderError> {
     if let Some(provider) =
         provider.filter(|p| !p.is_openai_response_shape(response, Endpoint::Responses))
     {
@@ -89,8 +89,10 @@ fn maybe_transform_final_response_for_persistence(
                 metrics_labels::ENDPOINT_RESPONSES,
                 metrics_labels::ERROR_INTERNAL,
             );
+            return Err(err);
         }
     }
+    Ok(())
 }
 
 /// Apply all transformations to event data in-place (rewrite + transform)
@@ -844,11 +846,17 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
             let encountered_error = accumulator.encountered_error().cloned();
             if let Some(mut response_json) = accumulator.into_final_response() {
-                maybe_transform_final_response_for_persistence(
+                if let Err(err) = maybe_transform_final_response_for_persistence(
                     &mut response_json,
                     provider.as_deref(),
                     &original_request.model,
-                );
+                ) {
+                    warn!(
+                        "Skipping persistence because final response transform failed: {}",
+                        err
+                    );
+                    return;
+                }
                 patch_response_with_request_metadata(
                     &mut response_json,
                     &original_request,
@@ -1201,11 +1209,18 @@ pub(super) fn handle_streaming_with_tool_interception(
                 };
 
                 if let Some(mut response_json) = final_response_json {
-                    maybe_transform_final_response_for_persistence(
+                    if let Err(err) = maybe_transform_final_response_for_persistence(
                         &mut response_json,
                         streaming_ctx.provider.as_deref(),
                         &original_request.model,
-                    );
+                    ) {
+                        warn!(
+                            "Skipping persistence because final response transform failed: {}",
+                            err
+                        );
+                        let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                        return;
+                    }
                     if let Some(ref id) = preserved_response_id {
                         if let Some(obj) = response_json.as_object_mut() {
                             obj.insert("id".to_string(), Value::String(id.clone()));
@@ -1438,7 +1453,8 @@ mod tests {
             "usageMetadata": {"promptTokenCount": 1}
         });
 
-        maybe_transform_final_response_for_persistence(&mut native, Some(&provider), "test-model");
+        maybe_transform_final_response_for_persistence(&mut native, Some(&provider), "test-model")
+            .expect("provider-native response should be transformed");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -1461,9 +1477,43 @@ mod tests {
             &mut openai_shaped,
             Some(&provider),
             "test-model",
-        );
+        )
+        .expect("openai-shaped response should skip transform");
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct FailingTransformProvider;
+
+    impl Provider for FailingTransformProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_response(
+            &self,
+            _response: &mut Value,
+            _endpoint: Endpoint,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::TransformError("boom".to_string()))
+        }
+
+        fn is_openai_response_shape(&self, _response: &Value, _endpoint: Endpoint) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn persistence_transform_propagates_transform_failure() {
+        let provider = FailingTransformProvider;
+        let mut native = json!({
+            "responseId": "resp_upstream",
+            "candidates": [{"finishReason": "STOP"}]
+        });
+
+        let result =
+            maybe_transform_final_response_for_persistence(&mut native, Some(&provider), "test");
+        assert!(result.is_err(), "transform failures must propagate");
     }
 
     struct CreatedEventProvider;
