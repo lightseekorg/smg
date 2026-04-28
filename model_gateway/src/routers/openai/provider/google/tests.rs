@@ -330,6 +330,7 @@ fn request_transform_maps_tool_response_to_function_response() {
         .transform_request(&mut payload, Endpoint::Responses)
         .expect("transform should succeed");
 
+    assert_eq!(payload["contents"][0]["role"], json!("user"));
     let part = &payload["contents"][0]["parts"][0]["functionResponse"];
     assert_eq!(part["name"], json!("weather_api"));
     assert_eq!(part["response"], json!({"result": "sunny"}));
@@ -354,6 +355,7 @@ fn request_transform_parses_json_strings_for_function_call_and_output() {
         payload["contents"][0]["parts"][0]["functionCall"]["args"],
         json!({"city":"sf"})
     );
+    assert_eq!(payload["contents"][1]["role"], json!("user"));
     assert_eq!(
         payload["contents"][1]["parts"][0]["functionResponse"]["response"],
         json!({"temp":72})
