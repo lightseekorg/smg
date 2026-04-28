@@ -204,8 +204,10 @@ pub(super) async fn load_previous_messages(
     stm_enabled: bool,
 ) -> Result<LoadedRequest, Response> {
     let Some(ref prev_id_str) = request.previous_response_id else {
-        // No previous_response_id, return request as-is
-        let turn_info = if stm_enabled {
+        // No previous_response_id: return request as-is.
+        // If a conversation ID is present we have not loaded its history here,
+        // so turn counts from request.input alone would be wrong — skip STMO.
+        let turn_info = if stm_enabled && request.conversation.is_none() {
             Some(count_conversation_turn_info(&request.input))
         } else {
             None
