@@ -243,13 +243,11 @@ fn resolve_or_register_gemini_endpoint_worker(
             endpoint_override = %endpoint,
             endpoint_base_url = %base_url,
             provider_hint = ?provider_hint,
-            "responses: endpoint override worker not found; registering ephemeral external worker"
+            "responses: endpoint override worker not found; using transient external worker for this request"
         );
 
         let ephemeral =
             build_ephemeral_external_worker(base_url, model, provider_hint.clone(), true);
-        let _ = deps.worker_registry.register_or_replace(ephemeral.clone());
-
         Ok(ephemeral)
     } else {
         tracing::warn!(
