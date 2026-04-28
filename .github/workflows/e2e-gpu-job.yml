@@ -19,6 +19,11 @@ on:
         required: true
         type: number
         description: "Job timeout in minutes"
+      test_timeout:
+        required: false
+        type: number
+        default: 25
+        description: "Run E2E tests step timeout in minutes"
       extra_deps:
         required: false
         type: string
@@ -113,7 +118,7 @@ jobs:
 
       # Run tests
       - name: Run E2E tests
-        timeout-minutes: 25
+        timeout-minutes: ${{ inputs.test_timeout }}
         env:
           SHOW_WORKER_LOGS: "0"
           SHOW_ROUTER_LOGS: "1"
