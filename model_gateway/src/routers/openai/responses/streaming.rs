@@ -376,11 +376,29 @@ pub(super) fn forward_streaming_event(
         },
     };
 
+    let transformed_events =
+        normalize_streaming_events_with_provider(&parsed_data, handler, ctx.provider.as_deref());
+    forward_normalized_streaming_events(
+        transformed_events,
+        event_name,
+        raw_block,
+        handler,
+        tx,
+        ctx,
+        sequence_number,
+    )
+}
+
+fn normalize_streaming_events_with_provider(
+    parsed_data: &Value,
+    handler: &mut StreamingToolHandler,
+    provider: Option<&dyn Provider>,
+) -> Vec<Value> {
     // Provider normalization comes first so downstream gateway rewrites
     // operate on OpenAI-shaped events regardless of upstream provider format.
-    let mut transformed_events = vec![parsed_data];
-    if let Some(provider) = &ctx.provider {
-        handler.ensure_provider_stream_state(provider.as_ref());
+    let mut transformed_events = vec![parsed_data.clone()];
+    if let Some(provider) = provider {
+        handler.ensure_provider_stream_state(provider);
         let state = handler.provider_stream_state_mut();
         match provider.transform_stream_event(&transformed_events[0], state, Endpoint::Responses) {
             Ok(events) => {
@@ -402,7 +420,18 @@ pub(super) fn forward_streaming_event(
             }
         }
     }
+    transformed_events
+}
 
+fn forward_normalized_streaming_events(
+    transformed_events: Vec<Value>,
+    event_name: Option<&str>,
+    raw_block: &str,
+    handler: &mut StreamingToolHandler,
+    tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    ctx: &StreamingEventContext<'_>,
+    sequence_number: &mut u64,
+) -> bool {
     for mut parsed_data in transformed_events {
         let transformed_event_type = parsed_data
             .get("type")
@@ -927,6 +956,12 @@ pub(super) fn handle_streaming_with_tool_interception(
             session: Some(&session),
             provider: provider.clone(),
         };
+        let forwarding_ctx = StreamingEventContext {
+            original_request: &original_request,
+            previous_response_id: previous_response_id.as_deref(),
+            session: Some(&session),
+            provider: None,
+        };
         let api_provider = ApiProvider::from_url(&url_clone);
         let auth_header =
             api_provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
@@ -972,7 +1007,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                         while let Some(raw_block) = chunk_processor.next_block() {
                             // Parse event
-                            let (event_name, data) = parse_sse_block(&raw_block);
+                            let (_event_name, data) = parse_sse_block(&raw_block);
 
                             if data.is_empty() {
                                 continue;
@@ -984,123 +1019,135 @@ pub(super) fn handle_streaming_with_tool_interception(
                                 continue;
                             }
 
-                            // Process through handler
-                            let action = handler.process_event(event_name, data.as_ref());
+                            let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+                            let Some(parsed) = parsed else {
+                                if tx
+                                    .send(Ok(Bytes::from(format!("{raw_block}\n\n"))))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            };
 
-                            match action {
-                                StreamAction::Forward => {
-                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
-                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+                            let normalized_events = normalize_streaming_events_with_provider(
+                                &parsed,
+                                &mut handler,
+                                streaming_ctx.provider.as_deref(),
+                            );
 
-                                    // Skip response.created and response.in_progress on subsequent iterations
-                                    let should_skip = if is_first_iteration {
-                                        false
-                                    } else {
-                                        parsed.as_ref().is_some_and(|v| {
-                                            matches!(
-                                                v.get("type").and_then(|t| t.as_str()),
-                                                Some(ResponseEvent::CREATED)
-                                                    | Some(ResponseEvent::IN_PROGRESS)
+                            for normalized_event in normalized_events {
+                                let serialized = match serde_json::to_string(&normalized_event) {
+                                    Ok(s) => s,
+                                    Err(_) => continue,
+                                };
+
+                                let action = handler.process_event(None, &serialized);
+                                let event_type =
+                                    normalized_event.get("type").and_then(|t| t.as_str());
+                                let should_skip = !is_first_iteration
+                                    && matches!(
+                                        event_type,
+                                        Some(ResponseEvent::CREATED)
+                                            | Some(ResponseEvent::IN_PROGRESS)
+                                    );
+                                let is_in_progress = !seen_in_progress
+                                    && event_type == Some(ResponseEvent::IN_PROGRESS);
+
+                                match action {
+                                    StreamAction::Forward => {
+                                        if !should_skip
+                                            && !forward_streaming_event(
+                                                SseEventData {
+                                                    raw_block: &raw_block,
+                                                    event_name: None,
+                                                    data: &serialized,
+                                                    pre_parsed: Some(normalized_event),
+                                                },
+                                                &mut handler,
+                                                &tx,
+                                                &forwarding_ctx,
+                                                &mut sequence_number,
                                             )
-                                        })
-                                    };
-
-                                    // Check in_progress before moving parsed into SseEventData
-                                    let is_in_progress = !seen_in_progress
-                                        && parsed.as_ref().is_some_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str())
-                                                == Some(ResponseEvent::IN_PROGRESS)
-                                        });
-
-                                    if !should_skip {
-                                        // Forward the event with pre-parsed value (moved, not cloned)
-                                        if !forward_streaming_event(
-                                            SseEventData {
-                                                raw_block: &raw_block,
-                                                event_name,
-                                                data: data.as_ref(),
-                                                pre_parsed: parsed,
-                                            },
-                                            &mut handler,
-                                            &tx,
-                                            &streaming_ctx,
-                                            &mut sequence_number,
-                                        ) {
+                                        {
                                             return;
                                         }
                                     }
-
-                                    if is_in_progress {
-                                        seen_in_progress = true;
-                                        if !mcp_list_tools_sent {
-                                            for (server_label, server_key) in &list_tools_bindings {
-                                                let list_tools_index =
-                                                    handler.allocate_synthetic_output_index();
-                                                if !send_mcp_list_tools_events(
-                                                    &tx,
-                                                    &session,
-                                                    server_label,
-                                                    list_tools_index,
-                                                    &mut sequence_number,
-                                                    server_key,
-                                                ) {
-                                                    // Client disconnected
-                                                    return;
-                                                }
-                                            }
-                                            mcp_list_tools_sent = true;
+                                    StreamAction::Buffer => {
+                                        // Don't forward, just buffer
+                                    }
+                                    StreamAction::Drop => {
+                                        // R6.7c native passthrough: upstream
+                                        // emitted an `output_item.done` for a
+                                        // hosted tool-call item that we did
+                                        // NOT wrap as a function_call (and so
+                                        // did not track in `pending_calls`).
+                                        // The upstream envelope arrives
+                                        // mis-ordered BEFORE
+                                        // `response.<type>.completed`, so we
+                                        // drop it here to preserve the wire
+                                        // invariant that `output_item.done`
+                                        // is the LAST event for a given item.
+                                        // Unlike `ExecuteTools`, this does NOT
+                                        // kick the tool loop — there is no
+                                        // dispatched call to finish.
+                                    }
+                                    StreamAction::ExecuteTools {
+                                        forward_triggering_event,
+                                    } => {
+                                        // When the upstream signals tool completion via
+                                        // `output_item.done` (instead of a preceding
+                                        // `function_call_arguments.done`), forwarding the
+                                        // event here would emit an umbrella
+                                        // `response.output_item.done` BEFORE
+                                        // `response.<tool>.completed`, violating spec
+                                        // sub-event ordering. The tool loop emits its own
+                                        // `output_item.done` at the correct position after
+                                        // the `.completed` sub-event; suppress here.
+                                        if forward_triggering_event
+                                            && !should_skip
+                                            && !forward_streaming_event(
+                                                SseEventData {
+                                                    raw_block: &raw_block,
+                                                    event_name: None,
+                                                    data: &serialized,
+                                                    pre_parsed: Some(normalized_event),
+                                                },
+                                                &mut handler,
+                                                &tx,
+                                                &forwarding_ctx,
+                                                &mut sequence_number,
+                                            )
+                                        {
+                                            return;
                                         }
+                                        tool_calls_detected = true;
                                     }
                                 }
-                                StreamAction::Buffer => {
-                                    // Don't forward, just buffer
-                                }
-                                StreamAction::Drop => {
-                                    // R6.7c native passthrough: upstream
-                                    // emitted an `output_item.done` for a
-                                    // hosted tool-call item that we did
-                                    // NOT wrap as a function_call (and so
-                                    // did not track in `pending_calls`).
-                                    // The upstream envelope arrives
-                                    // mis-ordered BEFORE
-                                    // `response.<type>.completed`, so we
-                                    // drop it here to preserve the wire
-                                    // invariant that `output_item.done`
-                                    // is the LAST event for a given item.
-                                    // Unlike `ExecuteTools`, this does NOT
-                                    // kick the tool loop — there is no
-                                    // dispatched call to finish.
-                                }
-                                StreamAction::ExecuteTools {
-                                    forward_triggering_event,
-                                } => {
-                                    // When the upstream signals tool completion via
-                                    // `output_item.done` (instead of a preceding
-                                    // `function_call_arguments.done`), forwarding the
-                                    // event here would emit an umbrella
-                                    // `response.output_item.done` BEFORE
-                                    // `response.<tool>.completed`, violating spec
-                                    // sub-event ordering. The tool loop emits its own
-                                    // `output_item.done` at the correct position after
-                                    // the `.completed` sub-event; suppress here.
-                                    if forward_triggering_event
-                                        && !forward_streaming_event(
-                                            SseEventData {
-                                                raw_block: &raw_block,
-                                                event_name,
-                                                data: data.as_ref(),
-                                                pre_parsed: None,
-                                            },
-                                            &mut handler,
-                                            &tx,
-                                            &streaming_ctx,
-                                            &mut sequence_number,
-                                        )
-                                    {
-                                        return;
+
+                                if is_in_progress {
+                                    seen_in_progress = true;
+                                    if !mcp_list_tools_sent {
+                                        for (server_label, server_key) in &list_tools_bindings {
+                                            let list_tools_index =
+                                                handler.allocate_synthetic_output_index();
+                                            if !send_mcp_list_tools_events(
+                                                &tx,
+                                                &session,
+                                                server_label,
+                                                list_tools_index,
+                                                &mut sequence_number,
+                                                server_key,
+                                            ) {
+                                                return;
+                                            }
+                                        }
+                                        mcp_list_tools_sent = true;
                                     }
-                                    tool_calls_detected = true;
-                                    break; // Exit stream processing to execute tools
+                                }
+
+                                if tool_calls_detected {
+                                    break;
                                 }
                             }
                         }
@@ -1621,6 +1668,67 @@ mod tests {
         assert!(
             payload.contains("\"store\":false"),
             "fallback path should still patch response metadata: {payload}"
+        );
+    }
+
+    struct NativeToolDoneProvider;
+
+    impl Provider for NativeToolDoneProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_stream_event(
+            &self,
+            _event: &Value,
+            _state: Option<&mut (dyn std::any::Any + Send)>,
+            _endpoint: Endpoint,
+        ) -> Result<Vec<Value>, ProviderError> {
+            Ok(vec![
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "my_tool"
+                    }
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": 0,
+                    "delta": "{\"x\":"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "output_index": 0
+                }),
+            ])
+        }
+    }
+
+    #[test]
+    fn normalized_provider_events_drive_tool_loop_decisions() {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let provider = NativeToolDoneProvider;
+        let native_event = json!({"candidates": [{"content": {"parts": [{"text": "native"}]}}]});
+
+        let normalized =
+            normalize_streaming_events_with_provider(&native_event, &mut handler, Some(&provider));
+
+        let mut saw_execute_tools = false;
+        for event in normalized {
+            let serialized = serde_json::to_string(&event).expect("serializable normalized event");
+            if let StreamAction::ExecuteTools { .. } = handler.process_event(None, &serialized) {
+                saw_execute_tools = true;
+                break;
+            }
+        }
+
+        assert!(
+            saw_execute_tools,
+            "provider-normalized function-call events should trigger ExecuteTools"
         );
     }
 }
