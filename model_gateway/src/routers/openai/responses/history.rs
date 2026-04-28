@@ -147,20 +147,16 @@ pub(crate) async fn load_input_history(
             ));
         }
 
-        // When STMO is active we request one extra item so we can detect
-        // whether the conversation has grown past max_conversation_history_items.
-        // If it has, turn-count math would be wrong, so we reject early.
+        // Always fetch cap+1 items so we can detect whether the conversation
+        // has grown past max_conversation_history_items. Fetching one extra row
+        // is harmless (it is just a SQL LIMIT). The rejection below only fires
+        // when STMO is active and the response will be persisted.
         let cap = components
             .shared
             .router_config
             .max_conversation_history_items;
-        let fetch_limit = if stm_enabled && request_body.store.unwrap_or(true) {
-            cap.saturating_add(1)
-        } else {
-            cap
-        };
         let params = ListParams {
-            limit: fetch_limit,
+            limit: cap.saturating_add(1),
             order: SortOrder::Asc,
             after: None,
         };
