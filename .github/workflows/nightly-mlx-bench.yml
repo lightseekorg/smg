@@ -116,6 +116,32 @@ jobs:
         # `genai-bench --help` doesn't crash on a clean wheel install.
         run: pip install genai-bench oci_openai
 
+      - name: Patch genai-bench streaming chunk size
+        # genai-bench's openai_user.py calls
+        # `response.iter_lines(chunk_size=None)`, which under the hood
+        # does `urllib3.HTTPResponse.read(amt=None)` — that reads to EOF
+        # before yielding anything when the response has no Content-Length
+        # and no `Transfer-Encoding: chunked` (which is exactly what
+        # mlx-lm.server emits — it uses Python's `BaseHTTPRequestHandler`
+        # default of HTTP/1.0). Result: every per-token chunk arrives at
+        # the bench client at once at end-of-stream, which collapses
+        # measured TPOT to ~0 and inflates TTFT to e2e latency.
+        # Wire-level probes confirm mlx-lm DOES stream tokens at ~18ms
+        # intervals; the buffering is purely client-side. Switching the
+        # call to `chunk_size=1` makes urllib3 yield per OS read, which
+        # restores correct TTFT and TPOT measurements. This patch is
+        # safe for the smg → mlx-grpc and vllm-metal phases too — both
+        # use HTTP/1.1 with chunked encoding, where chunk_size has no
+        # observable effect on the read pattern.
+        run: |
+          target=$(python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) + '/user/openai_user.py')")
+          echo "Patching $target"
+          sed -i.bak 's/response.iter_lines(chunk_size=None)/response.iter_lines(chunk_size=1)/g' "$target"
+          if ! grep -q "iter_lines(chunk_size=1)" "$target"; then
+            echo "Patch did not apply — pattern not found" >&2
+            exit 1
+          fi
+
       - name: Install vllm-metal (best effort)
         # vllm-metal isn't on PyPI (no public macos wheels for plain vllm),
         # so we install it via the project's official install script. The
