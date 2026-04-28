@@ -33,8 +33,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: nightly-mlx-bench-${{ github.event_name }}
-  cancel-in-progress: false
+  group: nightly-mlx-bench-${{ github.event_name }}-${{ github.ref }}
+  # PR pushes: cancel the previous PR run so the newest code runs ASAP.
+  # Scheduled / dispatched runs: never cancel each other.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   bench:
