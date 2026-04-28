@@ -1,3 +1,4 @@
+use http::HeaderValue;
 use reqwest::RequestBuilder;
 use serde_json::Value;
 
@@ -25,7 +26,21 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
-    fn apply_headers(&self, builder: RequestBuilder) -> RequestBuilder {
+    fn upstream_url(
+        &self,
+        worker_url: &str,
+        provided_upstream_url: Option<&str>,
+    ) -> Result<String, ProviderError> {
+        Ok(provided_upstream_url
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("{worker_url}/v1/responses")))
+    }
+
+    fn apply_headers(
+        &self,
+        builder: RequestBuilder,
+        _auth_header: Option<&HeaderValue>,
+    ) -> RequestBuilder {
         builder
     }
 }

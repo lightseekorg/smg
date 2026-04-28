@@ -10,9 +10,9 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::Request,
-    http::{Method, StatusCode},
-    response::Response,
+    extract::{Request, State},
+    http::{header::CONTENT_TYPE, HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
@@ -36,6 +36,7 @@ use smg::{
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
     net::TcpListener,
+    sync::Mutex as AsyncMutex,
     time::{sleep, Duration},
 };
 use tower::ServiceExt;
@@ -100,6 +101,147 @@ fn create_minimal_completion_request() -> CompletionRequest {
 
 fn test_tenant_meta() -> smg::middleware::TenantRequestMeta {
     RouteRequestMeta::new(TenantKey::from("test-tenant"))
+}
+
+#[derive(Clone)]
+struct CaptureResponsesState {
+    requests: Arc<AtomicUsize>,
+    last_body: Arc<AsyncMutex<Option<serde_json::Value>>>,
+    last_headers: Arc<AsyncMutex<Option<HeaderMap>>>,
+    last_uri: Arc<AsyncMutex<Option<String>>>,
+    status: StatusCode,
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper with known-valid header value"
+)]
+async fn capture_responses_handler(
+    State(state): State<CaptureResponsesState>,
+    req: Request<Body>,
+) -> Response {
+    state.requests.fetch_add(1, Ordering::SeqCst);
+
+    *state.last_uri.lock().await = Some(req.uri().to_string());
+
+    let headers = req.headers().clone();
+    *state.last_headers.lock().await = Some(headers);
+
+    let (_, body) = req.into_parts();
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(payload) => payload,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    *state.last_body.lock().await = Some(payload.clone());
+
+    if !state.status.is_success() {
+        return (
+            state.status,
+            Json(json!({
+                "error": {
+                    "message": "capture failure",
+                    "type": "internal_error",
+                    "code": "internal_error"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let is_streaming = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if is_streaming {
+        let data = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_capture",
+                "object": "response",
+                "created_at": 1,
+                "model": model,
+                "output": [],
+                "status": "completed"
+            }
+        });
+        let mut response = Response::new(Body::from(format!(
+            "event: response.completed\ndata: {data}\n\ndata: [DONE]\n\n"
+        )));
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, "text/event-stream".parse().unwrap());
+        response
+    } else {
+        Json(json!({
+            "id": "resp_capture",
+            "object": "response",
+            "created_at": 1,
+            "model": model,
+            "output": [],
+            "status": "completed",
+            "usage": null
+        }))
+        .into_response()
+    }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    reason = "test infrastructure"
+)]
+async fn start_capture_responses_server(status: StatusCode) -> (String, CaptureResponsesState) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capture server");
+    let addr = listener.local_addr().expect("capture server local addr");
+    let state = CaptureResponsesState {
+        requests: Arc::new(AtomicUsize::new(0)),
+        last_body: Arc::new(AsyncMutex::new(None)),
+        last_headers: Arc::new(AsyncMutex::new(None)),
+        last_uri: Arc::new(AsyncMutex::new(None)),
+        status,
+    };
+
+    let app = Router::new()
+        .route("/v1/responses", post(capture_responses_handler))
+        .fallback(post(capture_responses_handler))
+        .with_state(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("capture server");
+    });
+
+    (format!("http://{addr}"), state)
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper with known-valid header values"
+)]
+fn endpoint_override_headers(provider: &str, endpoint: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-model-provider", provider.parse().unwrap());
+    headers.insert("x-provider-endpoint", endpoint.parse().unwrap());
+    headers
+}
+
+fn endpoint_override_request(stream: bool) -> ResponsesRequest {
+    ResponsesRequest {
+        model: "gpt-oss-20b".to_string(),
+        input: ResponseInput::Text("hello dedicated".to_string()),
+        stream: stream.then_some(true),
+        ..Default::default()
+    }
 }
 
 /// Test basic OpenAI router creation and configuration
@@ -171,6 +313,158 @@ async fn test_openai_router_models() {
 
     assert_eq!(models["object"], "list");
     assert!(models["data"].is_array());
+}
+
+#[tokio::test]
+async fn test_responses_endpoint_override_rejects_loopback_endpoint_without_fallback() {
+    let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
+    let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
+
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let headers = endpoint_override_headers(
+        "openai",
+        &format!("{dedicated_url}/v1beta/models/gemini-2.5-flash:generateContent?alt=sse"),
+    );
+    let request = endpoint_override_request(false);
+
+    let response = router
+        .route_responses(
+            Some(&headers),
+            &test_tenant_meta(),
+            &request,
+            &request.model,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_responses_endpoint_override_rejects_invalid_endpoint_urls_without_fallback() {
+    let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
+    let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
+
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+    let request = endpoint_override_request(false);
+
+    for endpoint in ["notaurl", dedicated_url.as_str()] {
+        let headers = endpoint_override_headers("openai", endpoint);
+        let response = router
+            .route_responses(
+                Some(&headers),
+                &test_tenant_meta(),
+                &request,
+                &request.model,
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid endpoint should be rejected: {endpoint}"
+        );
+    }
+
+    assert_eq!(
+        dedicated_state.requests.load(Ordering::SeqCst),
+        0,
+        "invalid endpoint URLs must fail before calling the override endpoint"
+    );
+    assert_eq!(
+        shared_state.requests.load(Ordering::SeqCst),
+        0,
+        "invalid endpoint URLs must not fall back to registered workers"
+    );
+}
+
+#[tokio::test]
+async fn test_responses_endpoint_override_rejects_loopback_for_gpt_oss_without_fallback() {
+    let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
+    let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
+
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let headers = endpoint_override_headers("gpt-oss", &format!("{dedicated_url}/v1/responses"));
+    let request = endpoint_override_request(false);
+
+    let response = router
+        .route_responses(
+            Some(&headers),
+            &test_tenant_meta(),
+            &request,
+            &request.model,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_responses_endpoint_override_rejects_unknown_provider_without_fallback() {
+    let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
+    let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
+
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let headers = endpoint_override_headers("unknown", &format!("{dedicated_url}/v1/responses"));
+    let request = endpoint_override_request(false);
+
+    let response = router
+        .route_responses(
+            Some(&headers),
+            &test_tenant_meta(),
+            &request,
+            &request.model,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let (_, body) = response.into_parts();
+    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .expect("error response body");
+    let body_json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("error response json");
+    assert_eq!(
+        body_json["error"]["message"],
+        json!("x-model-provider must be one of openai, gpt-oss, xai, google, gemini, anthropic")
+    );
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_streaming_responses_endpoint_override_rejects_loopback_without_fallback() {
+    let (shared_url, shared_state) = start_capture_responses_server(StatusCode::OK).await;
+    let (dedicated_url, dedicated_state) = start_capture_responses_server(StatusCode::OK).await;
+
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
+    let router = OpenAIRouter::new(&ctx).await.unwrap();
+
+    let headers = endpoint_override_headers("openai", &format!("{dedicated_url}/v1/responses"));
+    let request = endpoint_override_request(true);
+
+    let response = router
+        .route_responses(
+            Some(&headers),
+            &test_tenant_meta(),
+            &request,
+            &request.model,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);
 }
 
 #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
