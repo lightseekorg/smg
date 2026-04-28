@@ -267,6 +267,7 @@ def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_cl
         ),
         previous_response_id=resp1.id,
         tools=[BRAVE_MCP_TOOL],
+        tool_choice="required",
         stream=False,
         reasoning={"effort": "low"},
     )
@@ -284,6 +285,7 @@ def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_cl
         ),
         previous_response_id=resp2.id,
         tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
+        tool_choice="required",
         stream=False,
         reasoning={"effort": "low"},
     )
@@ -318,6 +320,7 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
                 0
             ].response.id,
             tools=[BRAVE_MCP_TOOL],
+            tool_choice="required",
             stream=True,
             reasoning={"effort": "low"},
         )
@@ -337,6 +340,7 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
                 0
             ].response.id,
             tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
+            tool_choice="required",
             stream=True,
             reasoning={"effort": "low"},
         )
