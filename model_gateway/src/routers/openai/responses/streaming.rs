@@ -7,7 +7,7 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, io, sync::Arc};
 
 use axum::{
     body::Body,
@@ -37,7 +37,7 @@ use super::{
     common::{extract_output_index, get_event_type, parse_sse_block, ChunkProcessor},
     utils::{
         patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
-        rewrite_streaming_block,
+        rewrite_streaming_block, strip_internal_mcp_artifacts,
     },
 };
 const SSE_DONE: &str = "data: [DONE]\n\n";
@@ -49,7 +49,7 @@ use crate::{
             header_utils::{
                 extract_forwardable_request_headers, preserve_response_headers, ApiProvider,
             },
-            mcp_utils::DEFAULT_MAX_ITERATIONS,
+            mcp_utils::{collect_user_function_names, DEFAULT_MAX_ITERATIONS},
             persistence_utils::persist_conversation_items,
         },
         error,
@@ -126,6 +126,20 @@ pub(super) fn apply_event_transformations_inplace(
                         changed = true;
                     }
                 }
+            }
+        }
+
+        // Live response envelopes can echo the effective model tool payload.
+        // Redact leaked internal artifacts in-place without synthesizing final
+        // response-only fields that upstream omitted from the live envelope.
+        if let Some(response) = parsed_data.get_mut("response") {
+            let has_client_visible_tool_fields = response.get("tools").is_some()
+                || response.get("tool_choice").is_some()
+                || response.get("output").is_some();
+
+            if has_client_visible_tool_fields {
+                strip_internal_mcp_artifacts(response, ctx.original_request, ctx.session);
+                changed = true;
             }
         }
     }
@@ -352,6 +366,10 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
+    if should_suppress_internal_streaming_event(&parsed_data, handler, ctx) {
+        return true;
+    }
+
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
@@ -415,6 +433,59 @@ pub(super) fn forward_streaming_event(
     }
 
     true
+}
+
+fn should_suppress_internal_streaming_event(
+    parsed_data: &Value,
+    handler: &StreamingToolHandler,
+    ctx: &StreamingEventContext<'_>,
+) -> bool {
+    let Some(session) = ctx.session else {
+        return false;
+    };
+
+    if let Some(item) = parsed_data.get("item") {
+        let user_function_names = collect_user_function_names(ctx.original_request);
+        if session.should_hide_output_item_json(item, &user_function_names) {
+            return true;
+        }
+    }
+
+    let Some(tool_name) = streaming_event_tool_name(parsed_data, handler) else {
+        return false;
+    };
+
+    let user_function_names = collect_user_function_names(ctx.original_request);
+    session.is_internal_non_builtin_tool(tool_name.as_ref())
+        && !user_function_names.contains(tool_name.as_ref())
+}
+
+fn streaming_event_tool_name<'a>(
+    parsed_data: &'a Value,
+    handler: &'a StreamingToolHandler,
+) -> Option<Cow<'a, str>> {
+    if let Some(name) = parsed_data
+        .get("item")
+        .and_then(|item| item.get("name"))
+        .and_then(|value| value.as_str())
+    {
+        return Some(Cow::Borrowed(name));
+    }
+
+    if let Some(name) = parsed_data
+        .get("delta")
+        .and_then(|delta| delta.get("name"))
+        .and_then(|value| value.as_str())
+    {
+        return Some(Cow::Borrowed(name));
+    }
+
+    let output_index = extract_output_index(parsed_data)?;
+    handler
+        .pending_calls
+        .iter()
+        .find(|call| call.output_index == output_index)
+        .and_then(|call| (!call.name.is_empty()).then_some(Cow::Borrowed(call.name.as_str())))
 }
 
 /// Inject in_progress event after a tool call item is added.
@@ -487,7 +558,7 @@ pub(super) fn send_final_response_event(
         inject_mcp_metadata_streaming(&mut final_response, state, session);
     }
 
-    restore_original_tools(&mut final_response, ctx.original_request, None);
+    restore_original_tools(&mut final_response, ctx.original_request, ctx.session);
     patch_response_with_request_metadata(
         &mut final_response,
         ctx.original_request,
@@ -721,10 +792,8 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut sequence_number: u64 = 0;
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
-        let list_tools_bindings = mcp_list_tools_bindings_to_emit(
-            &state.existing_mcp_list_tools_labels,
-            session.mcp_servers(),
-        );
+        let list_tools_bindings =
+            client_visible_mcp_list_tools_bindings(&state.existing_mcp_list_tools_labels, &session);
 
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,
@@ -1062,6 +1131,16 @@ pub(super) fn handle_streaming_with_tool_interception(
     response
 }
 
+fn client_visible_mcp_list_tools_bindings(
+    existing_labels: &HashSet<String>,
+    session: &McpToolSession<'_>,
+) -> Vec<(String, String)> {
+    mcp_list_tools_bindings_to_emit(existing_labels, session.mcp_servers())
+        .into_iter()
+        .filter(|(server_label, _)| !session.is_internal_non_builtin_server_label(server_label))
+        .collect()
+}
+
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     use crate::routers::common::mcp_utils::ensure_request_mcp_client;
@@ -1113,4 +1192,143 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &mcp_orchestrator,
         mcp_servers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+    use serde_json::json;
+    use smg_mcp::{
+        McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession,
+        McpTransport, Tool, ToolEntry,
+    };
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn test_tool(name: &str) -> Tool {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert("properties".to_string(), json!({}));
+
+        Tool {
+            name: name.to_string().into(),
+            title: None,
+            description: Some("internal".into()),
+            input_schema: schema.into(),
+            output_schema: None,
+            icons: None,
+            annotations: None,
+        }
+    }
+
+    async fn internal_orchestrator_with_tool(tool_name: &str) -> McpOrchestrator {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool(tool_name),
+            ));
+        orchestrator
+    }
+
+    fn internal_binding() -> McpServerBinding {
+        McpServerBinding {
+            label: "internal-label".to_string(),
+            server_key: "internal-server".to_string(),
+            allowed_tools: None,
+        }
+    }
+
+    fn drain_channel(rx: &mut mpsc::UnboundedReceiver<Result<Bytes, io::Error>>) -> Vec<String> {
+        let mut events = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            let bytes = chunk.expect("no io errors in unit-test channel");
+            events.push(String::from_utf8(bytes.to_vec()).expect("utf-8 sse block"));
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn forward_streaming_event_strips_internal_tools_from_response_envelope() {
+        let orchestrator = internal_orchestrator_with_tool("internal_search").await;
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![internal_binding()],
+            "test-internal-response-envelope",
+        );
+        let original_request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            ..Default::default()
+        };
+        let ctx = StreamingEventContext {
+            original_request: &original_request,
+            previous_response_id: None,
+            session: Some(&session),
+        };
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut sequence_number = 0;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let payload = json!({
+            "type": ResponseEvent::IN_PROGRESS,
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_123",
+                "model": "gpt-5.4",
+                "tools": [{
+                    "type": "function",
+                    "name": "internal_search",
+                    "parameters": {"type": "object"}
+                }],
+                "tool_choice": {
+                    "type": "function",
+                    "name": "internal_search"
+                }
+            }
+        });
+        let data = payload.to_string();
+        let raw_block = format!("event: {}\ndata: {}", ResponseEvent::IN_PROGRESS, data);
+
+        assert!(forward_streaming_event(
+            SseEventData {
+                raw_block: &raw_block,
+                event_name: Some(ResponseEvent::IN_PROGRESS),
+                data: &data,
+                pre_parsed: Some(payload),
+            },
+            &mut handler,
+            &tx,
+            &ctx,
+            &mut sequence_number,
+        ));
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        assert_eq!(events.len(), 1, "expected response envelope event");
+        assert!(
+            !events[0].contains("internal_search"),
+            "response envelope leaked internal tool definition: {}",
+            events[0]
+        );
+    }
 }
