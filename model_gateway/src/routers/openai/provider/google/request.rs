@@ -383,7 +383,7 @@ impl GoogleProvider {
                         .map(|v| Self::normalize_response_object(Self::parse_json_or_value(&v)))
                         .unwrap_or_else(|| json!({}));
                     contents.push(json!({
-                        "role": "tool",
+                        "role": "user",
                         "parts": [{"functionResponse": {"name": name, "response": response_obj}}],
                     }));
                     continue;
@@ -403,7 +403,7 @@ impl GoogleProvider {
                         .map(|v| Self::normalize_response_object(Self::parse_json_or_value(&v)))
                         .unwrap_or_else(|| json!({}));
                     contents.push(json!({
-                        "role": "tool",
+                        "role": "user",
                         "parts": [{"functionResponse": {"name": name, "response": response_obj}}],
                     }));
                     continue;
