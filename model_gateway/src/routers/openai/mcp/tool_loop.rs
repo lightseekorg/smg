@@ -201,6 +201,9 @@ pub(crate) async fn execute_streaming_tool_calls(
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
         let emit_tool_events = !session.is_internal_non_builtin_tool(&call.name);
+        if !emit_tool_events && tx.is_closed() {
+            return false;
+        }
 
         let mut arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
@@ -271,6 +274,9 @@ pub(crate) async fn execute_streaming_tool_calls(
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
         debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
+        if !emit_tool_events && tx.is_closed() {
+            return false;
+        }
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -289,6 +295,9 @@ pub(crate) async fn execute_streaming_tool_calls(
                 metrics_labels::RESULT_SUCCESS
             },
         );
+        if !emit_tool_events && tx.is_closed() {
+            return false;
+        }
 
         let output_str = tool_output.output.to_string();
         let mut mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {

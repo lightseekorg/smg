@@ -443,9 +443,9 @@ fn should_suppress_internal_streaming_event(
     let Some(session) = ctx.session else {
         return false;
     };
+    let user_function_names = collect_user_function_names(ctx.original_request);
 
     if let Some(item) = parsed_data.get("item") {
-        let user_function_names = collect_user_function_names(ctx.original_request);
         if session.should_hide_output_item_json(item, &user_function_names) {
             return true;
         }
@@ -455,7 +455,6 @@ fn should_suppress_internal_streaming_event(
         return false;
     };
 
-    let user_function_names = collect_user_function_names(ctx.original_request);
     session.is_internal_non_builtin_tool(tool_name.as_ref())
         && !user_function_names.contains(tool_name.as_ref())
 }
