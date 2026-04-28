@@ -25,7 +25,10 @@ pub use config::{
     RequestPlaneRuntimeConfig, SyncPlaneRuntimeConfig,
 };
 pub use forwarding::{CrossRegionForwarder, ForwardingRequest};
-pub use headers::{CrossRegionHeaders, RequestMode};
+pub use headers::{
+    CrossRegionCommonHeaders, CrossRegionHeaders, RequestMode, SettledRequestContext,
+    SettledRouteMetadata, UnresolvedRequestContext,
+};
 pub use metrics::{
     CandidateGatedReason, CrossRegionMetricLabels, CrossRegionMetrics, RouteDecisionOutcome,
 };

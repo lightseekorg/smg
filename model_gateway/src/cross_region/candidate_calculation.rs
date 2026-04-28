@@ -134,11 +134,9 @@ mod tests {
     #[test]
     fn no_op_calculator_returns_no_decision() {
         let profile = RoutingProfileContext::new(
-            "us-ashburn-1",
             vec!["us-ashburn-1".to_string()],
-            "cohere.command-r-plus",
+            vec!["cohere.command-r-plus".to_string()],
             FailoverPolicy::new(CrossRegionFailoverMode::Manual, 1),
-            RequestMode::Unresolved,
             ModalityPolicy::default(),
         )
         .expect("profile should be valid");

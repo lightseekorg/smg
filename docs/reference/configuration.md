@@ -419,9 +419,7 @@ Note: Enabling service discovery automatically enables IGW mode.
 
 ## Cross-Region Smart Router Configuration
 
-Phase 1 cross-region routing config is disabled by default. SMG-01 only wires
-the config model, CLI conversion, and validation. Request forwarding, signal
-sync, and routing behavior are implemented by later cross-region tasks.
+Phase 1 cross-region routing is disabled by default. When enabled, SMG currently validates the `cross_region` block and builds runtime config plus a peer registry for later request and sync services. Serving-path dispatch, live signal sync, candidate routing, remote forwarding, mTLS listeners, and failover are still implemented by later cross-region tasks.
 
 ### YAML Shape
 
@@ -466,12 +464,12 @@ cross_region:
 | `--cross-region-realm` | Local OCI realm, for example `oc1` | Required when enabled |
 | `--cross-region-environment` | Local deployment environment, for example `prod` | Required when enabled |
 | `--cross-region-local-only-on-degraded-sync` | Keep serving local-only when remote signal state is degraded | `true` |
-| `--cross-region-request-plane-enabled` | Enable the request-forwarding plane config | `true` |
+| `--cross-region-request-plane-enabled` | Parse and validate request-forwarding plane settings for later runtime wiring | `true` |
 | `--cross-region-request-plane-listen-port` | Private NLB request-forwarding listener port | `8443` |
 | `--cross-region-request-plane-max-platform-retries` | Maximum platform-owned cross-region retries | `5` |
 | `--cross-region-request-plane-default-failover-mode` | Default failover mode: `MANUAL`, `AUTOMATIC`, or `AUTO` | `MANUAL` |
 | `--cross-region-request-plane-local-first-tie-break` | Prefer local region when candidates tie | `true` |
-| `--cross-region-sync-plane-enabled` | Enable the signal sync plane config | `true` |
+| `--cross-region-sync-plane-enabled` | Parse and validate signal-sync plane settings for later runtime wiring | `true` |
 | `--cross-region-sync-plane-listen-port` | Private NLB signal-sync listener port | `9443` |
 | `--cross-region-sync-plane-full-resync-interval-seconds` | Full signal resync interval | `300` |
 | `--cross-region-sync-plane-signal-stale-after-seconds` | Remote signal stale-after interval | `30` |
