@@ -36,6 +36,7 @@
 use std::collections::HashSet;
 
 use openai_protocol::responses::{ResponseInput, ResponseInputOutputItem};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 /// Lower an input transcript to the core item set every backend
@@ -106,11 +107,86 @@ fn lower_item(item: ResponseInputOutputItem) -> Vec<ResponseInputOutputItem> {
         | ResponseInputOutputItem::McpApprovalRequest { .. }
         | ResponseInputOutputItem::McpApprovalResponse { .. } => Vec::new(),
 
-        // Image-generation hosted calls historically reached harmony as
-        // "Unsupported input item type". Drop on input — the result
-        // (if any) is best surfaced on output, which is rendered by the
-        // image-generation tool path itself.
-        ResponseInputOutputItem::ImageGenerationCall { .. } => Vec::new(),
+        ResponseInputOutputItem::WebSearchCall {
+            id,
+            status,
+            action,
+            results,
+        } => {
+            let status = status_to_string(&status);
+            let action = serde_json::to_value(action).unwrap_or(Value::Null);
+            lower_hosted_builtin_call(
+                id,
+                "web_search",
+                json!({ "action": action.clone() }),
+                json!({ "status": status.clone(), "action": action, "results": results }),
+                status,
+            )
+        }
+        ResponseInputOutputItem::CodeInterpreterCall {
+            id,
+            status,
+            container_id,
+            code,
+            outputs,
+        } => {
+            let status = status_to_string(&status);
+            lower_hosted_builtin_call(
+                id,
+                "code_interpreter",
+                json!({ "container_id": container_id, "code": code }),
+                json!({ "status": status.clone(), "outputs": outputs }),
+                status,
+            )
+        }
+        ResponseInputOutputItem::FileSearchCall {
+            id,
+            status,
+            queries,
+            results,
+        } => {
+            let status = status_to_string(&status);
+            lower_hosted_builtin_call(
+                id,
+                "file_search",
+                json!({ "queries": queries.clone() }),
+                json!({ "status": status.clone(), "queries": queries, "results": results }),
+                status,
+            )
+        }
+        ResponseInputOutputItem::ImageGenerationCall {
+            id,
+            action,
+            background,
+            output_format,
+            quality,
+            result,
+            revised_prompt,
+            size,
+            status,
+        } => {
+            let status_text = status
+                .as_ref()
+                .map(status_to_string)
+                .unwrap_or_else(|| "completed".to_string());
+            lower_hosted_builtin_call(
+                id,
+                "image_generation",
+                json!({
+                    "action": action,
+                    "background": background,
+                    "output_format": output_format,
+                    "quality": quality,
+                    "size": size,
+                }),
+                json!({
+                    "status": status_text.clone(),
+                    "result": result,
+                    "revised_prompt": revised_prompt,
+                }),
+                status_text,
+            )
+        }
 
         // Hosted shell-family tools (`shell_call`, `apply_patch_call`,
         // `local_shell_call`) — like hosted MCP, they round-trip through
@@ -269,6 +345,38 @@ fn lower_item(item: ResponseInputOutputItem) -> Vec<ResponseInputOutputItem> {
 /// `arguments` blob (which is documented as a JSON-string).
 fn serialize_hosted_args(value: Value) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn status_to_string<T: Serialize>(status: &T) -> String {
+    serde_json::to_string(status)
+        .unwrap_or_else(|_| "\"completed\"".to_string())
+        .trim_matches('"')
+        .to_string()
+}
+
+fn lower_hosted_builtin_call(
+    id: String,
+    name: &str,
+    arguments: Value,
+    output: Value,
+    status: String,
+) -> Vec<ResponseInputOutputItem> {
+    vec![
+        ResponseInputOutputItem::FunctionToolCall {
+            id: id.clone(),
+            call_id: id.clone(),
+            name: name.to_string(),
+            arguments: serialize_hosted_args(arguments),
+            output: None,
+            status: Some(status.clone()),
+        },
+        ResponseInputOutputItem::FunctionCallOutput {
+            id: None,
+            call_id: id,
+            output: serialize_hosted_args(output),
+            status: Some(status),
+        },
+    ]
 }
 
 /// Convenience: lower the items inside a `ResponseInput`. `Text`
@@ -477,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn image_generation_call_drops_silently() {
+    fn image_generation_call_lowers_to_function_exchange() {
         let items = vec![
             user_msg("hello"),
             ResponseInputOutputItem::ImageGenerationCall {
@@ -493,7 +601,17 @@ mod tests {
             },
         ];
         let lowered = lower_transcript(items);
-        assert_eq!(lowered.len(), 1);
+        assert_eq!(lowered.len(), 3);
+        match &lowered[1] {
+            ResponseInputOutputItem::FunctionToolCall { name, .. } => {
+                assert_eq!(name, "image_generation");
+            }
+            other => panic!("expected FunctionToolCall, got {other:?}"),
+        }
+        assert!(matches!(
+            lowered[2],
+            ResponseInputOutputItem::FunctionCallOutput { .. }
+        ));
     }
 
     #[test]

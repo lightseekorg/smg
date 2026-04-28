@@ -146,17 +146,20 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                     | ResponseInputOutputItem::McpListTools { .. }
                     | ResponseInputOutputItem::McpApprovalRequest { .. }
                     | ResponseInputOutputItem::McpApprovalResponse { .. }
+                    | ResponseInputOutputItem::WebSearchCall { .. }
+                    | ResponseInputOutputItem::CodeInterpreterCall { .. }
+                    | ResponseInputOutputItem::FileSearchCall { .. }
                     | ResponseInputOutputItem::ImageGenerationCall { .. } => {
                         // Hosted-tool item types are projected by the
                         // shared `transcript_lower` pass before this
                         // function runs (see
                         // `routers/common/transcript_lower.rs`):
-                        // `mcp_call` → `function_call (+ output)` pair,
+                        // hosted calls → `function_call (+ output)` pair,
                         // hosted-tool metadata (`mcp_list_tools`,
-                        // approvals, `image_generation_call`) is
-                        // dropped. Reaching this arm means the lower
-                        // pass was bypassed; treat it as a programming
-                        // error rather than papering over it again.
+                        // approvals) is dropped. Reaching this arm means
+                        // the lower pass was bypassed; treat it as a
+                        // programming error rather than papering over it
+                        // again.
                         warn!(
                             function = "responses_to_chat",
                             "Hosted-tool item reached chat conversion despite transcript_lower"

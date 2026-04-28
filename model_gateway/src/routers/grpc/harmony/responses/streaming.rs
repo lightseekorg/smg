@@ -19,13 +19,15 @@ use super::{agent_streaming_adapter::HarmonyStreamingAdapter, common::load_previ
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::agent_loop::{
-            run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
-            ToolTransferDescriptor,
+        common::{
+            agent_loop::{
+                run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
+                ToolTransferDescriptor,
+            },
+            responses_streaming::ResponseStreamEventEmitter,
         },
         grpc::common::responses::{
-            build_sse_response, ensure_mcp_connection, streaming::ResponseStreamEventEmitter,
-            GrpcResponseStreamSink, ResponsesContext,
+            build_sse_response, ensure_mcp_connection, GrpcResponseStreamSink, ResponsesContext,
         },
     },
 };

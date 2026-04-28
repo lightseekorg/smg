@@ -12,12 +12,13 @@ use smg_data_connector::{
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
     RequestContext as StorageRequestContext, ResponseStorage,
 };
-use smg_mcp::{McpOrchestrator, McpToolSession};
+use smg_mcp::McpOrchestrator;
 
 use super::provider::Provider;
 use crate::{
     config::RouterConfig, memory::MemoryExecutionContext, middleware,
-    middleware::TenantRequestMeta, worker::Worker,
+    middleware::TenantRequestMeta, routers::common::agent_loop::ToolTransferDescriptor,
+    worker::Worker,
 };
 
 pub struct RequestContext {
@@ -267,5 +268,6 @@ pub struct StorageHandles {
 pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
-    pub session: Option<&'a McpToolSession<'a>>,
+    pub tool_transfers: &'a std::collections::HashMap<String, ToolTransferDescriptor>,
+    pub tool_server_labels: &'a std::collections::HashMap<String, String>,
 }

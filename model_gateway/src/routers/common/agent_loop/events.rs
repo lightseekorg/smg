@@ -121,9 +121,8 @@ pub(crate) enum LoopEvent<'a> {
     ResponseIncomplete { reason: &'a str },
 }
 
-/// Surface-specific event-to-wire translator. Two impls exist on the
-/// gRPC side (regular and harmony); both delegate to the shared
-/// `ResponseStreamEventEmitter` for OpenAI-compatible SSE.
+/// Surface-specific event-to-wire translator. Streaming surfaces delegate to
+/// the shared `ResponseStreamEventEmitter` for OpenAI-compatible SSE.
 pub(crate) trait StreamSink: Send {
     fn emit(&mut self, event: LoopEvent<'_>);
 }

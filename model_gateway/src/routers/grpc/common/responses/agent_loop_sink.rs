@@ -55,12 +55,12 @@ use openai_protocol::responses::ResponseOutputItem;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::routers::{
-    common::agent_loop::{
+use crate::routers::common::{
+    agent_loop::{
         ExecutedCall, LoopEvent, LoopToolCall, OutputFamily, PendingToolExecution, StreamSink,
         ToolPresentation, ToolTransferDescriptor, ToolVisibility,
     },
-    grpc::common::responses::streaming::{OutputItemType, ResponseStreamEventEmitter},
+    responses_streaming::{OutputItemType, ResponseStreamEventEmitter},
 };
 
 /// Bookkeeping for a single in-flight tool call's wire-side lifecycle.
@@ -385,11 +385,13 @@ impl GrpcResponseStreamSink {
             .emitter
             .emit_output_item_added(output_index, &item_in_progress);
         self.send(&event);
-        let event = self.emitter.emit_mcp_list_tools_in_progress(output_index);
+        let event = self
+            .emitter
+            .emit_mcp_list_tools_in_progress(output_index, id);
         self.send(&event);
         let event = self
             .emitter
-            .emit_mcp_list_tools_completed(output_index, &tool_items);
+            .emit_mcp_list_tools_completed(output_index, id, &tool_items);
         self.send(&event);
 
         let item_done = json!({
@@ -933,12 +935,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::routers::{
-        common::agent_loop::{
+    use crate::routers::common::{
+        agent_loop::{
             state::{LoopToolCall, PendingToolExecution},
             OutputFamily, ToolTransferDescriptor,
         },
-        grpc::common::responses::streaming::ResponseStreamEventEmitter,
+        responses_streaming::ResponseStreamEventEmitter,
     };
 
     /// Build a sink + receiver pair primed with common transfer
