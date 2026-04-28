@@ -606,6 +606,20 @@ impl GoogleProvider {
             }
 
             let mut generation_config = serde_json::Map::new();
+            if let Some(max_output_tokens) =
+                payload.get("max_output_tokens").and_then(Value::as_i64)
+            {
+                generation_config.insert("maxOutputTokens".to_string(), json!(max_output_tokens));
+            }
+            if let Some(temperature) = payload.get("temperature").and_then(Value::as_f64) {
+                generation_config.insert("temperature".to_string(), json!(temperature));
+            }
+            if let Some(top_p) = payload.get("top_p").and_then(Value::as_f64) {
+                generation_config.insert("topP".to_string(), json!(top_p));
+            }
+            if let Some(top_k) = payload.get("top_k").and_then(Value::as_i64) {
+                generation_config.insert("topK".to_string(), json!(top_k));
+            }
             if let Some(reasoning) = payload.get("reasoning").and_then(|v| v.as_object()) {
                 let mut thinking = serde_json::Map::new();
                 if let Some(effort) = reasoning.get("effort").and_then(|v| v.as_str()) {
