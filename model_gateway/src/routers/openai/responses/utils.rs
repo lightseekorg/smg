@@ -33,6 +33,13 @@ pub(super) fn build_persistence_request_body(
     client_body: &ResponsesRequest,
 ) -> ResponsesRequest {
     let mut persistence_body = request_body.clone();
+    if client_body.conversation.is_some() {
+        // Conversation item storage should append only the current client turn.
+        // The normalized request body already contains replayed conversation
+        // history, and relinking those historical items can collide in durable
+        // stores that enforce item id uniqueness.
+        persistence_body.input = client_body.input.clone();
+    }
     persistence_body
         .conversation
         .clone_from(&client_body.conversation);
