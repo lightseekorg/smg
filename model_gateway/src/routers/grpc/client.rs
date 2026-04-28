@@ -397,6 +397,10 @@ impl GrpcClient {
         clippy::unreachable,
         reason = "assembly stage guarantees matching MultimodalData variant for each backend"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "gRPC request builder needs all fields from the Messages API request"
+    )]
     pub fn build_messages_request(
         &self,
         request_id: String,

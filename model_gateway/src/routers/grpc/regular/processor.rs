@@ -11,7 +11,7 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    common::{FunctionCallResponse, ResponseFormat, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
@@ -96,15 +96,14 @@ impl ResponseProcessor {
         let mut reasoning_text: Option<String> = None;
         let mut processed_text = final_text;
 
-        let output_is_constrained = !original_request.separate_reasoning
-            && utils::has_constrained_output(
-                original_request.tool_choice.as_ref(),
-                original_request.response_format.as_ref(),
-            );
+        let has_structured_output = matches!(
+            original_request.response_format,
+            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        );
 
         if original_request.separate_reasoning
             && reasoning_parser_available
-            && !output_is_constrained
+            && !has_structured_output
         {
             let pooled_parser = utils::get_reasoning_parser(
                 &self.reasoning_parser_factory,
@@ -165,6 +164,10 @@ impl ResponseProcessor {
                 }
             };
 
+            let output_is_constrained = utils::has_constrained_output(
+                original_request.tool_choice.as_ref(),
+                original_request.response_format.as_ref(),
+            );
             if self.configured_tool_parser.is_some()
                 && tool_parser_available
                 && !output_is_constrained
@@ -237,8 +240,7 @@ impl ResponseProcessor {
 
         let is_json_response = matches!(
             &original_request.response_format,
-            Some(openai_protocol::common::ResponseFormat::JsonObject)
-                | Some(openai_protocol::common::ResponseFormat::JsonSchema { .. })
+            Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. })
         );
         if is_json_response {
             if processed_text.starts_with("```json") || processed_text.starts_with("```JSON") {
@@ -326,8 +328,14 @@ impl ResponseProcessor {
 
         let history_tool_calls_count = utils::get_history_tool_calls_count(&chat_request);
 
+        let has_structured_output = matches!(
+            chat_request.response_format,
+            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        );
+
         // Check parser availability once upfront (not per choice)
         let reasoning_parser_available = chat_request.separate_reasoning
+            && !has_structured_output
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),

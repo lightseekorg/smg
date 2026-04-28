@@ -88,7 +88,10 @@ impl PipelineStage for MessageRequestBuildingStage {
         }
 
         let message_hashes = if self.enable_message_hash {
-            Some(helpers::compute_and_log_input_message_hashes(&request_id, &messages_request.messages))
+            Some(helpers::compute_and_log_input_message_hashes(
+                &request_id,
+                &messages_request.messages,
+            ))
         } else {
             None
         };
