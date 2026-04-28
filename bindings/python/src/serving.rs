@@ -32,7 +32,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyModule};
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use tracing::{debug, error};
@@ -148,13 +148,22 @@ fn parse_reasoning_complete(py: Python<'_>, output: &str, parser_name: &str) -> 
 // OAI HTTP server
 // =====================================================================
 
-/// Shared state held by every axum handler — just a reference to the
-/// Python ``AsyncLLM``-shaped engine. Cloning is cheap (``Py<PyAny>``
-/// is reference-counted under the hood; we acquire the GIL when we
-/// actually call into it).
+/// Shared state held by every axum handler:
+///
+/// * the Python ``AsyncLLM``-shaped engine (cheap to clone — ``Py<PyAny>``
+///   is reference-counted; we acquire the GIL when actually calling
+///   into it).
+/// * the ``TaskLocals`` captured at server start. Without this,
+///   ``into_future`` from inside a tokio worker thread fails with
+///   ``RuntimeError: no running event loop`` because the asyncio loop
+///   pyo3-async-runtimes set up on the supervisor thread is invisible
+///   to the rest of the runtime. Each handler clones these locals and
+///   uses :func:`pyo3_async_runtimes::tokio::into_future_with_locals`
+///   so the Python coroutine gets scheduled on the right loop.
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Py<PyAny>>,
+    locals: Arc<pyo3_async_runtimes::TaskLocals>,
 }
 
 /// Drive ``engine.generate_request(GenerateReqInput(text=..., sampling_params=...))``
@@ -171,68 +180,81 @@ struct AppState {
 /// emit.
 async fn drive_generate(
     engine: Arc<Py<PyAny>>,
+    locals: Arc<pyo3_async_runtimes::TaskLocals>,
     prompt: String,
     sampling: serde_json::Map<String, Value>,
     request_id: String,
 ) -> PyResult<Value> {
-    // 1. Build the GenerateReqInput on the Python side under the GIL.
-    //    Then hand the resulting coroutine off to pyo3-async-runtimes
-    //    so axum's tokio reactor doesn't block on the engine.
-    //
-    //    We cross the language boundary by JSON-encoding the
-    //    sampling-params payload and asking Python's ``json.loads`` to
-    //    decode it. That is intentionally one syscall-style hop instead
-    //    of a recursive ``IntoPyObject`` walk: the values are tiny
-    //    (a handful of scalars per request), the engine itself has to
-    //    JSON-encode the response anyway, and avoiding pyo3's
-    //    type-conversion traits keeps this module portable across
-    //    pyo3 minor versions.
+    // We cross the language boundary by JSON-encoding the
+    // sampling-params payload and asking Python's ``json.loads`` to
+    // decode it. That is intentionally one syscall-style hop instead
+    // of a recursive ``IntoPyObject`` walk: the values are tiny
+    // (a handful of scalars per request), the engine itself has to
+    // JSON-encode the response anyway, and avoiding pyo3's
+    // type-conversion traits keeps this module portable across
+    // pyo3 minor versions.
     let sampling_json = serde_json::to_string(&Value::Object(sampling.clone()))
         .map_err(|e| PyRuntimeError::new_err(format!("encode sampling_params: {e}")))?;
 
-    let coro_fut = Python::with_gil(|py| -> PyResult<_> {
-        let io_struct = py.import("tokenspeed.runtime.engine.io_struct")?;
-        let generate_req_input_cls = io_struct.getattr("GenerateReqInput")?;
-        let json_module = py.import("json")?;
-        let sampling_dict = json_module.call_method1("loads", (sampling_json,))?;
+    // pyo3-async-runtimes' ``into_future`` reads its TaskLocals (the
+    // asyncio loop reference) from a tokio task-local. Axum handlers
+    // run on tokio worker threads with no such task-local set, so we
+    // wrap the engine call in ``tokio::scope(locals, ...)`` — that
+    // populates the task-local for the duration of this future, then
+    // ``into_future`` (called from inside ``Python::attach``) finds
+    // it and schedules the Python coroutine on the right loop.
+    let locals_for_scope = (*locals).clone();
+    let last_obj = pyo3_async_runtimes::tokio::scope(locals_for_scope, async move {
+        let coro_fut = Python::attach(|py| -> PyResult<_> {
+            let io_struct = py.import("tokenspeed.runtime.engine.io_struct")?;
+            let generate_req_input_cls = io_struct.getattr("GenerateReqInput")?;
+            let json_module = py.import("json")?;
+            let sampling_dict = json_module.call_method1("loads", (sampling_json,))?;
 
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("text", prompt)?;
-        kwargs.set_item("sampling_params", sampling_dict)?;
-        kwargs.set_item("rid", request_id)?;
-        kwargs.set_item("stream", false)?;
-        let req_obj = generate_req_input_cls.call((), Some(&kwargs))?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("text", prompt)?;
+            kwargs.set_item("sampling_params", sampling_dict)?;
+            kwargs.set_item("stream", false)?;
+            let req_obj = generate_req_input_cls.call((), Some(&kwargs))?;
+            // ``rid`` is declared ``field(default=None, init=False)`` on
+            // GenerateReqInput, so it can't go through the constructor —
+            // assign it post-init like the gRPC servicer does (which is
+            // also what tokenspeed's own ``normalize_batch_and_arguments``
+            // path expects to find when n>1 fan-out runs).
+            req_obj.setattr("rid", request_id)?;
 
-        // Inline coroutine helper that drains the engine's async generator
-        // and returns its **final** yielded dict (the one with
-        // ``meta_info.finish_reason`` set). Compiled fresh per call —
-        // cheap and keeps the helper from leaking into ``sys.modules``.
-        let helpers = pyo3::types::PyModule::from_code(
-            py,
-            std::ffi::CString::new(CONSUME_HELPER_SRC)
-                .expect("static cstring")
-                .as_c_str(),
-            std::ffi::CString::new("smg_rs_serve_helpers.py")
-                .expect("static cstring")
-                .as_c_str(),
-            std::ffi::CString::new("smg_rs_serve_helpers")
-                .expect("static cstring")
-                .as_c_str(),
-        )?;
-        let consume = helpers.getattr("_consume_to_last")?;
-        let coro = consume.call1((engine.bind(py), req_obj))?;
+            // Inline coroutine helper that drains the engine's async
+            // generator and returns its **final** yielded dict (the one
+            // with ``meta_info.finish_reason`` set). Compiled fresh per
+            // call — cheap and keeps the helper from leaking into
+            // ``sys.modules``.
+            let helpers = PyModule::from_code(
+                py,
+                std::ffi::CString::new(CONSUME_HELPER_SRC)
+                    .expect("static cstring")
+                    .as_c_str(),
+                std::ffi::CString::new("smg_rs_serve_helpers.py")
+                    .expect("static cstring")
+                    .as_c_str(),
+                std::ffi::CString::new("smg_rs_serve_helpers")
+                    .expect("static cstring")
+                    .as_c_str(),
+            )?;
+            let consume = helpers.getattr("_consume_to_last")?;
+            let coro = consume.call1((engine.bind(py), req_obj))?;
 
-        pyo3_async_runtimes::tokio::into_future(coro)
-    })?;
-
-    let last_obj = coro_fut.await?;
+            pyo3_async_runtimes::tokio::into_future(coro)
+        })?;
+        coro_fut.await
+    })
+    .await?;
 
     // 2. Convert the final Python dict to ``serde_json::Value`` via the
     //    same JSON hop in reverse: ``json.dumps`` on the Python side,
     //    ``serde_json::from_str`` on ours. The dict shape is well-defined
     //    by the TokenSpeed contract (``{"text": str, "output_ids": [int],
     //    "meta_info": {...}}``) so dumping is total.
-    let json_str = Python::with_gil(|py| -> PyResult<String> {
+    let json_str = Python::attach(|py| -> PyResult<String> {
         let json_module = py.import("json")?;
         let s: String = json_module
             .call_method1("dumps", (last_obj.bind(py),))?
@@ -342,7 +364,8 @@ async fn chat_completions_handler(
     );
 
     let engine = state.engine.clone();
-    let result = drive_generate(engine, prompt, sampling, request_id.clone()).await;
+    let locals = state.locals.clone();
+    let result = drive_generate(engine, locals, prompt, sampling, request_id.clone()).await;
 
     match result {
         Ok(out) => {
@@ -443,46 +466,40 @@ fn serve_oai(py: Python<'_>, engine: PyObject, host: &str, port: u16) -> PyResul
         .parse()
         .map_err(|e| PyValueError::new_err(format!("invalid host:port {host_owned}:{port}: {e}")))?;
 
-    let state = AppState {
-        engine: Arc::new(engine),
-    };
-    let app = Router::new()
-        .route("/v1/chat/completions", post(chat_completions_handler))
-        .with_state(state);
-
-    // Build a tokio runtime that pyo3-async-runtimes will treat as the
-    // bridge between Python coroutines (engine.generate_request) and
-    // axum's request loop. The runtime is leaked for the lifetime of
-    // the process — this function is the entry point and never returns
-    // until the server exits.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("smg-oai-server")
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime build failed: {e}")))?;
-
-    // Hand the runtime to pyo3-async-runtimes so ``into_future`` knows
-    // where to schedule Python coroutines. Must happen before the first
-    // ``into_future`` call.
-    let rt_handle = rt.handle().clone();
-    pyo3_async_runtimes::tokio::init_with_runtime(&rt)
-        .map_err(|e| PyRuntimeError::new_err(format!("pyo3-async-runtimes init failed: {e}")))?;
+    let engine_arc = Arc::new(engine);
 
     debug!(%addr, "smg_rs.serve_oai starting on {addr}");
 
-    // Release the GIL while the server is running so Python coroutines
-    // dispatched by axum handlers can re-acquire it themselves.
-    py.detach(|| {
-        rt_handle.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("bind {addr} failed: {e}"))
-                })?;
-            axum::serve(listener, app)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("axum serve failed: {e}")))
-        })
+    // ``pyo3_async_runtimes::tokio::run`` sets up an asyncio event loop
+    // on a supervisor thread, builds a tokio runtime, registers both
+    // with the bridge, and runs the supplied Rust future on the tokio
+    // runtime. Inside the future we capture the supervisor loop's
+    // ``TaskLocals`` so each axum handler can pass them to
+    // ``into_future_with_locals`` — handlers run on tokio worker
+    // threads where the loop reference is otherwise invisible.
+    pyo3_async_runtimes::tokio::run(py, async move {
+        // ``tokio::run`` set TaskLocals as a tokio task-local for this
+        // future. Pull them out so we can clone them per axum handler
+        // (each handler runs as its own tokio task and would otherwise
+        // not see them).
+        let locals = Python::attach(|py| -> PyResult<_> {
+            pyo3_async_runtimes::tokio::get_current_locals(py)
+        })?;
+
+        let state = AppState {
+            engine: engine_arc,
+            locals: Arc::new(locals),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat_completions_handler))
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("bind {addr} failed: {e}")))?;
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("axum serve failed: {e}")))
     })?;
 
     Ok(())
