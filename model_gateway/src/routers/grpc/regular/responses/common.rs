@@ -277,9 +277,18 @@ pub(super) async fn load_conversation_history(
             ));
         }
 
-        // Load conversation history
+        // Load conversation history.
+        // When STMO is active we request one extra item so we can detect
+        // whether the conversation has grown past max_conversation_history_items.
+        // If it has, turn-count math would be wrong, so we reject early.
+        let cap = ctx.max_conversation_history_items;
+        let fetch_limit = if stm_enabled {
+            cap.saturating_add(1)
+        } else {
+            cap
+        };
         let params = data_connector::ListParams {
-            limit: ctx.max_conversation_history_items,
+            limit: fetch_limit,
             order: data_connector::SortOrder::Asc,
             after: None,
         };
@@ -290,6 +299,17 @@ pub(super) async fn load_conversation_history(
             .await
         {
             Ok(stored_items) => {
+                if stm_enabled && stored_items.len() > cap {
+                    return Err(error::bad_request(
+                        "conversation_too_large",
+                        format!(
+                            "Conversation exceeds the configured limit of {cap} history items. \
+                             Increase max_conversation_history_items in the router config \
+                             or reduce conversation length before using short-term memory \
+                             optimization.",
+                        ),
+                    ));
+                }
                 raw_stored_item_count = Some(stored_items.len());
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {
