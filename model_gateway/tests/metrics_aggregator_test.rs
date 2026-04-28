@@ -302,6 +302,37 @@ sglang_num_running_reqs{dp_rank="0",engine_type="decode",model_name="kimi",tp_ra
     );
 }
 
+#[test]
+fn test_sglang_mixed_colon_underscore_format() {
+    let pack = MetricPack {
+        labels: vec![(
+            "worker_addr".to_string(),
+            "grpc://0.0.0.0:31000".to_string(),
+        )],
+        metrics_text: concat!(
+            "# HELP sglang:cache_config_info Cache configuration information.\n",
+            "# TYPE sglang:cache_config_info gauge\n",
+            "sglang_cache_config_info{num_pages=\"25507\",page_size=\"64\"} 1.0\n",
+            "# HELP sglang:num_running_reqs The number of running requests.\n",
+            "# TYPE sglang:num_running_reqs gauge\n",
+            "sglang_num_running_reqs{engine_type=\"unified\",model_name=\"kimi-k2.5\"} 0.0\n",
+            "# HELP sglang:prompt_tokens Number of prefill tokens processed.\n",
+            "# TYPE sglang:prompt_tokens counter\n",
+            "sglang_prompt_tokens_total{model_name=\"kimi-k2.5\"} 38.0\n",
+            "# EOF\n",
+        )
+        .to_string(),
+    };
+    let result = aggregate_metrics(vec![pack]);
+    assert!(result.is_ok(), "Failed: {:?}", result.err());
+    let text = result.unwrap();
+    assert!(!text.is_empty(), "Aggregated output should not be empty");
+    assert!(
+        text.contains("sglang_cache_config_info"),
+        "Should contain gauge metric, got:\n{text}"
+    );
+}
+
 fn assert_eq_sorted(result: &str, expected: &str) {
     // Split into lines and sort to handle BTreeMap ordering issues between test environments
     let mut result_lines: Vec<_> = result.trim().lines().map(|l| l.trim()).collect();
