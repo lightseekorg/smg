@@ -591,7 +591,7 @@ impl<'a> McpToolSession<'a> {
                 server_label, name, ..
             } => !self.should_hide_mcp_call_like_by_label(name, server_label),
             ResponseOutputItem::FunctionToolCall { name, .. } => {
-                !self.should_hide_function_call_like(name, user_function_names)
+                !self.should_hide_internal_non_builtin_function_like(name, user_function_names)
             }
             ResponseOutputItem::WebSearchCall { .. }
             | ResponseOutputItem::CodeInterpreterCall { .. }
@@ -621,8 +621,9 @@ impl<'a> McpToolSession<'a> {
         user_function_names: &HashSet<String>,
     ) -> bool {
         match tool.get("type").and_then(|value| value.as_str()) {
-            Some("function") => Self::function_tool_name_json(tool)
-                .is_some_and(|name| self.should_hide_function_call_like(name, user_function_names)),
+            Some("function") => Self::function_tool_name_json(tool).is_some_and(|name| {
+                self.should_hide_internal_non_builtin_function_like(name, user_function_names)
+            }),
             // MCP tool entries are keyed by server metadata, so function-name collision
             // handling does not apply to this arm.
             Some("mcp") => tool
@@ -671,7 +672,9 @@ impl<'a> McpToolSession<'a> {
             Some("function_call") | Some("function_tool_call") => item
                 .get("name")
                 .and_then(|value| value.as_str())
-                .is_some_and(|name| self.should_hide_function_call_like(name, user_function_names)),
+                .is_some_and(|name| {
+                    self.should_hide_internal_non_builtin_function_like(name, user_function_names)
+                }),
             _ => false,
         }
     }
@@ -695,12 +698,12 @@ impl<'a> McpToolSession<'a> {
         }
     }
 
-    fn should_hide_function_call_like(
+    fn should_hide_internal_non_builtin_function_like(
         &self,
         name: &str,
         user_function_names: &HashSet<String>,
     ) -> bool {
-        self.is_internal_tool(name) && !user_function_names.contains(name)
+        self.is_internal_non_builtin_tool(name) && !user_function_names.contains(name)
     }
 
     fn function_tool_name_json(tool: &serde_json::Value) -> Option<&str> {

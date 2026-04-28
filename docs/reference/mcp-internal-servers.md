@@ -17,14 +17,15 @@ servers:
 ```
 
 In the current implementation, `internal: true` applies only to self-provided
-MCP servers declared under `servers:`. It affects final assembled,
-non-streaming MCP responses by allowing higher layers to strip internal server
-tool lists and tool-call trace items before the response is returned to the
-client.
+MCP servers declared under `servers:`. The model may still see and call these
+tools during gateway-managed tool loops, but OpenAI Responses client-facing
+output hides internal non-builtin tool details before returning data to the
+client. That includes final non-streaming responses, final streaming
+`response.completed` events, live streaming tool-call events, live
+`mcp_list_tools` events, and response envelope `tools` / `tool_choice` fields.
 
-This flag does not currently hide streaming output, and it does not apply to
-builtin-routed MCP results such as `web_search_call`, `code_interpreter_call`,
-or `file_search_call`.
+This flag does not apply to builtin-routed MCP results such as
+`web_search_call`, `code_interpreter_call`, or `file_search_call`.
 
 This flag is generic. It does not imply any vendor-specific behavior and does
 not change transport setup or tool execution on its own.

@@ -200,6 +200,10 @@ pub(crate) async fn execute_streaming_tool_calls(
 
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
+        let emit_tool_events = !session.is_internal_non_builtin_tool(&call.name);
+        if !emit_tool_events && tx.is_closed() {
+            return false;
+        }
 
         let mut arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
@@ -221,13 +225,15 @@ pub(crate) async fn execute_streaming_tool_calls(
                         Value::String(stable_streaming_tool_item_id(&call, &response_format)),
                     );
                 }
-                if !send_tool_call_completion_events(
-                    tx,
-                    &call,
-                    &mcp_call_item,
-                    &response_format,
-                    sequence_number,
-                ) {
+                if emit_tool_events
+                    && !send_tool_call_completion_events(
+                        tx,
+                        &call,
+                        &mcp_call_item,
+                        &response_format,
+                        sequence_number,
+                    )
+                {
                     return false;
                 }
                 state.record_call(
@@ -242,7 +248,9 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         };
 
-        if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
+        if emit_tool_events
+            && !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number)
+        {
             return false;
         }
 
@@ -266,6 +274,9 @@ pub(crate) async fn execute_streaming_tool_calls(
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
         debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
+        if !emit_tool_events && tx.is_closed() {
+            return false;
+        }
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -284,6 +295,9 @@ pub(crate) async fn execute_streaming_tool_calls(
                 metrics_labels::RESULT_SUCCESS
             },
         );
+        if !emit_tool_events && tx.is_closed() {
+            return false;
+        }
 
         let output_str = tool_output.output.to_string();
         let mut mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
@@ -297,13 +311,15 @@ pub(crate) async fn execute_streaming_tool_calls(
             );
         }
 
-        if !send_tool_call_completion_events(
-            tx,
-            &call,
-            &mcp_call_item,
-            &response_format,
-            sequence_number,
-        ) {
+        if emit_tool_events
+            && !send_tool_call_completion_events(
+                tx,
+                &call,
+                &mcp_call_item,
+                &response_format,
+                sequence_number,
+            )
+        {
             return false;
         }
 
@@ -1438,6 +1454,80 @@ mod tests {
             &internal_non_builtin_item,
             &session
         ));
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_execution_suppresses_events_for_internal_non_builtin_tools() {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "internal-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: Default::default(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+                internal: true,
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "internal-server",
+                test_tool("internal_search"),
+            ));
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "internal-label".to_string(),
+                server_key: "internal-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+        let pending_call = super::FunctionCallInProgress {
+            call_id: "call_internal".to_string(),
+            name: "internal_search".to_string(),
+            arguments_buffer: "{not-json".to_string(),
+            item_id: Some("fc_internal".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = ToolLoopState::new(ResponseInput::Text("hello".to_string()), Vec::new());
+        let mut sequence_number = 0;
+
+        let ok = super::execute_streaming_tool_calls(
+            vec![pending_call],
+            &session,
+            &tx,
+            &mut state,
+            &mut sequence_number,
+            "gpt-5.4",
+            &[],
+            None,
+        )
+        .await;
+        drop(tx);
+
+        assert!(ok);
+        assert_eq!(
+            drain_channel(&mut rx),
+            Vec::<String>::new(),
+            "internal tool execution must not emit streaming tool events"
+        );
+        assert_eq!(state.mcp_call_items.len(), 1);
+        assert!(state.mcp_call_items[0]
+            .to_string()
+            .contains("internal_search"));
     }
 
     #[test]
