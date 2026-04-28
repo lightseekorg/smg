@@ -1,11 +1,7 @@
 //! Streaming flavor of the Harmony agent-loop adapter.
 //!
-//! Mirrors `HarmonyAdapter` but talks to
-//! `pipeline::execute_harmony_responses_streaming` and feeds chunk-level
-//! events into a `GrpcResponseStreamSink`. Kept as a separate type
-//! because the trait's sink generic resolves to a concrete type at
-//! impl-site — separate adapters are cleaner than dispatching streaming
-//! vs. non-streaming inside one trait method.
+//! Uses `pipeline::execute_harmony_responses_streaming` and feeds
+//! chunk-level events into a `GrpcResponseStreamSink`.
 
 use std::collections::HashSet;
 
@@ -309,13 +305,8 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
         )
         .await;
 
-        // The `response.completed` event is fired by the sink in
-        // response to `LoopEvent::ResponseFinished` /
-        // `LoopEvent::ResponseIncomplete`, which the driver emits
-        // automatically. `RenderMode::ApprovalInterrupt` flows the same
-        // way — the emitter has already pushed the approval item by
-        // the time we land here. Drop unused params to keep the trait
-        // shape consistent with the non-streaming path.
+        // The sink emits `response.completed` after the driver sends the
+        // terminal loop event.
         let _ = self.original_tools;
         let _ = self.user_function_names;
         Ok(())

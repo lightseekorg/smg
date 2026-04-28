@@ -1003,10 +1003,7 @@ mod tests {
     }
 
     /// `approve = true` against a session that no longer exposes the
-    /// referenced tool must surface as `invalid_request_error`. The
-    /// stale binding is recoverable on the client side (re-send with a
-    /// matching `tools[]`); silently dispatching against a disabled
-    /// server is not. Review P1.3.
+    /// referenced tool must surface as `invalid_request_error`.
     #[test]
     fn prime_pending_from_approval_rejects_unexposed_tool() {
         let orchestrator = McpOrchestrator::new_test();

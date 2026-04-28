@@ -64,10 +64,8 @@ pub(crate) struct RegularAdapter<'a> {
     ctx: &'a ResponsesContext,
     upstream: RegularUpstreamHandle,
     user_function_names: HashSet<String>,
-    /// MCP tools rendered into the chat-tools array shape — built once
-    /// from the session and cloned into every iteration's chat
-    /// request, mirroring the prior `convert_mcp_tools_to_chat_tools`
-    /// behavior.
+    /// MCP tools rendered into the chat-tools array shape and cloned
+    /// into each iteration's chat request.
     mcp_chat_tools: Vec<openai_protocol::common::Tool>,
 }
 

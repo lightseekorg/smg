@@ -1000,14 +1000,5 @@ impl Default for HarmonyStreamingProcessor {
 
 #[cfg(test)]
 mod tests {
-
-    // The argument-streaming classification used to live on a local
-    // helper (`streams_arguments`) because the harmony processor
-    // emitted tool-call args inline through the legacy
-    // `ResponseStreamEventEmitter` helpers. Both producer and
-    // classifier moved to `ToolPresentation` /
-    // `GrpcResponseStreamSink` after the agent-loop refactor; the
-    // classification lock-down test moved with them
-    // (`presentation::tests`). This module no longer needs to keep
-    // a parallel anchor.
+    // Argument-streaming classification is covered in presentation tests.
 }

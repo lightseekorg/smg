@@ -128,10 +128,8 @@ fn build_iteration_request(
     } else {
         upstream_tools
     };
-    // `tool_choice = auto` on every continuation prevents harmony from
-    // re-asserting a forced `required` / specific-function selection
-    // after a tool result lands. Mirrors the prior
-    // `build_next_request_with_tools` semantics.
+    // `tool_choice = auto` on continuations prevents a forced selection
+    // from repeating after a tool result lands.
     if state.tool_budget_exhausted {
         request.tool_choice = None;
     } else if state.iteration > 1 {

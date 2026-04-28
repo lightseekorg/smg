@@ -1,6 +1,4 @@
-//! Surface-side helpers kept after the agent-loop refactor.
-//!
-//! What remains here:
+//! Surface-side helpers for regular Responses.
 //!
 //! - `ResponsesCallContext` — request-scoped knobs the handler bundles
 //!   for both modes.
@@ -31,9 +29,7 @@ use crate::{
 pub(super) struct LoadedConversationHistory {
     pub request: ResponsesRequest,
     pub existing_mcp_list_tools_labels: HashSet<String>,
-    /// Control items collected from both history and hand-stitched
-    /// input. See the matching field on harmony's
-    /// `LoadedResponsesHistory` for the contract.
+    /// Control items collected from both history and hand-stitched input.
     pub control_items: Vec<ResponseInputOutputItem>,
 }
 

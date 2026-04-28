@@ -922,13 +922,8 @@ impl StreamSink for GrpcResponseStreamSink {
 
 #[cfg(test)]
 mod tests {
-    //! Wire-level sink behaviour. These tests build a real sink wired
-    //! to a tokio mpsc channel, drive it with `LoopEvent`s the way the
-    //! driver and adapter would, and decode the SSE chunks the
-    //! receiver sees. The intent is to lock down review-flagged wire
-    //! contracts that integration / e2e suites can't catch cheaply
-    //! (caller-fc args event family, approval-gated index allocation,
-    //! approval-continuation `approval_request_id` backfill).
+    //! Wire-level sink behaviour for contracts that are cheaper to
+    //! verify here than through integration / e2e suites.
     use std::collections::HashMap;
 
     use serde_json::Value;
@@ -1005,9 +1000,8 @@ mod tests {
         out
     }
 
-    /// Caller-declared function tools (not in the family snapshot) must
-    /// stream their arguments through `response.function_call_arguments.delta` /
-    /// `.done`, NEVER `response.mcp_call_arguments.*`. Review P1.1.
+    /// Caller-declared function tools stream through
+    /// `response.function_call_arguments.*`, not `response.mcp_call_arguments.*`.
     #[test]
     fn caller_fc_streams_function_call_arguments() {
         let (mut sink, mut rx) = make_sink(HashMap::new(), HashMap::new());
@@ -1151,10 +1145,7 @@ mod tests {
         assert_eq!(events[0]["output_index"], 0);
     }
 
-    /// An approval-gated MCP tool must NOT consume a streaming
-    /// `output_index`. The `mcp_approval_request` the driver appends
-    /// later through `LoopEvent::ApprovalRequested` must take index 0.
-    /// Review P1.2.
+    /// Approval-gated MCP tools must not consume a streaming `output_index`.
     #[test]
     fn approval_gated_calls_do_not_allocate_output_index() {
         let mut families = HashMap::new();
@@ -1214,10 +1205,8 @@ mod tests {
         );
     }
 
-    /// `ApprovedToolReplay` carries the original `mcpr_*` id from the
-    /// approval prompt so the rendered streamed `output_item.added`
-    /// (and the matching `output_item.done` after execution) echo it
-    /// onto `mcp_call.approval_request_id`. Review P1.3.
+    /// `ApprovedToolReplay` preserves the original `mcpr_*` id on the
+    /// streamed `mcp_call.approval_request_id`.
     #[test]
     fn approved_replay_stamps_approval_request_id() {
         let mut families = HashMap::new();

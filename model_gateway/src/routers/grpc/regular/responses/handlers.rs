@@ -8,8 +8,7 @@
 //! - stream → `route_responses_streaming` spawns a task running the
 //!   loop with `RegularStreamingAdapter` + `GrpcResponseStreamSink`
 //!
-//! Background mode is rejected here as before (BGM-PR-04 will plug
-//! `routers/common/background/` once that repository is available).
+//! Background mode is rejected at this surface boundary.
 
 use std::sync::Arc;
 

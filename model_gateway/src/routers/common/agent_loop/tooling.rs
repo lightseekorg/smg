@@ -58,14 +58,8 @@ pub(crate) async fn execute_planned_tool(
     } = plan;
     let model_id = ctx.original_request.model.as_str();
 
-    // Reject malformed JSON / non-object arguments BEFORE dispatch.
-    // The driver routes these through the same `ToolCompleted` path as
-    // a normal failed execution, so streaming (`mcp_call.failed` +
-    // `output_item.done(status=failed)`) and non-streaming (`mcp_call`
-    // with `status: failed`, `error: <reason>`) surfaces are
-    // wire-identical to a tool error returned by the server itself.
-    // This replaces the prior coerce-to-`{}` behaviour, which silently
-    // executed gateway tools with empty arguments.
+    // Reject malformed JSON / non-object arguments before dispatch so
+    // every surface reports them like a normal tool failure.
     let mut arguments = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
         Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
         Ok(_) | Err(_) => {
@@ -92,15 +86,9 @@ pub(crate) async fn execute_planned_tool(
         }
     };
 
-    // Apply hosted/builtin tool dispatch wiring before handing the args
-    // to the orchestrator: pin tool-config-level overrides
-    // (`size`/`quality`/...) onto the dispatch payload, and inject the
-    // request-level `user` so end-user attribution rides through to the
-    // hosted MCP server. Pre-refactor this happened at
-    // `routers/grpc/harmony/responses/execution.rs:94`; centralising it
-    // here means every adapter that runs through `execute_planned_tool`
-    // — regular, harmony, and the upcoming OpenAI passthrough —
-    // inherits the same pre-dispatch contract.
+    // Apply hosted/builtin dispatch wiring before handing args to the
+    // orchestrator: tool-config overrides and request-level `user` need
+    // to ride through to the hosted MCP server.
     let response_format = session.tool_response_format(&call.name);
     prepare_hosted_dispatch_args(
         &mut arguments,
@@ -156,14 +144,9 @@ fn backfill_approval_request_id(item: &mut ResponseOutputItem, approval_request_
     }
 }
 
-/// Build a family-aware error output item for a malformed-arguments
-/// rejection. The presentation layer's `render_final_item` would also
-/// produce a wire-correct shape from a `transformed_item: None`
-/// `ExecutedCall`, but pre-rendering here keeps the persisted
-/// non-streaming response and the streaming `output_item.done` payload
-/// aligned with the executor-error path: transformed item present,
-/// family preserved, and failed status set before the sink overlays any
-/// wire-only error fields.
+/// Build a family-aware error output item for a malformed-arguments rejection.
+/// Pre-rendering keeps streaming and non-streaming payloads aligned with the
+/// executor-error path.
 fn synthesize_error_item(
     call: &super::state::LoopToolCall,
     server_label: &str,
@@ -291,9 +274,8 @@ mod tests {
         }
     }
 
-    /// Malformed argument JSON must become a tool-error result the
-    /// driver can surface through the normal `ToolCompleted` path —
-    /// not a silent coerce-to-`{}` execution. Review P1.4.
+    /// Malformed argument JSON must become a tool-error result surfaced
+    /// through the normal `ToolCompleted` path.
     #[tokio::test]
     async fn malformed_arguments_returns_tool_error_without_executing() {
         let orchestrator = McpOrchestrator::new_test();

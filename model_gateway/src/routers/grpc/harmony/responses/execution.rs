@@ -1,10 +1,4 @@
-//! Harmony-side MCP tool helper kept after the agent-loop refactor.
-//!
-//! Tool execution itself now lives in
-//! `routers/common/agent_loop/tooling.rs::execute_planned_tool`; the
-//! only thing that remains harmony-specific is converting the
-//! request-scoped `McpToolSession` into the `ResponseTool` array the
-//! harmony pipeline sees as advertised function tools.
+//! Harmony-side MCP tool advertisement helper.
 
 use openai_protocol::responses::ResponseTool;
 use smg_mcp::McpToolSession;
