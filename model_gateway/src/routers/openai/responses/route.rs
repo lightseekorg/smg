@@ -110,6 +110,32 @@ fn endpoint_override_for_provider(
     None
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "routing helpers use shared axum Response error contracts across router code"
+)]
+fn validated_endpoint_override_for_provider(
+    headers: Option<&HeaderMap>,
+    provider_hint: &ProviderType,
+    model: &str,
+) -> Result<Option<String>, Response> {
+    let parsed_override = endpoint_override_for_provider(headers, provider_hint, model);
+
+    if parsed_override.is_none() {
+        tracing::warn!(
+            model,
+            provider_hint = ?provider_hint,
+            "Invalid x-provider-endpoint header: expected a valid http/https URL"
+        );
+        return Err(error::bad_request(
+            "invalid_request",
+            "Invalid x-provider-endpoint header: expected a valid http/https URL".to_string(),
+        ));
+    }
+
+    Ok(parsed_override)
+}
+
 async fn select_worker_with_metrics(
     deps: &ResponsesRouterContext<'_>,
     headers: Option<&HeaderMap>,
@@ -296,7 +322,11 @@ pub(in crate::routers::openai) async fn route_responses(
         bool_to_static_str(streaming),
     );
 
-    let endpoint_override = endpoint_override_for_provider(headers, &provider_hint, model);
+    let endpoint_override =
+        match validated_endpoint_override_for_provider(headers, &provider_hint, model) {
+            Ok(override_url) => override_url,
+            Err(response) => return response,
+        };
     let worker = match resolve_responses_worker(
         deps,
         headers,
@@ -691,6 +721,41 @@ mod tests {
             gemini_override.is_none(),
             "Invalid URL must not be used as endpoint override"
         );
+    }
+
+    #[test]
+    fn invalid_gemini_endpoint_override_is_rejected_before_worker_selection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-provider-endpoint",
+            "notaurl".parse().expect("valid header"),
+        );
+
+        let result = validated_endpoint_override_for_provider(
+            Some(&headers),
+            &ProviderType::Gemini,
+            "gemini-2.5-flash",
+        );
+
+        assert!(
+            result.is_err(),
+            "invalid override should return 400 response"
+        );
+    }
+
+    #[test]
+    fn missing_gemini_endpoint_override_is_not_rejected_upfront() {
+        let result = validated_endpoint_override_for_provider(
+            None,
+            &ProviderType::Gemini,
+            "gemini-2.5-flash",
+        );
+
+        assert!(
+            result.is_ok(),
+            "missing override should continue to downstream validation/selection"
+        );
+        assert_eq!(result.ok().flatten(), None);
     }
 
     #[test]
