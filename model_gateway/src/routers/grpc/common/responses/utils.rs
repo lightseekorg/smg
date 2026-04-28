@@ -8,19 +8,19 @@ use openai_protocol::{
     responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::to_value;
-use smg_data_connector::{
-    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
-    ResponseStorage,
-};
+use smg_data_connector::RequestContext as StorageRequestContext;
 use smg_mcp::{McpOrchestrator, McpServerBinding};
 use tracing::{debug, error, warn};
 
 use crate::{
+    memory::MemoryExecutionContext,
     routers::{
         common::{
-            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+            mcp_utils::ensure_request_mcp_client,
+            persistence_utils::{persist_conversation_items, ConversationTurnInfo},
         },
         error,
+        grpc::common::responses::context::PersistenceHandles,
     },
     worker::WorkerRegistry,
 };
@@ -151,9 +151,9 @@ pub(crate) fn extract_tools_from_response_tools(
 /// Common helper function to avoid duplication across sync and streaming paths
 /// in both harmony and regular responses implementations.
 pub(crate) async fn persist_response_if_needed(
-    conversation_storage: Arc<dyn ConversationStorage>,
-    conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    response_storage: Arc<dyn ResponseStorage>,
+    persistence: &PersistenceHandles,
+    memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
     response: &ResponsesResponse,
     original_request: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
@@ -164,12 +164,15 @@ pub(crate) async fn persist_response_if_needed(
 
     if let Ok(response_json) = to_value(response) {
         if let Err(e) = persist_conversation_items(
-            conversation_storage,
-            conversation_item_storage,
-            response_storage,
+            persistence.conversation_storage.clone(),
+            persistence.conversation_item_storage.clone(),
+            persistence.conversation_memory_writer.clone(),
+            persistence.response_storage.clone(),
             &response_json,
             original_request,
             request_context,
+            memory_execution_context,
+            conversation_turn_info,
         )
         .await
         {

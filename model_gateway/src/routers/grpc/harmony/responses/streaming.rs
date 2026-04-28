@@ -22,7 +22,7 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::{mcp_utils::DEFAULT_MAX_ITERATIONS, persistence_utils::ConversationTurnInfo},
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
@@ -47,10 +47,18 @@ pub(crate) async fn serve_harmony_responses_stream(
     tenant_request_meta: TenantRequestMeta,
 ) -> Response {
     // Load previous conversation history if previous_response_id is set
-    let current_request = match load_previous_messages(ctx, request.clone()).await {
+    let loaded_request = match load_previous_messages(
+        ctx,
+        request.clone(),
+        ctx.memory_execution_context.stm_enabled.active(),
+    )
+    .await
+    {
         Ok(req) => req,
         Err(err_response) => return err_response,
     };
+    let current_request = loaded_request.request;
+    let conversation_turn_info = loaded_request.turn_info;
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
@@ -102,6 +110,7 @@ pub(crate) async fn serve_harmony_responses_stream(
                 &request,
                 tenant_request_meta.clone(),
                 mcp_servers,
+                conversation_turn_info,
                 &mut emitter,
                 &tx,
             )
@@ -112,6 +121,7 @@ pub(crate) async fn serve_harmony_responses_stream(
                 &current_request,
                 &request,
                 tenant_request_meta,
+                conversation_turn_info,
                 &mut emitter,
                 &tx,
             )
@@ -131,12 +141,17 @@ pub(crate) async fn serve_harmony_responses_stream(
 /// - Loops through tool execution iterations
 /// - Emits final response.completed event
 /// - Persists response internally
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming MCP loop threads ctx, requests, MCP state, turn info, emitter, and tx together"
+)]
 async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
     mcp_servers: Vec<McpServerBinding>,
+    conversation_turn_info: Option<ConversationTurnInfo>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -389,9 +404,9 @@ async fn execute_mcp_tool_loop_streaming(
 
                 // Persist response to storage if store=true
                 persist_response_if_needed(
-                    ctx.conversation_storage.clone(),
-                    ctx.conversation_item_storage.clone(),
-                    ctx.response_storage.clone(),
+                    &ctx.persistence,
+                    ctx.memory_execution_context.clone(),
+                    conversation_turn_info,
                     &final_response,
                     original_request,
                     ctx.request_context.clone(),
@@ -427,6 +442,7 @@ async fn execute_without_mcp_streaming(
     current_request: &ResponsesRequest,
     original_request: &ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
+    conversation_turn_info: Option<ConversationTurnInfo>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -477,9 +493,9 @@ async fn execute_without_mcp_streaming(
 
     // Persist response to storage if store=true
     persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.response_storage.clone(),
+        &ctx.persistence,
+        ctx.memory_execution_context.clone(),
+        conversation_turn_info,
         &final_response,
         original_request,
         ctx.request_context.clone(),

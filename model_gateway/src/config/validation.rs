@@ -495,6 +495,14 @@ impl ConfigValidator {
             });
         }
 
+        if config.max_conversation_history_items == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "max_conversation_history_items".to_string(),
+                value: config.max_conversation_history_items.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
+        }
+
         if config.queue_size > 0 && config.queue_timeout_secs == 0 {
             return Err(ConfigError::InvalidValue {
                 field: "queue_timeout_secs".to_string(),

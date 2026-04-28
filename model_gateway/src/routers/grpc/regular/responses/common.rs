@@ -24,7 +24,10 @@ use tracing::{debug, warn};
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::persistence_utils::split_stored_message_content, error,
+        common::persistence_utils::{
+            count_conversation_turn_info, split_stored_message_content, ConversationTurnInfo,
+        },
+        error,
         grpc::common::responses::ResponsesContext,
     },
 };
@@ -49,6 +52,12 @@ pub(super) struct ResponsesCallContext {
     pub model_id: String,
     pub response_id: Option<String>,
     pub tenant_request_meta: TenantRequestMeta,
+}
+
+/// Loaded request bundle for Regular Responses path.
+pub(super) struct LoadedRequest {
+    pub request: ResponsesRequest,
+    pub turn_info: Option<ConversationTurnInfo>,
 }
 
 impl ToolLoopState {
@@ -165,14 +174,21 @@ pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> V
 pub(super) async fn load_conversation_history(
     ctx: &ResponsesContext,
     request: &ResponsesRequest,
-) -> Result<ResponsesRequest, Response> {
+    stm_enabled: bool,
+) -> Result<LoadedRequest, Response> {
     let mut modified_request = request.clone();
     let mut conversation_items: Option<Vec<ResponseInputOutputItem>> = None;
+    // Tracks the raw DB item count (all types) for the conversation path so
+    // that total_items in ConversationTurnInfo is not undercounted when
+    // function_call/function_call_output/MCP items are present in storage
+    // but filtered out of the inference window.
+    let mut raw_stored_item_count: Option<usize> = None;
 
     // Handle previous_response_id by loading response chain
     if let Some(ref prev_id_str) = modified_request.previous_response_id {
         let prev_id = ResponseId::from(prev_id_str.as_str());
         match ctx
+            .persistence
             .response_storage
             .get_response_chain(&prev_id, None)
             .await
@@ -241,6 +257,7 @@ pub(super) async fn load_conversation_history(
 
         // Check if conversation exists - return error if not found
         let conversation = ctx
+            .persistence
             .conversation_storage
             .get_conversation(&conv_id)
             .await
@@ -260,20 +277,39 @@ pub(super) async fn load_conversation_history(
             ));
         }
 
-        // Load conversation history
-        const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
+        // Load conversation history.
+        // Always fetch cap+1 items so we can detect whether the conversation
+        // has grown past max_conversation_history_items. Fetching one extra row
+        // is harmless (it is just a SQL LIMIT). The rejection below only fires
+        // when STMO is active and the response will be persisted.
+        let cap = ctx.max_conversation_history_items;
         let params = data_connector::ListParams {
-            limit: MAX_CONVERSATION_HISTORY_ITEMS,
+            limit: cap.saturating_add(1),
             order: data_connector::SortOrder::Asc,
             after: None,
         };
-
         match ctx
+            .persistence
             .conversation_item_storage
             .list_items(&conv_id, params)
             .await
         {
             Ok(stored_items) => {
+                // Only reject oversized conversations when the response will
+                // actually be persisted. store=false requests skip persistence
+                // entirely, so STMO is never enqueued and the cap does not apply.
+                if stm_enabled && request.store.unwrap_or(true) && stored_items.len() > cap {
+                    return Err(error::bad_request(
+                        "conversation_too_large",
+                        format!(
+                            "Conversation exceeds the configured limit of {cap} history items. \
+                             Increase max_conversation_history_items in the router config \
+                             or reduce conversation length before using short-term memory \
+                             optimization.",
+                        ),
+                    ));
+                }
+                raw_stored_item_count = Some(stored_items.len());
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {
                     if item.item_type == "message" {
@@ -358,7 +394,46 @@ pub(super) async fn load_conversation_history(
         "Loaded conversation history"
     );
 
-    Ok(modified_request)
+    let turn_info = if stm_enabled {
+        // If a conversation was requested but list_items failed, the assembled
+        // input only contains the current request — STMO turn counts would be
+        // wrong. Skip STMO for this request so persistence does not enqueue a
+        // job with an undercounted last_index/target_item_end.
+        if request.conversation.is_some() && raw_stored_item_count.is_none() {
+            None
+        } else {
+            let mut info = count_conversation_turn_info(&modified_request.input);
+            // If we loaded from conversation storage, total_items from the
+            // assembled (message-only) input undercounts — function_call,
+            // function_call_output, and MCP items are in the DB but filtered
+            // out of the inference window. Use the raw DB count instead so
+            // target_item_end points at the correct absolute position.
+            if let Some(raw_count) = raw_stored_item_count {
+                // Only apply the raw-count correction when no response chain
+                // was also loaded. If previous_response_id was set, the chain
+                // merge ran last and overwrote modified_request.input with the
+                // full replayed history — count_conversation_turn_info already
+                // saw every item, so no correction is needed. (conversation and
+                // previous_response_id are mutually exclusive in the API, but
+                // we guard here for safety.)
+                if request.previous_response_id.is_none() {
+                    let current_input_count = match &request.input {
+                        ResponseInput::Text(_) => 1,
+                        ResponseInput::Items(items) => items.len(),
+                    };
+                    info.total_items = raw_count + current_input_count;
+                }
+            }
+            Some(info)
+        }
+    } else {
+        None
+    };
+
+    Ok(LoadedRequest {
+        request: modified_request,
+        turn_info,
+    })
 }
 
 /// Build next request with updated conversation history

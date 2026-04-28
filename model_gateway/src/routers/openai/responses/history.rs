@@ -19,17 +19,19 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
-            header_utils::ConversationMemoryConfig, persistence_utils::split_stored_message_content,
+            header_utils::ConversationMemoryConfig,
+            persistence_utils::{
+                count_conversation_turn_info, split_stored_message_content, ConversationTurnInfo,
+            },
         },
         error,
     },
 };
 
-const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
-
 pub(crate) struct LoadedInputHistory {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub conversation_turn_info: Option<ConversationTurnInfo>,
 }
 
 /// Load conversation history and/or previous response chain into request input.
@@ -41,6 +43,7 @@ pub(crate) async fn load_input_history(
     conversation: Option<&str>,
     request_body: &mut ResponsesRequest,
     model: &str,
+    stm_enabled: bool,
 ) -> Result<LoadedInputHistory, Response> {
     let previous_response_id = request_body
         .previous_response_id
@@ -50,6 +53,12 @@ pub(crate) async fn load_input_history(
 
     // Load items from previous response chain if specified
     let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
+    let mut raw_stored_item_count: Option<usize> = None;
+    // Capture current request input count before history loading mutates request_body.input
+    let current_input_count = match &request_body.input {
+        ResponseInput::Text(_) => 1,
+        ResponseInput::Items(items) => items.len(),
+    };
     if let Some(prev_id_str) = &previous_response_id {
         let prev_id = ResponseId::from(prev_id_str.as_str());
         match components
@@ -138,18 +147,48 @@ pub(crate) async fn load_input_history(
             ));
         }
 
+        // Always fetch cap+1 items so we can detect whether the conversation
+        // has grown past max_conversation_history_items. Fetching one extra row
+        // is harmless (it is just a SQL LIMIT). The rejection below only fires
+        // when STMO is active and the response will be persisted.
+        let cap = components
+            .shared
+            .router_config
+            .max_conversation_history_items;
         let params = ListParams {
-            limit: MAX_CONVERSATION_HISTORY_ITEMS,
+            limit: cap.saturating_add(1),
             order: SortOrder::Asc,
             after: None,
         };
-
         match components
             .conversation_item_storage
             .list_items(&conv_id, params)
             .await
         {
             Ok(stored_items) => {
+                // Only reject oversized conversations when the response will
+                // actually be persisted. store=false requests skip persistence
+                // entirely, so STMO is never enqueued and the cap does not apply.
+                if stm_enabled && request_body.store.unwrap_or(true) && stored_items.len() > cap {
+                    Metrics::record_router_error(
+                        metrics_labels::ROUTER_OPENAI,
+                        metrics_labels::BACKEND_EXTERNAL,
+                        metrics_labels::CONNECTION_HTTP,
+                        model,
+                        metrics_labels::ENDPOINT_RESPONSES,
+                        metrics_labels::ERROR_VALIDATION,
+                    );
+                    return Err(error::bad_request(
+                        "conversation_too_large",
+                        format!(
+                            "Conversation exceeds the configured limit of {cap} history items. \
+                             Increase max_conversation_history_items in the router config \
+                             or reduce conversation length before using short-term memory \
+                             optimization.",
+                        ),
+                    ));
+                }
+                raw_stored_item_count = Some(stored_items.len());
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
                 for item in stored_items {
                     match item.item_type.as_str() {
@@ -232,9 +271,41 @@ pub(crate) async fn load_input_history(
         request_body.input = ResponseInput::Items(items);
     }
 
+    let conversation_turn_info = if stm_enabled {
+        // If a conversation was requested but list_items failed, the assembled
+        // input only contains the current request — STMO turn counts would be
+        // wrong. Skip STMO for this request so persistence does not enqueue a
+        // job with an undercounted last_index/target_item_end.
+        if conversation.is_some() && raw_stored_item_count.is_none() {
+            None
+        } else {
+            let mut info = count_conversation_turn_info(&request_body.input);
+            // Correct total_items when loaded from conversation storage: reasoning
+            // items are skipped during load but are stored in the DB, so the
+            // assembled input underestimates the true conversation size. Use the
+            // raw DB count + current input item count for an accurate target_item_end.
+            if let Some(raw_count) = raw_stored_item_count {
+                // Only apply the raw-count correction when no response chain
+                // was also loaded. If previous_response_id was set, the chain
+                // merge ran last and overwrote request_body.input with the full
+                // replayed history — count_conversation_turn_info already saw
+                // every item, so no correction is needed. (conversation and
+                // previous_response_id are mutually exclusive per the API spec,
+                // but we guard here for safety.)
+                if previous_response_id.is_none() {
+                    info.total_items = raw_count + current_input_count;
+                }
+            }
+            Some(info)
+        }
+    } else {
+        None
+    };
+
     Ok(LoadedInputHistory {
         previous_response_id,
         existing_mcp_list_tools_labels: existing_mcp_list_tools_labels.into_iter().collect(),
+        conversation_turn_info,
     })
 }
 

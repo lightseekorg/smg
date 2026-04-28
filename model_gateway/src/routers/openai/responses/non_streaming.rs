@@ -41,6 +41,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let ResponsesPayloadState {
         previous_response_id,
         existing_mcp_list_tools_labels,
+        conversation_turn_info,
     } = ctx.take_responses_payload().unwrap_or_default();
 
     let original_body = match ctx.responses_request() {
@@ -164,18 +165,22 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id.as_deref(),
     );
 
-    if let (Some(conv_storage), Some(item_storage), Some(resp_storage)) = (
+    if let (Some(conv_storage), Some(item_storage), Some(memory_writer), Some(resp_storage)) = (
         ctx.components.conversation_storage(),
         ctx.components.conversation_item_storage(),
+        ctx.components.conversation_memory_writer(),
         ctx.components.response_storage(),
     ) {
         if let Err(err) = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
+            memory_writer.clone(),
             resp_storage.clone(),
             &response_json,
             original_body,
             ctx.storage_request_context.clone(),
+            ctx.memory_execution_context.clone(),
+            conversation_turn_info,
         )
         .await
         {

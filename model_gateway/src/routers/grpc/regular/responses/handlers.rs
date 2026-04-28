@@ -111,18 +111,27 @@ async fn route_responses_streaming(
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
 ) -> Response {
-    // 1. Load conversation history
-    let modified_request = match load_conversation_history(ctx, &request).await {
-        Ok(req) => req,
-        Err(response) => return response, // Already a Response with proper status code
-    };
-
-    // 2. Check MCP connection and get whether MCP tools are present
+    // 1. Check MCP connection first so we can gate STMO logic correctly.
+    // ensure_mcp_connection only inspects request.tools, not request.input,
+    // so it is safe to call before history loading.
     let (has_mcp_tools, mcp_servers) =
         match ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await {
             Ok(result) => result,
             Err(response) => return response,
         };
+
+    // 2. Load conversation history.
+    // The MCP streaming path (execute_tool_loop_streaming) never calls
+    // persist_response_if_needed, so STMO is never enqueued there. Disable
+    // stm_enabled for that path so the cap overflow check does not reject
+    // requests that will never trigger STMO anyway.
+    let stm_enabled = ctx.memory_execution_context.stm_enabled.active() && !has_mcp_tools;
+    let loaded_request = match load_conversation_history(ctx, &request, stm_enabled).await {
+        Ok(req) => req,
+        Err(response) => return response,
+    };
+    let modified_request = loaded_request.request;
+    let conversation_turn_info = loaded_request.turn_info;
 
     if has_mcp_tools {
         debug!("MCP tools detected in streaming mode, using streaming tool loop");
@@ -148,5 +157,12 @@ async fn route_responses_streaming(
     };
 
     // 4. Execute chat pipeline and convert streaming format (no MCP tools)
-    streaming::convert_chat_stream_to_responses_stream(ctx, chat_request, params, &request).await
+    streaming::convert_chat_stream_to_responses_stream(
+        ctx,
+        chat_request,
+        params,
+        &request,
+        conversation_turn_info,
+    )
+    .await
 }

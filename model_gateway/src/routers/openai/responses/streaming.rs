@@ -562,6 +562,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
+    let conversation_turn_info = req.conversation_turn_info;
     let storage = req.storage;
 
     #[expect(
@@ -634,10 +635,13 @@ pub(super) async fn handle_simple_streaming_passthrough(
                 if let Err(err) = persist_conversation_items(
                     storage.conversation.clone(),
                     storage.conversation_item.clone(),
+                    storage.conversation_memory_writer.clone(),
                     storage.response.clone(),
                     &response_json,
                     &original_request,
                     storage.request_context.clone(),
+                    storage.memory_execution_context.clone(),
+                    conversation_turn_info,
                 )
                 .await
                 {
@@ -683,6 +687,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
     let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
+    let conversation_turn_info = req.conversation_turn_info;
     let url = req.url;
     let storage = req.storage;
 
@@ -962,10 +967,13 @@ pub(super) fn handle_streaming_with_tool_interception(
                     if let Err(err) = persist_conversation_items(
                         storage.conversation.clone(),
                         storage.conversation_item.clone(),
+                        storage.conversation_memory_writer.clone(),
                         storage.response.clone(),
                         &response_json,
                         &original_request,
                         storage.request_context.clone(),
+                        storage.memory_execution_context.clone(),
+                        conversation_turn_info,
                     )
                     .await
                     {
