@@ -185,7 +185,7 @@ impl GoogleProvider {
         let total_tokens = usage
             .get("totalTokenCount")
             .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+            .unwrap_or(input_tokens + output_tokens);
 
         *response = json!({
             "id": response.get("responseId").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| format!("resp_{}", uuid::Uuid::now_v7())),
