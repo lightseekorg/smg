@@ -5,12 +5,20 @@
 # the SMG MLX servicer + SMG router and runs the same benchmark matrix.
 # Results land in $RESULTS_DIR for aggregate.py to summarize.
 #
+# Phases can run independently via PHASE env (default "all"). The CI workflow
+# splits them into separate steps so a phase-1 failure doesn't block phase 2.
+#
+# Per-cell failures inside a phase are also tolerated — the bench writes a
+# .failed marker and continues. aggregate.py treats missing JSON as "—" so
+# the comparison table still renders with whatever data we collected.
+#
 # Uses the genai-bench CLI installed via pip (not docker) — Docker on
 # macos-latest GitHub runners requires Colima, which boots a Linux VM
 # that is unstable in CI. Native pip install runs the same code without
 # the VM hop.
 #
 # Tunables via env (overridable from the workflow):
+#   PHASE                http | grpc | all (default: all)
 #   MODEL                model id (default: mlx-community/gemma-3-4b-it-qat-4bit)
 #   CONCURRENCIES        space-separated (default: "1 4 16 64")
 #   SCENARIOS            space-separated genai-bench scenarios
@@ -26,6 +34,7 @@
 
 set -euo pipefail
 
+PHASE="${PHASE:-all}"
 MODEL="${MODEL:-mlx-community/gemma-3-4b-it-qat-4bit}"
 CONCURRENCIES="${CONCURRENCIES:-1 4 16 64}"
 SCENARIOS="${SCENARIOS:-D(100,256) D(2000,128)}"
@@ -102,7 +111,11 @@ run_bench() {
     # comment in e2e_test/benchmarks/test_nightly_perf.py:30 calls the unit
     # "seconds" but it's wrong; the existing tests pass `10` and get 10
     # minutes, not 10 seconds.
-    genai-bench benchmark \
+    #
+    # Per-cell failures (e.g. server overload at high concurrency) are
+    # tolerated: we record a .failed marker, log the error, and continue
+    # to the next cell. aggregate.py treats missing JSON as "—".
+    if ! genai-bench benchmark \
         --api-backend openai \
         --api-base "$base_url" \
         --api-key dummy-token \
@@ -115,62 +128,86 @@ run_bench() {
         --max-time-per-run "$DURATION_MIN" \
         --experiment-folder-name "$exp_name" \
         --experiment-base-dir "$RESULTS_DIR"
+    then
+        log "[$exp_name] FAILED — recording marker, continuing"
+        date -u +"%Y-%m-%dT%H:%M:%SZ" >"$exp_dir/.failed"
+        return 0
+    fi
 }
 
-# ──────────────────────────────────────────────────────────────────────────
-# Phase 1: direct mlx-lm HTTP server
-# ──────────────────────────────────────────────────────────────────────────
-log "=== Phase 1: direct HTTP (mlx-lm.server) ==="
+run_phase_http() {
+    log "=== Phase 1: direct HTTP (mlx-lm.server) ==="
 
-mlx_lm.server --model "$MODEL" --host 127.0.0.1 --port "$HTTP_PORT" \
-    >"$RESULTS_DIR/mlx-lm.log" 2>&1 &
-MLX_HTTP_PID=$!
-PIDS+=("$MLX_HTTP_PID")
-wait_for_openai "http://127.0.0.1:$HTTP_PORT" 300
-log "mlx-lm.server up on :$HTTP_PORT (pid=$MLX_HTTP_PID)"
+    mlx_lm.server --model "$MODEL" --host 127.0.0.1 --port "$HTTP_PORT" \
+        >"$RESULTS_DIR/mlx-lm.log" 2>&1 &
+    local mlx_pid=$!
+    PIDS+=("$mlx_pid")
+    wait_for_openai "http://127.0.0.1:$HTTP_PORT" 300
+    log "mlx-lm.server up on :$HTTP_PORT (pid=$mlx_pid)"
 
-for scenario in $SCENARIOS; do
-    for c in $CONCURRENCIES; do
-        run_bench "http" "http://127.0.0.1:$HTTP_PORT" "$scenario" "$c"
+    for scenario in $SCENARIOS; do
+        for c in $CONCURRENCIES; do
+            run_bench "http" "http://127.0.0.1:$HTTP_PORT" "$scenario" "$c"
+        done
     done
-done
 
-log "Stopping mlx-lm.server..."
-kill "$MLX_HTTP_PID" 2>/dev/null || true
-wait "$MLX_HTTP_PID" 2>/dev/null || true
-# Reset PIDS — mlx-lm was the only one running in phase 1, so an empty
-# array is correct. Using `PIDS=()` avoids the `${new_pids[@]}` empty-
-# array unbound-variable error under `set -u`.
-PIDS=()
+    log "Stopping mlx-lm.server..."
+    kill "$mlx_pid" 2>/dev/null || true
+    wait "$mlx_pid" 2>/dev/null || true
+    PIDS=()
+}
 
-# ──────────────────────────────────────────────────────────────────────────
-# Phase 2: SMG router + MLX gRPC servicer
-# ──────────────────────────────────────────────────────────────────────────
-log "=== Phase 2: SMG router + MLX gRPC servicer ==="
+run_phase_grpc() {
+    log "=== Phase 2: SMG router + MLX gRPC servicer ==="
 
-python3 -m smg_grpc_servicer.mlx.server --model "$MODEL" \
-    --host 127.0.0.1 --port "$GRPC_PORT" \
-    >"$RESULTS_DIR/mlx-grpc.log" 2>&1 &
-GRPC_PID=$!
-PIDS+=("$GRPC_PID")
-wait_for_port "$GRPC_PORT" 300
-log "MLX gRPC servicer up on :$GRPC_PORT (pid=$GRPC_PID)"
-# Give the gen thread a beat to finish warmup before starting the router.
-sleep 5
+    python3 -m smg_grpc_servicer.mlx.server --model "$MODEL" \
+        --host 127.0.0.1 --port "$GRPC_PORT" \
+        >"$RESULTS_DIR/mlx-grpc.log" 2>&1 &
+    local grpc_pid=$!
+    PIDS+=("$grpc_pid")
+    wait_for_port "$GRPC_PORT" 300
+    log "MLX gRPC servicer up on :$GRPC_PORT (pid=$grpc_pid)"
+    # Give the gen thread a beat to finish warmup before starting the router.
+    sleep 5
 
-"$SMG_BIN" launch \
-    --host 127.0.0.1 --port "$ROUTER_PORT" \
-    --worker-urls "grpc://127.0.0.1:$GRPC_PORT" \
-    >"$RESULTS_DIR/smg-router.log" 2>&1 &
-ROUTER_PID=$!
-PIDS+=("$ROUTER_PID")
-wait_for_openai "http://127.0.0.1:$ROUTER_PORT" 60
-log "SMG router up on :$ROUTER_PORT (pid=$ROUTER_PID)"
+    "$SMG_BIN" launch \
+        --host 127.0.0.1 --port "$ROUTER_PORT" \
+        --worker-urls "grpc://127.0.0.1:$GRPC_PORT" \
+        >"$RESULTS_DIR/smg-router.log" 2>&1 &
+    local router_pid=$!
+    PIDS+=("$router_pid")
+    wait_for_openai "http://127.0.0.1:$ROUTER_PORT" 60
+    log "SMG router up on :$ROUTER_PORT (pid=$router_pid)"
 
-for scenario in $SCENARIOS; do
-    for c in $CONCURRENCIES; do
-        run_bench "grpc" "http://127.0.0.1:$ROUTER_PORT" "$scenario" "$c"
+    for scenario in $SCENARIOS; do
+        for c in $CONCURRENCIES; do
+            run_bench "grpc" "http://127.0.0.1:$ROUTER_PORT" "$scenario" "$c"
+        done
     done
-done
+
+    log "Stopping gRPC servers..."
+    kill "$router_pid" 2>/dev/null || true
+    kill "$grpc_pid" 2>/dev/null || true
+    wait "$router_pid" 2>/dev/null || true
+    wait "$grpc_pid" 2>/dev/null || true
+    PIDS=()
+}
+
+case "$PHASE" in
+    http)
+        run_phase_http
+        ;;
+    grpc)
+        run_phase_grpc
+        ;;
+    all)
+        run_phase_http
+        run_phase_grpc
+        ;;
+    *)
+        log "Unknown PHASE=$PHASE (expected http|grpc|all)"
+        exit 1
+        ;;
+esac
 
 log "Done. Results in $RESULTS_DIR"
