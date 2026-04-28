@@ -359,6 +359,7 @@ impl RouterManager {
             {
                 return Some(router);
             }
+            return None;
         }
 
         self.select_router_for_request(headers, Some(model_id))
