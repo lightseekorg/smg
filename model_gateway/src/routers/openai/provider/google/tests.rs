@@ -480,3 +480,34 @@ fn stream_transform_stateful_text_then_function_output_indices() {
     assert_eq!(function_events[0]["output_index"], json!(1));
     assert_eq!(function_events[1]["output_index"], json!(1));
 }
+
+#[test]
+fn stream_transform_incomplete_details_contains_reason_only() {
+    let provider = GoogleProvider;
+    let mut state = provider.new_stream_state().expect("google stream state");
+    let final_chunk = json!({
+        "candidates": [{
+            "content": {"role":"model","parts":[{"text":"partial"}]},
+            "finishReason":"MAX_TOKENS"
+        }]
+    });
+
+    let final_events = provider
+        .transform_stream_event(&final_chunk, Some(state.as_mut()), Endpoint::Responses)
+        .expect("final transform");
+    let incomplete = final_events
+        .iter()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("response.incomplete"))
+        .expect("incomplete event");
+
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        json!("max_output_tokens")
+    );
+    assert!(
+        incomplete["response"]["incomplete_details"]
+            .get("type")
+            .is_none(),
+        "incomplete_details should only contain reason"
+    );
+}

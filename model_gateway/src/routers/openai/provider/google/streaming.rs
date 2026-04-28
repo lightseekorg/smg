@@ -288,7 +288,6 @@ impl GoogleProvider {
 
         if let Some(reason) = incomplete_reason {
             response["incomplete_details"] = json!({
-                "type": reason,
                 "reason": reason
             });
         }
