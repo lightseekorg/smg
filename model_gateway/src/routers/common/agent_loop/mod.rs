@@ -30,7 +30,8 @@ pub(crate) use error::AgentLoopError;
 pub(crate) use events::{LoopEvent, NoopSink, StreamSink};
 pub(crate) use prepared::PreparedLoopInput;
 pub(crate) use presentation::{
-    OutputFamily, ToolPresentation, ToolTransferDescriptor, ToolVisibility,
+    normalize_output_item_id, OutputFamily, ToolPresentation, ToolTransferDescriptor,
+    ToolVisibility,
 };
 pub(crate) use state::{
     AgentLoopState, ExecutedCall, LoopModelTurn, LoopToolCall, PendingToolExecution,

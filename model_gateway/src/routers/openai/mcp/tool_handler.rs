@@ -106,12 +106,6 @@ impl OutputIndexMapper {
         self.assigned.get(&upstream_index).copied()
     }
 
-    pub fn allocate_synthetic(&mut self) -> usize {
-        let assigned = self.next_index;
-        self.next_index += 1;
-        assigned
-    }
-
     pub fn next_index(&self) -> usize {
         self.next_index
     }
@@ -190,10 +184,6 @@ impl StreamingToolHandler {
 
     pub fn mapped_output_index(&self, upstream_index: usize) -> Option<usize> {
         self.output_index_mapper.lookup(upstream_index)
-    }
-
-    pub fn allocate_synthetic_output_index(&mut self) -> usize {
-        self.output_index_mapper.allocate_synthetic()
     }
 
     pub fn next_output_index(&self) -> usize {

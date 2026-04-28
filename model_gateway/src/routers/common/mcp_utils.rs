@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use axum::response::Response;
 use openai_protocol::responses::{
     McpAllowedTools, ResponseOutputItem, ResponseTool, ResponsesRequest,
 };
@@ -13,7 +14,9 @@ use smg_mcp::{
     apply_hosted_tool_overrides, extract_hosted_tool_overrides, BuiltinToolType, McpOrchestrator,
     McpServerBinding, McpServerConfig, McpToolSession, McpTransport, ResponseFormat,
 };
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
+
+use crate::routers::error;
 
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
@@ -456,6 +459,49 @@ pub async fn ensure_request_mcp_client(
     let builtin_types = extract_builtin_types(tools);
 
     ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
+}
+
+/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared.
+pub(crate) async fn ensure_mcp_connection(
+    mcp_orchestrator: &Arc<McpOrchestrator>,
+    tools: Option<&[ResponseTool]>,
+) -> Result<(bool, Vec<McpServerBinding>), Response> {
+    let has_explicit_mcp_tools = tools
+        .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
+        .unwrap_or(false);
+
+    let has_builtin_tools = tools
+        .map(|t| t.iter().any(|tool| classify_builtin_tool(tool).is_some()))
+        .unwrap_or(false);
+
+    if !has_explicit_mcp_tools && !has_builtin_tools {
+        return Ok((false, Vec::new()));
+    }
+
+    if let Some(tools) = tools {
+        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
+            Some(mcp_servers) => return Ok((true, mcp_servers)),
+            None if has_explicit_mcp_tools => {
+                error!(
+                    function = "ensure_mcp_connection",
+                    "Failed to connect to MCP servers"
+                );
+                return Err(error::failed_dependency(
+                    "connect_mcp_server_failed",
+                    "Failed to connect to MCP servers. Check server_url and authorization.",
+                ));
+            }
+            None => {
+                debug!(
+                    function = "ensure_mcp_connection",
+                    "No MCP routing configured for builtin tools, passing through to model"
+                );
+                return Ok((false, Vec::new()));
+            }
+        }
+    }
+
+    Ok((false, Vec::new()))
 }
 
 /// Forward the caller's `user` identifier into hosted-tool dispatch arguments.

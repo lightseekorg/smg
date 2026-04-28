@@ -10,6 +10,7 @@
 //! - Shared helpers for response retrieval-related logic
 
 mod accumulator;
+mod agent_loop_adapter;
 mod common;
 pub(crate) mod history;
 mod non_streaming;
