@@ -223,6 +223,33 @@ fn request_transform_ignores_input_file_with_file_id_only() {
 }
 
 #[test]
+fn request_transform_defaults_inline_file_mime_type_when_missing() {
+    let provider = GoogleProvider;
+    let mut payload = json!({
+        "model": "google.gemini-2.5-flash",
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type":"input_file","file_data":"dGVzdA=="}
+            ]
+        }]
+    });
+
+    provider
+        .transform_request(&mut payload, Endpoint::Responses)
+        .expect("transform should succeed");
+
+    assert_eq!(
+        payload["contents"][0]["parts"][0]["inlineData"]["mimeType"],
+        json!("application/octet-stream")
+    );
+    assert_eq!(
+        payload["contents"][0]["parts"][0]["inlineData"]["data"],
+        json!("dGVzdA==")
+    );
+}
+
+#[test]
 fn request_transform_maps_tool_response_to_function_response() {
     let provider = GoogleProvider;
     let mut payload = json!({
