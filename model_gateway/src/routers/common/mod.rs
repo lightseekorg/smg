@@ -26,6 +26,7 @@ pub mod background;
 pub mod header_utils;
 pub mod mcp_utils;
 pub mod persistence_utils;
+pub mod responses_history;
 pub mod retry;
 pub mod skill_resolution;
 pub mod transcript_lower;

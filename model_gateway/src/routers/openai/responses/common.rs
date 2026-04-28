@@ -58,16 +58,6 @@ impl ChunkProcessor {
             }
         }
     }
-
-    /// Check if there's remaining content in the buffer
-    pub fn has_remaining(&self) -> bool {
-        !self.pending.trim().is_empty()
-    }
-
-    /// Take any remaining content from the buffer
-    pub fn take_remaining(&mut self) -> String {
-        std::mem::take(&mut self.pending)
-    }
 }
 
 /// Parse an SSE block into event name and data

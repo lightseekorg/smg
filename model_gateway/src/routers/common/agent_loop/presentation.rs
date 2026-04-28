@@ -88,6 +88,30 @@ impl OutputFamily {
     pub(crate) const fn has_failed_event(self) -> bool {
         matches!(self, OutputFamily::McpCall)
     }
+
+    pub(crate) const fn id_prefix(self) -> &'static str {
+        match self {
+            OutputFamily::Function => "fc_",
+            OutputFamily::McpCall => "mcp_",
+            OutputFamily::WebSearchCall => "ws_",
+            OutputFamily::CodeInterpreterCall => "ci_",
+            OutputFamily::FileSearchCall => "fs_",
+            OutputFamily::ImageGenerationCall => "ig_",
+        }
+    }
+}
+
+pub(crate) fn normalize_output_item_id(family: OutputFamily, source_id: &str) -> String {
+    let prefix = family.id_prefix();
+    if source_id.starts_with(prefix) {
+        return source_id.to_string();
+    }
+
+    source_id
+        .strip_prefix("fc_")
+        .or_else(|| source_id.strip_prefix("call_"))
+        .map(|stripped| format!("{prefix}{stripped}"))
+        .unwrap_or_else(|| format!("{prefix}{source_id}"))
 }
 
 /// Whether a model-emitted tool call should be visible during the
