@@ -239,27 +239,28 @@ pub(in crate::routers::openai) async fn route_responses(
         bool_to_static_str(streaming),
     );
 
-    let requested_provider = match provider_from_headers(headers) {
-        Ok(provider) => provider,
-        Err(err) => {
-            debug!(
-                model,
-                error = ?err,
-                "Rejecting Responses provider hint"
-            );
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_VALIDATION,
-            );
-            return endpoint_override_error_response(err);
-        }
-    };
-    let endpoint_override =
-        match endpoint_override_from_headers(headers, requested_provider.clone()) {
+    let endpoint_override = if extract_provider_endpoint(headers).is_some() {
+        let requested_provider = match provider_from_headers(headers) {
+            Ok(provider) => provider,
+            Err(err) => {
+                debug!(
+                    model,
+                    error = ?err,
+                    "Rejecting Responses endpoint override provider"
+                );
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    metrics_labels::ENDPOINT_RESPONSES,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return endpoint_override_error_response(err);
+            }
+        };
+
+        match endpoint_override_from_headers(headers, requested_provider) {
             Ok(override_url) => override_url,
             Err(err) => {
                 debug!(
@@ -277,7 +278,10 @@ pub(in crate::routers::openai) async fn route_responses(
                 );
                 return endpoint_override_error_response(err);
             }
-        };
+        }
+    } else {
+        None
+    };
 
     let worker = if let Some(endpoint_override) = endpoint_override.as_ref() {
         debug!(
@@ -301,7 +305,7 @@ pub(in crate::routers::openai) async fn route_responses(
         .select_worker(&SelectWorkerRequest {
             model_id: model,
             headers,
-            provider: Some(requested_provider.clone()),
+            provider: Some(ProviderType::OpenAI),
             ..Default::default()
         })
         .await
@@ -524,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_override_without_endpoint_rejects_invalid_provider_header() {
+    fn provider_from_headers_rejects_invalid_provider_header() {
         let headers = headers_with_model_provider("unknown");
         let result = provider_from_headers(Some(&headers));
 
