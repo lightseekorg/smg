@@ -1,10 +1,9 @@
-//! Streaming response handling for OpenAI-compatible responses
+//! Streaming response handling for OpenAI-compatible responses.
 //!
 //! This module handles all streaming-related functionality including:
 //! - SSE (Server-Sent Events) parsing and forwarding
 //! - Streaming response accumulation for persistence
-//! - Tool call detection and interception during streaming
-//! - MCP tool execution loops within streaming responses
+//! - Upstream tool-call parsing during streaming
 //! - Event transformation and output index remapping
 
 use std::io;
@@ -17,9 +16,8 @@ use axum::{
 use bytes::Bytes;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
-        ResponseEvent, WebSearchCallEvent,
+        is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
+        OutputItemEvent, ResponseEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
@@ -36,11 +34,16 @@ use super::{
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
 use crate::routers::{
-    common::agent_loop::{normalize_output_item_id, OutputFamily},
+    common::{
+        agent_loop::{
+            normalize_output_item_id, OutputFamily, ToolTransferDescriptor, ToolVisibility,
+        },
+        responses_streaming::ResponseStreamEventEmitter,
+    },
     error,
     openai::{
         context::{RequestContext, StreamingEventContext},
-        mcp::StreamingToolHandler,
+        responses::upstream_stream_parser::OpenAiUpstreamStreamParser,
     },
 };
 
@@ -52,6 +55,30 @@ fn output_item_type_for_family(family: OutputFamily) -> &'static str {
         OutputFamily::FileSearchCall => ItemType::FILE_SEARCH_CALL,
         OutputFamily::ImageGenerationCall => ItemType::IMAGE_GENERATION_CALL,
         OutputFamily::Function => ItemType::FUNCTION_CALL,
+    }
+}
+
+fn transfer_descriptor_for(ctx: &StreamingEventContext<'_>, name: &str) -> ToolTransferDescriptor {
+    ctx.tool_transfers
+        .get(name)
+        .copied()
+        .unwrap_or_else(ToolTransferDescriptor::caller_function)
+}
+
+fn argument_event_names(family: OutputFamily) -> Option<(&'static str, &'static str)> {
+    match family {
+        OutputFamily::Function => Some((
+            FunctionCallEvent::ARGUMENTS_DELTA,
+            FunctionCallEvent::ARGUMENTS_DONE,
+        )),
+        OutputFamily::McpCall => Some((
+            McpEvent::CALL_ARGUMENTS_DELTA,
+            McpEvent::CALL_ARGUMENTS_DONE,
+        )),
+        OutputFamily::WebSearchCall
+        | OutputFamily::CodeInterpreterCall
+        | OutputFamily::FileSearchCall
+        | OutputFamily::ImageGenerationCall => None,
     }
 }
 
@@ -127,24 +154,26 @@ pub(super) fn apply_event_transformations_inplace(
             if let Some(item) = parsed_data.get_mut("item") {
                 if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
                     if is_function_call_type(item_type) {
-                        // Look up response_format for the tool
                         let tool_name = item
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
 
-                        // Only transform if this is an MCP tool; keep function_call unchanged
-                        if let Some(session) =
-                            ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
+                        let descriptor = transfer_descriptor_for(ctx, &tool_name);
+                        if !matches!(descriptor.family, OutputFamily::Function)
+                            && matches!(descriptor.visibility, ToolVisibility::Visible)
                         {
-                            let response_format = session.tool_response_format(&tool_name);
-                            let family = OutputFamily::from_mcp_format(&response_format);
+                            let family = descriptor.family;
                             let new_type = output_item_type_for_family(family);
 
                             item["type"] = json!(new_type);
                             if new_type == ItemType::MCP_CALL {
-                                let label = session.resolve_tool_server_label(&tool_name);
+                                let label = ctx
+                                    .tool_server_labels
+                                    .get(&tool_name)
+                                    .cloned()
+                                    .unwrap_or_default();
                                 item["server_label"] = json!(label);
                             }
 
@@ -193,28 +222,24 @@ fn send_sse_event(
     tx.send(Ok(Bytes::from(block))).is_ok()
 }
 
-/// Map function_call event names to mcp_call event names
-#[inline]
-fn map_event_name(event_name: &str) -> &str {
-    match event_name {
-        FunctionCallEvent::ARGUMENTS_DELTA => McpEvent::CALL_ARGUMENTS_DELTA,
-        FunctionCallEvent::ARGUMENTS_DONE => McpEvent::CALL_ARGUMENTS_DONE,
-        other => other,
-    }
+enum BufferedArgumentsResult {
+    ForwardCurrent,
+    DropCurrent,
+    Disconnected,
 }
 
 /// Send buffered function call arguments as a synthetic delta event.
 /// Returns false if client disconnected.
 fn send_buffered_arguments(
     parsed_data: &mut Value,
-    handler: &StreamingToolHandler,
+    handler: &OpenAiUpstreamStreamParser,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
-    sequence_number: &mut u64,
+    emitter: &mut ResponseStreamEventEmitter,
     mapped_output_index: &mut Option<usize>,
-) -> bool {
+) -> BufferedArgumentsResult {
     let Some(output_index) = extract_output_index(parsed_data) else {
-        return true;
+        return BufferedArgumentsResult::ForwardCurrent;
     };
 
     let assigned_index = handler
@@ -227,12 +252,16 @@ fn send_buffered_arguments(
         .iter()
         .find(|c| c.output_index == output_index)
     else {
-        return true;
+        return BufferedArgumentsResult::ForwardCurrent;
     };
 
-    let is_gateway_call = ctx
-        .session
-        .is_some_and(|session| session.has_exposed_tool(&call.name));
+    let descriptor = transfer_descriptor_for(ctx, &call.name);
+    if matches!(descriptor.visibility, ToolVisibility::SuppressedForApproval) {
+        return BufferedArgumentsResult::DropCurrent;
+    }
+    let Some((delta_event_name, done_event_name)) = argument_event_names(descriptor.family) else {
+        return BufferedArgumentsResult::DropCurrent;
+    };
 
     let arguments_value = if call.arguments_buffer.is_empty() {
         "{}".to_string()
@@ -248,24 +277,18 @@ fn send_buffered_arguments(
         .and_then(|v| v.as_str())
         .or(call.item_id.as_deref())
         .unwrap_or(call.call_id.as_str());
-    let transformed_item_id = if is_gateway_call {
-        normalize_output_item_id(OutputFamily::McpCall, item_id)
-    } else {
+    let transformed_item_id = if matches!(descriptor.family, OutputFamily::Function) {
         item_id.to_string()
+    } else {
+        normalize_output_item_id(descriptor.family, item_id)
     };
-    if is_gateway_call {
-        parsed_data["type"] = json!(McpEvent::CALL_ARGUMENTS_DONE);
-        parsed_data["item_id"] = Value::String(transformed_item_id.clone());
-    }
+    parsed_data["type"] = json!(done_event_name);
+    parsed_data["item_id"] = Value::String(transformed_item_id.clone());
 
     // Build synthetic delta event
     let mut delta_event = json!({
-        "type": if is_gateway_call {
-            McpEvent::CALL_ARGUMENTS_DELTA
-        } else {
-            FunctionCallEvent::ARGUMENTS_DELTA
-        },
-        "sequence_number": *sequence_number,
+        "type": delta_event_name,
+        "sequence_number": emitter.next_sequence(),
         "output_index": assigned_index,
         "item_id": transformed_item_id,
         "delta": arguments_value,
@@ -284,17 +307,11 @@ fn send_buffered_arguments(
         }
     }
 
-    let delta_event_name = if is_gateway_call {
-        McpEvent::CALL_ARGUMENTS_DELTA
-    } else {
-        FunctionCallEvent::ARGUMENTS_DELTA
-    };
     if !send_sse_event(tx, delta_event_name, &delta_event) {
-        return false;
+        return BufferedArgumentsResult::Disconnected;
     }
 
-    *sequence_number += 1;
-    true
+    BufferedArgumentsResult::ForwardCurrent
 }
 
 /// An SSE event to be forwarded to the client, with optional pre-parsed JSON.
@@ -306,14 +323,31 @@ pub(super) struct SseEventData<'a> {
     pub pre_parsed: Option<Value>,
 }
 
+fn is_suppressed_function_call_item(parsed_data: &Value, ctx: &StreamingEventContext<'_>) -> bool {
+    let Some(item) = parsed_data.get("item") else {
+        return false;
+    };
+    let Some(item_type) = item.get("type").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if !is_function_call_type(item_type) {
+        return false;
+    }
+    let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    matches!(
+        transfer_descriptor_for(ctx, tool_name).visibility,
+        ToolVisibility::SuppressedForApproval
+    )
+}
+
 /// Forward and transform a streaming event to the client.
 /// Returns false if client disconnected.
 pub(super) fn forward_streaming_event(
     event: SseEventData<'_>,
-    handler: &mut StreamingToolHandler,
+    handler: &mut OpenAiUpstreamStreamParser,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
-    sequence_number: &mut u64,
+    emitter: &mut ResponseStreamEventEmitter,
 ) -> bool {
     let SseEventData {
         raw_block,
@@ -321,6 +355,10 @@ pub(super) fn forward_streaming_event(
         data,
         pre_parsed,
     } = event;
+
+    if data.trim() == "[DONE]" {
+        return true;
+    }
 
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) {
         return true;
@@ -343,19 +381,27 @@ pub(super) fn forward_streaming_event(
         return true;
     }
 
+    if matches!(event_type, OutputItemEvent::ADDED | OutputItemEvent::DONE)
+        && is_suppressed_function_call_item(&parsed_data, ctx)
+    {
+        return true;
+    }
+
     // Handle function_call_arguments.done - send buffered args first
     let mut mapped_output_index: Option<usize> = None;
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
-        && !send_buffered_arguments(
+    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE) {
+        match send_buffered_arguments(
             &mut parsed_data,
             handler,
             tx,
             ctx,
-            sequence_number,
+            emitter,
             &mut mapped_output_index,
-        )
-    {
-        return false;
+        ) {
+            BufferedArgumentsResult::ForwardCurrent => {}
+            BufferedArgumentsResult::DropCurrent => return true,
+            BufferedArgumentsResult::Disconnected => return false,
+        }
     }
 
     if mapped_output_index.is_none() {
@@ -379,8 +425,7 @@ pub(super) fn forward_streaming_event(
     }
 
     if parsed_data.get("sequence_number").is_some() {
-        parsed_data["sequence_number"] = json!(*sequence_number);
-        *sequence_number += 1;
+        parsed_data["sequence_number"] = json!(emitter.next_sequence());
     }
 
     let final_data = match serde_json::to_string(&parsed_data) {
@@ -400,7 +445,7 @@ pub(super) fn forward_streaming_event(
                 .unwrap_or(FunctionCallEvent::ARGUMENTS_DONE),
             final_data
         ),
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
+        Some(evt) => format!("event: {evt}\ndata: {final_data}\n\n"),
         None => format!("data: {final_data}\n\n"),
     };
 
@@ -409,7 +454,7 @@ pub(super) fn forward_streaming_event(
     }
 
     if event_name == Some(OutputItemEvent::ADDED)
-        && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
+        && !maybe_inject_tool_in_progress(&parsed_data, tx, emitter)
     {
         return false;
     }
@@ -424,7 +469,7 @@ pub(super) fn forward_streaming_event(
 fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    sequence_number: &mut u64,
+    emitter: &mut ResponseStreamEventEmitter,
 ) -> bool {
     let Some(item) = parsed_data.get("item") else {
         return true;
@@ -432,13 +477,12 @@ fn maybe_inject_tool_in_progress(
 
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Determine the in_progress event type based on item type
-    let event_type = match item_type {
-        ItemType::MCP_CALL => McpEvent::CALL_IN_PROGRESS,
-        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
-        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
-        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
-        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
+    let family = match item_type {
+        ItemType::MCP_CALL => OutputFamily::McpCall,
+        ItemType::WEB_SEARCH_CALL => OutputFamily::WebSearchCall,
+        ItemType::CODE_INTERPRETER_CALL => OutputFamily::CodeInterpreterCall,
+        ItemType::FILE_SEARCH_CALL => OutputFamily::FileSearchCall,
+        ItemType::IMAGE_GENERATION_CALL => OutputFamily::ImageGenerationCall,
         _ => return true, // Not a tool call item, nothing to inject
     };
 
@@ -449,19 +493,21 @@ fn maybe_inject_tool_in_progress(
         return true;
     };
 
-    let event = json!({
-        "type": event_type,
-        "sequence_number": *sequence_number,
-        "output_index": output_index,
-        "item_id": item_id
-    });
-    *sequence_number += 1;
-
+    let Some(event) = emitter.emit_tool_call_in_progress(output_index as usize, item_id, family)
+    else {
+        return true;
+    };
+    let event_type = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("message");
     send_sse_event(tx, event_type, &event)
 }
 
 /// Main entry point for streaming responses.
 pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use serde_json::to_value;
     use uuid::Uuid;
 
@@ -470,10 +516,14 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
     };
     use crate::routers::{
         common::{
-            agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput},
+            agent_loop::{
+                run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
+                ToolTransferDescriptor,
+            },
             header_utils::extract_forwardable_request_headers,
             mcp_utils::ensure_mcp_connection,
             persistence_utils::persist_conversation_items,
+            responses_streaming::ResponseStreamEventEmitter,
         },
         openai::context::{ResponsesPayloadState, StorageHandles},
     };
@@ -575,7 +625,24 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
             max_tool_calls: loop_ctx_max_tool_calls,
         };
         let adapter = OpenAiStreamingAdapter::new(&loop_ctx_request, upstream);
-        let sink = OpenAiResponseStreamSink::new(tx.clone());
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let emitter = ResponseStreamEventEmitter::new(
+            session_request_id.clone(),
+            loop_ctx_request.model.clone(),
+            created_at,
+        );
+        let sink = OpenAiResponseStreamSink::new(
+            tx.clone(),
+            emitter,
+            ToolTransferDescriptor::map_from_mcp_snapshots(
+                session.presentation_snapshot(),
+                session.approval_snapshot(),
+            ),
+            session.server_label_snapshot(),
+        );
         match run_agent_loop(adapter, loop_ctx, state, sink).await {
             Ok(response) => match to_value(&response) {
                 Ok(response_json) => {

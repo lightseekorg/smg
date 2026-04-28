@@ -11,10 +11,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
     common::{CompletionTokensDetails, PromptTokenUsageInfo, Usage},
-    event_types::{
-        CodeInterpreterCallEvent, FileSearchCallEvent, ImageGenerationCallEvent, McpEvent,
-        OutputItemEvent, ResponseEvent, WebSearchCallEvent,
-    },
+    event_types::{is_function_call_type, OutputItemEvent, ResponseEvent},
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
         ResponsesRequest, ResponsesResponse,
@@ -31,18 +28,22 @@ use crate::routers::{
             build_response_from_state, normalize_output_item_id, AgentLoopAdapter,
             AgentLoopContext, AgentLoopError, AgentLoopState, ExecutedCall, LoopEvent,
             LoopModelTurn, LoopToolCall, OutputFamily, PendingToolExecution, RenderMode,
-            ResponseBuildHooks, StreamSink, ToolPresentation, UsageShape,
+            ResponseBuildHooks, StreamSink, ToolPresentation, ToolTransferDescriptor,
+            ToolVisibility, UsageShape,
         },
         header_utils::ApiProvider,
         mcp_utils::collect_user_function_names,
+        responses_streaming::{OutputItemType, ResponseStreamEventEmitter},
     },
     error,
     openai::{
         context::StreamingEventContext,
-        mcp::{FunctionCallInProgress, StreamAction, StreamingToolHandler},
         responses::{
             common::{parse_sse_block, ChunkProcessor},
             streaming::{forward_streaming_event, SseEventData},
+            upstream_stream_parser::{
+                OpenAiUpstreamStreamParser, ParsedFunctionCall, StreamParserAction,
+            },
         },
     },
 };
@@ -199,6 +200,7 @@ fn response_output_to_transcript(response: &ResponsesResponse) -> Vec<ResponseIn
     response
         .output
         .iter()
+        .filter(|item| !matches!(item, ResponseOutputItem::FunctionToolCall { .. }))
         .filter_map(|item| {
             to_value(item)
                 .ok()
@@ -261,16 +263,6 @@ fn extract_usage(response: &ResponsesResponse) -> Option<Usage> {
     })
 }
 
-fn response_contains_gateway_function_calls(
-    response: &ResponsesResponse,
-    session: &McpToolSession<'_>,
-) -> bool {
-    response.output.iter().any(|item| match item {
-        ResponseOutputItem::FunctionToolCall { name, .. } => session.has_exposed_tool(name),
-        _ => false,
-    })
-}
-
 #[async_trait]
 impl<S: StreamSink> AgentLoopAdapter<S> for OpenAiNonStreamingAdapter {
     type FinalResponse = ResponsesResponse;
@@ -292,7 +284,9 @@ impl<S: StreamSink> AgentLoopAdapter<S> for OpenAiNonStreamingAdapter {
             ))
         })?;
 
-        state.pending_tool_calls = extract_pending_tool_calls(&response);
+        let pending_tool_calls = extract_pending_tool_calls(&response);
+        let has_tool_calls = !pending_tool_calls.is_empty();
+        state.pending_tool_calls = pending_tool_calls;
         state.latest_turn = Some(LoopModelTurn {
             message_text: extract_message_text(&response),
             reasoning_text: extract_reasoning_text(&response),
@@ -303,7 +297,7 @@ impl<S: StreamSink> AgentLoopAdapter<S> for OpenAiNonStreamingAdapter {
             .transcript
             .extend(response_output_to_transcript(&response));
 
-        if response_contains_gateway_function_calls(&response, session) {
+        if has_tool_calls {
             self.completed_response = None;
         } else {
             self.completed_response = Some(response);
@@ -346,33 +340,104 @@ struct RegisteredGatewayCall {
     server_label: String,
 }
 
+fn should_forward_caller_function_done(
+    data: &str,
+    handler: &OpenAiUpstreamStreamParser,
+    ctx: &StreamingEventContext<'_>,
+) -> bool {
+    let Ok(parsed) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
+    if parsed.get("type").and_then(|value| value.as_str()) != Some(OutputItemEvent::DONE) {
+        return false;
+    }
+    let Some(item) = parsed.get("item") else {
+        return false;
+    };
+    let Some(item_type) = item.get("type").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if !is_function_call_type(item_type) {
+        return false;
+    }
+    let tool_name = item
+        .get("name")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            let output_index = parsed
+                .get("output_index")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| usize::try_from(value).ok())?;
+            handler
+                .pending_calls
+                .iter()
+                .find(|call| call.output_index == output_index)
+                .map(|call| call.name.as_str())
+        });
+    let Some(tool_name) = tool_name else {
+        return false;
+    };
+    let descriptor = ctx
+        .tool_transfers
+        .get(tool_name)
+        .copied()
+        .unwrap_or_else(ToolTransferDescriptor::caller_function);
+    matches!(descriptor.family, OutputFamily::Function)
+        && matches!(descriptor.visibility, ToolVisibility::Visible)
+}
+
 pub(crate) struct OpenAiResponseStreamSink {
     tx: mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    sequence_number: u64,
-    next_output_index: usize,
+    emitter: ResponseStreamEventEmitter,
     disconnected: bool,
     buffered_mcp_list_tools: Vec<ResponseOutputItem>,
     registered_gateway_calls: HashMap<String, RegisteredGatewayCall>,
+    tool_transfers: HashMap<String, ToolTransferDescriptor>,
+    tool_server_labels: HashMap<String, String>,
 }
 
 impl OpenAiResponseStreamSink {
-    pub(crate) fn new(tx: mpsc::UnboundedSender<Result<Bytes, io::Error>>) -> Self {
+    pub(crate) fn new(
+        tx: mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        emitter: ResponseStreamEventEmitter,
+        tool_transfers: HashMap<String, ToolTransferDescriptor>,
+        tool_server_labels: HashMap<String, String>,
+    ) -> Self {
         Self {
             tx,
-            sequence_number: 0,
-            next_output_index: 0,
+            emitter,
             disconnected: false,
             buffered_mcp_list_tools: Vec::new(),
             registered_gateway_calls: HashMap::new(),
+            tool_transfers,
+            tool_server_labels,
         }
     }
 
     pub(crate) fn next_output_index(&self) -> usize {
-        self.next_output_index
+        self.emitter.next_output_index()
     }
 
     pub(crate) fn set_next_output_index(&mut self, next_output_index: usize) {
-        self.next_output_index = next_output_index;
+        self.emitter.advance_next_output_index_to(next_output_index);
+    }
+
+    fn transfer_descriptor(&self, name: &str) -> ToolTransferDescriptor {
+        self.tool_transfers
+            .get(name)
+            .copied()
+            .unwrap_or_else(ToolTransferDescriptor::caller_function)
+    }
+
+    fn server_label_for(&self, name: &str, family: OutputFamily) -> String {
+        if matches!(family, OutputFamily::McpCall) {
+            self.tool_server_labels
+                .get(name)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
     }
 
     pub(crate) fn flush_buffered_mcp_list_tools(&mut self) {
@@ -407,22 +472,17 @@ impl OpenAiResponseStreamSink {
         }
         let payload = serde_json::json!({
             "type": ResponseEvent::COMPLETED,
-            "sequence_number": self.sequence_number,
+            "sequence_number": self.emitter.next_sequence(),
             "response": response,
         });
-        self.sequence_number += 1;
-        let block = format!("event: {}\ndata: {}\n\n", ResponseEvent::COMPLETED, payload);
-        if self.tx.send(Ok(Bytes::from(block))).is_err() {
-            self.disconnected = true;
-        }
+        self.send(&payload);
     }
 
-    fn send_json_event(&mut self, event_name: &str, payload: Value) {
+    fn send(&mut self, payload: &Value) {
         if self.disconnected {
             return;
         }
-        let block = format!("event: {event_name}\ndata: {payload}\n\n");
-        if self.tx.send(Ok(Bytes::from(block))).is_err() {
+        if self.emitter.send_event(payload, &self.tx).is_err() {
             self.disconnected = true;
         }
     }
@@ -438,13 +498,13 @@ impl OpenAiResponseStreamSink {
             return;
         };
 
-        let output_index = self.next_output_index;
-        self.next_output_index += 1;
-
         let tool_items: Vec<Value> = tools
             .iter()
             .filter_map(|tool| to_value(tool).ok())
             .collect();
+        let (output_index, _allocated_id) = self
+            .emitter
+            .allocate_output_index(OutputItemType::McpListTools);
         let added_item = serde_json::json!({
             "id": id,
             "type": "mcp_list_tools",
@@ -452,78 +512,43 @@ impl OpenAiResponseStreamSink {
             "status": "in_progress",
             "tools": [],
         });
-        self.send_json_event(
-            OutputItemEvent::ADDED,
-            serde_json::json!({
-                "type": OutputItemEvent::ADDED,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item": added_item,
-            }),
-        );
-        self.sequence_number += 1;
-        self.send_json_event(
-            McpEvent::LIST_TOOLS_IN_PROGRESS,
-            serde_json::json!({
-                "type": McpEvent::LIST_TOOLS_IN_PROGRESS,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item_id": id,
-            }),
-        );
-        self.sequence_number += 1;
-        self.send_json_event(
-            McpEvent::LIST_TOOLS_COMPLETED,
-            serde_json::json!({
-                "type": McpEvent::LIST_TOOLS_COMPLETED,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item_id": id,
-            }),
-        );
-        self.sequence_number += 1;
-        self.send_json_event(
-            OutputItemEvent::DONE,
-            serde_json::json!({
-                "type": OutputItemEvent::DONE,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item": {
-                    "id": id,
-                    "type": "mcp_list_tools",
-                    "server_label": server_label,
-                    "status": "completed",
-                    "tools": tool_items,
-                },
-            }),
-        );
-        self.sequence_number += 1;
+        let event = self
+            .emitter
+            .emit_output_item_added(output_index, &added_item);
+        self.send(&event);
+        let event = self
+            .emitter
+            .emit_mcp_list_tools_in_progress(output_index, id);
+        self.send(&event);
+        let event = self
+            .emitter
+            .emit_mcp_list_tools_completed(output_index, id, &tool_items);
+        self.send(&event);
+        let done_item = serde_json::json!({
+            "id": id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "status": "completed",
+            "tools": tool_items,
+        });
+        let event = self.emitter.emit_output_item_done(output_index, &done_item);
+        self.send(&event);
+        self.emitter.complete_output_item(output_index);
     }
 
     fn emit_gateway_execution_started(&mut self, call_id: &str) {
         let Some(tracking) = self.registered_gateway_calls.get(call_id) else {
             return;
         };
-        let event_type = match tracking.presentation.family {
-            OutputFamily::WebSearchCall => Some(WebSearchCallEvent::SEARCHING),
-            OutputFamily::CodeInterpreterCall => Some(CodeInterpreterCallEvent::INTERPRETING),
-            OutputFamily::FileSearchCall => Some(FileSearchCallEvent::SEARCHING),
-            OutputFamily::ImageGenerationCall => Some(ImageGenerationCallEvent::GENERATING),
-            OutputFamily::McpCall | OutputFamily::Function => None,
-        };
-        let Some(event_type) = event_type else {
-            return;
-        };
-        self.send_json_event(
-            event_type,
-            serde_json::json!({
-                "type": event_type,
-                "sequence_number": self.sequence_number,
-                "output_index": tracking.output_index,
-                "item_id": tracking.item_id,
-            }),
-        );
-        self.sequence_number += 1;
+        let family = tracking.presentation.family;
+        let output_index = tracking.output_index;
+        let item_id = tracking.item_id.clone();
+        if let Some(event) = self
+            .emitter
+            .emit_tool_call_searching(output_index, &item_id, family)
+        {
+            self.send(&event);
+        }
     }
 
     fn emit_tool_completed(&mut self, executed: &ExecutedCall) {
@@ -532,31 +557,18 @@ impl OpenAiResponseStreamSink {
         };
 
         let family = tracking.presentation.family;
-        let event_type = if executed.is_error && matches!(family, OutputFamily::McpCall) {
-            Some(McpEvent::CALL_FAILED)
-        } else {
-            match family {
-                OutputFamily::WebSearchCall => Some(WebSearchCallEvent::COMPLETED),
-                OutputFamily::CodeInterpreterCall => Some(CodeInterpreterCallEvent::COMPLETED),
-                OutputFamily::FileSearchCall => Some(FileSearchCallEvent::COMPLETED),
-                OutputFamily::ImageGenerationCall => Some(ImageGenerationCallEvent::COMPLETED),
-                OutputFamily::McpCall => Some(McpEvent::CALL_COMPLETED),
-                OutputFamily::Function => None,
-            }
-        };
-
-        if let Some(event_type) = event_type {
-            let mut payload = serde_json::json!({
-                "type": event_type,
-                "sequence_number": self.sequence_number,
-                "output_index": tracking.output_index,
-                "item_id": tracking.item_id,
-            });
-            if event_type == McpEvent::CALL_FAILED {
-                payload["error"] = serde_json::json!(executed.output_string);
-            }
-            self.send_json_event(event_type, payload);
-            self.sequence_number += 1;
+        if executed.is_error && matches!(family, OutputFamily::McpCall) {
+            let event = self.emitter.emit_mcp_call_failed(
+                tracking.output_index,
+                &tracking.item_id,
+                &executed.output_string,
+            );
+            self.send(&event);
+        } else if let Some(event) =
+            self.emitter
+                .emit_tool_call_completed(tracking.output_index, &tracking.item_id, family)
+        {
+            self.send(&event);
         }
 
         let mut final_item = tracking
@@ -576,55 +588,37 @@ impl OpenAiResponseStreamSink {
                 }
             }
         }
-        self.send_json_event(
-            OutputItemEvent::DONE,
-            serde_json::json!({
-                "type": OutputItemEvent::DONE,
-                "sequence_number": self.sequence_number,
-                "output_index": tracking.output_index,
-                "item": final_item,
-            }),
-        );
-        self.sequence_number += 1;
+        let event = self
+            .emitter
+            .emit_output_item_done(tracking.output_index, &final_item);
+        self.send(&event);
+        self.emitter.complete_output_item(tracking.output_index);
     }
 
     fn emit_approval_requested(&mut self, pending: &PendingToolExecution) {
-        let output_index = self.next_output_index;
-        self.next_output_index += 1;
+        let (output_index, _allocated_item_id) = self
+            .emitter
+            .allocate_output_index(OutputItemType::McpApprovalRequest);
         let item_id = format!("mcpr_{}", pending.call.call_id);
         let item = serde_json::json!({
+            "id": item_id.clone(),
+            "type": "mcp_approval_request",
+            "server_label": pending.server_label,
+            "name": pending.call.name,
+            "arguments": pending.call.arguments,
+        });
+        let event = self.emitter.emit_output_item_added(output_index, &item);
+        self.send(&event);
+        let done_item = serde_json::json!({
             "id": item_id,
             "type": "mcp_approval_request",
             "server_label": pending.server_label,
             "name": pending.call.name,
             "arguments": pending.call.arguments,
         });
-        self.send_json_event(
-            OutputItemEvent::ADDED,
-            serde_json::json!({
-                "type": OutputItemEvent::ADDED,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item": item,
-            }),
-        );
-        self.sequence_number += 1;
-        self.send_json_event(
-            OutputItemEvent::DONE,
-            serde_json::json!({
-                "type": OutputItemEvent::DONE,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item": {
-                    "id": item_id,
-                    "type": "mcp_approval_request",
-                    "server_label": pending.server_label,
-                    "name": pending.call.name,
-                    "arguments": pending.call.arguments,
-                },
-            }),
-        );
-        self.sequence_number += 1;
+        let event = self.emitter.emit_output_item_done(output_index, &done_item);
+        self.send(&event);
+        self.emitter.complete_output_item(output_index);
     }
 
     #[expect(
@@ -641,9 +635,10 @@ impl OpenAiResponseStreamSink {
         server_label: &str,
         approval_request_id: Option<&str>,
     ) {
-        let output_index = self.next_output_index;
-        self.next_output_index += 1;
-        let allocated_item_id = normalize_output_item_id(family, item_id_hint);
+        let output_item_type =
+            ResponseStreamEventEmitter::output_item_type_for_family(Some(family));
+        let (output_index, allocated_item_id) =
+            self.emitter.allocate_output_index(output_item_type);
         let presentation = ToolPresentation::from_family(family);
         let call = LoopToolCall {
             call_id: call_id.to_string(),
@@ -654,62 +649,33 @@ impl OpenAiResponseStreamSink {
         };
         let item = presentation.render_initial_item(&call, server_label, &allocated_item_id);
 
-        self.send_json_event(
-            OutputItemEvent::ADDED,
-            serde_json::json!({
-                "type": OutputItemEvent::ADDED,
-                "sequence_number": self.sequence_number,
-                "output_index": output_index,
-                "item": item,
-            }),
-        );
-        self.sequence_number += 1;
+        let event = self.emitter.emit_output_item_added(output_index, &item);
+        self.send(&event);
 
-        let in_progress_event = match family {
-            OutputFamily::McpCall => Some(McpEvent::CALL_IN_PROGRESS),
-            OutputFamily::WebSearchCall => Some(WebSearchCallEvent::IN_PROGRESS),
-            OutputFamily::CodeInterpreterCall => Some(CodeInterpreterCallEvent::IN_PROGRESS),
-            OutputFamily::FileSearchCall => Some(FileSearchCallEvent::IN_PROGRESS),
-            OutputFamily::ImageGenerationCall => Some(ImageGenerationCallEvent::IN_PROGRESS),
-            OutputFamily::Function => None,
-        };
-        if let Some(event_type) = in_progress_event {
-            self.send_json_event(
-                event_type,
-                serde_json::json!({
-                    "type": event_type,
-                    "sequence_number": self.sequence_number,
-                    "output_index": output_index,
-                    "item_id": allocated_item_id,
-                }),
-            );
-            self.sequence_number += 1;
+        if let Some(event) =
+            self.emitter
+                .emit_tool_call_in_progress(output_index, &allocated_item_id, family)
+        {
+            self.send(&event);
         }
 
-        if matches!(family, OutputFamily::McpCall) {
-            self.send_json_event(
-                McpEvent::CALL_ARGUMENTS_DELTA,
-                serde_json::json!({
-                    "type": McpEvent::CALL_ARGUMENTS_DELTA,
-                    "sequence_number": self.sequence_number,
-                    "output_index": output_index,
-                    "item_id": allocated_item_id,
-                    "delta": full_args,
-                    "obfuscation": null,
-                }),
-            );
-            self.sequence_number += 1;
-            self.send_json_event(
-                McpEvent::CALL_ARGUMENTS_DONE,
-                serde_json::json!({
-                    "type": McpEvent::CALL_ARGUMENTS_DONE,
-                    "sequence_number": self.sequence_number,
-                    "output_index": output_index,
-                    "item_id": allocated_item_id,
-                    "arguments": full_args,
-                }),
-            );
-            self.sequence_number += 1;
+        if presentation.streams_arguments() {
+            if let Some(event) = self.emitter.emit_tool_call_arguments_delta(
+                output_index,
+                &allocated_item_id,
+                full_args,
+                family,
+            ) {
+                self.send(&event);
+            }
+            if let Some(event) = self.emitter.emit_tool_call_arguments_done(
+                output_index,
+                &allocated_item_id,
+                full_args,
+                family,
+            ) {
+                self.send(&event);
+            }
         }
 
         self.registered_gateway_calls.insert(
@@ -784,22 +750,24 @@ impl OpenAiStreamingAdapter {
     }
 
     fn register_gateway_calls(
-        pending_calls: &[FunctionCallInProgress],
-        session: &McpToolSession<'_>,
+        pending_calls: &[ParsedFunctionCall],
         sink: &mut OpenAiResponseStreamSink,
     ) {
         for call in pending_calls {
-            if !session.has_exposed_tool(&call.name) {
+            let descriptor = sink.transfer_descriptor(&call.name);
+            if matches!(descriptor.family, OutputFamily::Function)
+                || matches!(descriptor.visibility, ToolVisibility::SuppressedForApproval)
+            {
                 continue;
             }
-            let family = OutputFamily::from_mcp_format(&session.tool_response_format(&call.name));
+            let family = descriptor.family;
             let source_id = call.item_id.as_deref().unwrap_or(call.call_id.as_str());
             sink.register_gateway_call(
                 call.call_id.clone(),
                 call.effective_output_index(),
                 normalize_output_item_id(family, source_id),
                 family,
-                session.resolve_tool_server_label(&call.name),
+                sink.server_label_for(&call.name, family),
             );
         }
     }
@@ -844,17 +812,19 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         }
 
         let mut upstream_stream = response.bytes_stream();
-        let mut handler = StreamingToolHandler::with_starting_index(sink.next_output_index());
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(sink.next_output_index());
         if let Some(ref id) = self.response_id_override {
             handler.original_response_id = Some(id.clone());
         }
         let mut chunk_processor = ChunkProcessor::new();
-        let mut tool_calls_detected = false;
         let mut seen_in_progress = false;
+        let tool_transfers = sink.tool_transfers.clone();
+        let tool_server_labels = sink.tool_server_labels.clone();
         let streaming_ctx = StreamingEventContext {
             original_request: &self.original_request,
             previous_response_id: self.previous_response_id.as_deref(),
-            session: Some(session),
+            tool_transfers: &tool_transfers,
+            tool_server_labels: &tool_server_labels,
         };
 
         while let Some(chunk_result) = upstream_stream.next().await {
@@ -869,7 +839,7 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
 
                         let action = handler.process_event(event_name, data.as_ref());
                         match action {
-                            StreamAction::Forward => {
+                            StreamParserAction::Forward => {
                                 let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
                                 let should_skip = state.iteration > 1
                                     && parsed.as_ref().is_some_and(|value| {
@@ -896,7 +866,7 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
                                         &mut handler,
                                         &tx,
                                         &streaming_ctx,
-                                        &mut sink.sequence_number,
+                                        &mut sink.emitter,
                                     )
                                 {
                                     return Err(AgentLoopError::Upstream(
@@ -906,14 +876,21 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
                                 if is_in_progress {
                                     seen_in_progress = true;
                                     sink.flush_buffered_mcp_list_tools();
+                                    handler.advance_next_output_index_to(sink.next_output_index());
                                 }
                             }
-                            StreamAction::Buffer | StreamAction::Drop => {}
-                            StreamAction::ExecuteTools {
+                            StreamParserAction::Buffer | StreamParserAction::Drop => {}
+                            StreamParserAction::ToolCallReady {
                                 forward_triggering_event,
                             } => {
+                                let should_forward_triggering_event = forward_triggering_event
+                                    || should_forward_caller_function_done(
+                                        data.as_ref(),
+                                        &handler,
+                                        &streaming_ctx,
+                                    );
                                 let tx = sink.tx.clone();
-                                if forward_triggering_event
+                                if should_forward_triggering_event
                                     && !forward_streaming_event(
                                         SseEventData {
                                             raw_block: &raw_block,
@@ -924,20 +901,15 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
                                         &mut handler,
                                         &tx,
                                         &streaming_ctx,
-                                        &mut sink.sequence_number,
+                                        &mut sink.emitter,
                                     )
                                 {
                                     return Err(AgentLoopError::Upstream(
                                         "client disconnected during streaming".to_string(),
                                     ));
                                 }
-                                tool_calls_detected = true;
-                                break;
                             }
                         }
-                    }
-                    if tool_calls_detected {
-                        break;
                     }
                 }
                 Err(e) => {
@@ -951,27 +923,29 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
             self.response_id_override = handler.original_response_id().map(ToOwned::to_owned);
         }
 
-        if let Some(response_json) = handler.snapshot_final_response() {
-            if let Ok(response) = serde_json::from_value::<ResponsesResponse>(response_json) {
-                state.latest_turn = Some(LoopModelTurn {
-                    message_text: extract_message_text(&response),
-                    reasoning_text: extract_reasoning_text(&response),
-                    usage: extract_usage(&response),
-                    request_id: Some(response.id.clone()),
-                });
-                state
-                    .transcript
-                    .extend(response_output_to_transcript(&response));
-                if response_contains_gateway_function_calls(&response, session) {
-                    self.completed_response = None;
-                } else {
-                    self.completed_response = Some(response);
-                }
+        let response = handler.snapshot_final_response().and_then(|response_json| {
+            serde_json::from_value::<ResponsesResponse>(response_json).ok()
+        });
+        let pending_calls = handler.take_pending_calls();
+
+        if let Some(response) = response {
+            state.latest_turn = Some(LoopModelTurn {
+                message_text: extract_message_text(&response),
+                reasoning_text: extract_reasoning_text(&response),
+                usage: extract_usage(&response),
+                request_id: Some(response.id.clone()),
+            });
+            state
+                .transcript
+                .extend(response_output_to_transcript(&response));
+            if pending_calls.is_empty() {
+                self.completed_response = Some(response);
+            } else {
+                self.completed_response = None;
             }
         }
 
-        let pending_calls = handler.take_pending_calls();
-        Self::register_gateway_calls(&pending_calls, session, sink);
+        Self::register_gateway_calls(&pending_calls, sink);
         state.pending_tool_calls = pending_calls
             .into_iter()
             .map(|call| LoopToolCall {
@@ -1017,5 +991,137 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         }
         sink.emit_final_response(&response);
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn streaming_ctx<'a>(
+        request: &'a ResponsesRequest,
+        tool_transfers: &'a HashMap<String, ToolTransferDescriptor>,
+        tool_server_labels: &'a HashMap<String, String>,
+    ) -> StreamingEventContext<'a> {
+        StreamingEventContext {
+            original_request: request,
+            previous_response_id: None,
+            tool_transfers,
+            tool_server_labels,
+        }
+    }
+
+    fn bootstrap_pending_call(
+        handler: &mut OpenAiUpstreamStreamParser,
+        output_index: usize,
+        name: &str,
+    ) {
+        let event = json!({
+            "type": OutputItemEvent::ADDED,
+            "output_index": output_index,
+            "item": {
+                "type": "function_call",
+                "id": "fc_test",
+                "call_id": "call_test",
+                "name": name,
+            }
+        });
+        let _ = handler.process_event(Some(OutputItemEvent::ADDED), &event.to_string());
+    }
+
+    fn function_done_event(output_index: usize, name: Option<&str>) -> String {
+        let mut item = json!({
+            "type": "function_call",
+            "id": "fc_test",
+            "call_id": "call_test",
+            "arguments": "{}",
+            "status": "completed",
+        });
+        if let Some(name) = name {
+            item["name"] = json!(name);
+        }
+
+        json!({
+            "type": OutputItemEvent::DONE,
+            "output_index": output_index,
+            "item": item,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn visible_caller_function_done_forwards() {
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        bootstrap_pending_call(&mut handler, 0, "caller_tool");
+        let request = ResponsesRequest::default();
+        let tool_transfers = HashMap::new();
+        let tool_server_labels = HashMap::new();
+        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
+
+        assert!(should_forward_caller_function_done(
+            &function_done_event(0, Some("caller_tool")),
+            &handler,
+            &ctx,
+        ));
+    }
+
+    #[test]
+    fn gateway_function_done_stays_suppressed() {
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        bootstrap_pending_call(&mut handler, 0, "gateway_tool");
+        let request = ResponsesRequest::default();
+        let mut tool_transfers = HashMap::new();
+        tool_transfers.insert(
+            "gateway_tool".to_string(),
+            ToolTransferDescriptor::from_family_and_approval(OutputFamily::McpCall, false),
+        );
+        let tool_server_labels = HashMap::new();
+        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
+
+        assert!(!should_forward_caller_function_done(
+            &function_done_event(0, Some("gateway_tool")),
+            &handler,
+            &ctx,
+        ));
+    }
+
+    #[test]
+    fn function_done_without_name_uses_pending_call_for_caller_function() {
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        bootstrap_pending_call(&mut handler, 0, "caller_tool");
+        let request = ResponsesRequest::default();
+        let tool_transfers = HashMap::new();
+        let tool_server_labels = HashMap::new();
+        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
+
+        assert!(should_forward_caller_function_done(
+            &function_done_event(0, None),
+            &handler,
+            &ctx,
+        ));
+    }
+
+    #[test]
+    fn function_done_without_name_uses_pending_call_for_gateway_tool() {
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        bootstrap_pending_call(&mut handler, 0, "gateway_tool");
+        let request = ResponsesRequest::default();
+        let mut tool_transfers = HashMap::new();
+        tool_transfers.insert(
+            "gateway_tool".to_string(),
+            ToolTransferDescriptor::from_family_and_approval(OutputFamily::McpCall, false),
+        );
+        let tool_server_labels = HashMap::new();
+        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
+
+        assert!(!should_forward_caller_function_done(
+            &function_done_event(0, None),
+            &handler,
+            &ctx,
+        ));
     }
 }

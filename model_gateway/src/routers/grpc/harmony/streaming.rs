@@ -30,13 +30,14 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     routers::{
-        common::agent_loop::{LoopEvent, StreamSink},
+        common::{
+            agent_loop::{LoopEvent, StreamSink},
+            responses_streaming::OutputItemType,
+        },
         grpc::{
             common::{
                 response_formatting::CompletionTokenTracker,
-                responses::{
-                    build_sse_response, streaming::OutputItemType, GrpcResponseStreamSink,
-                },
+                responses::{build_sse_response, GrpcResponseStreamSink},
             },
             context,
             proto_wrapper::{ProtoResponseVariant, ProtoStream},

@@ -1640,6 +1640,38 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// `type: "web_search_call"` — round-trip form for a prior hosted web
+    /// search output item.
+    #[serde(rename = "web_search_call")]
+    WebSearchCall {
+        id: String,
+        status: WebSearchCallStatus,
+        action: WebSearchAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<WebSearchResult>>,
+    },
+    /// `type: "code_interpreter_call"` — round-trip form for a prior hosted
+    /// code-interpreter output item.
+    #[serde(rename = "code_interpreter_call")]
+    CodeInterpreterCall {
+        id: String,
+        status: CodeInterpreterCallStatus,
+        container_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outputs: Option<Vec<CodeInterpreterOutput>>,
+    },
+    /// `type: "file_search_call"` — round-trip form for a prior hosted file
+    /// search output item.
+    #[serde(rename = "file_search_call")]
+    FileSearchCall {
+        id: String,
+        status: FileSearchCallStatus,
+        queries: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<FileSearchResult>>,
+    },
     /// `type: "image_generation_call"` — round-trip form for an image generated
     /// in a prior turn. Spec (OpenAI Responses API, multi-turn image-edit
     /// flow): clients may resubmit only `{ type, id }` to reference a prior
@@ -3151,6 +3183,9 @@ impl GenerationRequest for ResponsesRequest {
                         | ResponseInputOutputItem::FunctionCallOutput { .. }
                         | ResponseInputOutputItem::McpApprovalRequest { .. }
                         | ResponseInputOutputItem::McpApprovalResponse { .. }
+                        | ResponseInputOutputItem::WebSearchCall { .. }
+                        | ResponseInputOutputItem::CodeInterpreterCall { .. }
+                        | ResponseInputOutputItem::FileSearchCall { .. }
                         | ResponseInputOutputItem::ImageGenerationCall { .. }
                         | ResponseInputOutputItem::Compaction { .. }
                         | ResponseInputOutputItem::ComputerCall { .. }
@@ -3448,6 +3483,9 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
         ResponseInputOutputItem::FunctionToolCall { .. } => {}
         ResponseInputOutputItem::McpApprovalRequest { .. } => {}
         ResponseInputOutputItem::McpApprovalResponse { .. } => {}
+        ResponseInputOutputItem::WebSearchCall { .. } => {}
+        ResponseInputOutputItem::CodeInterpreterCall { .. } => {}
+        ResponseInputOutputItem::FileSearchCall { .. } => {}
         ResponseInputOutputItem::ImageGenerationCall { .. } => {}
         ResponseInputOutputItem::Compaction { .. } => {}
         ResponseInputOutputItem::ComputerCall { .. } => {}

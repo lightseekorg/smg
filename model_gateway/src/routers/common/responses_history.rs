@@ -196,6 +196,10 @@ async fn load_conversation_history(
             "reasoning"
             | ItemType::FUNCTION_CALL
             | ItemType::FUNCTION_CALL_OUTPUT
+            | ItemType::WEB_SEARCH_CALL
+            | ItemType::CODE_INTERPRETER_CALL
+            | ItemType::FILE_SEARCH_CALL
+            | ItemType::IMAGE_GENERATION_CALL
             | "mcp_call"
             | "mcp_list_tools"
             | "mcp_approval_request"

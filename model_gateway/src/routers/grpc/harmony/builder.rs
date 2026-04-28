@@ -857,10 +857,13 @@ impl HarmonyBuilder {
                 Err("Unsupported input item type".to_string())
             }
 
-            ResponseInputOutputItem::ImageGenerationCall { .. } => {
+            ResponseInputOutputItem::WebSearchCall { .. }
+            | ResponseInputOutputItem::CodeInterpreterCall { .. }
+            | ResponseInputOutputItem::FileSearchCall { .. }
+            | ResponseInputOutputItem::ImageGenerationCall { .. } => {
                 warn!(
                     function = "parse_response_item_to_harmony_message",
-                    "image_generation_call input item reached Harmony conversion"
+                    "hosted builtin input item reached Harmony conversion"
                 );
                 Err("Unsupported input item type".to_string())
             }

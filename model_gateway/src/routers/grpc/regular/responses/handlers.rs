@@ -31,14 +31,15 @@ use super::{
     non_streaming,
 };
 use crate::routers::{
-    common::agent_loop::{
-        run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput, ToolTransferDescriptor,
+    common::{
+        agent_loop::{
+            run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
+            ToolTransferDescriptor,
+        },
+        responses_streaming::ResponseStreamEventEmitter,
     },
     error,
-    grpc::common::responses::{
-        ensure_mcp_connection, streaming::ResponseStreamEventEmitter, GrpcResponseStreamSink,
-        ResponsesContext,
-    },
+    grpc::common::responses::{ensure_mcp_connection, GrpcResponseStreamSink, ResponsesContext},
 };
 
 pub(crate) async fn route_responses(
