@@ -2,6 +2,19 @@
 
 This directory contains the Python bindings for SMG (Shepherd Model Gateway), built using [maturin](https://github.com/PyO3/maturin) and [PyO3](https://github.com/PyO3/pyo3).
 
+## Two consumption modes
+
+These bindings serve two distinct use cases:
+
+1. **smg as a Python-launched binary** — the historical use, documented in
+   [Quick Start](#quick-start) below. `smg serve` boots a router in-process.
+2. **smg as a Python library** — used by inference engines that want smg's
+   protocol layer (tokenization, function calling, reasoning parser, OAI
+   server, MCP, response API) without owning the routing/gateway. The first
+   integration target is TokenSpeed; `tokenspeed serve` will `import smg_rs`
+   and call into the entry points in `src/serving.rs`. See the module
+   docstring there for the planned shape.
+
 ## Quick Start
 
 ### Installation
