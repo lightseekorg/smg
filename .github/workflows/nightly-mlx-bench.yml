@@ -102,8 +102,14 @@ jobs:
           python3 -c "from smg_grpc_servicer.mlx.server import main; print('servicer OK')"
           genai-bench --help | head -3
 
-      - name: Run benchmark (this is the long step)
-        run: ./benchmarks/mlx_grpc_vs_http/run.sh
+      - name: Run benchmark — Phase 1 (direct HTTP)
+        run: PHASE=http ./benchmarks/mlx_grpc_vs_http/run.sh
+
+      - name: Run benchmark — Phase 2 (SMG router + gRPC)
+        # Always run phase 2 even if phase 1 failed — the two are
+        # independent and the gRPC numbers are the most interesting half.
+        if: always()
+        run: PHASE=grpc ./benchmarks/mlx_grpc_vs_http/run.sh
 
       - name: Aggregate results
         if: always()
