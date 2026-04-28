@@ -262,8 +262,8 @@ def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_cl
     resp2 = api_client.responses.create(
         model=model,
         input=(
-            "Search the web for 'Rust programming language'. Set count to 1 and return one "
-            "sentence response."
+            "Use brave_web_search to search the web for today's weather in Seattle. Set count "
+            "to 1 and return one sentence based only on the search result."
         ),
         previous_response_id=resp1.id,
         tools=[BRAVE_MCP_TOOL],
@@ -311,8 +311,8 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
         api_client.responses.create(
             model=model,
             input=(
-                "Search the web for 'Rust programming language'. Set count to 1 and return one "
-                "sentence response."
+                "Use brave_web_search to search the web for today's weather in Seattle. Set "
+                "count to 1 and return one sentence based only on the search result."
             ),
             previous_response_id=[e for e in events1 if e.type == "response.completed"][
                 0
