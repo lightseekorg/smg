@@ -206,20 +206,31 @@ run_phase_vllm() {
         log "vllm-metal venv not found at $VLLM_VENV — skipping phase"
         return 0
     fi
+    if [ ! -x "$VLLM_VENV/bin/vllm" ]; then
+        log "vllm CLI not found at $VLLM_VENV/bin/vllm — skipping phase"
+        return 0
+    fi
 
-    # shellcheck disable=SC1091
-    source "$VLLM_VENV/bin/activate"
+    # Invoke vllm directly via the venv binary (no `source activate`) so the
+    # background child inherits the right interpreter without depending on
+    # PATH state at the time of the `&` fork.
     # Cap context: agent prompts are ~2.5k tokens + 256 output. 8192 is
     # plenty and avoids vllm-metal's max-position-embeddings-derived budget
     # (which can be huge for Gemma).
-    vllm serve "$MODEL" --host 127.0.0.1 --port "$VLLM_PORT" \
+    "$VLLM_VENV/bin/vllm" serve "$MODEL" --host 127.0.0.1 --port "$VLLM_PORT" \
         --max-model-len 8192 \
         >"$RESULTS_DIR/vllm-metal.log" 2>&1 &
     local pid=$!
     PIDS+=("$pid")
-    deactivate || true
 
-    wait_for_openai "http://127.0.0.1:$VLLM_PORT" 600
+    if ! wait_for_openai "http://127.0.0.1:$VLLM_PORT" 600; then
+        log "vllm-metal failed to come up — skipping vllm phase (last log lines):"
+        tail -20 "$RESULTS_DIR/vllm-metal.log" >&2 || true
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        PIDS=()
+        return 0
+    fi
     log "vllm-metal up on :$VLLM_PORT (pid=$pid)"
 
     for scenario in $SCENARIOS; do

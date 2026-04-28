@@ -65,11 +65,16 @@ jobs:
         || '1 4 16 64') }}
       SCENARIOS: >-
         ${{ github.event.inputs.scenarios || 'chat agent' }}
+      # PR runs use 4 min/cell so agent prompts (~2.5k token prefill at
+      # concurrency 4) have time to complete at least one request and
+      # produce metrics. Scheduled runs use 5.
       DURATION_MIN: >-
         ${{ github.event.inputs.duration_min
-        || (github.event_name == 'pull_request' && '2' || '5') }}
+        || (github.event_name == 'pull_request' && '4' || '5') }}
       RESULTS_DIR: bench-results
-      VLLM_VENV: ${{ github.workspace }}/.venv-vllm-metal
+      # Match the path that vllm-metal's install.sh uses when run via
+      # curl | bash (it hard-codes $HOME/.venv-vllm-metal in that branch).
+      VLLM_VENV: /Users/runner/.venv-vllm-metal
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout code
@@ -113,22 +118,21 @@ jobs:
 
       - name: Install vllm-metal (best effort)
         # vllm-metal isn't on PyPI (no public macos wheels for plain vllm),
-        # so we install it via the project's official install script into a
-        # workspace-local venv. If install fails, the vllm phase will skip
-        # itself rather than fail the job.
+        # so we install it via the project's official install script. The
+        # script hard-codes $HOME/.venv-vllm-metal as the install target
+        # when run via `curl | bash` — VLLM_VENV (above) matches that. If
+        # install fails, the vllm phase will skip itself.
         continue-on-error: true
         run: |
-          python -m venv "$VLLM_VENV"
-          # shellcheck disable=SC1091
-          source "$VLLM_VENV/bin/activate"
-          # Upstream's install.sh assumes ~/.venv-vllm-metal; we already
-          # created the venv at $VLLM_VENV (configurable via run.sh), so
-          # tell the script to install into our active venv instead.
-          curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh \
-            | VLLM_METAL_VENV="$VLLM_VENV" bash || \
-            pip install --pre vllm-metal || \
-            echo "vllm-metal install failed — vllm phase will be skipped"
-          deactivate
+          curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh | bash \
+            || echo "vllm-metal install failed — vllm phase will be skipped"
+          # Confirm what we got so subsequent steps are easier to debug.
+          if [ -x "$VLLM_VENV/bin/vllm" ]; then
+            echo "vllm-metal installed at $VLLM_VENV"
+            "$VLLM_VENV/bin/vllm" --help | head -3 || true
+          else
+            echo "vllm-metal not installed — vllm phase will skip"
+          fi
 
       - name: Verify components
         run: |
