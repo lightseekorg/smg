@@ -99,6 +99,7 @@ impl GrpcRouter {
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
             enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Create Harmony pipelines
@@ -129,6 +130,7 @@ impl GrpcRouter {
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
             enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Create Completion pipeline
@@ -136,6 +138,7 @@ impl GrpcRouter {
             worker_registry.clone(),
             _policy_registry.clone(),
             enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Extract shared dependencies for responses contexts

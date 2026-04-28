@@ -84,6 +84,7 @@ impl GrpcPDRouter {
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
             enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Create Messages PD pipeline
@@ -95,6 +96,7 @@ impl GrpcPDRouter {
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
             enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Create Completion PD pipeline
@@ -102,6 +104,7 @@ impl GrpcPDRouter {
             worker_registry.clone(),
             policy_registry.clone(),
             enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         Ok(GrpcPDRouter {
