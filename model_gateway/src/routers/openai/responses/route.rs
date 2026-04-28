@@ -119,9 +119,16 @@ fn validated_endpoint_override_for_provider(
     provider_hint: &ProviderType,
     model: &str,
 ) -> Result<Option<String>, Response> {
+    if provider_hint != &ProviderType::Gemini {
+        return Ok(None);
+    }
+
+    let provided_override = extract_provider_endpoint(headers)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let parsed_override = endpoint_override_for_provider(headers, provider_hint, model);
 
-    if parsed_override.is_none() {
+    if provided_override && parsed_override.is_none() {
         tracing::warn!(
             model,
             provider_hint = ?provider_hint,

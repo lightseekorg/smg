@@ -1285,7 +1285,19 @@ pub(super) fn handle_streaming_with_tool_interception(
                 true, // is_streaming = true
             ) {
                 Ok(resume_payload) => {
-                    current_payload = resume_payload;
+                    let mut next_payload = resume_payload;
+                    if let Some(provider_ref) = streaming_ctx.provider.as_deref() {
+                        if let Err(e) =
+                            provider_ref.transform_request(&mut next_payload, Endpoint::Responses)
+                        {
+                            send_error_and_done!(format!(
+                                "Failed to transform resume payload for provider: {}",
+                                e
+                            ));
+                            return;
+                        }
+                    }
+                    current_payload = next_payload;
                     is_first_iteration = false;
                 }
                 Err(e) => {
