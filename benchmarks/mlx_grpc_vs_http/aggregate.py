@@ -1,10 +1,13 @@
-"""Build a markdown comparison table from bench_client.py output.
+"""Aggregate genai-bench output across the three MLX backends.
 
-Reads experiment folders produced by run.sh:
-    bench-results/{label}_{scenario}_c{concurrency}/result.json
+Walks $RESULTS_DIR for sub-directories matching:
+    {label}_{scenario}_c{concurrency}/
+where label ∈ {mlx, grpc, vllm}, scenario ∈ {chat, agent}.
 
-Emits a side-by-side http vs grpc markdown table per scenario.
-Cells with a `.failed` marker (or no result.json) render as "—".
+Inside each, finds the genai-bench result JSON (filename pattern
+`<scenario_slug>_text-to-text_num_concurrency_<n>_time_<m>s.json`,
+skipping `experiment_metadata.json` and `gpu_utilization*.json`) and
+emits a per-scenario markdown comparison table.
 """
 
 from __future__ import annotations
@@ -15,15 +18,25 @@ import re
 from pathlib import Path
 from typing import Any
 
-DIRNAME_RE = re.compile(r"^(?P<label>http|grpc)_(?P<scenario>[^_]+)_c(?P<concurrency>\d+)$")
+DIRNAME_RE = re.compile(r"^(?P<label>mlx|grpc|vllm)_(?P<scenario>[^_]+)_c(?P<concurrency>\d+)$")
+
+LABEL_PRETTY = {"mlx": "mlx-lm.server", "grpc": "smg → mlx-grpc", "vllm": "vllm-metal"}
 
 
-def parse_experiment(folder: Path) -> dict[str, Any] | None:
-    result = folder / "result.json"
-    if not result.exists():
+def _find_result_json(folder: Path) -> Path | None:
+    for p in folder.rglob("*.json"):
+        if "experiment_metadata" in p.name or "gpu_utilization" in p.name:
+            continue
+        return p
+    return None
+
+
+def _read(folder: Path) -> dict[str, Any] | None:
+    j = _find_result_json(folder)
+    if j is None:
         return None
     try:
-        return json.loads(result.read_text())
+        return json.loads(j.read_text())
     except json.JSONDecodeError:
         return None
 
@@ -36,24 +49,35 @@ def collect(results_dir: Path) -> dict[tuple[str, str, int], dict[str, Any]]:
         m = DIRNAME_RE.match(sub.name)
         if not m:
             continue
-        data = parse_experiment(sub)
+        data = _read(sub)
         if data is None:
             continue
-        key = (m.group("label"), m.group("scenario"), int(m.group("concurrency")))
-        out[key] = data
+        out[(m.group("label"), m.group("scenario"), int(m.group("concurrency")))] = data
     return out
 
 
-def fmt_ms(stats: dict[str, Any] | None, key: str) -> str:
-    if not stats or key not in stats:
-        return "—"
-    return f"{stats[key]:.0f}"
+def _stat(d: dict[str, Any], path: str) -> float | None:
+    cur: Any = d
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    if isinstance(cur, (int, float)):
+        return float(cur)
+    return None
 
 
-def fmt_float(x: float, places: int = 2) -> str:
-    if x in (0.0, float("inf")):
+def fmt_float(v: float | None, places: int = 2) -> str:
+    if v is None:
         return "—"
-    return f"{x:.{places}f}"
+    return f"{v:.{places}f}"
+
+
+def fmt_ms(v_seconds: float | None) -> str:
+    """genai-bench latency stats are in seconds; render as ms."""
+    if v_seconds is None:
+        return "—"
+    return f"{v_seconds * 1000:.0f}"
 
 
 def build_section(
@@ -61,37 +85,29 @@ def build_section(
     scenario: str,
     concurrencies: list[int],
 ) -> list[str]:
-    samples = [v for v in results.values() if v["scenario"] == scenario]
-    if not samples:
-        return [
-            "",
-            f"### Scenario `{scenario}`",
-            "",
-            "_No results._",
-            "",
-        ]
-    sample = samples[0]
-    title_extra = f" (max_tokens={sample['max_tokens']})"
-
     lines = [
         "",
-        f"### Scenario `{scenario}`{title_extra}",
+        f"### Scenario `{scenario}`",
         "",
-        "| Concurrency | Setup | RPS | Output tok/s | TTFT p50 (ms) | TTFT p95 (ms) | TPOT p50 (ms) | Errors / Total |",
+        "| Concurrency | Backend | RPS | Output tok/s | TTFT mean (ms) | TTFT p99 (ms) | TPOT mean (ms) | Completed |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for c in concurrencies:
-        for label in ("http", "grpc"):
+        for label in ("mlx", "grpc", "vllm"):
             r = results.get((label, scenario, c))
+            pretty = LABEL_PRETTY[label]
             if r is None:
-                lines.append(f"| {c} | {label} | — | — | — | — | — | — |")
+                lines.append(f"| {c} | {pretty} | — | — | — | — | — | — |")
                 continue
+            agg = r.get("aggregated_metrics", {})
             lines.append(
-                f"| {c} | {label} | {fmt_float(r['request_throughput'], 2)} | "
-                f"{fmt_float(r['output_throughput'], 1)} | "
-                f"{fmt_ms(r['ttft_ms'], 'p50')} | {fmt_ms(r['ttft_ms'], 'p95')} | "
-                f"{fmt_ms(r['tpot_ms'], 'p50')} | "
-                f"{r['error_count']} / {r['error_count'] + r['completed_requests']} |"
+                f"| {c} | {pretty} | "
+                f"{fmt_float(agg.get('requests_per_second'))} | "
+                f"{fmt_float(agg.get('mean_output_throughput_tokens_per_s'), 1)} | "
+                f"{fmt_ms(_stat(agg, 'stats.ttft.mean'))} | "
+                f"{fmt_ms(_stat(agg, 'stats.ttft.p99'))} | "
+                f"{fmt_ms(_stat(agg, 'stats.tpot.mean'))} | "
+                f"{agg.get('num_completed_requests', '?')} |"
             )
     lines.append("")
     return lines
@@ -99,24 +115,27 @@ def build_section(
 
 def build_table(results: dict[tuple[str, str, int], dict[str, Any]], model: str) -> str:
     if not results:
-        return "_No results found in results dir._"
+        return "_No results found._"
     scenarios = sorted({k[1] for k in results})
     concurrencies = sorted({k[2] for k in results})
     lines = [
-        "## MLX Direct HTTP vs Router + gRPC Benchmark",
+        "## MLX Three-Way Benchmark",
         "",
-        f"**Model:** `{model}`  ",
-        f"**Concurrencies:** {', '.join(str(c) for c in concurrencies)}  ",
-        f"**Scenarios:** {', '.join(scenarios)}",
+        f"**Model:** `{model}`",
         "",
-        "RPS = request throughput. TTFT = time to first token. "
-        "TPOT = time per output token (excl. first). Lower is better for "
-        "latencies; higher is better for throughput. Cells where every "
-        "request failed (server overload) render as `—`.",
+        "Three backends serving the same MLX model on Apple Silicon, driven "
+        "by `genai-bench` against synthetic deterministic scenarios:",
         "",
-        "Scenarios:",
-        "- `chat` — ShareGPT (short user prompts, ~50–300 tokens)",
-        "- `agent` — vdaita/edit_10k_char (real local-agent code-edit prompts, ~2.5k tokens)",
+        "- `chat` = `D(100,256)` — short prompt + medium output (typical chat turn)",
+        "- `agent` = `D(2500,256)` — ~2.5k token context + medium output "
+        "(RAG / code-edit / Cursor-style local agent traffic)",
+        "",
+        f"**Concurrencies:** {', '.join(str(c) for c in concurrencies)}",
+        "",
+        "Backends:",
+        "- `mlx-lm.server` — direct HTTP (mlx-lm package)",
+        "- `smg → mlx-grpc` — SMG router fronting our MLX gRPC servicer (PR #1099)",
+        "- `vllm-metal` — vllm-project/vllm-metal `vllm serve`",
     ]
     for s in scenarios:
         lines.extend(build_section(results, s, concurrencies))

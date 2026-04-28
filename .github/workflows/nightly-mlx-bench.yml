@@ -1,4 +1,4 @@
-name: Nightly MLX Benchmark
+name: Nightly MLX Three-Way Benchmark
 
 on:
   schedule:
@@ -10,19 +10,27 @@ on:
         description: "Model id"
         required: false
         default: "mlx-community/gemma-3-4b-it-qat-4bit"
+      phases:
+        description: "Phases to run (space-separated subset of 'mlx grpc vllm')"
+        required: false
+        default: "mlx grpc vllm"
       concurrencies:
         description: "Space-separated concurrencies"
         required: false
         default: "1 4 16 64"
       scenarios:
-        description: "Space-separated scenarios: chat (ShareGPT) and/or agent (vdaita/edit_10k_char)"
+        description: "Space-separated scenarios (chat agent)"
         required: false
         default: "chat agent"
+      duration_min:
+        description: "Minutes per cell"
+        required: false
+        default: "5"
   # TEMPORARY: enable PR trigger so this workflow can be smoke-tested before
   # merge. Path-filtered so unrelated PRs don't fire it, and the matrix is
-  # reduced via the env block below to ~12 minutes. REMOVE this block before
-  # merging — once the harness is validated, only schedule + workflow_dispatch
-  # should remain.
+  # reduced via the env block below to keep PR runs short. REMOVE this block
+  # before merging — once the harness is validated, only schedule +
+  # workflow_dispatch should remain.
   pull_request:
     branches: [main]
     paths:
@@ -40,19 +48,28 @@ concurrency:
 
 jobs:
   bench:
-    name: MLX HTTP vs Router+gRPC
+    name: MLX three-way (mlx-lm vs SMG+gRPC vs vllm-metal)
     runs-on: macos-latest
-    # 4 concurrencies × 2 scenarios × 2 setups × 10 min ≈ 2.7 h, plus build
-    # and model download. Cap at 5h45m for safety.
-    timeout-minutes: 345
+    # 4 concurrencies × 2 scenarios × 3 backends × 5 min ≈ 2 h, plus build,
+    # model download, and vllm-metal install. Cap at 4 h for safety.
+    timeout-minutes: 240
     env:
       MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
-      # TEMPORARY: PR runs use the full matrix so we can collect real
-      # numbers on this PR before merging. Remove the `pull_request:`
-      # trigger entirely (or revert this env block) before merge.
-      CONCURRENCIES: ${{ github.event.inputs.concurrencies || '1 4 16 64' }}
-      SCENARIOS: ${{ github.event.inputs.scenarios || 'chat agent' }}
+      # PR runs use a reduced matrix so the smoke test finishes in
+      # reasonable time. Scheduled / dispatched runs use the full matrix.
+      PHASES: >-
+        ${{ github.event.inputs.phases || 'mlx grpc vllm' }}
+      CONCURRENCIES: >-
+        ${{ github.event.inputs.concurrencies
+        || (github.event_name == 'pull_request' && '1 4'
+        || '1 4 16 64') }}
+      SCENARIOS: >-
+        ${{ github.event.inputs.scenarios || 'chat agent' }}
+      DURATION_MIN: >-
+        ${{ github.event.inputs.duration_min
+        || (github.event_name == 'pull_request' && '2' || '5') }}
       RESULTS_DIR: bench-results
+      VLLM_VENV: ${{ github.workspace }}/.venv-vllm-metal
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout code
@@ -87,29 +104,53 @@ jobs:
       - name: Install mlx-lm CLI (for the direct-HTTP baseline)
         run: pip install "mlx-lm>=0.22.0"
 
-      - name: Install bench client deps
-        # Custom bench client (bench_client.py) replaces genai-bench. We
-        # can't use vllm bench because vllm publishes Linux/CUDA wheels
-        # only — pip install vllm fails on macos arm64. Custom client is
-        # ~250 LOC, mimics vllm bench --save-result output, and supports
-        # real datasets (ShareGPT for chat, vdaita/edit_10k_char for the
-        # local-agent workload).
-        run: pip install "httpx[http2]>=0.27" "datasets>=3.0"
+      - name: Install genai-bench (driver)
+        # Bench driver — same CLI as the rest of the SMG nightly suite.
+        # `oci_openai` is a transitive dep that genai-bench's CLI imports
+        # eagerly even when the OCI backend is unused; pin it explicitly so
+        # `genai-bench --help` doesn't crash on a clean wheel install.
+        run: pip install genai-bench oci_openai
 
-      - name: Verify smg + servicer + bench are runnable
+      - name: Install vllm-metal (best effort)
+        # vllm-metal isn't on PyPI (no public macos wheels for plain vllm),
+        # so we install it via the project's official install script into a
+        # workspace-local venv. If install fails, the vllm phase will skip
+        # itself rather than fail the job.
+        continue-on-error: true
+        run: |
+          python -m venv "$VLLM_VENV"
+          # shellcheck disable=SC1091
+          source "$VLLM_VENV/bin/activate"
+          # Upstream's install.sh assumes ~/.venv-vllm-metal; we already
+          # created the venv at $VLLM_VENV (configurable via run.sh), so
+          # tell the script to install into our active venv instead.
+          curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh \
+            | VLLM_METAL_VENV="$VLLM_VENV" bash || \
+            pip install --pre vllm-metal || \
+            echo "vllm-metal install failed — vllm phase will be skipped"
+          deactivate
+
+      - name: Verify components
         run: |
           ./target/release/smg --help | head -5
           python3 -c "from smg_grpc_servicer.mlx.server import main; print('servicer OK')"
-          python3 -c "import httpx, datasets; print('bench deps OK')"
+          genai-bench --help | head -3
 
-      - name: Run benchmark — Phase 1 (direct HTTP)
-        run: PHASE=http ./benchmarks/mlx_grpc_vs_http/run.sh
+      - name: Run benchmark — Phase 1 (mlx-lm.server, direct HTTP)
+        if: contains(env.PHASES, 'mlx')
+        run: PHASES=mlx ./benchmarks/mlx_grpc_vs_http/run.sh
 
-      - name: Run benchmark — Phase 2 (SMG router + gRPC)
-        # Always run phase 2 even if phase 1 failed — the two are
-        # independent and the gRPC numbers are the most interesting half.
-        if: always()
-        run: PHASE=grpc ./benchmarks/mlx_grpc_vs_http/run.sh
+      - name: Run benchmark — Phase 2 (SMG router + MLX gRPC servicer)
+        # Always run phase 2 even if phase 1 failed — phases are independent
+        # and the gRPC numbers are the most interesting half.
+        if: always() && contains(env.PHASES, 'grpc')
+        run: PHASES=grpc ./benchmarks/mlx_grpc_vs_http/run.sh
+
+      - name: Run benchmark — Phase 3 (vllm-metal serve)
+        # Best-effort: the run.sh phase auto-skips if $VLLM_VENV is missing,
+        # so this step won't fail the job when vllm-metal install errored.
+        if: always() && contains(env.PHASES, 'vllm')
+        run: PHASES=vllm ./benchmarks/mlx_grpc_vs_http/run.sh
 
       - name: Aggregate results
         if: always()
@@ -139,5 +180,6 @@ jobs:
             bench-results/mlx-lm.log
             bench-results/mlx-grpc.log
             bench-results/smg-router.log
+            bench-results/vllm-metal.log
           retention-days: 14
           if-no-files-found: ignore
