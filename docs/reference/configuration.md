@@ -417,6 +417,84 @@ Note: Enabling service discovery automatically enables IGW mode.
 
 ---
 
+## Cross-Region Smart Router Configuration
+
+Phase 1 cross-region routing config is disabled by default. SMG-01 only wires
+the config model, CLI conversion, and validation. Request forwarding, signal
+sync, and routing behavior are implemented by later cross-region tasks.
+
+### YAML Shape
+
+```yaml
+cross_region:
+  enabled: true
+  region_id: us-ashburn-1
+  realm: oc1
+  environment: prod
+  local_only_on_degraded_sync: true
+  request_plane:
+    enabled: true
+    listen_port: 8443
+    max_platform_retries: 5
+    default_failover_mode: MANUAL
+    local_first_tie_break: true
+  sync_plane:
+    enabled: true
+    listen_port: 9443
+    full_resync_interval_seconds: 300
+    signal_stale_after_seconds: 30
+  peers:
+    - region_id: us-chicago-1
+      request_url: https://smg-region-agent.us-chicago-1.internal:8443
+      sync_url: https://smg-region-agent.us-chicago-1.internal:9443
+      realm: oc1
+      environment: prod
+  mtls:
+    ca_cert_path: /etc/smg/certs/ca.crt
+    server_cert_path: /etc/smg/certs/tls.crt
+    server_key_path: /etc/smg/certs/tls.key
+    client_cert_path: /etc/smg/certs/client.crt
+    client_key_path: /etc/smg/certs/client.key
+```
+
+### CLI Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--cross-region-enabled` | Enable cross-region config validation and future runtime integration | `false` |
+| `--cross-region-region-id` | Local OCI region id, for example `us-ashburn-1` | Required when enabled |
+| `--cross-region-realm` | Local OCI realm, for example `oc1` | Required when enabled |
+| `--cross-region-environment` | Local deployment environment, for example `prod` | Required when enabled |
+| `--cross-region-local-only-on-degraded-sync` | Keep serving local-only when remote signal state is degraded | `true` |
+| `--cross-region-request-plane-enabled` | Enable the request-forwarding plane config | `true` |
+| `--cross-region-request-plane-listen-port` | Private NLB request-forwarding listener port | `8443` |
+| `--cross-region-request-plane-max-platform-retries` | Maximum platform-owned cross-region retries | `5` |
+| `--cross-region-request-plane-default-failover-mode` | Default failover mode: `MANUAL`, `AUTOMATIC`, or `AUTO` | `MANUAL` |
+| `--cross-region-request-plane-local-first-tie-break` | Prefer local region when candidates tie | `true` |
+| `--cross-region-sync-plane-enabled` | Enable the signal sync plane config | `true` |
+| `--cross-region-sync-plane-listen-port` | Private NLB signal-sync listener port | `9443` |
+| `--cross-region-sync-plane-full-resync-interval-seconds` | Full signal resync interval | `300` |
+| `--cross-region-sync-plane-signal-stale-after-seconds` | Remote signal stale-after interval | `30` |
+| `--cross-region-peer` | Peer Region Agent mapping | None |
+| `--cross-region-mtls-ca-cert-path` | Cross-region mTLS CA certificate path | Required when enabled |
+| `--cross-region-mtls-server-cert-path` | Cross-region mTLS server certificate path | Required when enabled |
+| `--cross-region-mtls-server-key-path` | Cross-region mTLS server key path | Required when enabled |
+| `--cross-region-mtls-client-cert-path` | Cross-region mTLS client certificate path | Required when enabled |
+| `--cross-region-mtls-client-key-path` | Cross-region mTLS client key path | Required when enabled |
+
+Peer mappings use one comma-separated `key=value` argument per peer:
+
+```bash
+--cross-region-peer region_id=us-chicago-1,request_url=https://smg-region-agent.us-chicago-1.internal:8443,sync_url=https://smg-region-agent.us-chicago-1.internal:9443,realm=oc1,environment=prod
+```
+
+When `cross_region.enabled=true`, SMG validates that local identity, at least
+one peer, and all cross-region mTLS paths are present. Peer `request_url` and
+`sync_url` must be HTTPS URLs with explicit ports. The local SMG must not
+configure its own `region_id` as a peer.
+
+---
+
 ## Mesh Server Configuration
 
 High-availability mesh networking for multi-router coordination.

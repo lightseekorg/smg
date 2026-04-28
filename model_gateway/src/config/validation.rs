@@ -12,6 +12,7 @@ impl ConfigValidator {
         Self::validate_server_settings(config)?;
         Self::validate_storage_context_headers(config)?;
         Self::validate_tenant_resolution(config)?;
+        Self::validate_cross_region(&config.cross_region)?;
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
         }
@@ -228,6 +229,194 @@ impl ConfigValidator {
         })?;
 
         Ok(())
+    }
+
+    /// Validate the complete cross-region block, while keeping disabled config inert.
+    fn validate_cross_region(config: &CrossRegionConfig) -> ConfigResult<()> {
+        if !config.enabled {
+            return Ok(());
+        }
+
+        Self::validate_required_string("cross_region.region", config.region_id.as_deref())?;
+        Self::validate_required_string("cross_region.realm", config.realm.as_deref())?;
+        Self::validate_required_string("cross_region.environment", config.environment.as_deref())?;
+
+        if config.request_plane.enabled {
+            if config.request_plane.listen_port == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.request_plane.listen_port".to_string(),
+                    value: config.request_plane.listen_port.to_string(),
+                    reason: "Port must be > 0".to_string(),
+                });
+            }
+            if config.request_plane.max_platform_retries == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.request_plane.max_platform_retries".to_string(),
+                    value: config.request_plane.max_platform_retries.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+        }
+
+        if config.sync_plane.enabled {
+            if config.sync_plane.listen_port == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.sync_plane.listen_port".to_string(),
+                    value: config.sync_plane.listen_port.to_string(),
+                    reason: "Port must be > 0".to_string(),
+                });
+            }
+            if config.sync_plane.full_resync_interval_seconds == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.sync_plane.full_resync_interval_seconds".to_string(),
+                    value: config.sync_plane.full_resync_interval_seconds.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+            if config.sync_plane.signal_stale_after_seconds == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.sync_plane.signal_stale_after_seconds".to_string(),
+                    value: config.sync_plane.signal_stale_after_seconds.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+        }
+
+        Self::validate_cross_region_mtls(&config.mtls)?;
+        Self::validate_cross_region_peers(config)?;
+
+        Ok(())
+    }
+
+    /// Require all mTLS certificate/key path fields needed by request and sync planes.
+    fn validate_cross_region_mtls(config: &CrossRegionMtlsConfig) -> ConfigResult<()> {
+        Self::validate_required_string(
+            "cross_region.mtls.ca_cert_path",
+            config.ca_cert_path.as_deref(),
+        )?;
+        Self::validate_required_string(
+            "cross_region.mtls.server_cert_path",
+            config.server_cert_path.as_deref(),
+        )?;
+        Self::validate_required_string(
+            "cross_region.mtls.server_key_path",
+            config.server_key_path.as_deref(),
+        )?;
+        Self::validate_required_string(
+            "cross_region.mtls.client_cert_path",
+            config.client_cert_path.as_deref(),
+        )?;
+        Self::validate_required_string(
+            "cross_region.mtls.client_key_path",
+            config.client_key_path.as_deref(),
+        )?;
+
+        Ok(())
+    }
+
+    /// Validate the configured peer Region Agent registry and reject self/duplicate peers.
+    fn validate_cross_region_peers(config: &CrossRegionConfig) -> ConfigResult<()> {
+        if config.peers.is_empty() {
+            return Err(ConfigError::MissingRequired {
+                field: "cross_region.peers".to_string(),
+            });
+        }
+
+        let mut peer_region_ids = std::collections::HashSet::new();
+        let local_region_id = config.region_id.as_deref();
+
+        for (idx, peer) in config.peers.iter().enumerate() {
+            let region_field = format!("cross_region.peers[{idx}].region");
+            let region_id =
+                Self::validate_required_string(&region_field, peer.region_id.as_deref())?;
+            if Some(region_id) == local_region_id {
+                return Err(ConfigError::InvalidValue {
+                    field: region_field,
+                    value: region_id.to_string(),
+                    reason: "peer region must differ from local cross_region.region".to_string(),
+                });
+            }
+            if !peer_region_ids.insert(region_id.to_string()) {
+                return Err(ConfigError::InvalidValue {
+                    field: region_field,
+                    value: region_id.to_string(),
+                    reason: "duplicate peer region".to_string(),
+                });
+            }
+
+            let request_url_field = format!("cross_region.peers[{idx}].request_url");
+            let request_url =
+                Self::validate_required_string(&request_url_field, peer.request_url.as_deref())?;
+            Self::validate_cross_region_peer_url(&request_url_field, request_url)?;
+
+            let sync_url_field = format!("cross_region.peers[{idx}].sync_url");
+            let sync_url =
+                Self::validate_required_string(&sync_url_field, peer.sync_url.as_deref())?;
+            Self::validate_cross_region_peer_url(&sync_url_field, sync_url)?;
+
+            Self::validate_required_string(
+                &format!("cross_region.peers[{idx}].realm"),
+                peer.realm.as_deref(),
+            )?;
+            Self::validate_required_string(
+                &format!("cross_region.peers[{idx}].environment"),
+                peer.environment.as_deref(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate that a peer endpoint is an HTTPS URL with host and explicit port.
+    fn validate_cross_region_peer_url(field: &str, value: &str) -> ConfigResult<()> {
+        let parsed = ::url::Url::parse(value).map_err(|e| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: value.to_string(),
+            reason: format!("Invalid URL format: {e}"),
+        })?;
+
+        if parsed.scheme() != "https" {
+            return Err(ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: value.to_string(),
+                reason: "URL must start with https://".to_string(),
+            });
+        }
+
+        if parsed.host_str().is_none() {
+            return Err(ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: value.to_string(),
+                reason: "URL must have a valid host".to_string(),
+            });
+        }
+
+        if parsed.port().is_none() {
+            return Err(ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: value.to_string(),
+                reason: "URL must include an explicit port".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Return a configured string value or a field-specific error when it is missing/blank.
+    fn validate_required_string<'a>(field: &str, value: Option<&'a str>) -> ConfigResult<&'a str> {
+        let value = value.ok_or_else(|| ConfigError::MissingRequired {
+            field: field.to_string(),
+        })?;
+
+        if value.trim().is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: value.to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+
+        Ok(value)
     }
 
     fn validate_oracle(oracle: &OracleConfig) -> ConfigResult<()> {
@@ -888,6 +1077,41 @@ mod tests {
     use super::*;
     use crate::worker::ConnectionMode;
 
+    /// Build a valid test fixture using realistic OCI-style values, not production defaults.
+    fn valid_cross_region_config() -> CrossRegionConfig {
+        CrossRegionConfig {
+            enabled: true,
+            region_id: Some("us-ashburn-1".to_string()),
+            realm: Some("oc1".to_string()),
+            environment: Some("prod".to_string()),
+            peers: vec![CrossRegionPeerConfig {
+                region_id: Some("us-chicago-1".to_string()),
+                request_url: Some(
+                    "https://smg-region-agent.us-chicago-1.internal:8443".to_string(),
+                ),
+                sync_url: Some("https://smg-region-agent.us-chicago-1.internal:9443".to_string()),
+                realm: Some("oc1".to_string()),
+                environment: Some("prod".to_string()),
+            }],
+            mtls: CrossRegionMtlsConfig {
+                ca_cert_path: Some("/etc/smg/certs/ca.crt".to_string()),
+                server_cert_path: Some("/etc/smg/certs/tls.crt".to_string()),
+                server_key_path: Some("/etc/smg/certs/tls.key".to_string()),
+                client_cert_path: Some("/etc/smg/certs/client.crt".to_string()),
+                client_key_path: Some("/etc/smg/certs/client.key".to_string()),
+            },
+            ..CrossRegionConfig::default()
+        }
+    }
+
+    /// Build a router config whose cross-region block starts from the valid fixture.
+    fn router_config_with_cross_region() -> RouterConfig {
+        RouterConfig {
+            cross_region: valid_cross_region_config(),
+            ..RouterConfig::default()
+        }
+    }
+
     #[test]
     fn test_validate_regular_mode() {
         let config = RouterConfig::new(
@@ -898,6 +1122,68 @@ mod tests {
         );
 
         assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cross_region_disabled_allows_empty_block() {
+        let mut config = RouterConfig::default();
+        config.cross_region.request_plane.listen_port = 0;
+
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cross_region_enabled_config() {
+        let config = router_config_with_cross_region();
+
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cross_region_requires_region_id_when_enabled() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.region_id = None;
+
+        let error = ConfigValidator::validate(&config).expect_err("missing region");
+        assert!(format!("{error}").contains("cross_region.region"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_requires_peer_urls_when_enabled() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].request_url = None;
+
+        let error = ConfigValidator::validate(&config).expect_err("missing peer request url");
+        assert!(format!("{error}").contains("cross_region.peers[0].request_url"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_requires_mtls_paths_when_enabled() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.mtls.client_key_path = None;
+
+        let error = ConfigValidator::validate(&config).expect_err("missing client key path");
+        assert!(format!("{error}").contains("cross_region.mtls.client_key_path"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_rejects_peer_url_without_explicit_port() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].request_url =
+            Some("https://smg-region-agent.us-chicago-1.internal".to_string());
+
+        let error = ConfigValidator::validate(&config).expect_err("missing peer URL port");
+        assert!(format!("{error}").contains("explicit port"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_rejects_non_https_peer_url() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].sync_url =
+            Some("http://smg-region-agent.us-chicago-1.internal:9443".to_string());
+
+        let error = ConfigValidator::validate(&config).expect_err("non-https peer URL");
+        assert!(format!("{error}").contains("https://"));
     }
 
     #[test]

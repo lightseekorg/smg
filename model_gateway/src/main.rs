@@ -4,10 +4,12 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use rand::{distr::Alphanumeric, Rng};
 use smg::{
     config::{
-        CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-        HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
-        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
-        TokenizerCacheConfig, TraceConfig,
+        CircuitBreakerConfig, ConfigError, ConfigResult, CrossRegionConfig,
+        CrossRegionFailoverMode, CrossRegionMtlsConfig, CrossRegionPeerConfig,
+        CrossRegionRequestPlaneConfig, CrossRegionSyncPlaneConfig, DiscoveryConfig,
+        HealthCheckConfig, HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig,
+        PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode,
+        SchemaConfig, TokenizerCacheConfig, TraceConfig,
     },
     observability::{
         metrics::PrometheusConfig,
@@ -655,6 +657,115 @@ struct CliArgs {
     )]
     disable_audit_logging: bool,
 
+    // ==================== Cross-Region Smart Router ====================
+    /// Enable cross-region smart-router config. Runtime routing is wired by later tasks.
+    #[arg(
+        long,
+        default_value_t = false,
+        help_heading = "Cross-Region Smart Router"
+    )]
+    cross_region_enabled: bool,
+
+    /// Local OCI region id, for example us-ashburn-1.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_region_id: Option<String>,
+
+    /// Local OCI realm, for example oc1.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_realm: Option<String>,
+
+    /// Local deployment environment, for example prod.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_environment: Option<String>,
+
+    /// Keep serving local-only when synced remote state is degraded.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Cross-Region Smart Router"
+    )]
+    cross_region_local_only_on_degraded_sync: Option<bool>,
+
+    /// Enable the cross-region request-forwarding plane.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Cross-Region Smart Router"
+    )]
+    cross_region_request_plane_enabled: Option<bool>,
+
+    /// Private NLB request-forwarding listener port.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_request_plane_listen_port: Option<u16>,
+
+    /// Maximum platform-owned cross-region retries.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_request_plane_max_platform_retries: Option<u32>,
+
+    /// Default cross-region failover mode.
+    #[arg(long, value_parser = parse_cross_region_failover_mode, help_heading = "Cross-Region Smart Router")]
+    cross_region_request_plane_default_failover_mode: Option<CrossRegionFailoverMode>,
+
+    /// Prefer local region when candidates tie.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Cross-Region Smart Router"
+    )]
+    cross_region_request_plane_local_first_tie_break: Option<bool>,
+
+    /// Enable the cross-region signal sync plane.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        help_heading = "Cross-Region Smart Router"
+    )]
+    cross_region_sync_plane_enabled: Option<bool>,
+
+    /// Private NLB signal-sync listener port.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_sync_plane_listen_port: Option<u16>,
+
+    /// Full signal resync interval in seconds.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_sync_plane_full_resync_interval_seconds: Option<u64>,
+
+    /// Remote signal stale-after interval in seconds.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_sync_plane_signal_stale_after_seconds: Option<u64>,
+
+    /// Peer Region Agent mapping: region_id=...,request_url=https://host:8443,sync_url=https://host:9443,realm=...,environment=...
+    #[arg(long = "cross-region-peer", action = ArgAction::Append, value_parser = parse_cross_region_peer, help_heading = "Cross-Region Smart Router")]
+    cross_region_peers: Vec<CrossRegionPeerConfig>,
+
+    /// Cross-region mTLS CA certificate path.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_mtls_ca_cert_path: Option<String>,
+
+    /// Cross-region mTLS server certificate path.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_mtls_server_cert_path: Option<String>,
+
+    /// Cross-region mTLS server private key path.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_mtls_server_key_path: Option<String>,
+
+    /// Cross-region mTLS client certificate path.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_mtls_client_cert_path: Option<String>,
+
+    /// Cross-region mTLS client private key path.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_mtls_client_key_path: Option<String>,
+
     // ==================== Mesh Server ====================
     #[arg(long, default_value_t = false)]
     enable_mesh: bool,
@@ -701,6 +812,55 @@ enum OracleConnectSource {
 fn parse_model_id_from(s: &str) -> Result<String, String> {
     ModelIdSource::parse(s)?;
     Ok(s.to_string())
+}
+
+/// Parse the CLI failover-mode value into the typed cross-region enum.
+fn parse_cross_region_failover_mode(s: &str) -> Result<CrossRegionFailoverMode, String> {
+    s.parse()
+}
+
+/// Parse one `--cross-region-peer` key/value argument into a peer config entry.
+fn parse_cross_region_peer(peer: &str) -> Result<CrossRegionPeerConfig, String> {
+    let mut region_id = None;
+    let mut request_url = None;
+    let mut sync_url = None;
+    let mut realm = None;
+    let mut environment = None;
+
+    for part in peer.split(',') {
+        let Some((key, value)) = part.split_once('=') else {
+            return Err(format!(
+                "invalid cross-region peer entry '{part}', expected key=value"
+            ));
+        };
+
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("cross-region peer field '{key}' must not be empty"));
+        }
+
+        match key {
+            "region_id" | "region" => region_id = Some(value.to_string()),
+            "request_url" => request_url = Some(value.to_string()),
+            "sync_url" => sync_url = Some(value.to_string()),
+            "realm" => realm = Some(value.to_string()),
+            "environment" | "env" => environment = Some(value.to_string()),
+            other => {
+                return Err(format!(
+                    "unknown cross-region peer field '{other}', expected region_id, request_url, sync_url, realm, or environment"
+                ));
+            }
+        }
+    }
+
+    Ok(CrossRegionPeerConfig {
+        region_id,
+        request_url,
+        sync_url,
+        realm,
+        environment,
+    })
 }
 
 /// Parse role mapping from CLI format "idp_role=gateway_role"
@@ -827,6 +987,61 @@ impl CliArgs {
             }
         }
         map
+    }
+
+    /// Convert cross-region CLI fields into the nested runtime config block.
+    fn build_cross_region_config(&self) -> CrossRegionConfig {
+        let request_plane_defaults = CrossRegionRequestPlaneConfig::default();
+        let sync_plane_defaults = CrossRegionSyncPlaneConfig::default();
+
+        CrossRegionConfig {
+            enabled: self.cross_region_enabled,
+            region_id: self.cross_region_region_id.clone(),
+            realm: self.cross_region_realm.clone(),
+            environment: self.cross_region_environment.clone(),
+            local_only_on_degraded_sync: self
+                .cross_region_local_only_on_degraded_sync
+                .unwrap_or(true),
+            request_plane: CrossRegionRequestPlaneConfig {
+                enabled: self
+                    .cross_region_request_plane_enabled
+                    .unwrap_or(request_plane_defaults.enabled),
+                listen_port: self
+                    .cross_region_request_plane_listen_port
+                    .unwrap_or(request_plane_defaults.listen_port),
+                max_platform_retries: self
+                    .cross_region_request_plane_max_platform_retries
+                    .unwrap_or(request_plane_defaults.max_platform_retries),
+                default_failover_mode: self
+                    .cross_region_request_plane_default_failover_mode
+                    .unwrap_or(request_plane_defaults.default_failover_mode),
+                local_first_tie_break: self
+                    .cross_region_request_plane_local_first_tie_break
+                    .unwrap_or(request_plane_defaults.local_first_tie_break),
+            },
+            sync_plane: CrossRegionSyncPlaneConfig {
+                enabled: self
+                    .cross_region_sync_plane_enabled
+                    .unwrap_or(sync_plane_defaults.enabled),
+                listen_port: self
+                    .cross_region_sync_plane_listen_port
+                    .unwrap_or(sync_plane_defaults.listen_port),
+                full_resync_interval_seconds: self
+                    .cross_region_sync_plane_full_resync_interval_seconds
+                    .unwrap_or(sync_plane_defaults.full_resync_interval_seconds),
+                signal_stale_after_seconds: self
+                    .cross_region_sync_plane_signal_stale_after_seconds
+                    .unwrap_or(sync_plane_defaults.signal_stale_after_seconds),
+            },
+            peers: self.cross_region_peers.clone(),
+            mtls: CrossRegionMtlsConfig {
+                ca_cert_path: self.cross_region_mtls_ca_cert_path.clone(),
+                server_cert_path: self.cross_region_mtls_server_cert_path.clone(),
+                server_key_path: self.cross_region_mtls_server_key_path.clone(),
+                client_cert_path: self.cross_region_mtls_client_cert_path.clone(),
+                client_key_path: self.cross_region_mtls_client_key_path.clone(),
+            },
+        }
     }
 
     fn parse_mesh_socket_addr(
@@ -1187,6 +1402,7 @@ impl CliArgs {
         let skills_enabled = self
             .skills_enabled
             .unwrap_or_else(|| self.skills_config_path.is_some());
+        let cross_region = self.build_cross_region_config();
 
         let builder = RouterConfig::builder()
             .mode(mode)
@@ -1246,6 +1462,7 @@ impl CliArgs {
                 (!self.storage_context_headers.is_empty())
                     .then(|| Self::parse_selector(&self.storage_context_headers)),
             )
+            .cross_region_config(cross_region)
             .trust_tenant_header(self.trust_tenant_header)
             .tenant_header_name(&self.tenant_header_name)
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
@@ -1458,4 +1675,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_otel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launch_args(raw: &[&str]) -> CliArgs {
+        let cli = Cli::try_parse_from(raw).expect("CLI args should parse");
+        match cli.command {
+            Some(Commands::Launch { args }) => args,
+            None => cli.router_args,
+        }
+    }
+
+    fn cross_region_launch_args() -> Vec<&'static str> {
+        vec![
+            "smg",
+            "launch",
+            "--worker-urls",
+            "http://worker:8000",
+            "--cross-region-enabled",
+            "--cross-region-region-id",
+            "us-ashburn-1",
+            "--cross-region-realm",
+            "oc1",
+            "--cross-region-environment",
+            "prod",
+            "--cross-region-request-plane-listen-port",
+            "18443",
+            "--cross-region-request-plane-max-platform-retries",
+            "7",
+            "--cross-region-request-plane-default-failover-mode",
+            "automatic",
+            "--cross-region-request-plane-local-first-tie-break",
+            "false",
+            "--cross-region-sync-plane-listen-port",
+            "19443",
+            "--cross-region-sync-plane-full-resync-interval-seconds",
+            "600",
+            "--cross-region-sync-plane-signal-stale-after-seconds",
+            "45",
+            "--cross-region-peer",
+            "region_id=us-chicago-1,request_url=https://smg-region-agent.us-chicago-1.internal:8443,sync_url=https://smg-region-agent.us-chicago-1.internal:9443,realm=oc1,environment=prod",
+            "--cross-region-mtls-ca-cert-path",
+            "/etc/smg/certs/ca.crt",
+            "--cross-region-mtls-server-cert-path",
+            "/etc/smg/certs/tls.crt",
+            "--cross-region-mtls-server-key-path",
+            "/etc/smg/certs/tls.key",
+            "--cross-region-mtls-client-cert-path",
+            "/etc/smg/certs/client.crt",
+            "--cross-region-mtls-client-key-path",
+            "/etc/smg/certs/client.key",
+        ]
+    }
+
+    #[test]
+    fn cross_region_cli_values_flow_to_router_and_server_config() {
+        let args = launch_args(&cross_region_launch_args());
+        let router_config = args.to_router_config(Vec::new()).expect("router config");
+
+        assert!(router_config.cross_region.enabled);
+        assert_eq!(
+            router_config.cross_region.region_id.as_deref(),
+            Some("us-ashburn-1")
+        );
+        assert_eq!(router_config.cross_region.request_plane.listen_port, 18443);
+        assert_eq!(
+            router_config
+                .cross_region
+                .request_plane
+                .default_failover_mode,
+            CrossRegionFailoverMode::Automatic
+        );
+        assert!(
+            !router_config
+                .cross_region
+                .request_plane
+                .local_first_tie_break
+        );
+        assert_eq!(router_config.cross_region.sync_plane.listen_port, 19443);
+        assert_eq!(router_config.cross_region.peers.len(), 1);
+
+        let server_config = args
+            .to_server_config(router_config.clone())
+            .expect("server config");
+        assert_eq!(
+            server_config.router_config.cross_region,
+            router_config.cross_region
+        );
+    }
+
+    #[test]
+    fn cross_region_cli_rejects_invalid_failover_mode() {
+        let result = Cli::try_parse_from([
+            "smg",
+            "launch",
+            "--cross-region-request-plane-default-failover-mode",
+            "INVALID",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cross_region_peer_cli_parser_accepts_expected_shape() {
+        let peer = parse_cross_region_peer(
+            "region_id=us-chicago-1,request_url=https://request.example:8443,sync_url=https://sync.example:9443,realm=oc1,environment=prod",
+        )
+        .expect("peer parses");
+
+        assert_eq!(peer.region_id.as_deref(), Some("us-chicago-1"));
+        assert_eq!(
+            peer.request_url.as_deref(),
+            Some("https://request.example:8443")
+        );
+        assert_eq!(peer.sync_url.as_deref(), Some("https://sync.example:9443"));
+        assert_eq!(peer.realm.as_deref(), Some("oc1"));
+        assert_eq!(peer.environment.as_deref(), Some("prod"));
+    }
 }

@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use smg_mcp::McpConfig;
 
 use super::{
-    CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-    HistoryBackend, MemoryRuntimeConfig, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig,
-    RedisConfig, RetryConfig, RouterConfig, RoutingMode, SkillsConfig, TokenizerCacheConfig,
-    TraceConfig,
+    CircuitBreakerConfig, ConfigError, ConfigResult, CrossRegionConfig, DiscoveryConfig,
+    HealthCheckConfig, HistoryBackend, MemoryRuntimeConfig, MetricsConfig, OracleConfig,
+    PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode,
+    SkillsConfig, TokenizerCacheConfig, TraceConfig,
 };
 use crate::worker::ConnectionMode;
 
@@ -359,6 +359,13 @@ impl RouterConfigBuilder {
     /// CLI/Python wiring is intentionally not exposed yet.
     pub fn memory_runtime_config(mut self, config: MemoryRuntimeConfig) -> Self {
         self.config.memory_runtime = config;
+        self
+    }
+
+    /// Configure cross-region smart-router settings. This only stores config;
+    /// request forwarding and sync are enabled by later runtime integration.
+    pub fn cross_region_config(mut self, config: CrossRegionConfig) -> Self {
+        self.config.cross_region = config;
         self
     }
 

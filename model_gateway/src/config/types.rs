@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 use openai_protocol::worker::HealthCheckConfig as ProtocolHealthCheckConfig;
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,157 @@ impl BackgroundConfig {
     }
 }
 
+/// Cross-region failover behavior used when DP-API does not provide a
+/// request-specific override.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrossRegionFailoverMode {
+    #[default]
+    #[serde(rename = "MANUAL", alias = "manual")]
+    Manual,
+    #[serde(
+        rename = "AUTOMATIC",
+        alias = "AUTO",
+        alias = "automatic",
+        alias = "auto"
+    )]
+    Automatic,
+}
+
+impl std::fmt::Display for CrossRegionFailoverMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Manual => f.write_str("MANUAL"),
+            Self::Automatic => f.write_str("AUTOMATIC"),
+        }
+    }
+}
+
+impl FromStr for CrossRegionFailoverMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "MANUAL" => Ok(Self::Manual),
+            "AUTO" | "AUTOMATIC" => Ok(Self::Automatic),
+            other => Err(format!(
+                "invalid cross-region failover mode '{other}', expected MANUAL or AUTOMATIC"
+            )),
+        }
+    }
+}
+
+/// Cross-region request-forwarding listener and routing decision defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossRegionRequestPlaneConfig {
+    pub enabled: bool,
+    pub listen_port: u16,
+    pub max_platform_retries: u32,
+    pub default_failover_mode: CrossRegionFailoverMode,
+    pub local_first_tie_break: bool,
+}
+
+impl Default for CrossRegionRequestPlaneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_port: 8443,
+            max_platform_retries: 5,
+            default_failover_mode: CrossRegionFailoverMode::Manual,
+            local_first_tie_break: true,
+        }
+    }
+}
+
+/// Cross-region signal sync listener and freshness tuning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossRegionSyncPlaneConfig {
+    pub enabled: bool,
+    pub listen_port: u16,
+    pub full_resync_interval_seconds: u64,
+    pub signal_stale_after_seconds: u64,
+}
+
+impl Default for CrossRegionSyncPlaneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_port: 9443,
+            full_resync_interval_seconds: 300,
+            signal_stale_after_seconds: 30,
+        }
+    }
+}
+
+/// Configured peer Region Agent. Remote workers are intentionally not modeled
+/// here; request forwarding resolves only by peer region.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossRegionPeerConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+}
+
+/// mTLS file paths for cross-region request forwarding and signal sync.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossRegionMtlsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_key_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_key_path: Option<String>,
+}
+
+/// Phase 1 cross-region routing configuration. This is only plumbing until the
+/// later sync and request-plane tasks consume it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossRegionConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    pub local_only_on_degraded_sync: bool,
+    pub request_plane: CrossRegionRequestPlaneConfig,
+    pub sync_plane: CrossRegionSyncPlaneConfig,
+    pub peers: Vec<CrossRegionPeerConfig>,
+    pub mtls: CrossRegionMtlsConfig,
+}
+
+impl Default for CrossRegionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            region_id: None,
+            realm: None,
+            environment: None,
+            local_only_on_degraded_sync: true,
+            request_plane: CrossRegionRequestPlaneConfig::default(),
+            sync_plane: CrossRegionSyncPlaneConfig::default(),
+            peers: Vec::new(),
+            mtls: CrossRegionMtlsConfig::default(),
+        }
+    }
+}
+
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterConfig {
@@ -110,6 +261,8 @@ pub struct RouterConfig {
     pub background: BackgroundConfig,
     #[serde(default)]
     pub tenant_resolution: TenantResolutionConfig,
+    #[serde(default)]
+    pub cross_region: CrossRegionConfig,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
     pub queue_size: usize,
@@ -646,6 +799,7 @@ impl Default for RouterConfig {
             memory_runtime: MemoryRuntimeConfig::default(),
             background: BackgroundConfig::default(),
             tenant_resolution: TenantResolutionConfig::default(),
+            cross_region: CrossRegionConfig::default(),
             max_concurrent_requests: -1,
             queue_size: 100,
             queue_timeout_secs: 60,
@@ -754,6 +908,33 @@ impl RouterConfig {
 mod tests {
     use super::*;
 
+    /// Build a valid test fixture using realistic OCI-style values, not production defaults.
+    fn valid_cross_region_config() -> CrossRegionConfig {
+        CrossRegionConfig {
+            enabled: true,
+            region_id: Some("us-ashburn-1".to_string()),
+            realm: Some("oc1".to_string()),
+            environment: Some("prod".to_string()),
+            peers: vec![CrossRegionPeerConfig {
+                region_id: Some("us-chicago-1".to_string()),
+                request_url: Some(
+                    "https://smg-region-agent.us-chicago-1.internal:8443".to_string(),
+                ),
+                sync_url: Some("https://smg-region-agent.us-chicago-1.internal:9443".to_string()),
+                realm: Some("oc1".to_string()),
+                environment: Some("prod".to_string()),
+            }],
+            mtls: CrossRegionMtlsConfig {
+                ca_cert_path: Some("/etc/smg/certs/ca.crt".to_string()),
+                server_cert_path: Some("/etc/smg/certs/tls.crt".to_string()),
+                server_key_path: Some("/etc/smg/certs/tls.key".to_string()),
+                client_cert_path: Some("/etc/smg/certs/client.crt".to_string()),
+                client_key_path: Some("/etc/smg/certs/client.key".to_string()),
+            },
+            ..CrossRegionConfig::default()
+        }
+    }
+
     #[test]
     fn test_router_config_default() {
         let config = RouterConfig::default();
@@ -779,8 +960,64 @@ mod tests {
             config.tenant_resolution.tenant_header_name,
             DEFAULT_TENANT_HEADER_NAME
         );
+        assert!(!config.cross_region.enabled);
         assert!(!config.skills_enabled);
         assert!(config.skills.is_none());
+    }
+
+    #[test]
+    fn test_cross_region_config_defaults_are_disabled_and_phase1_values() {
+        let config = CrossRegionConfig::default();
+
+        assert!(!config.enabled);
+        assert_eq!(config.region_id, None);
+        assert!(config.local_only_on_degraded_sync);
+        assert!(config.request_plane.enabled);
+        assert_eq!(config.request_plane.listen_port, 8443);
+        assert_eq!(config.request_plane.max_platform_retries, 5);
+        assert_eq!(
+            config.request_plane.default_failover_mode,
+            CrossRegionFailoverMode::Manual
+        );
+        assert!(config.request_plane.local_first_tie_break);
+        assert!(config.sync_plane.enabled);
+        assert_eq!(config.sync_plane.listen_port, 9443);
+        assert_eq!(config.sync_plane.full_resync_interval_seconds, 300);
+        assert_eq!(config.sync_plane.signal_stale_after_seconds, 30);
+        assert!(config.peers.is_empty());
+    }
+
+    #[test]
+    fn test_cross_region_failover_mode_parse_and_display() {
+        assert_eq!(
+            "manual".parse::<CrossRegionFailoverMode>(),
+            Ok(CrossRegionFailoverMode::Manual)
+        );
+        assert_eq!(
+            "AUTO".parse::<CrossRegionFailoverMode>(),
+            Ok(CrossRegionFailoverMode::Automatic)
+        );
+        assert_eq!(CrossRegionFailoverMode::Manual.to_string(), "MANUAL");
+        assert_eq!(CrossRegionFailoverMode::Automatic.to_string(), "AUTOMATIC");
+    }
+
+    #[test]
+    fn test_cross_region_yaml_loads_into_router_config() {
+        let config = RouterConfig {
+            cross_region: valid_cross_region_config(),
+            ..RouterConfig::default()
+        };
+
+        let yaml = serde_yaml::to_string(&config).expect("serialize router config");
+        let parsed: RouterConfig = serde_yaml::from_str(&yaml).expect("deserialize router config");
+
+        assert!(parsed.cross_region.enabled);
+        assert_eq!(
+            parsed.cross_region.region_id.as_deref(),
+            Some("us-ashburn-1")
+        );
+        assert_eq!(parsed.cross_region.peers.len(), 1);
+        parsed.validate().expect("valid cross-region config");
     }
 
     #[test]
