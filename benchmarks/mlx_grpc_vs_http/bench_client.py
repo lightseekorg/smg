@@ -86,13 +86,7 @@ def _load_agent_prompts(num_samples: int) -> list[str]:
     for row in ds.shuffle(seed=42).select(range(min(num_samples * 4, len(ds)))):
         # The schema isn't perfectly consistent across forks; try common keys.
         instruction = row.get("instruction") or row.get("prompt") or ""
-        context = (
-            row.get("input")
-            or row.get("code")
-            or row.get("file")
-            or row.get("source")
-            or ""
-        )
+        context = row.get("input") or row.get("code") or row.get("file") or row.get("source") or ""
         if instruction and context:
             prompt = f"{instruction.strip()}\n\n{context.strip()}"
         elif instruction or context:
@@ -202,10 +196,7 @@ async def _run_concurrent(
                 results.append(r)
 
         start = time.monotonic()
-        tasks = [
-            asyncio.create_task(worker(prompts[i % len(prompts)]))
-            for i in range(num_prompts)
-        ]
+        tasks = [asyncio.create_task(worker(prompts[i % len(prompts)])) for i in range(num_prompts)]
         await asyncio.gather(*tasks)
         elapsed = time.monotonic() - start
 
