@@ -76,19 +76,39 @@ PHASES="mlx grpc" CONCURRENCIES="1" SCENARIOS="chat" DURATION_MIN=1 \
 
 ## Reading the results
 
-Most cells render four meaningful columns (RPS, output tok/s, TTFT, TPOT)
-across all three backends. Two known quirks worth calling out:
+Cells render four meaningful columns (RPS, output tok/s, TTFT, TPOT)
+across all three backends.
 
-- **`mlx-lm.server` TPOT often shows `0`.** mlx-lm's HTTP server buffers
-  all per-token SSE chunks and flushes them in a single localhost write,
-  so per-chunk inter-token latency collapses to ~0 from the client's
-  perspective. The same MLX `BatchGenerator` viewed through the SMG gRPC
-  servicer streams properly — that's why the `smg → mlx-grpc` row right
-  next to it shows a real TPOT in the same scenario.
-- **High-concurrency agent cells may be empty (`—`)** if the
-  `DURATION_MIN` budget runs out before any request completes a 2.5k
-  token prefill. Bump `DURATION_MIN` (or drop to lower concurrency) if
-  you need numbers there.
+**High-concurrency agent cells may be empty (`—`)** if the
+`DURATION_MIN` budget runs out before any request completes a 2.5k
+token prefill. Bump `DURATION_MIN` (or drop to lower concurrency) if
+you need numbers there.
+
+### Why we patch genai-bench
+
+`mlx-lm.server` is built on Python's `BaseHTTPRequestHandler`, which
+uses HTTP/1.0 by default and emits no `Content-Length` or
+`Transfer-Encoding: chunked` for streaming responses. Wire-level probes
+confirm mlx-lm DOES stream per-token chunks at ~18 ms intervals — the
+issue is purely client-side: genai-bench calls
+`response.iter_lines(chunk_size=None)` (in `genai_bench/user/openai_user.py`),
+which under the hood does `urllib3.HTTPResponse.read(amt=None)` and
+buffers to EOF when the response has neither `Content-Length` nor a
+`chunked` envelope. Result without the patch: every per-token chunk
+arrives at the bench client in one bulk read at end-of-stream, which
+collapses measured TPOT to ~0 and inflates TTFT to e2e latency.
+
+The `Patch genai-bench streaming chunk size` workflow step changes
+`chunk_size=None` to `chunk_size=1`, which makes urllib3 yield per OS
+read — restoring correct per-token timing. The patch is a no-op for
+the SMG router (Rust hyper, HTTP/1.1 + chunked) and vllm-metal (uvicorn,
+HTTP/1.1 + chunked); both stream correctly with either chunk_size.
+
+When running locally, apply the same patch by hand once:
+```bash
+python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) + '/user/openai_user.py')" \
+  | xargs sed -i.bak 's/response.iter_lines(chunk_size=None)/response.iter_lines(chunk_size=1)/g'
+```
 
 ## Robustness
 
