@@ -291,9 +291,18 @@ fn extend_with_deserialized_items(
         match from_value::<ResponseInputOutputItem>(item.clone()) {
             Ok(parsed) => out.push(parsed),
             Err(e) => {
+                // Don't dump the full `item` JSON — stored history can
+                // contain raw user text, tool arguments, and tool
+                // outputs (PII/secrets). Log just the kind plus the
+                // item's `id` and `type` for debugging.
+                let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("<no-id>");
+                let item_type = item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<no-type>");
                 warn!(
-                    "Failed to deserialize stored {} item: {}. Item: {}",
-                    kind, e, item
+                    "Failed to deserialize stored {} item (id={}, type={}): {}",
+                    kind, item_id, item_type, e,
                 );
             }
         }

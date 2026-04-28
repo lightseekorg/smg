@@ -32,7 +32,7 @@ impl AgentLoopError {
     pub(crate) fn into_response(self) -> Response {
         match self {
             AgentLoopError::InvalidRequest(msg) => error::bad_request("invalid_request", msg),
-            AgentLoopError::Upstream(msg) => error::internal_error("upstream_error", msg),
+            AgentLoopError::Upstream(msg) => error::bad_gateway("upstream_error", msg),
             AgentLoopError::Internal(msg) => error::internal_error("internal_error", msg),
             AgentLoopError::Response(resp) => *resp,
         }

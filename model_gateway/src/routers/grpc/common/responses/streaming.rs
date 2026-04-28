@@ -16,7 +16,7 @@ use openai_protocol::{
         ResponsesRequest, ResponsesResponse, ResponsesUsage,
     },
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use smg_mcp::{self as mcp};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -50,7 +50,7 @@ enum ItemStatus {
 struct OutputItemState {
     output_index: usize,
     status: ItemStatus,
-    item_data: Option<serde_json::Value>,
+    item_data: Option<Value>,
 }
 
 /// OpenAI-compatible event emitter for /v1/responses streaming
@@ -146,7 +146,7 @@ impl ResponseStreamEventEmitter {
         seq
     }
 
-    pub fn emit_created(&mut self) -> serde_json::Value {
+    pub fn emit_created(&mut self) -> Value {
         json!({
             "type": ResponseEvent::CREATED,
             "sequence_number": self.next_sequence(),
@@ -161,7 +161,7 @@ impl ResponseStreamEventEmitter {
         })
     }
 
-    pub fn emit_in_progress(&mut self) -> serde_json::Value {
+    pub fn emit_in_progress(&mut self) -> Value {
         json!({
             "type": ResponseEvent::IN_PROGRESS,
             "sequence_number": self.next_sequence(),
@@ -178,7 +178,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         content_index: usize,
-    ) -> serde_json::Value {
+    ) -> Value {
         self.has_emitted_content_part_added = true;
         json!({
             "type": ContentPartEvent::ADDED,
@@ -199,7 +199,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         content_index: usize,
-    ) -> serde_json::Value {
+    ) -> Value {
         self.accumulated_text.push_str(delta);
         json!({
             "type": OutputTextEvent::DELTA,
@@ -217,7 +217,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         content_index: usize,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": OutputTextEvent::DONE,
             "sequence_number": self.next_sequence(),
@@ -233,7 +233,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         content_index: usize,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": ContentPartEvent::DONE,
             "sequence_number": self.next_sequence(),
@@ -249,9 +249,9 @@ impl ResponseStreamEventEmitter {
 
     // INVARIANT: this method is terminal — it drains internal state via `take()`
     // and must only be called once per emitter lifetime.
-    pub fn emit_completed(&mut self, usage: Option<&serde_json::Value>) -> serde_json::Value {
+    pub fn emit_completed(&mut self, usage: Option<&Value>) -> Value {
         // Build output array from tracked items
-        let output: Vec<serde_json::Value> = self
+        let output: Vec<Value> = self
             .output_items
             .iter_mut()
             .filter_map(|item| {
@@ -293,38 +293,40 @@ impl ResponseStreamEventEmitter {
             response_obj["usage"] = usage_val.clone();
         }
 
-        // Add all original request fields if available
+        // Mirror the non-streaming `ResponsesResponse` shape so streaming
+        // `response.completed.response` echoes the same canonical-field set
+        // a client would see from the NS body. Fields that are `Option::None`
+        // serialise as `null` to match the NS path's wire shape (which lost
+        // its `#[serde_with::skip_serializing_none]` in this PR).
         if let Some(ref req) = self.original_request {
-            Self::add_optional_field(&mut response_obj, "instructions", req.instructions.as_ref());
-            Self::add_optional_field(
-                &mut response_obj,
-                "max_output_tokens",
-                req.max_output_tokens.as_ref(),
-            );
-            Self::add_optional_field(
-                &mut response_obj,
-                "max_tool_calls",
-                req.max_tool_calls.as_ref(),
-            );
-            Self::add_optional_field(
-                &mut response_obj,
-                "previous_response_id",
-                req.previous_response_id.as_ref(),
-            );
+            response_obj["instructions"] = json!(req.instructions);
+            response_obj["max_output_tokens"] = json!(req.max_output_tokens);
+            response_obj["max_tool_calls"] = json!(req.max_tool_calls);
+            response_obj["previous_response_id"] = json!(req.previous_response_id);
             // OpenAI Responses always echoes `conversation` as
             // `{ "id": "conv_..." }`. The request's `ConversationRef`
             // accepts either a bare string or the `Object` form via
             // untagged serde — normalize the echo to the canonical
             // object shape so the wire response is shape-stable
             // regardless of which input form the client sent.
-            if let Some(conv) = req.conversation.as_ref() {
-                response_obj["conversation"] = json!({ "id": conv.as_id() });
-            }
-            Self::add_optional_field(&mut response_obj, "reasoning", req.reasoning.as_ref());
-            Self::add_optional_field(&mut response_obj, "temperature", req.temperature.as_ref());
-            Self::add_optional_field(&mut response_obj, "top_p", req.top_p.as_ref());
-            Self::add_optional_field(&mut response_obj, "truncation", req.truncation.as_ref());
-            Self::add_optional_field(&mut response_obj, "user", req.user.as_ref());
+            response_obj["conversation"] = match req.conversation.as_ref() {
+                Some(conv) => json!({ "id": conv.as_id() }),
+                None => Value::Null,
+            };
+            response_obj["reasoning"] = json!(req.reasoning);
+            response_obj["temperature"] = json!(req.temperature);
+            response_obj["top_p"] = json!(req.top_p);
+            response_obj["truncation"] = json!(req.truncation);
+            response_obj["user"] = json!(req.user);
+            response_obj["background"] = json!(req.background);
+            response_obj["frequency_penalty"] = json!(req.frequency_penalty);
+            response_obj["presence_penalty"] = json!(req.presence_penalty);
+            response_obj["service_tier"] = json!(req.service_tier);
+            response_obj["prompt_cache_key"] = json!(req.prompt_cache_key);
+            response_obj["prompt_cache_retention"] = json!(req.prompt_cache_retention);
+            response_obj["top_logprobs"] = json!(req.top_logprobs);
+            response_obj["text"] = json!(req.text);
+            response_obj["safety_identifier"] = json!(req.safety_identifier);
 
             response_obj["parallel_tool_calls"] = json!(req.parallel_tool_calls.unwrap_or(true));
             response_obj["store"] = json!(req.store.unwrap_or(true));
@@ -341,6 +343,15 @@ impl ResponseStreamEventEmitter {
             }
         }
 
+        // Pure response-side fields the gateway does not populate today
+        // but that the OpenAI Responses NS body always carries as `null`.
+        // Emit them here too so streaming stays shape-aligned with NS.
+        response_obj["billing"] = Value::Null;
+        response_obj["moderation"] = Value::Null;
+        response_obj["completed_at"] = Value::Null;
+        response_obj["error"] = Value::Null;
+        response_obj["incomplete_details"] = Value::Null;
+
         json!({
             "type": ResponseEvent::COMPLETED,
             "sequence_number": self.next_sequence(),
@@ -349,9 +360,7 @@ impl ResponseStreamEventEmitter {
     }
 
     /// Convert tool entries to JSON values using the shared `build_mcp_tool_infos` bridge.
-    fn tool_entries_to_json(
-        tools: &[mcp::ToolEntry],
-    ) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+    fn tool_entries_to_json(tools: &[mcp::ToolEntry]) -> Result<Vec<Value>, serde_json::Error> {
         mcp::build_mcp_tool_infos(tools)
             .into_iter()
             .map(serde_json::to_value)
@@ -359,11 +368,7 @@ impl ResponseStreamEventEmitter {
     }
 
     /// Helper to add optional fields to JSON object
-    fn add_optional_field<T: serde::Serialize>(
-        obj: &mut serde_json::Value,
-        key: &str,
-        value: Option<&T>,
-    ) {
+    fn add_optional_field<T: serde::Serialize>(obj: &mut Value, key: &str, value: Option<&T>) {
         if let Some(val) = value {
             obj[key] = json!(val);
         }
@@ -373,7 +378,7 @@ impl ResponseStreamEventEmitter {
     // MCP Event Emission Methods
     // ========================================================================
 
-    pub fn emit_mcp_list_tools_in_progress(&mut self, output_index: usize) -> serde_json::Value {
+    pub fn emit_mcp_list_tools_in_progress(&mut self, output_index: usize) -> Value {
         json!({
             "type": McpEvent::LIST_TOOLS_IN_PROGRESS,
             "sequence_number": self.next_sequence(),
@@ -384,8 +389,8 @@ impl ResponseStreamEventEmitter {
     pub fn emit_mcp_list_tools_completed(
         &mut self,
         output_index: usize,
-        tool_items: &[serde_json::Value],
-    ) -> serde_json::Value {
+        tool_items: &[Value],
+    ) -> Value {
         json!({
             "type": McpEvent::LIST_TOOLS_COMPLETED,
             "sequence_number": self.next_sequence(),
@@ -399,7 +404,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         delta: &str,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": McpEvent::CALL_ARGUMENTS_DELTA,
             "sequence_number": self.next_sequence(),
@@ -415,7 +420,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         arguments: &str,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": McpEvent::CALL_ARGUMENTS_DONE,
             "sequence_number": self.next_sequence(),
@@ -430,7 +435,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         error: &str,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": McpEvent::CALL_FAILED,
             "sequence_number": self.next_sequence(),
@@ -451,7 +456,7 @@ impl ResponseStreamEventEmitter {
         event_type: &'static str,
         output_index: usize,
         item_id: &str,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": event_type,
             "sequence_number": self.next_sequence(),
@@ -472,7 +477,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         family: OutputFamily,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Value> {
         let event_type = match family {
             OutputFamily::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
             OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
@@ -495,7 +500,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         family: OutputFamily,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Value> {
         let event_type = match family {
             OutputFamily::WebSearchCall => WebSearchCallEvent::SEARCHING,
             OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
@@ -526,7 +531,7 @@ impl ResponseStreamEventEmitter {
         family: OutputFamily,
         partial_image_index: u32,
         partial_image_b64: &str,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Value> {
         if !matches!(family, OutputFamily::ImageGenerationCall) {
             return None;
         }
@@ -551,7 +556,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         family: OutputFamily,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Value> {
         let event_type = match family {
             OutputFamily::WebSearchCall => WebSearchCallEvent::COMPLETED,
             OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
@@ -574,7 +579,7 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         delta: &str,
         family: OutputFamily,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Value> {
         match family {
             OutputFamily::Function => {
                 Some(self.emit_function_call_arguments_delta(output_index, item_id, delta))
@@ -597,7 +602,7 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         arguments: &str,
         family: OutputFamily,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Value> {
         match family {
             OutputFamily::Function => {
                 Some(self.emit_function_call_arguments_done(output_index, item_id, arguments))
@@ -640,7 +645,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         delta: &str,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": FunctionCallEvent::ARGUMENTS_DELTA,
             "sequence_number": self.next_sequence(),
@@ -656,7 +661,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         item_id: &str,
         arguments: &str,
-    ) -> serde_json::Value {
+    ) -> Value {
         json!({
             "type": FunctionCallEvent::ARGUMENTS_DONE,
             "sequence_number": self.next_sequence(),
@@ -671,11 +676,7 @@ impl ResponseStreamEventEmitter {
     // ========================================================================
 
     /// Emit response.output_item.added event
-    pub fn emit_output_item_added(
-        &mut self,
-        output_index: usize,
-        item: &serde_json::Value,
-    ) -> serde_json::Value {
+    pub fn emit_output_item_added(&mut self, output_index: usize, item: &Value) -> Value {
         json!({
             "type": OutputItemEvent::ADDED,
             "sequence_number": self.next_sequence(),
@@ -685,11 +686,7 @@ impl ResponseStreamEventEmitter {
     }
 
     /// Emit response.output_item.done event
-    pub fn emit_output_item_done(
-        &mut self,
-        output_index: usize,
-        item: &serde_json::Value,
-    ) -> serde_json::Value {
+    pub fn emit_output_item_done(&mut self, output_index: usize, item: &Value) -> Value {
         // Store the item data for later use in emit_completed
         self.store_output_item_data(output_index, item.clone());
 
@@ -749,7 +746,7 @@ impl ResponseStreamEventEmitter {
     }
 
     /// Store output item data when emitting output_item.done
-    pub fn store_output_item_data(&mut self, output_index: usize, item_data: serde_json::Value) {
+    pub fn store_output_item_data(&mut self, output_index: usize, item_data: Value) {
         if let Some(item) = self
             .output_items
             .iter_mut()
@@ -818,13 +815,17 @@ impl ResponseStreamEventEmitter {
             self.current_reasoning_output_index = Some(output_index);
             self.current_reasoning_item_id = Some(item_id.clone());
 
+            // Match the OpenAI Responses cloud reasoning item shape:
+            // only `id`, `type`, and `summary` are emitted (verified by
+            // hitting the cloud across effort=minimal/medium/high and
+            // summary=auto/detailed; `content` / `encrypted_content` /
+            // `status` never appear unless the client opts into
+            // `include: ["reasoning.encrypted_content"]`, which the
+            // gateway does not relay anyway).
             let item = json!({
                 "id": item_id,
                 "type": "reasoning",
                 "summary": [],
-                "content": [],
-                "encrypted_content": null,
-                "status": "in_progress"
             });
             let event = self.emit_output_item_added(output_index, &item);
             self.send_event(&event, tx)?;
@@ -851,12 +852,19 @@ impl ResponseStreamEventEmitter {
         }
 
         self.accumulated_reasoning_text.push_str(delta);
+        // Cloud emits reasoning summary deltas under
+        // `response.reasoning_summary_text.{delta,done}` keyed by
+        // `summary_index`, not `response.reasoning_text.*` /
+        // `content_index`. Use the cloud-aligned event family so
+        // OpenAI-SDK clients pick up the deltas as standard reasoning
+        // summary stream, and final `summary[]` is populated below in
+        // `finish_reasoning_item` with the same accumulated text.
         let event = json!({
-            "type": "response.reasoning_text.delta",
+            "type": "response.reasoning_summary_text.delta",
             "sequence_number": self.next_sequence(),
             "output_index": output_index,
             "item_id": item_id,
-            "content_index": 0,
+            "summary_index": 0,
             "delta": delta,
             "obfuscation": null
         });
@@ -876,11 +884,11 @@ impl ResponseStreamEventEmitter {
 
         let text = std::mem::take(&mut self.accumulated_reasoning_text);
         let event = json!({
-            "type": "response.reasoning_text.done",
+            "type": "response.reasoning_summary_text.done",
             "sequence_number": self.next_sequence(),
             "output_index": output_index,
             "item_id": item_id,
-            "content_index": 0,
+            "summary_index": 0,
             "text": text.clone()
         });
         self.send_event(&event, tx)?;
@@ -897,13 +905,15 @@ impl ResponseStreamEventEmitter {
             self.send_event(&event, tx)?;
         }
 
+        // Final reasoning item carries the accumulated text inside
+        // `summary[]` as a `summary_text` part, matching the cloud
+        // shape (verified across multiple effort/summary configs).
         let item = json!({
             "id": item_id,
             "type": "reasoning",
-            "summary": [],
-            "content": [{ "type": "reasoning_text", "text": text }],
-            "encrypted_content": null,
-            "status": "completed"
+            "summary": [
+                { "type": "summary_text", "text": text }
+            ],
         });
         let event = self.emit_output_item_done(output_index, &item);
         self.send_event(&event, tx)?;
@@ -1026,7 +1036,7 @@ impl ResponseStreamEventEmitter {
     )]
     pub fn send_event(
         &self,
-        event: &serde_json::Value,
+        event: &Value,
         tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
     ) -> Result<(), String> {
         let event_json =
@@ -1055,7 +1065,7 @@ impl ResponseStreamEventEmitter {
     /// Returns true if sent successfully, false if client disconnected.
     pub fn send_event_best_effort(
         &self,
-        event: &serde_json::Value,
+        event: &Value,
         tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
     ) -> bool {
         match self.send_event(event, tx) {

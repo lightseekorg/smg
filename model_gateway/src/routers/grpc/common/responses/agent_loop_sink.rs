@@ -839,9 +839,16 @@ impl GrpcResponseStreamSink {
         if self.disconnected {
             return;
         }
-        let (output_index, item_id) = self
+        let (output_index, _allocated_item_id) = self
             .emitter
             .allocate_output_index(OutputItemType::McpApprovalRequest);
+        // Use the canonical `mcpr_<call_id>` id that the driver's
+        // NS-side `build_mcp_approval_request_items` uses
+        // (`driver.rs:692`). The allocator-issued id would put
+        // streaming on a different wire id from the persisted /
+        // history form, so a continuation that copies the streamed
+        // id and hits the chain on a later turn could orphan-reject.
+        let item_id = format!("mcpr_{}", pending.call.call_id);
 
         let item = json!({
             "id": item_id,

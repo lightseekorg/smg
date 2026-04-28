@@ -294,6 +294,34 @@ impl ToolExecutionResult {
 }
 
 impl ToolExecutionOutput {
+    /// Build a synthetic error output for rendering when the gateway
+    /// rejects a tool call before it reaches the orchestrator (e.g.
+    /// malformed arguments parsed before dispatch). Routes through the
+    /// same [`Self::to_response_item`] pipeline as real executions, so
+    /// `apply_error_overrides` shapes the failed item identically — no
+    /// separate render path lives outside this struct.
+    pub fn synthetic_error(
+        call_id: String,
+        tool_name: String,
+        server_label: String,
+        arguments_str: String,
+        response_format: ResponseFormat,
+        error_message: String,
+    ) -> Self {
+        Self {
+            call_id,
+            tool_name,
+            server_key: server_label.clone(),
+            server_label,
+            arguments_str,
+            output: serde_json::json!({ "error": &error_message }),
+            is_error: true,
+            error_message: Some(error_message),
+            response_format,
+            duration: Duration::default(),
+        }
+    }
+
     /// Get the transformed ResponseOutputItem.
     ///
     /// Transforms the raw output to the appropriate ResponseOutputItem type
@@ -353,8 +381,17 @@ fn apply_error_overrides(item: &mut ResponseOutputItem, error_message: Option<&s
             *error = Some(msg);
             output.clear();
         }
-        ResponseOutputItem::WebSearchCall { status, .. } => {
+        ResponseOutputItem::WebSearchCall {
+            status, results, ..
+        } => {
             *status = WebSearchCallStatus::Failed;
+            // Drop the success-path hits the transformer wrote
+            // alongside the (now-failed) status so wire consumers
+            // don't see `status: "failed"` co-existing with a
+            // populated `results` array. Aligns with the
+            // `CodeInterpreterCall` / `FileSearchCall` /
+            // `ImageGenerationCall` arms below.
+            *results = None;
         }
         ResponseOutputItem::CodeInterpreterCall {
             status, outputs, ..
