@@ -54,6 +54,29 @@ fn responses_transform_maps_tool_choice_required_to_any_mode() {
 }
 
 #[test]
+fn responses_transform_preserves_generation_controls_in_generation_config() {
+    let provider = GoogleProvider;
+    let mut payload = json!({
+        "model": "google.gemini-2.5-flash",
+        "input": [{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+        "max_output_tokens": 256,
+        "temperature": 0.3,
+        "top_p": 0.9
+    });
+
+    provider
+        .transform_request(&mut payload, Endpoint::Responses)
+        .expect("transform should succeed");
+
+    let generation = payload
+        .get("generationConfig")
+        .expect("generationConfig should be present");
+    assert_eq!(generation["maxOutputTokens"], json!(256));
+    assert_eq!(generation["temperature"], json!(0.3));
+    assert_eq!(generation["topP"], json!(0.9));
+}
+
+#[test]
 fn gemini_upstream_url_requires_dp_supplied_url() {
     let provider = GoogleProvider;
     let err = provider
