@@ -200,8 +200,22 @@ impl GrpcResponseStreamSink {
         &mut self,
         chunk: &openai_protocol::chat::ChatCompletionStreamResponse,
     ) {
-        // Forward the text/finish parts unchanged.
-        let _ = self.emitter.process_chunk(chunk, &self.tx);
+        // Honor the disconnect latch other emit_* paths use — once the
+        // client is gone, every send is a no-op and we should stop
+        // both the forward step and the per-call_index dispatch
+        // below. Without this guard the emitter keeps formatting and
+        // attempting to push events onto a closed channel.
+        if self.disconnected {
+            return;
+        }
+        // Forward the text/finish parts. `process_chunk` returns Err
+        // only when the underlying `tx.send` failed because the
+        // receiver dropped — that's the signal to latch the
+        // disconnect flag so subsequent emits short-circuit.
+        if self.emitter.process_chunk(chunk, &self.tx).is_err() {
+            self.disconnected = true;
+            return;
+        }
 
         let Some(choice) = chunk.choices.first() else {
             return;

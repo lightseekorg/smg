@@ -84,10 +84,14 @@ fn lower_item(item: ResponseInputOutputItem) -> Vec<ResponseInputOutputItem> {
             // Successful call: take the rendered output verbatim.
             // Failed call: project `error` into the output slot,
             // wrapped so the backend prompt can distinguish it from a
-            // normal result. Only one of `output` / `error` is
-            // populated by the surface that produced the original
-            // mcp_call, so taking either is unambiguous.
-            let output_text = output.or_else(|| error.map(|e| format!("Tool call failed: {e}")));
+            // normal result. Filter out empty `output` strings before
+            // falling through — some surfaces persist failed calls
+            // with `output: Some("")` *and* a populated `error`, and
+            // taking the empty string verbatim would erase the
+            // failure context the prompt needs.
+            let output_text = output
+                .filter(|s| !s.is_empty())
+                .or_else(|| error.map(|e| format!("Tool call failed: {e}")));
             if let Some(text) = output_text {
                 out.push(ResponseInputOutputItem::FunctionCallOutput {
                     id: None,

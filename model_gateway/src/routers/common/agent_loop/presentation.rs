@@ -315,12 +315,23 @@ impl ToolPresentation {
 
             if executed.is_error {
                 obj.insert("status".to_string(), json!("failed"));
-                let error_text = if executed.output_string.is_empty() {
-                    "tool execution failed".to_string()
-                } else {
-                    executed.output_string.clone()
-                };
-                obj.insert("error".to_string(), json!(error_text));
+                // Only `mcp_call` carries an `error` slot in the
+                // protocol layer (see `ResponseOutputItem::McpCall`);
+                // the hosted-builtin variants do not. Stamping
+                // `error` on those families would let the streaming
+                // wire diverge from the deserialized typed shape and
+                // get silently dropped on `previous_response_id`
+                // round-trip. Surface failure detail only for
+                // mcp_call; hosted families convey failure through
+                // `status: "failed"` alone.
+                if matches!(self.family, OutputFamily::McpCall) {
+                    let error_text = if executed.output_string.is_empty() {
+                        "tool execution failed".to_string()
+                    } else {
+                        executed.output_string.clone()
+                    };
+                    obj.insert("error".to_string(), json!(error_text));
+                }
                 // Successful-path output must not co-exist with a
                 // failure status. Clear it for families whose final
                 // item shape includes an `output` slot.
@@ -354,11 +365,15 @@ impl ToolPresentation {
                 "output": output,
                 "status": status,
             }),
+            // Hosted-builtin families do not carry an `error` slot in
+            // the protocol layer (see `ResponseOutputItem::{
+            // WebSearchCall, CodeInterpreterCall, FileSearchCall,
+            // ImageGenerationCall}`). Convey failure through
+            // `status: "failed"` alone — `error` is mcp_call-only.
             OutputFamily::WebSearchCall => json!({
                 "id": item_id,
                 "type": "web_search_call",
                 "action": { "type": "search", "query": "" },
-                "error": error,
                 "status": status,
             }),
             OutputFamily::CodeInterpreterCall => json!({
@@ -367,7 +382,6 @@ impl ToolPresentation {
                 "container_id": "",
                 "code": null,
                 "outputs": [],
-                "error": error,
                 "status": status,
             }),
             OutputFamily::FileSearchCall => json!({
@@ -375,14 +389,12 @@ impl ToolPresentation {
                 "type": "file_search_call",
                 "queries": [],
                 "results": null,
-                "error": error,
                 "status": status,
             }),
             OutputFamily::ImageGenerationCall => json!({
                 "id": item_id,
                 "type": "image_generation_call",
                 "result": null,
-                "error": error,
                 "status": status,
             }),
             // Function (caller fc) has no execute phase, so this fallback
