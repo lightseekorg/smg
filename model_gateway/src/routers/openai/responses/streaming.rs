@@ -729,12 +729,26 @@ pub(super) async fn handle_simple_streaming_passthrough(
                                                 for transformed in transformed_events {
                                                     match serde_json::to_string(&transformed) {
                                                         Ok(serialized) => {
+                                                            let transformed_event_name = transformed
+                                                                .get("type")
+                                                                .and_then(|v| v.as_str())
+                                                                .map(str::to_string)
+                                                                .or_else(|| {
+                                                                    event_name.map(str::to_string)
+                                                                });
                                                             let raw_transformed_block =
-                                                                match event_name {
+                                                                match transformed_event_name
+                                                                    .as_deref()
+                                                                {
                                                                     Some(evt) => {
-                                                                        format!("event: {evt}\ndata: {serialized}")
+                                                                        format!(
+                                                                            "event: {}\ndata: {serialized}",
+                                                                            map_event_name(evt)
+                                                                        )
                                                                     }
-                                                                    None => format!("data: {serialized}"),
+                                                                    None => {
+                                                                        format!("data: {serialized}")
+                                                                    }
                                                                 };
 
                                                             let chunk_to_send = match rewrite_streaming_block(
