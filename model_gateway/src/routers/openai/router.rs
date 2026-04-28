@@ -87,6 +87,7 @@ impl OpenAIRouter {
 
         let shared_components = Arc::new(SharedComponents {
             client: ctx.client.clone(),
+            last_token_time: ctx.last_token_time.clone(),
         });
 
         let responses_components = Arc::new(ResponsesComponents {

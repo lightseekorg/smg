@@ -92,6 +92,7 @@ impl GrpcRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
+            ctx.last_token_time.clone(),
         );
 
         // Create Harmony pipelines
@@ -120,11 +121,15 @@ impl GrpcRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
+            ctx.last_token_time.clone(),
         );
 
         // Create Completion pipeline
-        let completion_pipeline =
-            RequestPipeline::new_completion(worker_registry.clone(), _policy_registry.clone());
+        let completion_pipeline = RequestPipeline::new_completion(
+            worker_registry.clone(),
+            _policy_registry.clone(),
+            ctx.last_token_time.clone(),
+        );
 
         // Extract shared dependencies for responses contexts
         let mcp_orchestrator = ctx

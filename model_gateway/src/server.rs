@@ -155,7 +155,10 @@ async fn health(_state: State<Arc<AppState>>) -> Response {
 }
 
 async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> Response {
-    use std::time::Instant;
+    use std::{
+        sync::atomic::Ordering,
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
 
     let registry = &state.context.worker_registry;
     let workers = registry.get_all();
@@ -170,6 +173,35 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
             StatusCode::SERVICE_UNAVAILABLE,
             format!("0/{} workers healthy: {}", workers.len(), info.join(", ")),
         ).into_response();
+    }
+
+    // Fast path: if a token was forwarded within the last 10 seconds, skip the
+    // probe entirely. Under high load this avoids adding a synthetic request that
+    // could tip the backend over its concurrency limit.
+    let last_token_unix = state.context.last_token_time.load(Ordering::Relaxed);
+    if last_token_unix > 0 {
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let age_secs = now_unix.saturating_sub(last_token_unix);
+        if age_secs < 10 {
+            info!(
+                target: "smg::health",
+                workers = healthy.len(),
+                last_token_age_secs = age_secs,
+                "health_generate: skipping probe — token forwarded recently"
+            );
+            return (
+                StatusCode::OK,
+                format!(
+                    "OK - {} workers healthy, last token {}s ago (probe skipped)",
+                    healthy.len(),
+                    age_secs
+                ),
+            )
+                .into_response();
+        }
     }
 
     let model_id = healthy[0].model_id().to_string();

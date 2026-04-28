@@ -80,6 +80,7 @@ impl GrpcPDRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
+            ctx.last_token_time.clone(),
         );
 
         // Create Messages PD pipeline
@@ -90,11 +91,15 @@ impl GrpcPDRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
+            ctx.last_token_time.clone(),
         );
 
         // Create Completion PD pipeline
-        let completion_pipeline =
-            RequestPipeline::new_completion_pd(worker_registry.clone(), policy_registry.clone());
+        let completion_pipeline = RequestPipeline::new_completion_pd(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            ctx.last_token_time.clone(),
+        );
 
         Ok(GrpcPDRouter {
             worker_registry,
