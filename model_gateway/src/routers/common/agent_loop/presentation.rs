@@ -315,15 +315,8 @@ impl ToolPresentation {
 
             if executed.is_error {
                 obj.insert("status".to_string(), json!("failed"));
-                // Only `mcp_call` carries an `error` slot in the
-                // protocol layer (see `ResponseOutputItem::McpCall`);
-                // the hosted-builtin variants do not. Stamping
-                // `error` on those families would let the streaming
-                // wire diverge from the deserialized typed shape and
-                // get silently dropped on `previous_response_id`
-                // round-trip. Surface failure detail only for
-                // mcp_call; hosted families convey failure through
-                // `status: "failed"` alone.
+                // `error` exists only on `mcp_call` per spec; hosted
+                // families convey failure through `status` alone.
                 if matches!(self.family, OutputFamily::McpCall) {
                     let error_text = if executed.output_string.is_empty() {
                         "tool execution failed".to_string()
@@ -332,9 +325,6 @@ impl ToolPresentation {
                     };
                     obj.insert("error".to_string(), json!(error_text));
                 }
-                // Successful-path output must not co-exist with a
-                // failure status. Clear it for families whose final
-                // item shape includes an `output` slot.
                 if obj.contains_key("output") {
                     obj.insert("output".to_string(), Value::Null);
                 }
@@ -344,10 +334,8 @@ impl ToolPresentation {
     }
 
     fn synthesize_fallback(&self, executed: &ExecutedCall, item_id: &str) -> Value {
-        // Minimal family-specific shape used when the executor did not
-        // populate `transformed_item`. Mirrors the in-progress shape
-        // but flips status / output / error to reflect the executed
-        // outcome.
+        // Fallback used when the executor did not populate
+        // `transformed_item`; produces the per-family wire shape.
         let (output, error, status) = if executed.is_error {
             (Value::Null, json!(executed.output_string), "failed")
         } else {
@@ -365,11 +353,8 @@ impl ToolPresentation {
                 "output": output,
                 "status": status,
             }),
-            // Hosted-builtin families do not carry an `error` slot in
-            // the protocol layer (see `ResponseOutputItem::{
-            // WebSearchCall, CodeInterpreterCall, FileSearchCall,
-            // ImageGenerationCall}`). Convey failure through
-            // `status: "failed"` alone — `error` is mcp_call-only.
+            // Hosted families have no `error` slot per spec; failure
+            // surfaces through `status` alone.
             OutputFamily::WebSearchCall => json!({
                 "id": item_id,
                 "type": "web_search_call",

@@ -654,18 +654,10 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        // Decide whether to drive a fresh tool call or close the
-        // turn with a final assistant message based on the **last**
-        // input item, not on whether ANY function_call_output appears
-        // anywhere. The agent loop replays full lowered transcripts
-        // (mcp_call → function_call + function_call_output pair) on
-        // continuation turns, so a `previous_response_id`-driven
-        // request looks like `[..., fc, fco, prior_msg, user_msg]`:
-        // the user's new message is what the model should answer
-        // next, so the mock should emit a fresh function_call. Only
-        // when the latest input item is `function_call_output` (i.e.
-        // SMG just returned a tool result mid-loop) should the mock
-        // close the turn with the final summary message.
+        // Close the turn only when SMG just returned a tool result —
+        // i.e. the *last* input item is `function_call_output`.
+        // Anything else (user message, replayed history) drives a
+        // fresh function_call.
         let has_prior_tool_context = payload
             .get("input")
             .and_then(|v| v.as_array())
@@ -867,12 +859,6 @@ async fn responses_handler(
                             "type": "message",
                             "role": "assistant",
                             "content": [],
-                            // Per OpenAI Responses spec, `OutputMessage.status`
-                            // is required (`{"in_progress","completed",
-                            // "incomplete"}`). The `output_item.added` event
-                            // opens the lifecycle, so the message starts in
-                            // `in_progress`; the matching `output_item.done`
-                            // below flips to `completed`.
                             "status": "in_progress"
                         }
                     })
@@ -1029,18 +1015,10 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        // Decide whether to drive a fresh tool call or close the
-        // turn with a final assistant message based on the **last**
-        // input item, not on whether ANY function_call_output appears
-        // anywhere. The agent loop replays full lowered transcripts
-        // (mcp_call → function_call + function_call_output pair) on
-        // continuation turns, so a `previous_response_id`-driven
-        // request looks like `[..., fc, fco, prior_msg, user_msg]`:
-        // the user's new message is what the model should answer
-        // next, so the mock should emit a fresh function_call. Only
-        // when the latest input item is `function_call_output` (i.e.
-        // SMG just returned a tool result mid-loop) should the mock
-        // close the turn with the final summary message.
+        // Close the turn only when SMG just returned a tool result —
+        // i.e. the *last* input item is `function_call_output`.
+        // Anything else (user message, replayed history) drives a
+        // fresh function_call.
         let has_prior_tool_context = payload
             .get("input")
             .and_then(|v| v.as_array())

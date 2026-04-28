@@ -81,14 +81,9 @@ fn lower_item(item: ResponseInputOutputItem) -> Vec<ResponseInputOutputItem> {
                 output: None,
                 status: status.clone().or_else(|| Some("completed".to_string())),
             });
-            // Successful call: take the rendered output verbatim.
-            // Failed call: project `error` into the output slot,
-            // wrapped so the backend prompt can distinguish it from a
-            // normal result. Filter out empty `output` strings before
-            // falling through — some surfaces persist failed calls
-            // with `output: Some("")` *and* a populated `error`, and
-            // taking the empty string verbatim would erase the
-            // failure context the prompt needs.
+            // Take `output` if non-empty; otherwise project `error`
+            // into the output slot so the backend prompt sees the
+            // failure context.
             let output_text = output
                 .filter(|s| !s.is_empty())
                 .or_else(|| error.map(|e| format!("Tool call failed: {e}")));

@@ -593,10 +593,6 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
                     }
                 }
                 Err(err) => {
-                    // Don't silently drop persistence on a serialize
-                    // failure; otherwise a follow-up turn that sets
-                    // `previous_response_id` to this id would observe
-                    // a missing chain link with no diagnostic trail.
                     warn!(
                         "Failed to serialize streaming response for persistence: {}",
                         err
@@ -604,13 +600,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
                 }
             },
             Err(err) => {
-                // `into_response().status().to_string()` would discard
-                // the actual error message and only forward the HTTP
-                // status string. Pull the human-readable message off
-                // the `AgentLoopError` first so SSE clients see the
-                // diagnostic detail that drove the failure.
-                let message = err.message();
-                let _ = send_sse_event(&tx, "error", &json!({"error": {"message": message}}));
+                let _ = send_sse_event(&tx, "error", &json!({"error": {"message": err.message()}}));
             }
         }
 
