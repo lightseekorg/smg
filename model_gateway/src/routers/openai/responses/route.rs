@@ -148,6 +148,7 @@ pub(in crate::routers::openai) async fn route_responses(
         provider: Arc::clone(&provider),
     });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
+        client_request: Some(Arc::new(body.clone())),
         previous_response_id: loaded_history.previous_response_id,
         existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
         ..Default::default()
@@ -200,12 +201,11 @@ pub(in crate::routers::openai) async fn route_responses(
             format!("Failed to prepare stateful tool request state: {e}"),
         );
     }
-    ctx.input.request_type = RequestType::Responses(Arc::new(request_body.clone()));
-
     request_body.store = Some(false);
     if let ResponseInput::Items(ref mut items) = request_body.input {
         items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
     }
+    ctx.input.request_type = RequestType::Responses(Arc::new(request_body.clone()));
 
     let mut payload = match to_value(&request_body) {
         Ok(v) => v,

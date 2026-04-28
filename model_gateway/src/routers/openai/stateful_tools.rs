@@ -127,6 +127,8 @@ pub async fn ensure_stateful_tool_bootstrap(
         return Ok(());
     }
 
+    // INVARIANT: bootstrap failures short-circuit the route immediately, so
+    // `executed` is only flipped after a successful injection/preparation.
     let result = bootstrapper.bootstrap(request, context).await?;
     prepend_injected_items(&mut request.input, result.injected_input_items);
 

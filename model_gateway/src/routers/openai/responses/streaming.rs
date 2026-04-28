@@ -559,8 +559,8 @@ pub(super) async fn handle_simple_streaming_passthrough(
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
 
-    let should_store = req.original_body.store.unwrap_or(true);
-    let original_request = req.original_body;
+    let should_store = req.client_body.store.unwrap_or(true);
+    let client_request = req.client_body;
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
@@ -582,7 +582,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     while let Some(raw_block) = chunk_processor.next_block() {
                         let block_cow = match rewrite_streaming_block(
                             &raw_block,
-                            &original_request,
+                            &client_request,
                             previous_response_id.as_deref(),
                         ) {
                             Some(modified) => Cow::Owned(modified),
@@ -626,7 +626,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             if let Some(mut response_json) = accumulator.into_final_response() {
                 patch_response_with_request_metadata(
                     &mut response_json,
-                    &original_request,
+                    &client_request,
                     previous_response_id.as_deref(),
                 );
 
@@ -636,7 +636,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     storage.conversation_item.clone(),
                     storage.response.clone(),
                     &response_json,
-                    &original_request,
+                    &client_request,
                     storage.request_context.clone(),
                 )
                 .await
@@ -679,8 +679,9 @@ pub(super) fn handle_streaming_with_tool_interception(
     let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
-    let should_store = req.original_body.store.unwrap_or(true);
-    let original_request = req.original_body;
+    let should_store = req.client_body.store.unwrap_or(true);
+    let client_request = req.client_body;
+    let request_body = req.request_body;
     let previous_response_id = req.previous_response_id;
     let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
     let stateful_tool_bootstrap = req.stateful_tool_bootstrap;
@@ -700,7 +701,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     )]
     tokio::spawn(async move {
         let mut state = ToolLoopState::new_with_bootstrap(
-            original_request.input.clone(),
+            request_body.input.clone(),
             existing_mcp_list_tools_labels,
             stateful_tool_bootstrap,
         );
@@ -708,7 +709,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             prepared_stateful_tools = state.stateful_tool_bootstrap.prepared_tools.len(),
             "Starting streaming tool loop"
         );
-        let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
+        let max_tool_calls = request_body.max_tool_calls.map(|n| n as usize);
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
         let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
@@ -733,7 +734,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         );
 
         let streaming_ctx = StreamingEventContext {
-            original_request: &original_request,
+            original_request: &client_request,
             previous_response_id: previous_response_id.as_deref(),
             session: Some(&session),
         };
@@ -957,10 +958,10 @@ pub(super) fn handle_streaming_with_tool_interception(
                     }
                     inject_mcp_metadata_streaming(&mut response_json, &state, &session);
 
-                    restore_original_tools(&mut response_json, &original_request, Some(&session));
+                    restore_original_tools(&mut response_json, &client_request, Some(&session));
                     patch_response_with_request_metadata(
                         &mut response_json,
-                        &original_request,
+                        &client_request,
                         previous_response_id.as_deref(),
                     );
 
@@ -970,7 +971,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         storage.conversation_item.clone(),
                         storage.response.clone(),
                         &response_json,
-                        &original_request,
+                        &client_request,
                         storage.request_context.clone(),
                     )
                     .await
@@ -994,7 +995,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             state.total_calls += pending_calls.len();
 
             // Record tool loop iteration metric
-            Metrics::record_mcp_tool_iteration(&original_request.model);
+            Metrics::record_mcp_tool_iteration(&request_body.model);
 
             let effective_limit = match max_tool_calls {
                 Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
@@ -1025,9 +1026,9 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &tx,
                 &mut state,
                 &mut sequence_number,
-                &original_request.model,
-                original_request.tools.as_deref().unwrap_or(&[]),
-                original_request.user.as_deref(),
+                &request_body.model,
+                request_body.tools.as_deref().unwrap_or(&[]),
+                request_body.user.as_deref(),
             )
             .await
             {
