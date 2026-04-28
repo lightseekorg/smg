@@ -106,10 +106,6 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let response = match run_agent_loop(adapter, loop_ctx, state, NoopSink).await {
         Ok(response) => response,
         Err(err) => {
-            // Stamp the worker outcome on the error path too, otherwise
-            // `worker.record_outcome` only fires on the success branch
-            // at line ~141 and per-worker error metrics under-count
-            // upstream failures (502s, internal errors, etc.).
             let response = err.into_response();
             worker.record_outcome(response.status().as_u16());
             return response;

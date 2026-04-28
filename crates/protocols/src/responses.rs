@@ -2156,10 +2156,8 @@ pub enum ResponseOutputItem {
         id: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         summary: Vec<SummaryTextContent>,
-        // Canonical Responses wire shape for the terminal reasoning
-        // item omits `content` entirely; the field stays in the type
-        // so historical / encrypted-round-trip paths can still carry
-        // analysis text on the input side.
+        // `content` is kept on the type for input round-trip but omitted
+        // from terminal output items per spec.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<ResponseReasoningContent>,
         /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
@@ -2167,10 +2165,6 @@ pub enum ResponseOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         encrypted_content: Option<String>,
-        // Terminal reasoning items in the canonical wire shape do not
-        // carry `status`; only intermediate streaming events do. Skip
-        // when None so a non-streaming render does not leak a stale
-        // `status: null` field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
@@ -3667,15 +3661,9 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub background: Option<bool>,
 
-    /// Conversation this response is linked to, if any.
-    ///
-    /// Wire shape: response side always serializes the `Object` form
-    /// `{ "id": "conv_..." }` regardless of how the value was
-    /// constructed. Normalization runs through [`ConversationAsObject`]
-    /// — `serde_with` unwraps the `Option` for us so the impl only
-    /// sees `&ConversationRef`. Bare-string *deserialization* stays
-    /// supported on the request side via [`ConversationRef`]'s
-    /// `untagged` enum derive.
+    /// Conversation this response is linked to. Always serialized as
+    /// `{ "id": "..." }`; deserialize accepts both that shape and the
+    /// bare-string form via [`ConversationRef`]'s `untagged` enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde_as(serialize_as = "Option<ConversationAsObject>")]
     pub conversation: Option<ConversationRef>,
@@ -3751,12 +3739,7 @@ pub struct ResponsesResponse {
     #[serde(default = "default_tool_choice")]
     pub tool_choice: Value,
 
-    /// Available tools.
-    ///
-    /// Skipped when empty so the wire shape mirrors the user's request:
-    /// a request with no `tools[]` (or one whose tools were entirely
-    /// filtered as internal-MCP) returns a response without a `tools`
-    /// key at all, rather than the spec-noisy `"tools": []`.
+    /// Available tools. Omitted from the wire when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ResponseTool>,
 
@@ -3778,11 +3761,8 @@ pub struct ResponsesResponse {
     /// Safety identifier for content moderation
     pub safety_identifier: Option<String>,
 
-    /// Additional metadata.
-    ///
-    /// OpenAI cloud emits `"metadata": null` when no metadata is set —
-    /// `serde_as(deserialize_as = "DefaultOnNull")` accepts both that
-    /// shape and the spec's `{}` form, mapping either to an empty map.
+    /// Additional metadata. Accepts `null` from upstream (OpenAI cloud
+    /// emits `"metadata": null` for empty maps).
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub metadata: HashMap<String, Value>,
@@ -3796,13 +3776,8 @@ fn default_tool_choice() -> Value {
     Value::String("auto".to_string())
 }
 
-/// `serde_with` adapter that forces response-side `conversation`
-/// fields to always emit the canonical `{ "id": "..." }` shape,
-/// regardless of which `ConversationRef` variant the value was
-/// deserialized into upstream. The impl operates on a bare
-/// `&ConversationRef` — `serde_with` unwraps the `Option<T>` layer for
-/// us — so this stays free of the `&Option<T>` shape that serde's
-/// `serialize_with` callback would otherwise require.
+/// `serde_with` adapter forcing response-side `conversation` to always
+/// emit `{ "id": "..." }`.
 pub struct ConversationAsObject;
 
 impl serde_with::SerializeAs<ConversationRef> for ConversationAsObject {

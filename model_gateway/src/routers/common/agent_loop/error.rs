@@ -38,12 +38,9 @@ impl AgentLoopError {
         }
     }
 
-    /// Human-readable error message suitable for surfacing to the
-    /// client (e.g. inside an SSE `error` event payload). For the
-    /// pre-built `Response` variant we cannot peek at the JSON body
-    /// without consuming it, so we fall back to the status code's
-    /// reason phrase — adapters that need the body should handle
-    /// `Response` separately before reaching this method.
+    /// Human-readable error message for client-facing surfaces (SSE
+    /// `error` payloads, etc.). The pre-built `Response` variant falls
+    /// back to the status code's reason phrase since the body is opaque.
     pub(crate) fn message(&self) -> String {
         match self {
             AgentLoopError::InvalidRequest(msg)

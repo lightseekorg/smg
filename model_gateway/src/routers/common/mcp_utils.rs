@@ -929,9 +929,7 @@ mod tests {
             .collect();
 
         assert_eq!(labels, vec!["deepwiki"]);
-        // Lock the prepend contract: the prepended `mcp_list_tools`
-        // item must come *first*, ahead of any pre-existing output
-        // items the caller passed in.
+        // Lock the prepend ordering: mcp_list_tools must be first.
         assert!(
             matches!(
                 output.first(),

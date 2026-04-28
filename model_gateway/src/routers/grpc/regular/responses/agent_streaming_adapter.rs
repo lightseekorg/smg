@@ -237,13 +237,8 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
         // Stage usage so the sink's `ResponseFinished` /
         // `ResponseIncomplete` emit attaches it to the final
         // `response.completed`. The loop driver fires that event after
-        // this method returns.
-        // Preserve reasoning-token detail in the persisted record so
-        // the stored `ResponsesResponse` lines up with the SSE-side
-        // `usage_json` below (which surfaces `reasoning_tokens` via
-        // `output_tokens_details`). Without this, a follow-up
-        // `previous_response_id` read sees zero reasoning tokens
-        // while the live stream just reported them.
+        // this method returns. Carry `reasoning_tokens` so the stored
+        // record matches the SSE-side `usage_json` below.
         let usage_for_persist = self.last_usage.clone().map(|u| Usage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,

@@ -313,12 +313,8 @@ fn prime_pending_from_approval(
         .collect();
 
     let mut planned: Vec<PlannedToolExecution> = Vec::new();
-    // `resolved_call_ids` is a transcript snapshot; it never updates
-    // as we process this pass. To prevent duplicate execution when
-    // two distinct `approval_request_id` values normalize to the same
-    // derived `call_id` (e.g. a malformed payload with both
-    // `mcpr_<X>` and bare `<X>`), track the call_ids we have already
-    // planned in this pass and skip later aliases.
+    // Per-pass dedup so two responses whose `approval_request_id`s
+    // normalize to the same derived `call_id` cannot both execute.
     let mut processed_call_ids: HashSet<String> = HashSet::new();
     for (approval_request_id, approve, reason) in responses {
         let derived_call_id = approval_request_id
