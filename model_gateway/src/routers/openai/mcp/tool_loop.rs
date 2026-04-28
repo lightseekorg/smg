@@ -22,7 +22,7 @@ use openai_protocol::{
 use serde_json::{json, to_value, Value};
 use smg_mcp::{
     extract_embedded_openai_responses, mcp_response_item_id, McpServerBinding, McpToolSession,
-    ResponseFormat, ResponseTransformer, ToolExecutionInput, ToolExecutionResult,
+    ResponseFormat, ToolExecutionInput, ToolExecutionOutput, ToolExecutionResult,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -206,15 +206,26 @@ pub(crate) async fn execute_streaming_tool_calls(
             Err(e) => {
                 let err_str = format!("Failed to parse tool arguments: {e}");
                 warn!("{}", err_str);
-                let error_output = json!({ "error": &err_str });
-                let mut mcp_call_item = build_transformed_mcp_call_item(
-                    &error_output,
-                    &response_format,
-                    &call.call_id,
-                    &server_label,
-                    &call.name,
-                    &call.arguments_buffer,
+                // Synthesize a `ToolExecutionOutput` so the parse-failure
+                // error renders through the same `to_response_item` ->
+                // `apply_error_overrides` pipeline as a real execution
+                // error. Keeps NS / ST and synthetic / executed paths on
+                // a single rendering pipeline (no `build_transformed_mcp_call_item`
+                // shortcut that would skip the failure shaping).
+                let synthetic = ToolExecutionOutput::synthetic_error(
+                    call.call_id.clone(),
+                    call.name.clone(),
+                    server_label.clone(),
+                    call.arguments_buffer.clone(),
+                    response_format.clone(),
+                    err_str,
                 );
+                let error_output = synthetic.output.clone();
+                let mut mcp_call_item =
+                    to_value(synthetic.to_response_item()).unwrap_or_else(|e| {
+                        warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+                        json!({})
+                    });
                 if let Some(obj) = mcp_call_item.as_object_mut() {
                     obj.insert(
                         "id".to_string(),
@@ -902,15 +913,28 @@ pub(crate) async fn execute_tool_loop(
                     let server_label = session.resolve_tool_server_label(&call.name);
                     let tool_item_id =
                         non_streaming_tool_item_id_source(&call.item_id, &response_format);
-                    let error_json = json!({ "error": &error_output });
-                    let transformed_item = build_transformed_mcp_call_item(
-                        &error_json,
-                        &response_format,
-                        &tool_item_id,
-                        &server_label,
-                        &call.name,
-                        &call.arguments,
+                    // Synthesize a `ToolExecutionOutput` so the parse-failure
+                    // error renders through the same `to_response_item` ->
+                    // `apply_error_overrides` pipeline as a real execution
+                    // error — single rendering pipeline, no separate
+                    // `build_transformed_mcp_call_item` shortcut that would
+                    // skip the failure shaping.
+                    let synthetic = ToolExecutionOutput::synthetic_error(
+                        call.call_id.clone(),
+                        call.name.clone(),
+                        server_label.clone(),
+                        call.arguments.clone(),
+                        response_format.clone(),
+                        error_output.clone(),
                     );
+                    let mut transformed_item = to_value(synthetic.to_response_item())
+                        .unwrap_or_else(|e| {
+                            warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+                            json!({})
+                        });
+                    if let Some(obj) = transformed_item.as_object_mut() {
+                        obj.insert("id".to_string(), Value::String(tool_item_id));
+                    }
 
                     Metrics::record_mcp_tool_call(
                         &original_body.model,
@@ -1005,14 +1029,20 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let output_str = tool_output.output.to_string();
-            let transformed_item = build_transformed_mcp_call_item(
-                &tool_output.output,
-                &response_format,
-                &tool_item_id,
-                &server_label,
-                &call.name,
-                &call.arguments,
-            );
+            // Render through the shared `to_response_item` pipeline so the
+            // NS path picks up `apply_error_overrides` identically to the
+            // streaming path (line 289). Previously the NS path called
+            // `build_transformed_mcp_call_item` directly and silently kept
+            // success-shaped items even when `tool_output.is_error` was
+            // true.
+            let mut transformed_item =
+                to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+                    warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+                    json!({})
+                });
+            if let Some(obj) = transformed_item.as_object_mut() {
+                obj.insert("id".to_string(), Value::String(tool_item_id));
+            }
 
             state.record_call(
                 session.is_builtin_tool(&call.name),
@@ -1200,34 +1230,6 @@ fn build_mcp_approval_request_item(
     })
 }
 
-/// Build a transformed output item using ResponseTransformer
-///
-/// Converts the output using the tool's response_format to the correctly-typed
-/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call,
-/// image_generation_call).
-/// Returns the result as a JSON Value for SSE event streaming.
-fn build_transformed_mcp_call_item(
-    output: &Value,
-    response_format: &ResponseFormat,
-    tool_item_id: &str,
-    server_label: &str,
-    tool_name: &str,
-    arguments: &str,
-) -> Value {
-    let output_item = ResponseTransformer::transform(
-        output,
-        response_format,
-        tool_item_id,
-        server_label,
-        tool_name,
-        arguments,
-    );
-    to_value(&output_item).unwrap_or_else(|e| {
-        warn!(tool = %tool_name, error = %e, "Failed to serialize transformed output item");
-        json!({})
-    })
-}
-
 /// A function call extracted from a non-streaming response
 struct ExtractedFunctionCall {
     pub call_id: String,
@@ -1276,19 +1278,18 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, time::Duration};
 
-    use serde_json::json;
+    use serde_json::{json, to_value};
     use smg_mcp::{
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
-        McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry,
+        McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry, ToolExecutionOutput,
     };
     use tokio::sync::mpsc;
 
     use super::{
-        build_transformed_mcp_call_item, extract_openai_response_output_items,
-        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
-        ToolLoopState,
+        extract_openai_response_output_items, is_internal_mcp_response_item,
+        mcp_list_tools_bindings_to_emit, ResponseInput, ToolLoopState,
     };
 
     fn test_tool(name: &str) -> Tool {
@@ -1308,20 +1309,30 @@ mod tests {
     }
 
     #[test]
-    fn build_transformed_mcp_call_item_does_not_add_server_label_for_builtin_formats() {
-        let item = build_transformed_mcp_call_item(
-            &json!({
+    fn to_response_item_does_not_add_server_label_for_builtin_formats() {
+        // Renders a successful WebSearchCall through the unified
+        // `ToolExecutionOutput::to_response_item` pipeline (the same
+        // entry point both NS and ST tool-loop paths use). The wire
+        // shape for hosted-builtin families must omit `server_label`,
+        // matching OpenAI Responses spec — only `mcp_call` carries it.
+        let success = ToolExecutionOutput {
+            call_id: "call_123".to_string(),
+            tool_name: "brave_web_search".to_string(),
+            server_key: "internal-label".to_string(),
+            server_label: "internal-label".to_string(),
+            arguments_str: r#"{"query":"private query"}"#.to_string(),
+            output: json!({
                 "queries": ["private query"],
                 "results": [
                     { "url": "https://example.com" }
                 ]
             }),
-            &ResponseFormat::WebSearchCall,
-            "call_123",
-            "internal-label",
-            "brave_web_search",
-            r#"{"query":"private query"}"#,
-        );
+            is_error: false,
+            error_message: None,
+            response_format: ResponseFormat::WebSearchCall,
+            duration: Duration::default(),
+        };
+        let item = to_value(success.to_response_item()).expect("serialize");
 
         assert_eq!(
             item.get("type").and_then(|value| value.as_str()),

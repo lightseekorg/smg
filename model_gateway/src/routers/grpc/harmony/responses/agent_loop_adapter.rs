@@ -225,7 +225,14 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for HarmonyAdapter<'a> {
                         call_id: tc.id.clone(),
                         item_id: tc.id,
                         name: tc.function.name,
-                        arguments: tc.function.arguments.unwrap_or_else(|| "{}".to_string()),
+                        // Don't substitute "{}" for missing args — the
+                        // shared executor's malformed-args path already
+                        // surfaces an empty / unparsable payload as a
+                        // clean tool-error item. Coercing to a valid
+                        // empty object would silently execute a tool
+                        // with empty arguments instead of failing
+                        // loudly when the harmony parser truncates.
+                        arguments: tc.function.arguments.unwrap_or_default(),
                         approval_request_id: None,
                     }));
 

@@ -11,10 +11,11 @@ use super::{
     error::AgentLoopError,
     presentation::{OutputFamily, ToolPresentation},
     state::{AgentLoopState, ExecutedCall, PlannedToolExecution},
+    AgentLoopContext,
 };
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+    routers::common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
 };
 
 /// Effective per-request gateway-tool budget. The user's
@@ -48,13 +49,14 @@ pub(crate) fn remaining_tool_call_budget(
 pub(crate) async fn execute_planned_tool(
     session: &McpToolSession<'_>,
     plan: PlannedToolExecution,
-    model_id: &str,
+    ctx: &AgentLoopContext<'_>,
 ) -> Result<Box<ExecutedCall>, AgentLoopError> {
     let PlannedToolExecution {
         call,
         server_label,
         presentation,
     } = plan;
+    let model_id = ctx.original_request.model.as_str();
 
     // Reject malformed JSON / non-object arguments BEFORE dispatch.
     // The driver routes these through the same `ToolCompleted` path as
@@ -64,7 +66,7 @@ pub(crate) async fn execute_planned_tool(
     // wire-identical to a tool error returned by the server itself.
     // This replaces the prior coerce-to-`{}` behaviour, which silently
     // executed gateway tools with empty arguments.
-    let arguments = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+    let mut arguments = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
         Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
         Ok(_) | Err(_) => {
             let reason = format!(
@@ -89,6 +91,23 @@ pub(crate) async fn execute_planned_tool(
             }));
         }
     };
+
+    // Apply hosted/builtin tool dispatch wiring before handing the args
+    // to the orchestrator: pin tool-config-level overrides
+    // (`size`/`quality`/...) onto the dispatch payload, and inject the
+    // request-level `user` so end-user attribution rides through to the
+    // hosted MCP server. Pre-refactor this happened at
+    // `routers/grpc/harmony/responses/execution.rs:94`; centralising it
+    // here means every adapter that runs through `execute_planned_tool`
+    // — regular, harmony, and the upcoming OpenAI passthrough —
+    // inherits the same pre-dispatch contract.
+    let response_format = session.tool_response_format(&call.name);
+    prepare_hosted_dispatch_args(
+        &mut arguments,
+        &response_format,
+        ctx.original_request.tools.as_deref().unwrap_or(&[]),
+        ctx.original_request.user.as_deref(),
+    );
 
     let tool_output = session
         .execute_tool(ToolExecutionInput {
@@ -212,16 +231,24 @@ fn truncate_for_message(value: &str) -> String {
     if value.len() <= MAX {
         value.to_string()
     } else {
-        format!("{}…", &value[..MAX])
+        // Walk back to a UTF-8 char boundary so a multi-byte codepoint
+        // straddling byte 80 doesn't panic the slice — turning a
+        // recoverable malformed-args error into a 500.
+        let mut end = MAX;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &value[..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
     use smg_mcp::{McpOrchestrator, McpToolSession};
 
     use super::*;
-    use crate::routers::common::agent_loop::state::LoopToolCall;
+    use crate::routers::common::agent_loop::{prepared::PreparedLoopInput, state::LoopToolCall};
 
     fn passthrough_plan(arguments: &str) -> PlannedToolExecution {
         PlannedToolExecution {
@@ -237,6 +264,33 @@ mod tests {
         }
     }
 
+    /// Minimal `ResponsesRequest` for tests: only the `model` field is
+    /// observed by `execute_planned_tool` (for metrics labels and the
+    /// hosted-dispatch wiring's request-level `tools` / `user` lookups,
+    /// which both default to None here).
+    fn test_request(model: &str) -> ResponsesRequest {
+        ResponsesRequest {
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn test_prepared() -> PreparedLoopInput {
+        PreparedLoopInput::new(ResponseInput::Items(Vec::new()), Vec::new())
+    }
+
+    fn test_ctx<'a>(
+        request: &'a ResponsesRequest,
+        prepared: &'a PreparedLoopInput,
+    ) -> AgentLoopContext<'a> {
+        AgentLoopContext {
+            prepared,
+            session: None,
+            original_request: request,
+            max_tool_calls: None,
+        }
+    }
+
     /// Malformed argument JSON must become a tool-error result the
     /// driver can surface through the normal `ToolCompleted` path —
     /// not a silent coerce-to-`{}` execution. Review P1.4.
@@ -245,9 +299,13 @@ mod tests {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
         let plan = passthrough_plan("not-valid-json");
-        let executed = execute_planned_tool(&session, plan, "model-x")
-            .await
-            .expect("malformed args must produce an Ok(ExecutedCall) with is_error");
+        let executed = execute_planned_tool(
+            &session,
+            plan,
+            &test_ctx(&test_request("model-x"), &test_prepared()),
+        )
+        .await
+        .expect("malformed args must produce an Ok(ExecutedCall) with is_error");
         assert!(executed.is_error, "malformed args must mark is_error");
         assert!(
             executed.output_string.contains("Invalid tool arguments"),
@@ -271,9 +329,13 @@ mod tests {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
         let plan = passthrough_plan("[1,2,3]");
-        let executed = execute_planned_tool(&session, plan, "model-x")
-            .await
-            .expect("non-object args must surface as a tool error");
+        let executed = execute_planned_tool(
+            &session,
+            plan,
+            &test_ctx(&test_request("model-x"), &test_prepared()),
+        )
+        .await
+        .expect("non-object args must surface as a tool error");
         assert!(executed.is_error);
         assert!(executed.output_string.contains("Invalid tool arguments"));
     }
@@ -288,9 +350,13 @@ mod tests {
         let mut plan = passthrough_plan("not-json");
         plan.presentation = ToolPresentation::from_family(OutputFamily::WebSearchCall);
 
-        let executed = execute_planned_tool(&session, plan, "model-x")
-            .await
-            .expect("malformed hosted builtin args must surface as tool error");
+        let executed = execute_planned_tool(
+            &session,
+            plan,
+            &test_ctx(&test_request("model-x"), &test_prepared()),
+        )
+        .await
+        .expect("malformed hosted builtin args must surface as tool error");
 
         assert!(executed.is_error);
         let item = executed.transformed_item.as_ref().expect("missing item");
@@ -309,9 +375,13 @@ mod tests {
         let mut plan = passthrough_plan("{}");
         plan.call.approval_request_id = Some("mcpr_call_x".to_string());
 
-        let executed = execute_planned_tool(&session, plan, "model-x")
-            .await
-            .expect("execution fallback should still render an item");
+        let executed = execute_planned_tool(
+            &session,
+            plan,
+            &test_ctx(&test_request("model-x"), &test_prepared()),
+        )
+        .await
+        .expect("execution fallback should still render an item");
 
         let item = executed.transformed_item.as_ref().expect("missing item");
         let v = serde_json::to_value(item).unwrap();

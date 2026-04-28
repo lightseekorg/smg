@@ -185,10 +185,15 @@ impl ResponsesResponseBuilder {
         self
     }
 
-    /// Set the conversation directly from a [`ConversationRef`] —
-    /// preserves whichever wire shape the caller already had.
+    /// Set the conversation from a [`ConversationRef`], normalised to the
+    /// canonical `{ "id": "..." }` `Object` form. Mirrors the
+    /// `copy_from_request` echo path so every response builder route emits
+    /// the same wire shape regardless of which input variant the caller
+    /// originally received.
     pub fn conversation_ref(mut self, conversation: ConversationRef) -> Self {
-        self.conversation = Some(conversation);
+        self.conversation = Some(ConversationRef::Object {
+            id: conversation.as_id().to_string(),
+        });
         self
     }
 

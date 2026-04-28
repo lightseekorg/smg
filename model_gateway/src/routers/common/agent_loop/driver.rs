@@ -250,12 +250,13 @@ fn prime_pending_from_approval(
     session: Option<&McpToolSession<'_>>,
     state: &mut AgentLoopState,
 ) -> Result<(), AgentLoopError> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::{presentation::ToolPresentation, state::LoopToolCall};
 
     let mut requests: HashMap<&str, (&str, &str, &str)> = HashMap::new();
     let mut responses: Vec<(&str, bool, Option<&str>)> = Vec::new();
+    let mut seen_responses: HashSet<&str> = HashSet::new();
     for item in control_items {
         match item {
             ResponseInputOutputItem::McpApprovalRequest {
@@ -269,12 +270,17 @@ fn prime_pending_from_approval(
                     (server_label.as_str(), name.as_str(), arguments.as_str()),
                 );
             }
+            // The chain can carry the same approval pair across
+            // multiple turns once it has been settled; only the
+            // first occurrence in iteration order should drive a
+            // plan. Later duplicates would otherwise build a
+            // second `PlannedToolExecution` for the same call_id.
             ResponseInputOutputItem::McpApprovalResponse {
                 approval_request_id,
                 approve,
                 reason,
                 ..
-            } => {
+            } if seen_responses.insert(approval_request_id.as_str()) => {
                 responses.push((approval_request_id.as_str(), *approve, reason.as_deref()));
             }
             _ => {}
@@ -285,8 +291,36 @@ fn prime_pending_from_approval(
         return Ok(());
     }
 
+    // Approvals already settled on a previous turn surface as
+    // `FunctionCallOutput` entries in the lowered transcript:
+    // `transcript_lower` projects historical `mcp_call` items into
+    // `FunctionToolCall` + `FunctionCallOutput` pairs, and the deny
+    // branch below pushes the same pair on the current turn. Skipping
+    // approval responses whose call_id already has output prevents
+    // `prime_pending_from_approval` from re-executing non-idempotent
+    // MCP tools when a long `previous_response_id` chain replays past
+    // approval pairs.
+    // Own the keys so the loop body below can still push new
+    // FunctionToolCall / FunctionCallOutput entries to
+    // `state.transcript` (deny branch).
+    let resolved_call_ids: HashSet<String> = state
+        .transcript
+        .iter()
+        .filter_map(|item| match item {
+            ResponseInputOutputItem::FunctionCallOutput { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+
     let mut planned: Vec<PlannedToolExecution> = Vec::new();
     for (approval_request_id, approve, reason) in responses {
+        let derived_call_id = approval_request_id
+            .strip_prefix("mcpr_")
+            .unwrap_or(approval_request_id);
+        if resolved_call_ids.contains(derived_call_id) {
+            continue;
+        }
+
         let Some((server_label, tool_name, arguments)) = requests.get(approval_request_id).copied()
         else {
             return Err(AgentLoopError::InvalidRequest(format!(
@@ -302,11 +336,9 @@ fn prime_pending_from_approval(
         // so the synthesized `function_call_output.call_id` matches
         // the original `call_id` the model emitted. The driver
         // re-derives `mcpr_<call_id>` when rendering the approval
-        // request item, so this round-trips losslessly.
-        let call_id = approval_request_id
-            .strip_prefix("mcpr_")
-            .unwrap_or(approval_request_id)
-            .to_string();
+        // request item, so this round-trips losslessly. Reuses
+        // `derived_call_id` from the resolved-skip filter above.
+        let call_id = derived_call_id.to_string();
 
         if approve {
             let Some(s) = session else {
@@ -631,7 +663,7 @@ async fn run_execute_tools<S: StreamSink>(
         // adapter. Here we just need the closing half: tool actually
         // runs, then the sink emits `mcp_call.completed/.failed` +
         // `output_item.done(with output)` via `ToolCompleted`.
-        let executed = execute_planned_tool(session, plan_item, model_id).await?;
+        let executed = execute_planned_tool(session, plan_item, ctx).await?;
         sink.emit(LoopEvent::ToolCompleted {
             executed: &executed,
         });
