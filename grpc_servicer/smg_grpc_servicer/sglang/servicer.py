@@ -846,7 +846,6 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             model_specific_data=model_specific_data,
             offsets=offsets,
         )
-        mm_item.set_pad_value()
 
         im_token_id = mm_proto.im_token_id if mm_proto.HasField("im_token_id") else None
 
