@@ -1,4 +1,9 @@
-use axum::response::Response;
+//! Request-local skill reference resolution.
+//!
+//! This module owns the skills feature semantics for Messages and Responses
+//! request shapes. The gateway invokes it after tenant metadata is resolved and
+//! before forwarding to provider-specific routers.
+
 use openai_protocol::{
     messages::CreateMessageRequest,
     responses::{
@@ -12,10 +17,8 @@ use openai_protocol::{
     },
 };
 use serde_json::Value;
-use smg_skills::{SkillRecord, SkillService, SkillVersionRecord, SkillsStoreError};
-use tracing::error;
 
-use crate::{routers::error as route_error, tenant::TenantKey};
+use crate::{PinnedSkillVersion, SkillService, SkillServiceError, SkillVersionSelector};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedSkillManifest {
@@ -64,59 +67,18 @@ pub enum ResolvedSkillRef {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PinnedSkillVersion {
-    pub version: String,
-    pub version_number: u32,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SkillResolutionError {
     #[error("skills are not enabled")]
     SkillsNotEnabled,
 
-    #[error("skills metadata store is not available")]
-    MissingMetadataStore,
-
-    #[error("skill not found")]
-    SkillNotFound,
-
-    #[error("skill version not found")]
-    SkillVersionNotFound,
-
-    #[error("skills metadata lookup failed: {0}")]
-    Store(#[from] SkillsStoreError),
-}
-
-impl SkillResolutionError {
-    #[must_use]
-    pub fn into_response(self) -> Response {
-        match self {
-            Self::SkillsNotEnabled => route_error::bad_request(
-                "skills_not_enabled",
-                "SMG skills are not enabled for this gateway",
-            ),
-            Self::SkillNotFound => {
-                route_error::bad_request("skill_not_found", "Referenced SMG skill was not found")
-            }
-            Self::SkillVersionNotFound => route_error::bad_request(
-                "skill_version_not_found",
-                "Referenced SMG skill version was not found",
-            ),
-            Self::MissingMetadataStore | Self::Store(_) => {
-                error!(error = %self, "failed to resolve request skills");
-                route_error::internal_error(
-                    "skills_resolution_failed",
-                    "Failed to resolve request skills",
-                )
-            }
-        }
-    }
+    #[error(transparent)]
+    Service(#[from] SkillServiceError),
 }
 
 pub async fn resolve_messages_skill_manifest(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     request: &CreateMessageRequest,
 ) -> Result<ResolvedSkillManifest, SkillResolutionError> {
     let Some(skills) = request
@@ -132,27 +94,27 @@ pub async fn resolve_messages_skill_manifest(
 
     let mut refs = Vec::with_capacity(skills.len());
     for skill in skills {
-        refs.push(resolve_messages_skill_ref(skill_service, tenant_key, skill).await?);
+        refs.push(resolve_messages_skill_ref(skill_service, tenant_id, skill).await?);
     }
     Ok(ResolvedSkillManifest::new(refs))
 }
 
 pub async fn resolve_responses_skill_manifest(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     request: &ResponsesRequest,
 ) -> Result<ResolvedSkillManifest, SkillResolutionError> {
     let mut refs = Vec::new();
 
     if let Some(tools) = &request.tools {
         for tool in tools {
-            resolve_response_tool_skills(skill_service, tenant_key, tool, &mut refs).await?;
+            resolve_response_tool_skills(skill_service, tenant_id, tool, &mut refs).await?;
         }
     }
 
     if let ResponseInput::Items(items) = &request.input {
         for item in items {
-            resolve_response_input_item_skills(skill_service, tenant_key, item, &mut refs).await?;
+            resolve_response_input_item_skills(skill_service, tenant_id, item, &mut refs).await?;
         }
     }
 
@@ -161,7 +123,7 @@ pub async fn resolve_responses_skill_manifest(
 
 async fn resolve_messages_skill_ref(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     skill: &MessagesSkillRef,
 ) -> Result<ResolvedSkillRef, SkillResolutionError> {
     match skill {
@@ -172,9 +134,14 @@ async fn resolve_messages_skill_ref(
             })
         }
         MessagesSkillRef::Custom { skill_id, version } => {
-            let pinned =
-                resolve_required_smg_skill(skill_service, tenant_key, skill_id, version.as_ref())
-                    .await?;
+            let service = skill_service.ok_or(SkillResolutionError::SkillsNotEnabled)?;
+            let pinned = service
+                .pin_skill_version(
+                    tenant_id,
+                    skill_id,
+                    skill_version_selector(version.as_ref()),
+                )
+                .await?;
             Ok(ResolvedSkillRef::SmgStorage {
                 skill_id: skill_id.clone(),
                 requested_version: version.clone(),
@@ -186,7 +153,7 @@ async fn resolve_messages_skill_ref(
 
 async fn resolve_response_tool_skills(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     tool: &ResponseTool,
     refs: &mut Vec<ResolvedSkillRef>,
 ) -> Result<(), SkillResolutionError> {
@@ -194,14 +161,14 @@ async fn resolve_response_tool_skills(
         ResponseTool::CodeInterpreter(CodeInterpreterTool { environment, .. }) => {
             resolve_response_tool_environment_skills(
                 skill_service,
-                tenant_key,
+                tenant_id,
                 environment.as_ref(),
                 refs,
             )
             .await
         }
         ResponseTool::Shell(ShellTool { environment }) => {
-            resolve_shell_environment_skills(skill_service, tenant_key, environment.as_ref(), refs)
+            resolve_shell_environment_skills(skill_service, tenant_id, environment.as_ref(), refs)
                 .await
         }
         _ => Ok(()),
@@ -210,49 +177,44 @@ async fn resolve_response_tool_skills(
 
 async fn resolve_response_input_item_skills(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     item: &ResponseInputOutputItem,
     refs: &mut Vec<ResolvedSkillRef>,
 ) -> Result<(), SkillResolutionError> {
     if let ResponseInputOutputItem::ShellCall { environment, .. } = item {
-        resolve_shell_call_environment_skills(
-            skill_service,
-            tenant_key,
-            environment.as_ref(),
-            refs,
-        )
-        .await?;
+        resolve_shell_call_environment_skills(skill_service, tenant_id, environment.as_ref(), refs)
+            .await?;
     }
     Ok(())
 }
 
 async fn resolve_response_tool_environment_skills(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     environment: Option<&ResponseToolEnvironment>,
     refs: &mut Vec<ResolvedSkillRef>,
 ) -> Result<(), SkillResolutionError> {
     if let Some(skills) = environment.and_then(|environment| environment.skills.as_ref()) {
-        resolve_responses_skill_entries(skill_service, tenant_key, skills, refs).await?;
+        resolve_responses_skill_entries(skill_service, tenant_id, skills, refs).await?;
     }
     Ok(())
 }
 
 async fn resolve_shell_environment_skills(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     environment: Option<&ShellEnvironment>,
     refs: &mut Vec<ResolvedSkillRef>,
 ) -> Result<(), SkillResolutionError> {
     match environment {
         Some(ShellEnvironment::ContainerAuto(environment)) => {
             if let Some(skills) = &environment.skills {
-                resolve_responses_skill_entries(skill_service, tenant_key, skills, refs).await?;
+                resolve_responses_skill_entries(skill_service, tenant_id, skills, refs).await?;
             }
         }
         Some(ShellEnvironment::Local(LocalShellEnvironment { skills })) => {
             if let Some(skills) = skills {
-                resolve_responses_skill_entries(skill_service, tenant_key, skills, refs).await?;
+                resolve_responses_skill_entries(skill_service, tenant_id, skills, refs).await?;
             }
         }
         Some(ShellEnvironment::ContainerReference(_)) | None => {}
@@ -262,7 +224,7 @@ async fn resolve_shell_environment_skills(
 
 async fn resolve_shell_call_environment_skills(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     environment: Option<&ShellCallEnvironment>,
     refs: &mut Vec<ResolvedSkillRef>,
 ) -> Result<(), SkillResolutionError> {
@@ -270,32 +232,32 @@ async fn resolve_shell_call_environment_skills(
         skills: Some(skills),
     })) = environment
     {
-        resolve_responses_skill_entries(skill_service, tenant_key, skills, refs).await?;
+        resolve_responses_skill_entries(skill_service, tenant_id, skills, refs).await?;
     }
     Ok(())
 }
 
 async fn resolve_responses_skill_entries(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     skills: &[ResponsesSkillEntry],
     refs: &mut Vec<ResolvedSkillRef>,
 ) -> Result<(), SkillResolutionError> {
     refs.reserve(skills.len());
     for skill in skills {
-        refs.push(resolve_responses_skill_entry(skill_service, tenant_key, skill).await?);
+        refs.push(resolve_responses_skill_entry(skill_service, tenant_id, skill).await?);
     }
     Ok(())
 }
 
 async fn resolve_responses_skill_entry(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     skill: &ResponsesSkillEntry,
 ) -> Result<ResolvedSkillRef, SkillResolutionError> {
     match skill {
         ResponsesSkillEntry::Typed(ResponsesSkillRef::Reference { skill_id, version }) => {
-            resolve_responses_reference(skill_service, tenant_key, skill_id, version.as_ref()).await
+            resolve_responses_reference(skill_service, tenant_id, skill_id, version.as_ref()).await
         }
         ResponsesSkillEntry::Typed(ResponsesSkillRef::Local {
             name,
@@ -316,7 +278,7 @@ async fn resolve_responses_skill_entry(
 
 async fn resolve_responses_reference(
     skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
+    tenant_id: &str,
     skill_id: &str,
     version: Option<&SkillVersionRef>,
 ) -> Result<ResolvedSkillRef, SkillResolutionError> {
@@ -326,12 +288,9 @@ async fn resolve_responses_reference(
             raw_version: version.map(skill_version_ref_to_string),
         });
     };
-    let metadata_store = service
-        .metadata_store()
-        .ok_or(SkillResolutionError::MissingMetadataStore)?;
 
-    let Some(skill) = metadata_store
-        .get_skill(tenant_key.as_str(), skill_id)
+    let Some(pinned) = service
+        .try_pin_skill_version(tenant_id, skill_id, skill_version_selector(version))
         .await?
     else {
         return Ok(ResolvedSkillRef::OpenAIProvider {
@@ -340,7 +299,6 @@ async fn resolve_responses_reference(
         });
     };
 
-    let pinned = resolve_smg_skill_version(service, skill, version).await?;
     Ok(ResolvedSkillRef::SmgStorage {
         skill_id: skill_id.to_string(),
         requested_version: version.cloned(),
@@ -348,85 +306,15 @@ async fn resolve_responses_reference(
     })
 }
 
-async fn resolve_required_smg_skill(
-    skill_service: Option<&SkillService>,
-    tenant_key: &TenantKey,
-    skill_id: &str,
-    version: Option<&SkillVersionRef>,
-) -> Result<PinnedSkillVersion, SkillResolutionError> {
-    let service = skill_service.ok_or(SkillResolutionError::SkillsNotEnabled)?;
-    let metadata_store = service
-        .metadata_store()
-        .ok_or(SkillResolutionError::MissingMetadataStore)?;
-    let skill = metadata_store
-        .get_skill(tenant_key.as_str(), skill_id)
-        .await?
-        .ok_or(SkillResolutionError::SkillNotFound)?;
-    resolve_smg_skill_version(service, skill, version).await
-}
-
-async fn resolve_smg_skill_version(
-    service: &SkillService,
-    skill: SkillRecord,
-    version: Option<&SkillVersionRef>,
-) -> Result<PinnedSkillVersion, SkillResolutionError> {
-    let record = match version {
-        None => {
-            let default_version = skill
-                .default_version
-                .as_deref()
-                .ok_or(SkillResolutionError::SkillVersionNotFound)?;
-            get_exact_skill_version(service, &skill, default_version).await?
-        }
-        Some(SkillVersionRef::Latest) => {
-            let latest_version = skill
-                .latest_version
-                .as_deref()
-                .ok_or(SkillResolutionError::SkillVersionNotFound)?;
-            get_exact_skill_version(service, &skill, latest_version).await?
-        }
-        Some(SkillVersionRef::Timestamp(version)) => {
-            get_exact_skill_version(service, &skill, version).await?
-        }
+fn skill_version_selector(version: Option<&SkillVersionRef>) -> SkillVersionSelector<'_> {
+    match version {
+        None => SkillVersionSelector::Default,
+        Some(SkillVersionRef::Latest) => SkillVersionSelector::Latest,
         Some(SkillVersionRef::Integer(version_number)) => {
-            get_skill_version_by_number(service, &skill, *version_number).await?
+            SkillVersionSelector::VersionNumber(*version_number)
         }
-    };
-
-    Ok(PinnedSkillVersion {
-        version: record.version,
-        version_number: record.version_number,
-    })
-}
-
-async fn get_exact_skill_version(
-    service: &SkillService,
-    skill: &SkillRecord,
-    version: &str,
-) -> Result<SkillVersionRecord, SkillResolutionError> {
-    let metadata_store = service
-        .metadata_store()
-        .ok_or(SkillResolutionError::MissingMetadataStore)?;
-    metadata_store
-        .get_skill_version(&skill.skill_id, version)
-        .await?
-        .ok_or(SkillResolutionError::SkillVersionNotFound)
-}
-
-async fn get_skill_version_by_number(
-    service: &SkillService,
-    skill: &SkillRecord,
-    version_number: u32,
-) -> Result<SkillVersionRecord, SkillResolutionError> {
-    let metadata_store = service
-        .metadata_store()
-        .ok_or(SkillResolutionError::MissingMetadataStore)?;
-    metadata_store
-        .list_skill_versions(&skill.skill_id)
-        .await?
-        .into_iter()
-        .find(|record| record.version_number == version_number)
-        .ok_or(SkillResolutionError::SkillVersionNotFound)
+        Some(SkillVersionRef::Timestamp(version)) => SkillVersionSelector::Exact(version),
+    }
 }
 
 fn skill_version_ref_to_string(version: &SkillVersionRef) -> String {
@@ -444,13 +332,13 @@ mod tests {
     use anyhow::{anyhow, Result};
     use openai_protocol::{messages::CreateMessageRequest, responses::ResponsesRequest};
     use smg_blob_storage::FilesystemBlobStore;
-    use smg_skills::{
-        CreateSkillRequest, CreateSkillVersionRequest, SkillService, SkillUpload,
-        UpdateSkillRequest, UploadedSkillFile,
-    };
     use tempfile::TempDir;
 
     use super::*;
+    use crate::{
+        CreateSkillRequest, CreateSkillVersionRequest, SkillService, SkillUpload,
+        UpdateSkillRequest, UploadedSkillFile,
+    };
 
     const TENANT_ID: &str = "auth:test-tenant";
 
@@ -486,10 +374,6 @@ mod tests {
             })
             .await?;
         Ok(result.version.version)
-    }
-
-    fn tenant_key() -> TenantKey {
-        TenantKey::from(TENANT_ID)
     }
 
     fn messages_request(skill_id: &str, version: Option<Value>) -> Result<CreateMessageRequest> {
@@ -535,8 +419,7 @@ mod tests {
     async fn messages_custom_default_version_is_pinned_at_resolution() -> Result<()> {
         let (_root, service, skill_id) = create_test_service().await?;
         let request = messages_request(&skill_id, None)?;
-        let manifest =
-            resolve_messages_skill_manifest(Some(&service), &tenant_key(), &request).await?;
+        let manifest = resolve_messages_skill_manifest(Some(&service), TENANT_ID, &request).await?;
 
         let second_version = create_second_version(&service, &skill_id).await?;
         service
@@ -562,8 +445,7 @@ mod tests {
     async fn messages_custom_latest_version_is_pinned_at_resolution() -> Result<()> {
         let (_root, service, skill_id) = create_test_service().await?;
         let request = messages_request(&skill_id, Some(Value::String("latest".to_string())))?;
-        let manifest =
-            resolve_messages_skill_manifest(Some(&service), &tenant_key(), &request).await?;
+        let manifest = resolve_messages_skill_manifest(Some(&service), TENANT_ID, &request).await?;
 
         let second_version = create_second_version(&service, &skill_id).await?;
 
@@ -594,7 +476,7 @@ mod tests {
         ])?;
 
         let manifest =
-            resolve_responses_skill_manifest(Some(&service), &tenant_key(), &request).await?;
+            resolve_responses_skill_manifest(Some(&service), TENANT_ID, &request).await?;
 
         assert_eq!(manifest.refs().len(), 2);
         match &manifest.refs()[0] {
@@ -633,7 +515,7 @@ mod tests {
             }),
         ])?;
 
-        let manifest = resolve_responses_skill_manifest(None, &tenant_key(), &request).await?;
+        let manifest = resolve_responses_skill_manifest(None, TENANT_ID, &request).await?;
 
         assert_eq!(manifest.refs().len(), 2);
         assert!(matches!(
@@ -652,7 +534,7 @@ mod tests {
     #[tokio::test]
     async fn messages_custom_requires_enabled_smg_skills() -> Result<()> {
         let request = messages_request("skill_missing", None)?;
-        let error = resolve_messages_skill_manifest(None, &tenant_key(), &request)
+        let error = resolve_messages_skill_manifest(None, TENANT_ID, &request)
             .await
             .err()
             .ok_or_else(|| anyhow!("expected skills-not-enabled error"))?;

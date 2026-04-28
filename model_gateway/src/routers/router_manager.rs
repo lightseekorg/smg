@@ -36,18 +36,20 @@ use openai_protocol::{
     transcription::TranscriptionRequest,
 };
 use serde_json::Value;
-use smg_skills::SkillService;
-use tracing::{debug, info, warn};
+use smg_skills::{
+    resolve_messages_skill_manifest, resolve_responses_skill_manifest,
+    validate_messages_reserved_skill_tool_names, validate_responses_reserved_skill_tool_names,
+    ReservedSkillToolNameError, SkillResolutionError, SkillService, SkillServiceError,
+};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     app_context::AppContext,
     config::RoutingMode,
     middleware::TenantRequestMeta,
     routers::{
-        common::{
-            header_utils::apply_provider_headers,
-            skill_resolution::{resolve_messages_skill_manifest, resolve_responses_skill_manifest},
-        },
+        common::header_utils::apply_provider_headers,
+        error as route_error,
         factory::{router_ids, RouterId},
         AudioFile, RouterFactory, RouterTrait,
     },
@@ -422,6 +424,48 @@ impl RouterManager {
     }
 }
 
+fn reserved_skill_tool_name_response(error: ReservedSkillToolNameError) -> Response {
+    route_error::bad_request(
+        "reserved_tool_name",
+        format!(
+            "Tool name '{}' is reserved for SMG skill tools",
+            error.tool_name()
+        ),
+    )
+}
+
+fn skill_resolution_error_response(error: SkillResolutionError) -> Response {
+    match error {
+        SkillResolutionError::SkillsNotEnabled => route_error::bad_request(
+            "skills_not_enabled",
+            "SMG skills are not enabled for this gateway",
+        ),
+        SkillResolutionError::Service(SkillServiceError::SkillNotFound { .. }) => {
+            route_error::bad_request("skill_not_found", "Referenced SMG skill was not found")
+        }
+        SkillResolutionError::Service(
+            SkillServiceError::SkillVersionNotFound { .. }
+            | SkillServiceError::MissingDefaultVersion { .. },
+        ) => route_error::bad_request(
+            "skill_version_not_found",
+            "Referenced SMG skill version was not found",
+        ),
+        SkillResolutionError::Service(
+            SkillServiceError::MissingTenantId | SkillServiceError::MissingSkillId,
+        ) => route_error::bad_request(
+            "invalid_skill_reference",
+            "Skill reference is missing a required field",
+        ),
+        SkillResolutionError::Service(_) => {
+            error!(error = %error, "failed to resolve request skills");
+            route_error::internal_error(
+                "skills_resolution_failed",
+                "Failed to resolve request skills",
+            )
+        }
+    }
+}
+
 #[async_trait]
 impl RouterTrait for RouterManager {
     fn as_any(&self) -> &dyn std::any::Any {
@@ -588,18 +632,21 @@ impl RouterTrait for RouterManager {
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        if let Err(error) = validate_messages_reserved_skill_tool_names(body.tools.as_deref()) {
+            return reserved_skill_tool_name_response(error);
+        }
 
+        let router = self.select_router_for_request(headers, Some(model_id));
         if let Some(router) = router {
             let skill_manifest = match resolve_messages_skill_manifest(
                 self.skill_service.as_deref(),
-                tenant_meta.tenant_key(),
+                tenant_meta.tenant_key().as_str(),
                 body,
             )
             .await
             {
                 Ok(manifest) => manifest,
-                Err(error) => return error.into_response(),
+                Err(error) => return skill_resolution_error_response(error),
             };
             let tenant_meta = if skill_manifest.is_empty() {
                 tenant_meta.clone()
@@ -625,18 +672,21 @@ impl RouterTrait for RouterManager {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        if let Err(error) = validate_responses_reserved_skill_tool_names(body.tools.as_deref()) {
+            return reserved_skill_tool_name_response(error);
+        }
 
+        let router = self.select_router_for_request(headers, Some(model_id));
         if let Some(router) = router {
             let skill_manifest = match resolve_responses_skill_manifest(
                 self.skill_service.as_deref(),
-                tenant_meta.tenant_key(),
+                tenant_meta.tenant_key().as_str(),
                 body,
             )
             .await
             {
                 Ok(manifest) => manifest,
-                Err(error) => return error.into_response(),
+                Err(error) => return skill_resolution_error_response(error),
             };
             let tenant_meta = if skill_manifest.is_empty() {
                 tenant_meta.clone()
