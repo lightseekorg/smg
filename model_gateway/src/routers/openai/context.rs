@@ -268,6 +268,7 @@ pub struct OwnedStreamingContext {
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub provider: Option<Arc<dyn Provider>>,
     pub storage: StorageHandles,
 }
 
@@ -306,6 +307,7 @@ impl RequestContext {
             original_body,
             previous_response_id: responses_payload_state.previous_response_id,
             existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
+            provider: self.state.worker.as_ref().map(|w| w.provider.clone()),
             storage: StorageHandles {
                 response,
                 conversation,
@@ -322,6 +324,7 @@ pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
     pub session: Option<&'a McpToolSession<'a>>,
+    pub provider: Option<Arc<dyn Provider>>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;
