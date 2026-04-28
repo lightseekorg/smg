@@ -40,6 +40,13 @@ from sglang.srt.utils import get_or_create_event_loop, kill_process_tree
 from sglang.srt.utils.network import get_zmq_socket
 from sglang.utils import get_exception_traceback
 
+# Conditional import — metrics collector is only available when --enable-metrics is set
+# and PROMETHEUS_MULTIPROC_DIR is configured.
+try:
+    from sglang.srt.observability.metrics_collector import TokenizerMetricsCollector
+except ImportError:
+    TokenizerMetricsCollector = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -143,6 +150,7 @@ class GrpcReqState:
     # Metrics (same as TokenizerManager's ReqState)
     time_stats: APIServerReqTimeStats
     last_completion_tokens: int = 1
+    ttft_observed: bool = False
 
     # Streaming state
     stream_finished: bool = False
@@ -206,6 +214,23 @@ class GrpcRequestManager:
 
         # Metrics
         self.last_receive_tstamp = real_time()
+        self.enable_metrics = server_args.enable_metrics
+        self.metrics_collector = None
+        if self.enable_metrics and TokenizerMetricsCollector is not None:
+            labels = {
+                "model_name": server_args.served_model_name,
+            }
+            if server_args.extra_metric_labels:
+                labels.update(server_args.extra_metric_labels)
+            self.metrics_collector = TokenizerMetricsCollector(
+                server_args=server_args,
+                labels=labels,
+                bucket_time_to_first_token=server_args.bucket_time_to_first_token,
+                bucket_inter_token_latency=server_args.bucket_inter_token_latency,
+                bucket_e2e_request_latency=server_args.bucket_e2e_request_latency,
+                collect_tokens_histogram=server_args.collect_tokens_histogram,
+            )
+            logger.info("TokenizerMetricsCollector initialized for gRPC mode")
 
         # Crash dump for debugging
         self.crash_dump_request_list = []
@@ -577,11 +602,29 @@ class GrpcRequestManager:
                 logger.debug(f"Skipping output for aborted request {rid}")
                 continue
 
-            # Update metrics
+            # Update timing and record per-token metrics
+            # Mirrors TokenizerManager.collect_metrics() logic exactly.
+            completion_tokens = batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
             if state.time_stats.first_token_time == 0.0:
                 state.time_stats.set_first_token_time()
+            if not state.ttft_observed and self.disaggregation_mode != DisaggregationMode.PREFILL:
+                state.ttft_observed = True
+                state.last_completion_tokens = completion_tokens
+                if self.metrics_collector is not None:
+                    self.metrics_collector.observe_time_to_first_token(
+                        self.metrics_collector.labels,
+                        state.time_stats.get_first_token_latency(),
+                    )
             else:
-                state.time_stats.set_last_time()
+                num_new_tokens = completion_tokens - state.last_completion_tokens
+                if num_new_tokens and self.metrics_collector is not None:
+                    self.metrics_collector.observe_inter_token_latency(
+                        self.metrics_collector.labels,
+                        state.time_stats.get_interval(),
+                        num_new_tokens,
+                    )
+                    state.time_stats.set_last_time()
+                    state.last_completion_tokens = completion_tokens
 
             # Extract output for this request
             output_data = {
@@ -672,6 +715,9 @@ class GrpcRequestManager:
                 state.stream_finished = True
                 state.event.set()
 
+                # Record serving metrics (TTFT, ITL, E2E, token counts)
+                self._collect_metrics(state, batch_out, i)
+
                 # Remove from tracking after a delay
                 async def cleanup(request_id):
                     await asyncio.sleep(5.0)
@@ -694,6 +740,44 @@ class GrpcRequestManager:
         # Execute all queue.put() operations in parallel
         if put_tasks:
             await asyncio.gather(*put_tasks, return_exceptions=True)
+
+    def _collect_metrics(self, state: GrpcReqState, batch_out: BatchTokenIDOutput, i: int):
+        """Record serving metrics for a finished request.
+
+        Mirrors TokenizerManager.collect_metrics() — records E2E latency,
+        prompt/completion token counts, and cached token counts into the
+        shared Prometheus multiprocess directory so they appear on the
+        engine's /metrics endpoint.
+        """
+        if self.metrics_collector is None:
+            return
+
+        labels = self.metrics_collector.labels
+        completion_tokens = batch_out.completion_tokens[i] if batch_out.completion_tokens else 0
+        prompt_tokens = batch_out.prompt_tokens[i] if batch_out.prompt_tokens else 0
+        cached_tokens = batch_out.cached_tokens[i] if batch_out.cached_tokens else 0
+
+        retraction_count = (
+            batch_out.retraction_counts[i]
+            if getattr(batch_out, "retraction_counts", None)
+            and i < len(batch_out.retraction_counts)
+            else 0
+        )
+
+        cached_tokens_details = None
+        if hasattr(batch_out, "cached_tokens_details") and batch_out.cached_tokens_details:
+            cached_tokens_details = batch_out.cached_tokens_details[i]
+
+        self.metrics_collector.observe_one_finished_request(
+            labels,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            state.time_stats.get_e2e_latency(),
+            False,  # has_grammar — not tracked in gRPC mode
+            retraction_count,
+            cached_tokens_details,
+        )
 
     async def _handle_embedding_output(self, batch_out: BatchEmbeddingOutput):
         """Handle batch embedding output from scheduler."""
