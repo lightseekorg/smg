@@ -58,6 +58,7 @@ use crate::{
         otel_trace,
     },
     routers::{
+        common::background::create::{handle_background_create, BackgroundCreateDeps},
         conversations,
         mesh::{
             get_app_config, get_cluster_status, get_global_rate_limit, get_global_rate_limit_stats,
@@ -255,6 +256,18 @@ async fn v1_responses(
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
+    if body.background.unwrap_or(false) {
+        let request_context = smg_data_connector::current_request_context();
+        let deps = BackgroundCreateDeps {
+            repository: state.context.background_repository.as_ref(),
+            response_storage: state.context.response_storage.as_ref(),
+            conversation_storage: state.context.conversation_storage.as_ref(),
+            conversation_item_storage: state.context.conversation_item_storage.as_ref(),
+            background_config: &state.context.router_config.background,
+            request_context: request_context.as_ref(),
+        };
+        return handle_background_create(deps, &body, &body.model).await;
+    }
     state
         .router
         .route_responses(Some(&headers), &tenant_meta, &body, &body.model)

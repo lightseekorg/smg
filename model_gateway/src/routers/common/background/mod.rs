@@ -1,7 +1,6 @@
-//! Background-mode shared handler scaffolding.
-//!
-//! BGM-PR-03 ships only [`BackgroundServices`]. Concrete create / cancel /
-//! resume handlers land in later PRs.
+//! Background-mode shared handlers.
+
+pub mod create;
 
 use std::sync::Arc;
 

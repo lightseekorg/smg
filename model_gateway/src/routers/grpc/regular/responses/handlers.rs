@@ -12,9 +12,6 @@
 //! 1. **Synchronous** - Returns complete response immediately (non_streaming.rs)
 //! 2. **Streaming** - Returns SSE stream with real-time events (streaming.rs)
 //!
-//! Note: Background mode is no longer supported. Requests with background=true
-//! will be rejected with a 400 error.
-//!
 //! # Request Flow
 //!
 //! ```text
@@ -54,17 +51,17 @@ pub(crate) async fn route_responses(
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
-    // BGM-PR-04 replaces this with delegation to routers/common/background/
-    // when ctx.app_context.background_repository is Some.
-    let is_background = request.background.unwrap_or(false);
-    if is_background {
+    // Background dispatch lives on the axum handler `v1_responses` in
+    // `server.rs`. The gRPC router has no path into that handler, so a
+    // `background=true` request reaching here would otherwise execute
+    // synchronously and silently drop the queued semantics. Reject loudly.
+    if request.background.unwrap_or(false) {
         return error::bad_request(
             "unsupported_parameter",
-            "Background mode is not supported. Please set 'background' to false or omit it.",
+            "Background mode is not supported on the gRPC router; use the HTTP API.",
         );
     }
 
-    // 2. Route based on execution mode
     let is_streaming = request.stream.unwrap_or(false);
     if is_streaming {
         let params = ResponsesCallContext {
