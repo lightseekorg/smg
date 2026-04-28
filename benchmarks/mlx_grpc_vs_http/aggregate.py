@@ -1,11 +1,10 @@
-"""Build a markdown comparison table from genai-bench output JSON.
+"""Build a markdown comparison table from bench_client.py output.
 
-Reads the experiment folders produced by run.sh:
-    bench-results/{label}_{scenario}_c{concurrency}/.../*.json
+Reads experiment folders produced by run.sh:
+    bench-results/{label}_{scenario}_c{concurrency}/result.json
 
-Pulls the aggregated metrics (ttft, e2e_latency, input_throughput,
-output_throughput) from each and emits a side-by-side http vs grpc
-markdown table per traffic scenario.
+Emits a side-by-side http vs grpc markdown table per scenario.
+Cells with a `.failed` marker (or no result.json) render as "—".
 """
 
 from __future__ import annotations
@@ -16,34 +15,17 @@ import re
 from pathlib import Path
 from typing import Any
 
-# Directory name format from run.sh: e.g. "http_D-100-256_c16"
-DIRNAME_RE = re.compile(r"^(?P<label>http|grpc)_(?P<scenario>.+?)_c(?P<concurrency>\d+)$")
-
-
-def _stats(d: dict[str, Any], key: str) -> dict[str, float]:
-    return d.get("aggregated_metrics", {}).get("stats", {}).get(key, {})
+DIRNAME_RE = re.compile(r"^(?P<label>http|grpc)_(?P<scenario>[^_]+)_c(?P<concurrency>\d+)$")
 
 
 def parse_experiment(folder: Path) -> dict[str, Any] | None:
-    """Pull metrics out of a genai-bench experiment folder."""
-    json_files = sorted(
-        p
-        for p in folder.rglob("*.json")
-        if "experiment_metadata" not in p.name and "gpu_utilization" not in p.name
-    )
-    if not json_files:
+    result = folder / "result.json"
+    if not result.exists():
         return None
-    # Each cell produces one summary JSON; sorted() makes the choice
-    # deterministic if a partial rerun left a stale file.
-    data = json.loads(json_files[0].read_text())
-    return {
-        "ttft_mean": float(_stats(data, "ttft").get("mean", float("inf"))),
-        "ttft_p90": float(_stats(data, "ttft").get("p90", float("inf"))),
-        "e2e_mean": float(_stats(data, "e2e_latency").get("mean", float("inf"))),
-        "input_tps": float(_stats(data, "input_throughput").get("mean", 0.0)),
-        "output_tps": float(_stats(data, "output_throughput").get("mean", 0.0)),
-        "rps": float(_stats(data, "request_throughput").get("mean", 0.0)),
-    }
+    try:
+        return json.loads(result.read_text())
+    except json.JSONDecodeError:
+        return None
 
 
 def collect(results_dir: Path) -> dict[tuple[str, str, int], dict[str, Any]]:
@@ -54,23 +36,21 @@ def collect(results_dir: Path) -> dict[tuple[str, str, int], dict[str, Any]]:
         m = DIRNAME_RE.match(sub.name)
         if not m:
             continue
-        metrics = parse_experiment(sub)
-        if metrics is None:
+        data = parse_experiment(sub)
+        if data is None:
             continue
-        label = m.group("label")
-        scenario = m.group("scenario")
-        concurrency = int(m.group("concurrency"))
-        out[(label, scenario, concurrency)] = metrics
+        key = (m.group("label"), m.group("scenario"), int(m.group("concurrency")))
+        out[key] = data
     return out
 
 
-def fmt_ms(seconds: float) -> str:
-    if seconds == float("inf"):
+def fmt_ms(stats: dict[str, Any] | None, key: str) -> str:
+    if not stats or key not in stats:
         return "—"
-    return f"{seconds * 1000:.0f}"
+    return f"{stats[key]:.0f}"
 
 
-def fmt_float(x: float, places: int = 1) -> str:
+def fmt_float(x: float, places: int = 2) -> str:
     if x in (0.0, float("inf")):
         return "—"
     return f"{x:.{places}f}"
@@ -81,32 +61,43 @@ def build_section(
     scenario: str,
     concurrencies: list[int],
 ) -> list[str]:
+    samples = [v for v in results.values() if v["scenario"] == scenario]
+    if not samples:
+        return [
+            "",
+            f"### Scenario `{scenario}`",
+            "",
+            "_No results._",
+            "",
+        ]
+    sample = samples[0]
+    title_extra = f" (max_tokens={sample['max_tokens']})"
+
     lines = [
         "",
-        f"### Scenario `{scenario}`",
+        f"### Scenario `{scenario}`{title_extra}",
         "",
-        "| Concurrency | Setup | RPS | TTFT mean (ms) | TTFT p90 (ms) | E2E mean (ms) | Output tok/s |",
-        "|---|---|---|---|---|---|---|",
+        "| Concurrency | Setup | RPS | Output tok/s | TTFT p50 (ms) | TTFT p95 (ms) | TPOT p50 (ms) | Errors / Total |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for c in concurrencies:
         for label in ("http", "grpc"):
             r = results.get((label, scenario, c))
             if r is None:
-                lines.append(f"| {c} | {label} | — | — | — | — | — |")
+                lines.append(f"| {c} | {label} | — | — | — | — | — | — |")
                 continue
             lines.append(
-                f"| {c} | {label} | {fmt_float(r['rps'], 3)} | "
-                f"{fmt_ms(r['ttft_mean'])} | {fmt_ms(r['ttft_p90'])} | "
-                f"{fmt_ms(r['e2e_mean'])} | {fmt_float(r['output_tps'])} |"
+                f"| {c} | {label} | {fmt_float(r['request_throughput'], 2)} | "
+                f"{fmt_float(r['output_throughput'], 1)} | "
+                f"{fmt_ms(r['ttft_ms'], 'p50')} | {fmt_ms(r['ttft_ms'], 'p95')} | "
+                f"{fmt_ms(r['tpot_ms'], 'p50')} | "
+                f"{r['error_count']} / {r['error_count'] + r['completed_requests']} |"
             )
     lines.append("")
     return lines
 
 
-def build_table(
-    results: dict[tuple[str, str, int], dict[str, Any]],
-    model: str,
-) -> str:
+def build_table(results: dict[tuple[str, str, int], dict[str, Any]], model: str) -> str:
     if not results:
         return "_No results found in results dir._"
     scenarios = sorted({k[1] for k in results})
@@ -119,8 +110,13 @@ def build_table(
         f"**Scenarios:** {', '.join(scenarios)}",
         "",
         "RPS = request throughput. TTFT = time to first token. "
-        "E2E = end-to-end request latency. Lower is better for latencies; "
-        "higher is better for throughput.",
+        "TPOT = time per output token (excl. first). Lower is better for "
+        "latencies; higher is better for throughput. Cells where every "
+        "request failed (server overload) render as `—`.",
+        "",
+        "Scenarios:",
+        "- `chat` — ShareGPT (short user prompts, ~50–300 tokens)",
+        "- `agent` — vdaita/edit_10k_char (real local-agent code-edit prompts, ~2.5k tokens)",
     ]
     for s in scenarios:
         lines.extend(build_section(results, s, concurrencies))
