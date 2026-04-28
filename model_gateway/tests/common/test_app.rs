@@ -106,7 +106,7 @@ pub fn create_test_app(
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
-        api_port: router_config.port,
+        api_port: 0,
     });
 
     // Configure request ID headers (use defaults if not specified)
@@ -149,7 +149,7 @@ pub fn create_test_app_with_context(
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
-        api_port: app_context.router_config.port,
+        api_port: 0,
     });
 
     // Get config from the context

@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::AtomicU64,
+        Arc, OnceLock,
+    },
     time::Duration,
 };
 
@@ -77,6 +80,10 @@ pub struct AppContext {
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
+    /// Unix timestamp (seconds) of the last token chunk forwarded to a client.
+    /// Zero means no tokens have been forwarded yet. Used by health_generate to
+    /// skip the real inference probe when traffic is flowing recently.
+    pub last_token_time: Arc<AtomicU64>,
     pub kv_event_monitor: Option<Arc<KvEventMonitor>>,
     pub realtime_registry: Arc<RealtimeRegistry>,
     /// Bind address for WebRTC UDP sockets (`None` = `0.0.0.0`, auto-detect).
@@ -400,6 +407,7 @@ impl AppContextBuilder {
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
+            last_token_time: Arc::new(AtomicU64::new(0)),
             kv_event_monitor: self.kv_event_monitor,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
             webrtc_bind_addr: self.webrtc_bind_addr,

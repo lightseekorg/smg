@@ -1,6 +1,9 @@
 //! Request context types for OpenAI router pipeline.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::AtomicU64,
+    Arc,
+};
 
 use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
@@ -42,6 +45,7 @@ pub enum RequestType {
 pub struct SharedComponents {
     pub client: reqwest::Client,
     pub router_config: Arc<RouterConfig>,
+    pub last_token_time: Arc<AtomicU64>,
 }
 
 pub struct ResponsesComponents {

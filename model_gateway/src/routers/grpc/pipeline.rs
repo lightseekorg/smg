@@ -3,7 +3,7 @@
 //! This module defines the RequestPipeline orchestrator that coordinates
 //! the execution of pipeline stages from request preparation to response delivery.
 
-use std::{sync::Arc, time::Instant};
+use std::{sync::{atomic::AtomicU64, Arc}, time::Instant};
 
 use axum::response::{IntoResponse, Response};
 use openai_protocol::{
@@ -110,6 +110,7 @@ impl RequestPipeline {
     }
 
     /// Create a regular (single-worker) pipeline
+    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
     pub fn new_regular(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -117,6 +118,7 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -131,6 +133,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_REGULAR,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -216,6 +219,7 @@ impl RequestPipeline {
     }
 
     /// Create a PD (prefill-decode) pipeline
+    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
     pub fn new_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -223,6 +227,7 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -237,6 +242,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_PD,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -320,6 +326,7 @@ impl RequestPipeline {
     /// Uses Messages-specific stages for preparation, request building, and response
     /// processing. Shares worker selection, client acquisition, dispatch metadata,
     /// and request execution stages with other pipelines.
+    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
     pub fn new_messages(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -327,6 +334,7 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -341,6 +349,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_REGULAR,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -367,6 +376,7 @@ impl RequestPipeline {
     }
 
     /// Create a Messages API PD (prefill-decode) pipeline
+    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
     pub fn new_messages_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -374,6 +384,7 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -388,6 +399,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_PD,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -421,6 +433,7 @@ impl RequestPipeline {
     pub fn new_completion(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             ToolParserFactory::default(),
@@ -435,6 +448,7 @@ impl RequestPipeline {
             None,
             None,
             metrics_labels::BACKEND_REGULAR,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -464,6 +478,7 @@ impl RequestPipeline {
     pub fn new_completion_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             ToolParserFactory::default(),
@@ -478,6 +493,7 @@ impl RequestPipeline {
             None,
             None,
             metrics_labels::BACKEND_PD,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![

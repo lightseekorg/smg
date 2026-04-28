@@ -5,7 +5,10 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
-    sync::Arc,
+    sync::{
+        atomic::AtomicU64,
+        Arc,
+    },
     time::Instant,
 };
 
@@ -37,7 +40,10 @@ use tracing::{debug, error, warn};
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     routers::grpc::{
-        common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
+        common::{
+            response_formatting::CompletionTokenTracker,
+            responses::build_tracked_sse_response,
+        },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
         utils,
@@ -53,6 +59,7 @@ pub(crate) struct StreamingProcessor {
     configured_tool_parser: Option<String>,
     configured_reasoning_parser: Option<String>,
     backend_type: &'static str,
+    last_token_time: Arc<AtomicU64>,
 }
 
 /// Context for generate endpoint streaming - groups config params to reduce function arguments
@@ -71,6 +78,7 @@ impl StreamingProcessor {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
         backend_type: &'static str,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         Self {
             tool_parser_factory,
@@ -78,6 +86,7 @@ impl StreamingProcessor {
             configured_tool_parser,
             configured_reasoning_parser,
             backend_type,
+            last_token_time,
         }
     }
 
@@ -179,7 +188,7 @@ impl StreamingProcessor {
         }
 
         // Return SSE response
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process streaming chunks from a single stream (Regular mode)
@@ -732,7 +741,7 @@ impl StreamingProcessor {
         }
 
         // Return SSE response
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process streaming chunks for generate endpoint (no tool/reasoning parsing)
@@ -1550,7 +1559,7 @@ impl StreamingProcessor {
             }
         }
 
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process Messages API streaming chunks from a single stream.
@@ -2294,7 +2303,7 @@ impl StreamingProcessor {
             }
         }
 
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process completion streaming chunks from a single stream.
