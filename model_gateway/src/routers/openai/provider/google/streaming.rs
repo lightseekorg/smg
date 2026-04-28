@@ -300,9 +300,11 @@ impl GoogleProvider {
                     json!({ "reasoning_tokens": thoughts_tokens }),
                 );
             }
-            if let Some(total_tokens) = usage.get("totalTokenCount").and_then(Value::as_i64) {
-                usage_out.insert("total_tokens".to_string(), json!(total_tokens));
-            }
+            let total_tokens = usage
+                .get("totalTokenCount")
+                .and_then(Value::as_i64)
+                .unwrap_or(input_tokens + output_tokens);
+            usage_out.insert("total_tokens".to_string(), json!(total_tokens));
             response["usage"] = Value::Object(usage_out);
         }
 

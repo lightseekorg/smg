@@ -658,3 +658,32 @@ fn stream_transform_incomplete_details_contains_reason_only() {
         "incomplete_details should only contain reason"
     );
 }
+
+#[test]
+fn stream_transform_usage_falls_back_total_tokens_when_missing() {
+    let provider = GoogleProvider;
+    let mut state = provider.new_stream_state().expect("google stream state");
+    let final_chunk = json!({
+        "candidates": [{
+            "content": {"role":"model","parts":[{"text":"ok"}]},
+            "finishReason":"STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 7,
+            "candidatesTokenCount": 3,
+            "thoughtsTokenCount": 2
+        }
+    });
+
+    let final_events = provider
+        .transform_stream_event(&final_chunk, Some(state.as_mut()), Endpoint::Responses)
+        .expect("final transform");
+    let completed = final_events
+        .iter()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("response.completed"))
+        .expect("completed event");
+
+    assert_eq!(completed["response"]["usage"]["input_tokens"], json!(7));
+    assert_eq!(completed["response"]["usage"]["output_tokens"], json!(5));
+    assert_eq!(completed["response"]["usage"]["total_tokens"], json!(12));
+}
