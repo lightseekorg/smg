@@ -154,7 +154,7 @@ pub(crate) async fn load_input_history(
             .shared
             .router_config
             .max_conversation_history_items;
-        let fetch_limit = if stm_enabled {
+        let fetch_limit = if stm_enabled && request_body.store.unwrap_or(true) {
             cap.saturating_add(1)
         } else {
             cap
@@ -170,7 +170,10 @@ pub(crate) async fn load_input_history(
             .await
         {
             Ok(stored_items) => {
-                if stm_enabled && stored_items.len() > cap {
+                // Only reject oversized conversations when the response will
+                // actually be persisted. store=false requests skip persistence
+                // entirely, so STMO is never enqueued and the cap does not apply.
+                if stm_enabled && request_body.store.unwrap_or(true) && stored_items.len() > cap {
                     Metrics::record_router_error(
                         metrics_labels::ROUTER_OPENAI,
                         metrics_labels::BACKEND_EXTERNAL,

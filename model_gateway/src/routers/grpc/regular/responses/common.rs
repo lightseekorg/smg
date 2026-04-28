@@ -282,7 +282,7 @@ pub(super) async fn load_conversation_history(
         // whether the conversation has grown past max_conversation_history_items.
         // If it has, turn-count math would be wrong, so we reject early.
         let cap = ctx.max_conversation_history_items;
-        let fetch_limit = if stm_enabled {
+        let fetch_limit = if stm_enabled && request.store.unwrap_or(true) {
             cap.saturating_add(1)
         } else {
             cap
@@ -299,7 +299,10 @@ pub(super) async fn load_conversation_history(
             .await
         {
             Ok(stored_items) => {
-                if stm_enabled && stored_items.len() > cap {
+                // Only reject oversized conversations when the response will
+                // actually be persisted. store=false requests skip persistence
+                // entirely, so STMO is never enqueued and the cap does not apply.
+                if stm_enabled && request.store.unwrap_or(true) && stored_items.len() > cap {
                     return Err(error::bad_request(
                         "conversation_too_large",
                         format!(
