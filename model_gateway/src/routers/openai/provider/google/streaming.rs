@@ -5,6 +5,14 @@ use serde_json::{json, Value};
 use super::GoogleProvider;
 use crate::worker::Endpoint;
 
+#[derive(Default, Clone)]
+struct PendingFunctionCall {
+    id: String,
+    name: String,
+    arguments: String,
+    output_index: usize,
+}
+
 #[derive(Default)]
 pub(super) struct GoogleStreamState {
     has_emitted_initial_events: bool,
@@ -12,13 +20,9 @@ pub(super) struct GoogleStreamState {
     assistant_message_id: String,
     text_content_part_id: String,
     response_id: String,
-    function_call_id: Option<String>,
-    current_function_name: Option<String>,
     accumulated_text: String,
-    accumulated_function_args: String,
-    has_function_call: bool,
+    function_calls: Vec<PendingFunctionCall>,
     output_index: usize,
-    function_call_output_index: Option<usize>,
     message_item_added: bool,
 }
 
@@ -30,13 +34,9 @@ impl GoogleStreamState {
             assistant_message_id: format!("msg_{}", uuid::Uuid::now_v7()),
             text_content_part_id: format!("part_{}", uuid::Uuid::now_v7()),
             response_id: format!("resp_{}", uuid::Uuid::now_v7()),
-            function_call_id: None,
-            current_function_name: None,
             accumulated_text: String::new(),
-            accumulated_function_args: String::new(),
-            has_function_call: false,
+            function_calls: Vec::new(),
             output_index: 0,
-            function_call_output_index: None,
             message_item_added: false,
         }
     }
@@ -87,53 +87,48 @@ impl GoogleProvider {
         {
             for p in parts {
                 if let Some(function_call) = p.get("functionCall").and_then(Value::as_object) {
-                    let call_id = state
-                        .function_call_id
-                        .get_or_insert_with(|| {
-                            format!("call_{}", uuid::Uuid::now_v7().to_string().replace('-', ""))
-                        })
-                        .clone();
-                    state.has_function_call = true;
+                    let call_id =
+                        format!("call_{}", uuid::Uuid::now_v7().to_string().replace('-', ""));
                     let function_name = function_call
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown_tool")
                         .to_string();
-                    state.current_function_name = Some(function_name.clone());
                     let args = function_call
                         .get("args")
                         .cloned()
                         .unwrap_or_else(|| json!({}));
                     let args_json =
                         serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-                    if state.function_call_output_index.is_none() {
-                        let idx = if state.message_item_added {
-                            state.output_index + 1
-                        } else {
-                            state.output_index
-                        };
-                        state.function_call_output_index = Some(idx);
-                        out.push(json!({
-                            "type": "response.output_item.added",
-                            "output_index": idx,
-                            "item": {
-                                "id": call_id,
-                                "type": "function_call",
-                                "name": function_name,
-                                "arguments": "",
-                                "call_id": call_id
-                            }
-                        }));
-                    }
-                    if let Some(idx) = state.function_call_output_index {
-                        out.push(json!({
-                            "type": "response.function_call_arguments.delta",
-                            "output_index": idx,
-                            "item_id": call_id,
-                            "delta": args_json
-                        }));
-                    }
-                    state.accumulated_function_args.push_str(&args_json);
+                    let base_idx = if state.message_item_added {
+                        state.output_index + 1
+                    } else {
+                        state.output_index
+                    };
+                    let idx = base_idx + state.function_calls.len();
+                    out.push(json!({
+                        "type": "response.output_item.added",
+                        "output_index": idx,
+                        "item": {
+                            "id": call_id,
+                            "type": "function_call",
+                            "name": function_name,
+                            "arguments": "",
+                            "call_id": call_id
+                        }
+                    }));
+                    out.push(json!({
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": idx,
+                        "item_id": call_id,
+                        "delta": args_json
+                    }));
+                    state.function_calls.push(PendingFunctionCall {
+                        id: call_id,
+                        name: function_name,
+                        arguments: args_json,
+                        output_index: idx,
+                    });
                 }
 
                 if let Some(text) = p.get("text").and_then(Value::as_str) {
@@ -183,32 +178,22 @@ impl GoogleProvider {
             return out;
         }
 
-        if state.has_function_call {
-            let call_id = state.function_call_id.clone().unwrap_or_else(|| {
-                format!("call_{}", uuid::Uuid::now_v7().to_string().replace('-', ""))
-            });
-            let call_name = state
-                .current_function_name
-                .clone()
-                .unwrap_or_else(|| "unknown_tool".to_string());
-            let idx = state
-                .function_call_output_index
-                .unwrap_or(state.output_index);
+        for call in &state.function_calls {
             out.push(json!({
                 "type": "response.function_call_arguments.done",
-                "output_index": idx,
-                "item_id": call_id,
-                "arguments": state.accumulated_function_args
+                "output_index": call.output_index,
+                "item_id": call.id,
+                "arguments": call.arguments
             }));
             out.push(json!({
                 "type": "response.output_item.done",
-                "output_index": idx,
+                "output_index": call.output_index,
                 "item": {
-                    "id": call_id,
+                    "id": call.id,
                     "type": "function_call",
-                    "name": call_name,
-                    "arguments": state.accumulated_function_args,
-                    "call_id": call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "call_id": call.id,
                     "status": "completed"
                 }
             }));
@@ -260,13 +245,13 @@ impl GoogleProvider {
         });
 
         let mut output = Vec::new();
-        if state.has_function_call {
+        for call in &state.function_calls {
             output.push(json!({
-                "id": state.function_call_id.clone().unwrap_or_default(),
+                "id": call.id,
                 "type": "function_call",
-                "name": state.current_function_name.clone().unwrap_or_else(|| "unknown_tool".to_string()),
-                "arguments": state.accumulated_function_args,
-                "call_id": state.function_call_id.clone().unwrap_or_default(),
+                "name": call.name,
+                "arguments": call.arguments,
+                "call_id": call.id,
                 "status": "completed"
             }));
         }
