@@ -396,20 +396,28 @@ pub(super) async fn load_conversation_history(
     );
 
     let turn_info = if stm_enabled {
-        let mut info = count_conversation_turn_info(&modified_request.input);
-        // If we loaded from conversation storage, total_items from the
-        // assembled (message-only) input undercounts — function_call,
-        // function_call_output, and MCP items are in the DB but filtered
-        // out of the inference window. Use the raw DB count instead so
-        // target_item_end points at the correct absolute position.
-        if let Some(raw_count) = raw_stored_item_count {
-            let current_input_count = match &request.input {
-                ResponseInput::Text(_) => 1,
-                ResponseInput::Items(items) => items.len(),
-            };
-            info.total_items = raw_count + current_input_count;
+        // If a conversation was requested but list_items failed, the assembled
+        // input only contains the current request — STMO turn counts would be
+        // wrong. Skip STMO for this request so persistence does not enqueue a
+        // job with an undercounted last_index/target_item_end.
+        if request.conversation.is_some() && raw_stored_item_count.is_none() {
+            None
+        } else {
+            let mut info = count_conversation_turn_info(&modified_request.input);
+            // If we loaded from conversation storage, total_items from the
+            // assembled (message-only) input undercounts — function_call,
+            // function_call_output, and MCP items are in the DB but filtered
+            // out of the inference window. Use the raw DB count instead so
+            // target_item_end points at the correct absolute position.
+            if let Some(raw_count) = raw_stored_item_count {
+                let current_input_count = match &request.input {
+                    ResponseInput::Text(_) => 1,
+                    ResponseInput::Items(items) => items.len(),
+                };
+                info.total_items = raw_count + current_input_count;
+            }
+            Some(info)
         }
-        Some(info)
     } else {
         None
     };

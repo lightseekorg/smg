@@ -273,15 +273,23 @@ pub(crate) async fn load_input_history(
     }
 
     let conversation_turn_info = if stm_enabled {
-        let mut info = count_conversation_turn_info(&request_body.input);
-        // Correct total_items when loaded from conversation storage: reasoning
-        // items are skipped during load but are stored in the DB, so the
-        // assembled input underestimates the true conversation size. Use the
-        // raw DB count + current input item count for an accurate target_item_end.
-        if let Some(raw_count) = raw_stored_item_count {
-            info.total_items = raw_count + current_input_count;
+        // If a conversation was requested but list_items failed, the assembled
+        // input only contains the current request — STMO turn counts would be
+        // wrong. Skip STMO for this request so persistence does not enqueue a
+        // job with an undercounted last_index/target_item_end.
+        if conversation.is_some() && raw_stored_item_count.is_none() {
+            None
+        } else {
+            let mut info = count_conversation_turn_info(&request_body.input);
+            // Correct total_items when loaded from conversation storage: reasoning
+            // items are skipped during load but are stored in the DB, so the
+            // assembled input underestimates the true conversation size. Use the
+            // raw DB count + current input item count for an accurate target_item_end.
+            if let Some(raw_count) = raw_stored_item_count {
+                info.total_items = raw_count + current_input_count;
+            }
+            Some(info)
         }
-        Some(info)
     } else {
         None
     };
