@@ -74,6 +74,22 @@ PHASES="mlx grpc" CONCURRENCIES="1" SCENARIOS="chat" DURATION_MIN=1 \
 | `RESULTS_DIR` | `bench-results` | output dir |
 | `VLLM_VENV` | `~/.venv-vllm-metal` | vllm-metal venv path |
 
+## Reading the results
+
+Most cells render four meaningful columns (RPS, output tok/s, TTFT, TPOT)
+across all three backends. Two known quirks worth calling out:
+
+- **`mlx-lm.server` TPOT often shows `0`.** mlx-lm's HTTP server buffers
+  all per-token SSE chunks and flushes them in a single localhost write,
+  so per-chunk inter-token latency collapses to ~0 from the client's
+  perspective. The same MLX `BatchGenerator` viewed through the SMG gRPC
+  servicer streams properly — that's why the `smg → mlx-grpc` row right
+  next to it shows a real TPOT in the same scenario.
+- **High-concurrency agent cells may be empty (`—`)** if the
+  `DURATION_MIN` budget runs out before any request completes a 2.5k
+  token prefill. Bump `DURATION_MIN` (or drop to lower concurrency) if
+  you need numbers there.
+
 ## Robustness
 
 - **Per-cell failures tolerated**: if genai-bench fails for one cell,
