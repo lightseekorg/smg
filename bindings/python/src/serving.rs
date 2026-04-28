@@ -23,7 +23,13 @@ use std::sync::OnceLock;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3::{Py, PyAny};
 use tokio::runtime::Runtime;
+
+/// Re-export of pyo3's owned-Python-object handle. ``Py<PyAny>`` is what
+/// pyo3 0.28 uses where older versions exposed ``PyObject`` from the
+/// prelude.
+type PyObject = Py<PyAny>;
 
 /// Lazily-initialized tokio runtime shared across blocking PyO3 entries.
 ///
@@ -68,6 +74,7 @@ fn shared_runtime() -> PyResult<&'static Runtime> {
 fn parse_tool_call_complete(py: Python<'_>, output: &str, parser_name: &str) -> PyResult<PyObject> {
     let factory = tool_parser::ParserFactory::new();
     let mut parser = factory
+        .registry()
         .create_parser(parser_name)
         .ok_or_else(|| PyValueError::new_err(format!("unknown tool parser: {parser_name:?}")))?;
 
@@ -112,6 +119,7 @@ fn parse_tool_call_complete(py: Python<'_>, output: &str, parser_name: &str) -> 
 fn parse_reasoning_complete(py: Python<'_>, output: &str, parser_name: &str) -> PyResult<PyObject> {
     let factory = reasoning_parser::ParserFactory::new();
     let mut parser = factory
+        .registry()
         .create_parser(parser_name)
         .ok_or_else(|| {
             PyValueError::new_err(format!("unknown reasoning parser: {parser_name:?}"))
