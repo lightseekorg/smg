@@ -84,15 +84,11 @@ impl Provider for GoogleProvider {
         if let Some(auth) = auth_header {
             if let Ok(auth_str) = auth.to_str() {
                 let trimmed = auth_str.trim();
-                if !trimmed.is_empty() {
-                    if trimmed.split_once(' ').is_some_and(|(scheme, token)| {
-                        scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()
-                    }) {
-                        builder = builder.header("Authorization", trimmed);
-                    } else {
-                        builder = builder.header("x-goog-api-key", trimmed);
-                    }
-                }
+                if trimmed.split_once(' ').is_some_and(|(scheme, token)| {
+                    scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()
+                }) {
+                    builder = builder.header("Authorization", trimmed);
+                };
             }
         }
         builder
