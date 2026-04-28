@@ -91,11 +91,10 @@ impl GoogleProvider {
                         }
                         if let Some(fr) = p.get("functionResponse") {
                             extra_output.push(json!({
-                                "id": format!("fco_{}", uuid::Uuid::now_v7().to_string().replace('-', "")),
                                 "type": "function_call_output",
                                 "status": msg_status,
-                                "tool_call_id": fr.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                                "content": fr.get("response").cloned().unwrap_or_else(|| json!({}))
+                                "call_id": fr.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                                "output": fr.get("response").cloned().unwrap_or_else(|| json!({}))
                             }));
                         }
                         if let Some(inline) = p.get("inlineData") {

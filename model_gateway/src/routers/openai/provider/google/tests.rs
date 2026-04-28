@@ -250,6 +250,47 @@ fn request_transform_defaults_inline_file_mime_type_when_missing() {
 }
 
 #[test]
+fn response_transform_maps_function_response_to_call_id_and_output() {
+    let provider = GoogleProvider;
+    let mut response = json!({
+        "modelVersion": "gemini-2.5-flash",
+        "createTime": "2026-04-20T10:20:30Z",
+        "candidates": [{
+            "finishReason": "STOP",
+            "content": {
+                "parts": [{
+                    "functionResponse": {
+                        "id": "call_abc123",
+                        "response": {"temp": 72}
+                    }
+                }]
+            }
+        }],
+        "usageMetadata": {
+          "promptTokenCount": 10,
+          "candidatesTokenCount": 1,
+          "thoughtsTokenCount": 0,
+          "totalTokenCount": 11
+        }
+    });
+
+    provider
+        .transform_response(&mut response, Endpoint::Responses)
+        .expect("response transform should succeed");
+
+    let output = response["output"].as_array().expect("output array");
+    let function_output = output
+        .iter()
+        .find(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call_output"))
+        .expect("function_call_output item");
+
+    assert_eq!(function_output["call_id"], json!("call_abc123"));
+    assert_eq!(function_output["output"], json!({"temp": 72}));
+    assert!(function_output.get("tool_call_id").is_none());
+    assert!(function_output.get("content").is_none());
+}
+
+#[test]
 fn request_transform_maps_tool_response_to_function_response() {
     let provider = GoogleProvider;
     let mut payload = json!({
