@@ -50,6 +50,7 @@ pub(super) async fn route_chat(
     let start = Instant::now();
     let model = model_id;
     let streaming = body.stream;
+    let last_token_time = deps.shared_components.last_token_time.clone();
 
     Metrics::record_router_request(
         metrics_labels::ROUTER_OPENAI,
@@ -157,6 +158,7 @@ pub(super) async fn route_chat(
             let headers = Arc::clone(&headers_cloned);
             let worker_api_key = Arc::clone(&worker_api_key);
             let worker = Arc::clone(&worker);
+            let last_token_time = last_token_time.clone();
 
             async move {
                 let mut req = client.post(&url).json(&*payload);
@@ -193,6 +195,7 @@ pub(super) async fn route_chat(
                     let (tx, rx) = mpsc::unbounded_channel();
                     #[expect(clippy::disallowed_methods, reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding")]
                     tokio::spawn(async move {
+                        use std::sync::atomic::Ordering;
                         let mut s = stream;
                         while let Some(chunk) = s.next().await {
                             match chunk {
@@ -200,6 +203,11 @@ pub(super) async fn route_chat(
                                     if tx.send(Ok(bytes)).is_err() {
                                         break;
                                     }
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    last_token_time.store(now, Ordering::Relaxed);
                                 }
                                 Err(e) => {
                                     let _ = tx.send(Err(format!("Stream error: {e}")));
