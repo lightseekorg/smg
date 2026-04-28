@@ -142,7 +142,6 @@ async fn route_responses_streaming(
             &request,
             params,
             mcp_servers,
-            conversation_turn_info,
         );
     }
 

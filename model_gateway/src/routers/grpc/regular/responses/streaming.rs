@@ -433,7 +433,6 @@ pub(super) fn execute_tool_loop_streaming(
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
     mcp_servers: Vec<McpServerBinding>,
-    _conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
