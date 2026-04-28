@@ -277,12 +277,6 @@ impl ResponsesResponseBuilder {
         self
     }
 
-    /// Set tool choice setting
-    pub fn tool_choice(mut self, tool_choice: impl Into<String>) -> Self {
-        self.tool_choice = Value::String(tool_choice.into());
-        self
-    }
-
     /// Set available tools
     pub fn tools(mut self, tools: Vec<ResponseTool>) -> Self {
         self.tools = tools;

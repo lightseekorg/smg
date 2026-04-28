@@ -169,8 +169,13 @@ async fn route_responses_streaming(
                 // and the receiver below sees end-of-stream.
             }
             Err(e) => {
+                // Match the harmony Responses streaming error payload
+                // (`grpc/harmony/responses/streaming.rs`) so
+                // `/v1/responses` clients see one uniform shape across
+                // surfaces:
+                //   {"error": "agent_loop_failed", "status": <n>}
                 let _ = tx.send(Ok(Bytes::from(format!(
-                    "event: error\ndata: {{\"status\":{}}}\n\n",
+                    "event: error\ndata: {{\"error\":\"agent_loop_failed\",\"status\":{}}}\n\n",
                     e.into_response().status().as_u16()
                 ))));
             }

@@ -367,13 +367,6 @@ impl ResponseStreamEventEmitter {
             .collect()
     }
 
-    /// Helper to add optional fields to JSON object
-    fn add_optional_field<T: serde::Serialize>(obj: &mut Value, key: &str, value: Option<&T>) {
-        if let Some(val) = value {
-            obj[key] = json!(val);
-        }
-    }
-
     // ========================================================================
     // MCP Event Emission Methods
     // ========================================================================

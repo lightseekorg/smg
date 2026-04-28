@@ -654,19 +654,25 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        let has_function_output = payload
+        // Decide whether to drive a fresh tool call or close the
+        // turn with a final assistant message based on the **last**
+        // input item, not on whether ANY function_call_output appears
+        // anywhere. The agent loop replays full lowered transcripts
+        // (mcp_call → function_call + function_call_output pair) on
+        // continuation turns, so a `previous_response_id`-driven
+        // request looks like `[..., fc, fco, prior_msg, user_msg]`:
+        // the user's new message is what the model should answer
+        // next, so the mock should emit a fresh function_call. Only
+        // when the latest input item is `function_call_output` (i.e.
+        // SMG just returned a tool result mid-loop) should the mock
+        // close the turn with the final summary message.
+        let has_prior_tool_context = payload
             .get("input")
             .and_then(|v| v.as_array())
-            .map(|items| {
-                items.iter().any(|item| {
-                    item.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t == "function_call_output")
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        let has_prior_tool_context = has_function_output;
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("type"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t == "function_call_output");
 
         if has_tools && !has_prior_tool_context {
             // First turn: emit streaming tool call events using OpenAI-style function_call ids
@@ -860,7 +866,14 @@ async fn responses_handler(
                             "id": msg_id.clone(),
                             "type": "message",
                             "role": "assistant",
-                            "content": []
+                            "content": [],
+                            // Per OpenAI Responses spec, `OutputMessage.status`
+                            // is required (`{"in_progress","completed",
+                            // "incomplete"}`). The `output_item.added` event
+                            // opens the lifecycle, so the message starts in
+                            // `in_progress`; the matching `output_item.done`
+                            // below flips to `completed`.
+                            "status": "in_progress"
                         }
                     })
                     .to_string(),
@@ -928,7 +941,8 @@ async fn responses_handler(
                             "content": [{
                                 "type": "output_text",
                                 "text": "Tool result consumed; here is the final answer."
-                            }]
+                            }],
+                            "status": "completed"
                         }
                     })
                     .to_string(),
@@ -970,12 +984,14 @@ async fn responses_handler(
                     "model": "mock-model",
                     "status": "in_progress",
                     "output": [{
+                        "id": format!("msg_{}", Uuid::now_v7().simple()),
                         "type": "message",
                         "role": "assistant",
                         "content": [{
                             "type": "output_text",
                             "text": "This is a mock responses streamed output."
-                        }]
+                        }],
+                        "status": "in_progress"
                     }]
                 });
                 Ok::<_, Infallible>(Event::default().data(chunk.to_string()))
@@ -1013,19 +1029,25 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        let has_function_output = payload
+        // Decide whether to drive a fresh tool call or close the
+        // turn with a final assistant message based on the **last**
+        // input item, not on whether ANY function_call_output appears
+        // anywhere. The agent loop replays full lowered transcripts
+        // (mcp_call → function_call + function_call_output pair) on
+        // continuation turns, so a `previous_response_id`-driven
+        // request looks like `[..., fc, fco, prior_msg, user_msg]`:
+        // the user's new message is what the model should answer
+        // next, so the mock should emit a fresh function_call. Only
+        // when the latest input item is `function_call_output` (i.e.
+        // SMG just returned a tool result mid-loop) should the mock
+        // close the turn with the final summary message.
+        let has_prior_tool_context = payload
             .get("input")
             .and_then(|v| v.as_array())
-            .map(|items| {
-                items.iter().any(|item| {
-                    item.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t == "function_call_output")
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        let has_prior_tool_context = has_function_output;
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("type"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t == "function_call_output");
 
         if has_tools && !has_prior_tool_context {
             let rid = format!("resp-{}", Uuid::now_v7());
@@ -1055,12 +1077,14 @@ async fn responses_handler(
                 "created_at": timestamp,
                 "model": "mock-model",
                 "output": [{
+                    "id": format!("msg_{}", Uuid::now_v7().simple()),
                     "type": "message",
                     "role": "assistant",
                     "content": [{
                         "type": "output_text",
                         "text": "Tool result consumed; here is the final answer."
-                    }]
+                    }],
+                    "status": "completed"
                 }],
                 "status": "completed",
                 "usage": {
@@ -1077,12 +1101,14 @@ async fn responses_handler(
                 "created_at": timestamp,
                 "model": "mock-model",
                 "output": [{
+                    "id": format!("msg_{}", Uuid::now_v7().simple()),
                     "type": "message",
                     "role": "assistant",
                     "content": [{
                         "type": "output_text",
                         "text": "This is a mock responses output."
-                    }]
+                    }],
+                    "status": "completed"
                 }],
                 "status": "completed",
                 "usage": {

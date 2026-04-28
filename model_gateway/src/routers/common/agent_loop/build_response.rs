@@ -35,8 +35,8 @@ use openai_protocol::{
     common::{ConversationRef, Usage},
     responses::{
         InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
-        ResponseReasoningContent, ResponseStatus, ResponseTool, ResponseUsage, ResponsesRequest,
-        ResponsesResponse, ResponsesUsage,
+        ResponseStatus, ResponseTool, ResponseUsage, ResponsesRequest, ResponsesResponse,
+        ResponsesUsage, SummaryTextContent,
     },
 };
 use serde_json::json;
@@ -100,8 +100,25 @@ pub(crate) fn build_response_from_state(
         pre_built_base.unwrap_or_else(|| build_base_from_state(state, request, hooks));
 
     // Restore the user-facing tool list. Done before mode handling so
-    // any further mutation (`output.extend`, etc.) sees the final tools.
-    response.tools = hooks.original_tools.clone().unwrap_or_default();
+    // any further mutation (`output.extend`, etc.) sees the final
+    // tools. Internal-MCP server entries (`internal: true` servers
+    // configured at the orchestrator) are scrubbed so SMG-side
+    // implementation details never leak back to the caller, even if
+    // the request explicitly named them. The protocol-layer
+    // `tools` field skip-serializes when empty, so a request whose
+    // tools were entirely filtered renders without a `tools` key
+    // (matching the `restore_original_tools` contract the legacy
+    // OpenAI passthrough router maintained before unification).
+    response.tools = hooks
+        .original_tools
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tool| {
+            let value = serde_json::to_value(tool).unwrap_or(serde_json::Value::Null);
+            !session.should_hide_tool_json(&value, &hooks.user_function_names)
+        })
+        .collect();
 
     match mode {
         RenderMode::Normal => {}
@@ -138,6 +155,30 @@ pub(crate) fn build_response_from_state(
         });
     response.store = request.store.unwrap_or(true);
 
+    // Overlay request-level metadata onto the response shell when the
+    // upstream left those fields blank. Pre-refactor this lived in the
+    // OpenAI router's `patch_response_with_request_metadata`; the
+    // shared builder now owns it so every surface has the same echo
+    // semantics — model / instructions / metadata / safety_identifier
+    // round-trip from request to response when upstream sent empty
+    // strings, `null`, or empty maps.
+    if response.model.is_empty() {
+        response.model.clone_from(&request.model);
+    }
+    if response.instructions.is_none() {
+        response.instructions.clone_from(&request.instructions);
+    }
+    if response.metadata.is_empty() {
+        if let Some(metadata) = &request.metadata {
+            response.metadata.clone_from(metadata);
+        }
+    }
+    if response.safety_identifier.is_none() {
+        response
+            .safety_identifier
+            .clone_from(&request.safety_identifier);
+    }
+
     response
 }
 
@@ -166,13 +207,19 @@ fn build_base_from_state(
 
     let mut output: Vec<ResponseOutputItem> = Vec::new();
     if let Some(analysis_text) = analysis {
+        // Canonical wire shape for the terminal reasoning item is
+        // `{ id, type, summary: [{ type: "summary_text", text }] }`
+        // — no `content` and no `status`. Streaming emits the same
+        // shape (see `streaming::finish_reasoning_item`); keep
+        // non-streaming aligned so `/v1/responses` does not diverge
+        // by stream mode.
         output.push(ResponseOutputItem::new_reasoning(
             format!("reasoning_{request_id}"),
-            vec![],
-            vec![ResponseReasoningContent::ReasoningText {
+            vec![SummaryTextContent::SummaryText {
                 text: analysis_text,
             }],
-            Some("completed".to_string()),
+            vec![],
+            None,
         ));
     }
     if !partial_text.is_empty() {

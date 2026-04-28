@@ -22,7 +22,10 @@ use openai_protocol::{
     chat::{
         ChatChoice, ChatCompletionMessage, ChatCompletionResponse, ChatCompletionStreamResponse,
     },
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage, UsageInfo},
+    common::{
+        CompletionTokensDetails, FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue,
+        Usage, UsageInfo,
+    },
     responses::{ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest},
 };
 use serde_json::json;
@@ -235,12 +238,22 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
         // `ResponseIncomplete` emit attaches it to the final
         // `response.completed`. The loop driver fires that event after
         // this method returns.
+        // Preserve reasoning-token detail in the persisted record so
+        // the stored `ResponsesResponse` lines up with the SSE-side
+        // `usage_json` below (which surfaces `reasoning_tokens` via
+        // `output_tokens_details`). Without this, a follow-up
+        // `previous_response_id` read sees zero reasoning tokens
+        // while the live stream just reported them.
         let usage_for_persist = self.last_usage.clone().map(|u| Usage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
             prompt_tokens_details: None,
-            completion_tokens_details: None,
+            completion_tokens_details: u.reasoning_tokens.map(|n| CompletionTokensDetails {
+                reasoning_tokens: Some(n),
+                accepted_prediction_tokens: None,
+                rejected_prediction_tokens: None,
+            }),
         });
         let usage_json = self.last_usage.take().map(|u| {
             let mut obj = json!({

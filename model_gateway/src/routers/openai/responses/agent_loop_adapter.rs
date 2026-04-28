@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
@@ -72,9 +72,26 @@ impl OpenAiUpstreamHandle {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             let body = error::sanitize_error_body(&body);
-            return Err(AgentLoopError::Upstream(format!(
-                "upstream error {status}: {body}"
-            )));
+            // Preserve the upstream HTTP status verbatim instead of
+            // collapsing every non-2xx into 502. The pre-refactor
+            // direct-passthrough path forwarded the upstream status
+            // (so a 400 client-validation error or a 429 rate-limit
+            // landed at the SMG client as 400 / 429), and the
+            // Responses contract expects that distinction so callers
+            // can react (retry-after on 429, surface validation
+            // detail on 400, etc.). Genuine transport / 5xx errors
+            // still fall back to 502 below.
+            let preserved_status = if status.is_client_error() || status.is_server_error() {
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            let response = error::create_error(
+                preserved_status,
+                "upstream_error",
+                format!("upstream error {status}: {body}"),
+            );
+            return Err(AgentLoopError::Response(Box::new(response)));
         }
 
         response.json::<Value>().await.map_err(|e| {
