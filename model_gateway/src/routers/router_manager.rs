@@ -351,12 +351,7 @@ impl RouterManager {
         let provider_hint = extract_model_provider(headers).map(str::trim);
         let endpoint_override = extract_provider_endpoint(headers).map(str::trim);
 
-        let has_provider_hint = provider_hint.is_some_and(|v| !v.is_empty());
-        let provider_is_gemini =
-            provider_hint.is_some_and(|v| !v.is_empty() && Self::provider_hint_is_google(v));
-        let has_endpoint_override = endpoint_override.is_some_and(|v| !v.is_empty());
-
-        if has_provider_hint && provider_is_gemini && has_endpoint_override {
+        if Self::should_force_openai_responses_router(provider_hint, endpoint_override, model_id) {
             if let Some(router) = self
                 .routers
                 .get(&router_ids::HTTP_OPENAI)
@@ -367,6 +362,26 @@ impl RouterManager {
         }
 
         self.select_router_for_request(headers, Some(model_id))
+    }
+
+    fn should_force_openai_responses_router(
+        provider_hint: Option<&str>,
+        endpoint_override: Option<&str>,
+        model_id: &str,
+    ) -> bool {
+        let has_endpoint_override = endpoint_override.is_some_and(|v| !v.trim().is_empty());
+        if !has_endpoint_override {
+            return false;
+        }
+
+        if provider_hint.is_some_and(Self::provider_hint_is_google) {
+            return true;
+        }
+
+        matches!(
+            ProviderType::from_model_name(model_id),
+            Some(ProviderType::Gemini)
+        )
     }
 
     /// Build a response from self-hosted registry models (excludes external workers).
@@ -939,5 +954,37 @@ impl std::fmt::Debug for RouterManager {
             .field("workers_count", &self.worker_registry.get_all().len())
             .field("default_router", &*default_router)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RouterManager;
+
+    #[test]
+    fn forces_openai_responses_router_for_gemini_header_and_endpoint_override() {
+        assert!(RouterManager::should_force_openai_responses_router(
+            Some("gemini"),
+            Some("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"),
+            "gpt-5.4",
+        ));
+    }
+
+    #[test]
+    fn forces_openai_responses_router_for_gemini_model_inference_and_endpoint_override() {
+        assert!(RouterManager::should_force_openai_responses_router(
+            None,
+            Some("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"),
+            "gemini-2.5-flash",
+        ));
+    }
+
+    #[test]
+    fn does_not_force_openai_responses_router_without_endpoint_override() {
+        assert!(!RouterManager::should_force_openai_responses_router(
+            Some("gemini"),
+            None,
+            "google.gemini-2.5-flash",
+        ));
     }
 }
