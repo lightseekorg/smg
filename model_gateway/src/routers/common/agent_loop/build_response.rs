@@ -1,15 +1,7 @@
 //! Driver-owned construction of the terminal `ResponsesResponse`.
 //!
-//! Adapters used to each render their own final response, with the
-//! regular path leaning on `chat_to_responses` (which atomically
-//! translates *every* chat tool_call into a `function_call` output
-//! item — no way to suppress the gateway/MCP fc the driver had already
-//! rerouted into an `mcp_approval_request`). That
-//! forced a "tell adapter which call_ids to strip" back-channel, which
-//! in turn broke the layering rule that adapters never re-classify fc.
-//!
-//! Instead, the driver hands the builder a pure `(state, mode, hooks)`
-//! triple and the builder emits items directly from loop primitives:
+//! The driver hands the builder `(state, mode, hooks)`, and the builder
+//! emits items directly from loop primitives:
 //!
 //! * `latest_turn.message_text` / `reasoning_text` → assistant
 //!   message + reasoning items
@@ -18,9 +10,6 @@
 //! * `mode`-specific items (`approval_items` for `ApprovalInterrupt`)
 //! * `state.mcp_output_items` / `state.emitted_mcp_list_tools_items`
 //!   → MCP wire items via `inject_mcp_output_items`
-//!
-//! Gateway/MCP fc never enters the output here, so there is nothing to
-//! filter out and `RenderMode` stays narrow.
 //!
 //! Surface knobs (`tools` echo, response-id source, usage shape) live
 //! on [`ResponseBuildHooks`] so each adapter only contributes what is
@@ -295,11 +284,8 @@ mod tests {
         }
     }
 
-    /// `RenderMode::Incomplete` must keep top-level `status` as
-    /// `Completed` and attach `incomplete_details.reason`. The
-    /// streaming adapter mirrors this contract; the regression review
-    /// flagged was streaming overriding `status` to `Incomplete`.
-    /// Review P2.7.
+    /// `RenderMode::Incomplete` keeps top-level `status` as `Completed`
+    /// and attaches `incomplete_details.reason`.
     #[test]
     fn incomplete_mode_keeps_status_completed_and_attaches_details() {
         let orchestrator = McpOrchestrator::new_test();

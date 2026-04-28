@@ -98,14 +98,8 @@ pub(crate) struct ResponseStreamEventEmitter {
     original_request: Option<ResponsesRequest>,
 }
 
-// Emitter primitives are exposed broadly so surface adapters can pick
-// the precise wire-event subset they need. Several helpers
-// (`emit_error`, `emit_mcp_list_tools_sequence`, `emit_mcp_call_failed`,
-// `finalize`, `tool_entries_to_json`) are kept on the impl for the
-// streaming adapters to draw on, even when no current caller in this
-// crate uses them — the alternative is to delete them on every
-// refactor wave and re-add them on the next, which is churn for no
-// review benefit.
+// Streaming adapters share these emitter primitives and each uses a
+// different subset.
 #[expect(
     dead_code,
     reason = "primitives kept on the impl for future surface adapters"
@@ -263,7 +257,7 @@ impl ResponseStreamEventEmitter {
             })
             .collect();
 
-        // If no items were tracked (legacy path), fall back to generic message
+        // If no items were tracked, fall back to a generic message.
         let output = if output.is_empty() {
             vec![json!({
                 "id": std::mem::take(&mut self.message_id),
@@ -294,10 +288,7 @@ impl ResponseStreamEventEmitter {
         }
 
         // Mirror the non-streaming `ResponsesResponse` shape so streaming
-        // `response.completed.response` echoes the same canonical-field set
-        // a client would see from the NS body. Fields that are `Option::None`
-        // serialise as `null` to match the NS path's wire shape (which lost
-        // its `#[serde_with::skip_serializing_none]` in this PR).
+        // `response.completed.response` echoes the same canonical-field set.
         if let Some(ref req) = self.original_request {
             response_obj["instructions"] = json!(req.instructions);
             response_obj["max_output_tokens"] = json!(req.max_output_tokens);

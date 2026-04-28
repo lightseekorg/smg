@@ -280,13 +280,7 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
         });
         final_response.store = ctx.original_request.store.unwrap_or(true);
         if let RenderMode::Incomplete { reason, .. } = &mode {
-            // Match the non-streaming `RenderMode::Incomplete` contract:
-            // top-level `status` stays `Completed`, with the reason
-            // attached to `incomplete_details`. Streaming previously
-            // overrode `status` to `Incomplete` here, which made the
-            // persisted record diverge from the non-streaming render
-            // path and produced inconsistent reads on follow-up
-            // `previous_response_id` resolutions.
+            // Match the non-streaming `RenderMode::Incomplete` contract.
             final_response.incomplete_details = Some(json!({ "reason": reason }));
         }
         persist_response_if_needed(
@@ -342,12 +336,8 @@ async fn consume_and_accumulate_stream(
     Ok(accumulator.finalize())
 }
 
-/// Emit the function-call SSE triple
-/// (`output_item.added` → `function_call_arguments.delta` →
-/// Lightweight chat-stream accumulator. Mirrors what the prior
-/// `convert_and_accumulate_stream` did — just enough state to detect
-/// tool calls and to surface a final `ChatCompletionResponse` shape
-/// the loop driver can consult.
+/// Lightweight chat-stream accumulator: enough state to detect tool
+/// calls and surface a final `ChatCompletionResponse` shape.
 struct ChatStreamAccumulator {
     id: String,
     model: String,

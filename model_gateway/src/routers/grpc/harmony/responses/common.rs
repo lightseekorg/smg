@@ -1,6 +1,7 @@
 //! Shared helpers for the gRPC Harmony Responses surface.
 //!
-//! After the agent-loop refactor only two things live here:
+//! This module keeps the Harmony-specific history loader and
+//! image-generation tool normalization.
 //!
 //! - `load_previous_messages` — surface-side wrapper around the shared
 //!   `load_request_history` primitive that resolves
@@ -11,10 +12,6 @@
 //!   builder workaround for the
 //!   [`openai_protocol::responses::ResponseTool::ImageGeneration`] tag
 //!   when an MCP server has taken ownership of `image_generation`.
-//!
-//! The legacy `McpCallTracking` / `build_next_request_with_tools` /
-//! `inject_mcp_metadata` helpers were inlined into the agent-loop
-//! adapters and removed.
 
 use std::collections::HashSet;
 
@@ -100,20 +97,12 @@ pub(super) async fn load_previous_messages(
     })
 }
 
-/// Strip `ResponseTool::ImageGeneration` from a request's tools list
-/// once the MCP session has exposed an MCP-routed replacement. See the
-/// long-form rationale below — this is a builder-side single-source
-/// guarantee, not part of the agent loop.
+/// Strip `ResponseTool::ImageGeneration` once an MCP session exposes an
+/// MCP-routed replacement.
 ///
 /// The harmony builder synthesizes a function-tool description named
-/// `image_generation` from `ResponseTool::ImageGeneration`. That is
-/// the right advertisement when no MCP server is configured, but once
-/// an MCP server takes ownership of `image_generation`
-/// `McpToolSession::has_exposed_tool` will not recognize the
-/// synthesized name, so every call the model makes against it falls
-/// through to the unresolved function-call path instead of
-/// dispatching. Removing the tag keeps the advertisement single-source
-/// (the MCP-exposed Function tool).
+/// Once an MCP server takes ownership of `image_generation`, the MCP-exposed
+/// function tool is the single advertisement the model should see.
 pub(super) fn strip_image_generation_from_request_tools(
     request: &mut ResponsesRequest,
     session: &McpToolSession<'_>,
