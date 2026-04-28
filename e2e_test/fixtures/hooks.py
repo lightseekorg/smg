@@ -7,12 +7,15 @@ This module handles:
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
 from infra import get_runtime
 
 from .markers import resolve_class_marker
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Marker registration
@@ -79,6 +82,21 @@ def pytest_configure(config: pytest.Config) -> None:
 # ---------------------------------------------------------------------------
 # Runtime-specific skip handling
 # ---------------------------------------------------------------------------
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Write BFCL summary at session end.
+
+    Backend teardown is handled directly by the current setup fixtures, so the
+    session hook only needs to emit the BFCL summary.
+    """
+
+    from bfcl.session_state import write_summary_if_needed
+
+    try:
+        write_summary_if_needed()
+    except Exception:
+        logger.warning("Failed to write BFCL summary", exc_info=True)
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
