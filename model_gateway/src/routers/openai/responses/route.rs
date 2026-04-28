@@ -13,11 +13,12 @@ use serde_json::to_value;
 use super::{
     super::{
         context::{
-            ComponentRefs, PayloadState, RequestContext, ResponsesComponents,
+            ComponentRefs, PayloadState, RequestContext, RequestType, ResponsesComponents,
             ResponsesPayloadState, WorkerSelection,
         },
         provider::ProviderRegistry,
         router::resolve_provider,
+        stateful_tools::{ensure_stateful_tool_bootstrap, StatefulToolBootstrapContext},
     },
     handle_non_streaming_response, handle_streaming_response,
 };
@@ -132,10 +133,79 @@ pub(in crate::routers::openai) async fn route_responses(
         super::history::inject_memory_context(&memory_config, &mut request_body);
     }
 
+    let mut ctx = RequestContext::for_responses(
+        Arc::new(request_body.clone()),
+        headers.cloned(),
+        Some(model_id.to_string()),
+        ComponentRefs::Responses(Arc::clone(deps.responses_components)),
+    );
+    ctx.storage_request_context = smg_data_connector::current_request_context();
+    ctx.tenant_request_meta = Some(tenant_meta.clone());
+    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
+
+    ctx.state.worker = Some(WorkerSelection {
+        worker: Arc::clone(&worker),
+        provider: Arc::clone(&provider),
+    });
+    ctx.state.responses_payload = Some(ResponsesPayloadState {
+        client_request: Some(Arc::new(body.clone())),
+        previous_response_id: loaded_history.previous_response_id,
+        existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
+        ..Default::default()
+    });
+
+    let stateful_tool_bootstrapper = match ctx.components.stateful_tool_bootstrapper() {
+        Some(bootstrapper) => Arc::clone(bootstrapper),
+        None => {
+            return error::internal_error(
+                "internal_error",
+                "Stateful tool bootstrapper not configured",
+            );
+        }
+    };
+    let storage_request_context = ctx.storage_request_context.clone();
+    let tenant_request_meta = ctx.tenant_request_meta.clone();
+    let memory_execution_context = ctx.memory_execution_context.clone();
+    let bootstrap_state = match ctx.state.responses_payload.as_mut() {
+        Some(responses_payload) => &mut responses_payload.stateful_tool_bootstrap,
+        None => {
+            return error::internal_error(
+                "internal_error",
+                "Responses payload state not initialized",
+            );
+        }
+    };
+    if let Err(e) = ensure_stateful_tool_bootstrap(
+        &mut request_body,
+        bootstrap_state,
+        stateful_tool_bootstrapper.as_ref(),
+        StatefulToolBootstrapContext {
+            headers,
+            storage_request_context: storage_request_context.as_ref(),
+            memory_execution_context: &memory_execution_context,
+            tenant_request_meta: tenant_request_meta.as_ref(),
+        },
+    )
+    .await
+    {
+        Metrics::record_router_error(
+            metrics_labels::ROUTER_OPENAI,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model,
+            metrics_labels::ENDPOINT_RESPONSES,
+            metrics_labels::ERROR_INTERNAL,
+        );
+        return error::internal_error(
+            "stateful_tool_bootstrap_failed",
+            format!("Failed to prepare stateful tool request state: {e}"),
+        );
+    }
     request_body.store = Some(false);
     if let ResponseInput::Items(ref mut items) = request_body.input {
         items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
     }
+    ctx.input.request_type = RequestType::Responses(Arc::new(request_body.clone()));
 
     let mut payload = match to_value(&request_body) {
         Ok(v) => v,
@@ -155,7 +225,6 @@ pub(in crate::routers::openai) async fn route_responses(
         }
     };
 
-    let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
         Metrics::record_router_error(
             metrics_labels::ROUTER_OPENAI,
@@ -168,27 +237,9 @@ pub(in crate::routers::openai) async fn route_responses(
         return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
     }
 
-    let mut ctx = RequestContext::for_responses(
-        Arc::new(body.clone()),
-        headers.cloned(),
-        Some(model_id.to_string()),
-        ComponentRefs::Responses(Arc::clone(deps.responses_components)),
-    );
-    ctx.storage_request_context = smg_data_connector::current_request_context();
-    ctx.tenant_request_meta = Some(tenant_meta.clone());
-
-    ctx.state.worker = Some(WorkerSelection {
-        worker: Arc::clone(&worker),
-        provider: Arc::clone(&provider),
-    });
-
     ctx.state.payload = Some(PayloadState {
         json: payload,
         url: format!("{}/v1/responses", worker.url()),
-    });
-    ctx.state.responses_payload = Some(ResponsesPayloadState {
-        previous_response_id: loaded_history.previous_response_id,
-        existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
     });
 
     let response = if ctx.is_streaming() {

@@ -36,6 +36,7 @@ use crate::{
             mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
         },
         error,
+        openai::stateful_tools::StatefulToolBootstrapState,
     },
 };
 
@@ -49,6 +50,8 @@ pub(crate) struct ToolLoopState {
     pub conversation_history: Vec<Value>,
     /// Original user input (preserved for building resume payloads)
     pub original_input: ResponseInput,
+    /// Request-scoped prepared state for hosted/stateful tools.
+    pub stateful_tool_bootstrap: StatefulToolBootstrapState,
     /// MCP bindings already represented by historical `mcp_list_tools` items.
     pub existing_mcp_list_tools_labels: HashSet<String>,
     /// Transformed output items (mcp_call, web_search_call, etc.) - stored to avoid reconstruction
@@ -56,7 +59,20 @@ pub(crate) struct ToolLoopState {
 }
 
 impl ToolLoopState {
+    #[cfg(test)]
     pub fn new(original_input: ResponseInput, prior_mcp_list_tools_labels: Vec<String>) -> Self {
+        Self::new_with_bootstrap(
+            original_input,
+            prior_mcp_list_tools_labels,
+            StatefulToolBootstrapState::default(),
+        )
+    }
+
+    pub fn new_with_bootstrap(
+        original_input: ResponseInput,
+        prior_mcp_list_tools_labels: Vec<String>,
+        stateful_tool_bootstrap: StatefulToolBootstrapState,
+    ) -> Self {
         let known_labels = prior_mcp_list_tools_labels
             .into_iter()
             .collect::<HashSet<_>>();
@@ -66,6 +82,7 @@ impl ToolLoopState {
             total_calls: 0,
             conversation_history: Vec::new(),
             original_input,
+            stateful_tool_bootstrap,
             existing_mcp_list_tools_labels: known_labels,
             mcp_call_items: Vec::new(),
         }
@@ -795,6 +812,7 @@ fn approval_prefix_items(
 pub(crate) struct ToolLoopExecutionContext<'a> {
     pub original_body: &'a ResponsesRequest,
     pub existing_mcp_list_tools_labels: &'a [String],
+    pub stateful_tool_bootstrap: &'a StatefulToolBootstrapState,
     pub session: &'a McpToolSession<'a>,
 }
 
@@ -810,12 +828,14 @@ pub(crate) async fn execute_tool_loop(
     let ToolLoopExecutionContext {
         original_body,
         existing_mcp_list_tools_labels,
+        stateful_tool_bootstrap,
         session,
     } = tool_loop_ctx;
 
-    let mut state = ToolLoopState::new(
+    let mut state = ToolLoopState::new_with_bootstrap(
         original_body.input.clone(),
         existing_mcp_list_tools_labels.to_vec(),
+        stateful_tool_bootstrap.clone(),
     );
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
     let base_payload = initial_payload.clone();
@@ -823,8 +843,10 @@ pub(crate) async fn execute_tool_loop(
     let mut current_payload = initial_payload;
 
     info!(
-        "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
-        max_tool_calls, DEFAULT_MAX_ITERATIONS
+        "Starting tool loop: max_tool_calls={:?}, max_iterations={}, prepared_stateful_tools={}",
+        max_tool_calls,
+        DEFAULT_MAX_ITERATIONS,
+        state.stateful_tool_bootstrap.prepared_tools.len()
     );
     let provider = ApiProvider::from_url(url);
     let auth_header = provider.extract_auth_header(headers, worker_api_key);

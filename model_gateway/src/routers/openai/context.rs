@@ -11,7 +11,10 @@ use smg_data_connector::{
 };
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
-use super::provider::Provider;
+use super::{
+    provider::Provider,
+    stateful_tools::{SharedStatefulToolBootstrapper, StatefulToolBootstrapState},
+};
 use crate::{
     config::RouterConfig, memory::MemoryExecutionContext, middleware,
     middleware::TenantRequestMeta, worker::Worker,
@@ -47,6 +50,7 @@ pub struct SharedComponents {
 pub struct ResponsesComponents {
     pub shared: Arc<SharedComponents>,
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+    pub stateful_tool_bootstrapper: SharedStatefulToolBootstrapper,
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
@@ -85,6 +89,13 @@ impl ComponentRefs {
         match self {
             ComponentRefs::Shared(_) => None,
             ComponentRefs::Responses(r) => Some(&r.response_storage),
+        }
+    }
+
+    pub fn stateful_tool_bootstrapper(&self) -> Option<&SharedStatefulToolBootstrapper> {
+        match self {
+            ComponentRefs::Shared(_) => None,
+            ComponentRefs::Responses(r) => Some(&r.stateful_tool_bootstrapper),
         }
     }
 
@@ -130,8 +141,10 @@ pub struct PayloadState {
 
 #[derive(Default)]
 pub struct ResponsesPayloadState {
+    pub client_request: Option<Arc<ResponsesRequest>>,
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub stateful_tool_bootstrap: StatefulToolBootstrapState,
 }
 
 impl RequestContext {
@@ -265,9 +278,11 @@ pub struct StorageHandles {
 pub struct OwnedStreamingContext {
     pub url: String,
     pub payload: Value,
-    pub original_body: ResponsesRequest,
+    pub request_body: ResponsesRequest,
+    pub client_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub stateful_tool_bootstrap: StatefulToolBootstrapState,
     pub storage: StorageHandles,
 }
 
@@ -275,10 +290,15 @@ impl RequestContext {
     pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
         let payload_state = self.take_payload().ok_or("Payload not prepared")?;
         let responses_payload_state = self.take_responses_payload().unwrap_or_default();
-        let original_body = self
+        let request_body = self
             .responses_request()
             .ok_or("Expected responses request")?
             .clone();
+        let client_body = responses_payload_state
+            .client_request
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| request_body.clone());
         let response = self
             .components
             .response_storage()
@@ -303,9 +323,11 @@ impl RequestContext {
         Ok(OwnedStreamingContext {
             url: payload_state.url,
             payload: payload_state.json,
-            original_body,
+            request_body,
+            client_body,
             previous_response_id: responses_payload_state.previous_response_id,
             existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
+            stateful_tool_bootstrap: responses_payload_state.stateful_tool_bootstrap,
             storage: StorageHandles {
                 response,
                 conversation,
