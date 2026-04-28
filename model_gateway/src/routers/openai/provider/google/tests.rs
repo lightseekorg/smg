@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{super::Provider, GoogleProvider};
 use crate::worker::Endpoint;
@@ -521,6 +521,62 @@ fn stream_transform_stateful_function_call_only_parity() {
         done_events[2]["response"]["output"][0]["type"],
         json!("function_call")
     );
+}
+
+#[test]
+fn stream_transform_tracks_multiple_function_calls_independently() {
+    let provider = GoogleProvider;
+    let mut state = provider.new_stream_state().expect("google stream state");
+    let function_chunk = json!({
+        "candidates": [{
+            "content": {"role":"model","parts":[
+                {"functionCall":{"name":"tool_one","args":{"a":1}}},
+                {"functionCall":{"name":"tool_two","args":{"b":2}}}
+            ]}
+        }]
+    });
+
+    let events = provider
+        .transform_stream_event(&function_chunk, Some(state.as_mut()), Endpoint::Responses)
+        .expect("function chunk transform");
+
+    let added: Vec<&Value> = events
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("response.output_item.added"))
+        .collect();
+    let deltas: Vec<&Value> = events
+        .iter()
+        .filter(|e| {
+            e.get("type").and_then(|v| v.as_str()) == Some("response.function_call_arguments.delta")
+        })
+        .collect();
+
+    assert_eq!(added.len(), 2);
+    assert_eq!(deltas.len(), 2);
+    assert_eq!(added[0]["item"]["name"], json!("tool_one"));
+    assert_eq!(added[1]["item"]["name"], json!("tool_two"));
+    assert_eq!(added[0]["output_index"], json!(0));
+    assert_eq!(added[1]["output_index"], json!(1));
+
+    let completion = json!({
+        "candidates": [{
+            "content": {"role":"model","parts":[{"text":""}]},
+            "finishReason":"STOP"
+        }]
+    });
+    let done_events = provider
+        .transform_stream_event(&completion, Some(state.as_mut()), Endpoint::Responses)
+        .expect("completion transform");
+    let response_completed = done_events
+        .iter()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("response.completed"))
+        .expect("response.completed event");
+    let output = response_completed["response"]["output"]
+        .as_array()
+        .expect("response output array");
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["name"], json!("tool_one"));
+    assert_eq!(output[1]["name"], json!("tool_two"));
 }
 
 #[test]
