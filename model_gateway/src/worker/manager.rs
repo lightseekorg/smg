@@ -688,43 +688,79 @@ impl WorkerManager {
         let workers = worker_registry.get_all();
         let total_workers = workers.len();
 
-        let http_workers: Vec<_> = workers
-            .into_iter()
-            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Http))
-            .collect();
-
-        if http_workers.is_empty() {
+        if workers.is_empty() {
             return FlushCacheResult {
                 successful: vec![],
                 failed: vec![],
                 total_workers,
                 http_workers: 0,
-                message: "No HTTP workers available for cache flush".to_string(),
+                message: "No workers available for cache flush".to_string(),
             };
         }
 
+        let mut http_workers = Vec::new();
+        let mut grpc_workers = Vec::new();
+        for w in &workers {
+            match w.connection_mode() {
+                ConnectionMode::Http => http_workers.push(Arc::clone(w)),
+                ConnectionMode::Grpc => grpc_workers.push(Arc::clone(w)),
+            }
+        }
+
         info!(
-            "Flushing cache on {} HTTP workers (out of {} total)",
+            "Flushing cache on {} HTTP + {} gRPC workers (out of {} total)",
             http_workers.len(),
+            grpc_workers.len(),
             total_workers
         );
-
-        let responses = fan_out(&http_workers, client, "flush_cache", reqwest::Method::POST).await;
 
         let mut successful = Vec::new();
         let mut failed = Vec::new();
 
-        for resp in responses {
-            match resp.result {
-                Ok(r) if r.status().is_success() => successful.push(resp.url),
-                Ok(r) => failed.push((resp.url, format!("HTTP {}", r.status()))),
-                Err(e) => failed.push((resp.url, e.to_string())),
+        // Fan out to HTTP workers
+        if !http_workers.is_empty() {
+            let responses =
+                fan_out(&http_workers, client, "flush_cache", reqwest::Method::POST).await;
+            for resp in responses {
+                match resp.result {
+                    Ok(r) if r.status().is_success() => successful.push(resp.url),
+                    Ok(r) => failed.push((resp.url, format!("HTTP {}", r.status()))),
+                    Err(e) => failed.push((resp.url, e.to_string())),
+                }
+            }
+        }
+
+        // Fan out to gRPC workers
+        let grpc_futures: Vec<_> = grpc_workers
+            .iter()
+            .map(|w| {
+                let worker = Arc::clone(w);
+                async move {
+                    let url = worker.url().to_string();
+                    match worker.get_grpc_client().await {
+                        Ok(Some(grpc_client)) => match grpc_client.flush_cache(0.0).await {
+                            Ok((true, _)) => (url, Ok(())),
+                            Ok((false, msg)) => (url, Err(format!("flush failed: {msg}"))),
+                            Err(e) => (url, Err(format!("gRPC error: {e}"))),
+                        },
+                        Ok(None) => (url, Err("no gRPC client available".to_string())),
+                        Err(e) => (url, Err(format!("failed to get gRPC client: {e}"))),
+                    }
+                }
+            })
+            .collect();
+
+        let grpc_results: Vec<_> = future::join_all(grpc_futures).await;
+        for (url, result) in grpc_results {
+            match result {
+                Ok(()) => successful.push(url),
+                Err(msg) => failed.push((url, msg)),
             }
         }
 
         let message = if failed.is_empty() {
             format!(
-                "Successfully flushed cache on all {} HTTP workers",
+                "Successfully flushed cache on all {} workers",
                 successful.len()
             )
         } else {
