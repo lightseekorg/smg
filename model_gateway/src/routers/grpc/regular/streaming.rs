@@ -18,7 +18,8 @@ use llm_tokenizer::{
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
     common::{
-        FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
+        FunctionCallDelta, ResponseFormat, StringOrArray, Tool, ToolCallDelta, ToolChoice,
+        ToolChoiceValue, Usage,
     },
     completion::{CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
     generate::GenerateRequest,
@@ -195,8 +196,12 @@ impl StreamingProcessor {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
 
-        // Extract request parameters
-        let separate_reasoning = original_request.separate_reasoning;
+        // Extract request parameters — skip reasoning parsing for structured output
+        let has_structured_output = matches!(
+            original_request.response_format,
+            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        );
+        let separate_reasoning = original_request.separate_reasoning && !has_structured_output;
         let tool_choice = &original_request.tool_choice;
         let tools = &original_request.tools;
         let history_tool_calls_count = utils::get_history_tool_calls_count(&original_request);
