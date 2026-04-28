@@ -329,7 +329,7 @@ fn request_transform_accepts_plain_string_input() {
 }
 
 #[test]
-fn response_transform_sets_completed_at_and_defaults_total_tokens_to_zero() {
+fn response_transform_sets_completed_at_and_falls_back_total_tokens_from_components() {
     let provider = GoogleProvider;
     let mut response = json!({
         "modelVersion": "gemini-2.5-flash",
@@ -349,8 +349,8 @@ fn response_transform_sets_completed_at_and_defaults_total_tokens_to_zero() {
     assert!(response.get("completed_at").is_some());
     assert_eq!(
         response["usage"]["total_tokens"].as_i64(),
-        Some(0),
-        "Java parity defaults missing totalTokenCount to 0"
+        Some(13),
+        "missing totalTokenCount should fall back to input + output tokens"
     );
 }
 
