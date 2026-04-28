@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from smg.serve import (
+    _SMG_TP_SIZE_ATTR,
     BACKEND_ARG_ADDERS,
     BACKEND_CHOICES,
     BACKEND_LAUNCHERS,
@@ -364,6 +365,76 @@ class TestParseServeArgs:
         assert exc_info.value.code == 2
         mock_frontend_args.assert_not_called()
 
+    def test_sglang_normalizes_tp_size_for_worker_launch(self):
+        def _mock_sglang_args(backend, parser):
+            if backend == "sglang":
+                parser.add_argument("--tensor-parallel-size", "--tp-size", type=int, default=1)
+                parser.add_argument("--model-path", type=str)
+            else:
+                _import_backend_args(backend, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_sglang_args):
+            _, args, _ = parse_serve_args(
+                [
+                    "--backend",
+                    "sglang",
+                    "--model-path",
+                    "/tmp/model",
+                    "--tensor-parallel-size",
+                    "4",
+                ]
+            )
+
+        assert args.tensor_parallel_size == 4
+        assert getattr(args, _SMG_TP_SIZE_ATTR) == 4
+
+    def test_vllm_normalizes_tp_size_for_worker_launch(self):
+        def _mock_vllm_args(backend, parser):
+            if backend == "vllm":
+                parser.add_argument("--tensor-parallel-size", type=int, default=1)
+                parser.add_argument("--model", type=str)
+            else:
+                _import_backend_args(backend, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_vllm_args):
+            _, args, _ = parse_serve_args(
+                [
+                    "--backend",
+                    "vllm",
+                    "--model",
+                    "/tmp/model",
+                    "--tensor-parallel-size",
+                    "4",
+                ]
+            )
+
+        assert args.tensor_parallel_size == 4
+        assert getattr(args, _SMG_TP_SIZE_ATTR) == 4
+
+    def test_sglang_zero_tp_is_preserved_for_validation(self):
+        def _mock_sglang_args(backend, parser):
+            if backend == "sglang":
+                parser.add_argument("--tensor-parallel-size", "--tp-size", type=int, default=1)
+                parser.add_argument("--model-path", type=str)
+            else:
+                _import_backend_args(backend, parser)
+
+        with patch("smg.serve._import_backend_args", side_effect=_mock_sglang_args):
+            _, args, _ = parse_serve_args(
+                [
+                    "--backend",
+                    "sglang",
+                    "--model-path",
+                    "/tmp/model",
+                    "--tensor-parallel-size",
+                    "0",
+                ]
+            )
+
+        assert getattr(args, _SMG_TP_SIZE_ATTR) == 0
+        with pytest.raises(ValueError, match="tp_size must be positive"):
+            SglangWorkerLauncher().gpu_env(args, dp_rank=0, env={})
+
     def test_invalid_backend_exits(self):
         with pytest.raises(SystemExit):
             parse_serve_args(["--backend", "nonexistent"])
@@ -435,6 +506,7 @@ class TestWorkerLauncherGpuEnv:
             _, args, _ = parse_serve_args(
                 ["--backend", backend, "--model-path", "/tmp/m", cli_flag, tp_value]
             )
+        assert getattr(args, _SMG_TP_SIZE_ATTR) == int(tp_value)
         launcher = SglangWorkerLauncher()
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
@@ -459,20 +531,40 @@ class TestWorkerLauncherGpuEnv:
             _, args, _ = parse_serve_args(
                 ["--backend", "vllm", "--model", "/tmp/m", cli_flag, tp_value]
             )
+        assert getattr(args, _SMG_TP_SIZE_ATTR) == int(tp_value)
         launcher = VllmWorkerLauncher()
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
 
-    def test_trtllm_tp_from_cli(self):
-        """CLI --tp_size flows through to CUDA_VISIBLE_DEVICES for trtllm."""
+    @pytest.mark.parametrize("cli_flag", ["--tp_size", "--tp-size", "--tensor-parallel-size"])
+    def test_trtllm_tp_from_cli(self, cli_flag):
+        """TRT-LLM TP CLI flags flow through to CUDA_VISIBLE_DEVICES."""
         _, args, _ = parse_serve_args(
-            ["--backend", "trtllm", "--model-path", "/tmp/m", "--tp_size", "4"]
+            ["--backend", "trtllm", "--model-path", "/tmp/m", cli_flag, "4"]
         )
+        assert getattr(args, _SMG_TP_SIZE_ATTR) == 4
         launcher = TrtllmWorkerLauncher()
         env = launcher.gpu_env(args, dp_rank=0, env={})
         assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
 
-    # -- Unit: _get_tp_size with direct Namespace (TRT-LLM config paths) ------
+    # -- Unit: _get_tp_size with direct Namespace -----------------------------
+
+    @pytest.mark.parametrize(
+        "launcher_class, args, expected_tp",
+        [
+            (SglangWorkerLauncher, argparse.Namespace(tensor_parallel_size=4), 4),
+            (SglangWorkerLauncher, argparse.Namespace(tp_size=4), 4),
+            (SglangWorkerLauncher, argparse.Namespace(tensor_parallel_size=4, tp_size=2), 4),
+            (SglangWorkerLauncher, argparse.Namespace(), 1),
+            (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=4), 4),
+            (VllmWorkerLauncher, argparse.Namespace(tp_size=4), 4),
+            (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=4, tp_size=2), 4),
+            (VllmWorkerLauncher, argparse.Namespace(), 1),
+        ],
+    )
+    def test_get_tp_size_sglang_and_vllm(self, launcher_class, args, expected_tp):
+        launcher = launcher_class()
+        assert launcher._get_tp_size(args) == expected_tp
 
     @pytest.mark.parametrize(
         "launcher_class, args, expected_tp",
@@ -488,6 +580,20 @@ class TestWorkerLauncherGpuEnv:
         assert launcher._get_tp_size(args) == expected_tp
 
     # -- Unit: gpu_env math ---------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "launcher_class, args, dp_rank, expected_devices",
+        [
+            (SglangWorkerLauncher, argparse.Namespace(tensor_parallel_size=4), 0, "0,1,2,3"),
+            (SglangWorkerLauncher, argparse.Namespace(tp_size=4), 1, "4,5,6,7"),
+            (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=4), 0, "0,1,2,3"),
+            (VllmWorkerLauncher, argparse.Namespace(tp_size=4), 1, "4,5,6,7"),
+        ],
+    )
+    def test_gpu_env_tp_4_slices(self, launcher_class, args, dp_rank, expected_devices):
+        launcher = launcher_class()
+        env = launcher.gpu_env(args, dp_rank=dp_rank, env={})
+        assert env["CUDA_VISIBLE_DEVICES"] == expected_devices
 
     def test_gpu_env_dp_rank_0_tp_2(self):
         launcher = SglangWorkerLauncher()
@@ -812,6 +918,14 @@ class TestTrtllmWorkerLauncher:
         args = argparse.Namespace(config=str(config_file))
         assert launcher._get_tp_size(args) == 8
 
+    def test_get_tp_size_trtllm_explicit_cli_1_beats_config(self, tmp_path):
+        """An explicit CLI tp_size=1 should not fall through to config."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("tensor_parallel_size: 8\ntp_size: 2\n")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(tensor_parallel_size=1, config=str(config_file))
+        assert launcher._get_tp_size(args) == 1
+
     def test_get_tp_size_from_config_read_fails_raises(self):
         """When config file does not exist, FileNotFoundError propagates."""
         launcher = TrtllmWorkerLauncher()
@@ -819,8 +933,8 @@ class TestTrtllmWorkerLauncher:
         with pytest.raises(FileNotFoundError):
             launcher._get_tp_size(args)
 
-    def test_get_tp_size_from_config_empty_or_no_keys_returns_default(self, tmp_path):
-        """When config has no tp keys or is empty, warn and return default 1."""
+    def test_get_tp_size_from_config_no_tp_keys_returns_default(self, tmp_path):
+        """When config is a mapping without tp keys, warn and return default 1."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("other_key: 42\n")
         launcher = TrtllmWorkerLauncher()
@@ -833,6 +947,26 @@ class TestTrtllmWorkerLauncher:
             "does not contain tensor_parallel_size or tp_size"
             in mock_logger.warning.call_args[0][0]
         )
+
+    def test_get_tp_size_from_config_empty_yaml_raises(self, tmp_path):
+        """When config YAML is empty, raise a clear ValueError."""
+        config_file = tmp_path / "empty.yaml"
+        config_file.write_text("")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+
+        with pytest.raises(ValueError, match="is empty or malformed; expected a YAML mapping"):
+            launcher._get_tp_size(args)
+
+    def test_get_tp_size_from_config_non_mapping_yaml_raises(self, tmp_path):
+        """When config YAML is not a mapping, raise a clear ValueError."""
+        config_file = tmp_path / "list.yaml"
+        config_file.write_text("- tensor_parallel_size\n- 4\n")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+
+        with pytest.raises(ValueError, match="is empty or malformed; expected a YAML mapping"):
+            launcher._get_tp_size(args)
 
     def test_get_tp_size_from_config_malformed_yaml_raises(self, tmp_path):
         """When config file contains invalid YAML, error propagates."""
@@ -1227,7 +1361,7 @@ class TestServeOrchestrator:
 
     def test_launch_workers_passes_gpu_env(self):
         """_launch_workers passes CUDA_VISIBLE_DEVICES via gpu_env for each dp_rank."""
-        args = _make_args(data_parallel_size=2, tensor_parallel_size=2, connection_mode="grpc")
+        args = _make_args(data_parallel_size=2, tensor_parallel_size=4, connection_mode="grpc")
         backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
 
@@ -1244,7 +1378,7 @@ class TestServeOrchestrator:
                 orch._launch_workers()
 
         assert len(launched_envs) == 2
-        assert launched_envs[0]["CUDA_VISIBLE_DEVICES"] == "0,1"
-        assert launched_envs[1]["CUDA_VISIBLE_DEVICES"] == "2,3"
+        assert launched_envs[0]["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+        assert launched_envs[1]["CUDA_VISIBLE_DEVICES"] == "4,5,6,7"
         assert launched_envs[0]["PYTHONUNBUFFERED"] == "1"
         assert launched_envs[1]["PYTHONUNBUFFERED"] == "1"
