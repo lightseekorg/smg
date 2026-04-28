@@ -416,7 +416,7 @@ async fn test_responses_endpoint_override_rejects_unknown_provider_without_fallb
     register_external_worker(&ctx, &shared_url, Some(vec!["gpt-oss-20b"]));
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
-    let headers = endpoint_override_headers("gemini", &format!("{dedicated_url}/v1/responses"));
+    let headers = endpoint_override_headers("unknown", &format!("{dedicated_url}/v1/responses"));
     let request = endpoint_override_request(false);
 
     let response = router
@@ -436,7 +436,7 @@ async fn test_responses_endpoint_override_rejects_unknown_provider_without_fallb
         serde_json::from_slice(&body_bytes).expect("error response json");
     assert_eq!(
         body_json["error"]["message"],
-        json!("x-model-provider must be one of openai, gpt-oss, xai, google, anthropic")
+        json!("x-model-provider must be one of openai, gpt-oss, xai, google, gemini, anthropic")
     );
     assert_eq!(dedicated_state.requests.load(Ordering::SeqCst), 0);
     assert_eq!(shared_state.requests.load(Ordering::SeqCst), 0);

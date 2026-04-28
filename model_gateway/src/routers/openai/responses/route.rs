@@ -54,7 +54,7 @@ struct ProviderHeaderMapping {
     provider: ProviderType,
 }
 
-fn provider_header_mappings() -> [ProviderHeaderMapping; 5] {
+fn provider_header_mappings() -> [ProviderHeaderMapping; 6] {
     [
         ProviderHeaderMapping {
             header_value: ProviderType::OpenAI.as_str(),
@@ -70,6 +70,10 @@ fn provider_header_mappings() -> [ProviderHeaderMapping; 5] {
         },
         ProviderHeaderMapping {
             header_value: "google",
+            provider: ProviderType::Gemini,
+        },
+        ProviderHeaderMapping {
+            header_value: "gemini",
             provider: ProviderType::Gemini,
         },
         ProviderHeaderMapping {
@@ -147,7 +151,7 @@ fn endpoint_override_error_response(error: EndpointOverrideError) -> Response {
     }
 }
 
-fn provider_from_header(
+fn provider_from_headers(
     headers: Option<&HeaderMap>,
 ) -> Result<ProviderType, EndpointOverrideError> {
     let Some(raw_provider) = extract_model_provider(headers) else {
@@ -168,15 +172,12 @@ fn provider_from_header(
 
 fn endpoint_override_from_headers(
     headers: Option<&HeaderMap>,
+    provider: ProviderType,
 ) -> Result<Option<EndpointOverride>, EndpointOverrideError> {
     let Some(raw_endpoint) = extract_provider_endpoint(headers) else {
-        if extract_model_provider(headers).is_some() {
-            provider_from_header(headers)?;
-        }
         return Ok(None);
     };
 
-    let provider = provider_from_header(headers)?;
     let (worker_base_url, target_url) =
         normalize_provider_endpoint(raw_endpoint).ok_or(EndpointOverrideError::InvalidEndpoint)?;
 
@@ -238,13 +239,13 @@ pub(in crate::routers::openai) async fn route_responses(
         bool_to_static_str(streaming),
     );
 
-    let endpoint_override = match endpoint_override_from_headers(headers) {
-        Ok(override_url) => override_url,
+    let requested_provider = match provider_from_headers(headers) {
+        Ok(provider) => provider,
         Err(err) => {
             debug!(
                 model,
                 error = ?err,
-                "Rejecting Responses endpoint override"
+                "Rejecting Responses provider hint"
             );
             Metrics::record_router_error(
                 metrics_labels::ROUTER_OPENAI,
@@ -257,6 +258,26 @@ pub(in crate::routers::openai) async fn route_responses(
             return endpoint_override_error_response(err);
         }
     };
+    let endpoint_override =
+        match endpoint_override_from_headers(headers, requested_provider.clone()) {
+            Ok(override_url) => override_url,
+            Err(err) => {
+                debug!(
+                    model,
+                    error = ?err,
+                    "Rejecting Responses endpoint override"
+                );
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    metrics_labels::ENDPOINT_RESPONSES,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return endpoint_override_error_response(err);
+            }
+        };
 
     let worker = if let Some(endpoint_override) = endpoint_override.as_ref() {
         debug!(
@@ -280,7 +301,7 @@ pub(in crate::routers::openai) async fn route_responses(
         .select_worker(&SelectWorkerRequest {
             model_id: model,
             headers,
-            provider: Some(ProviderType::OpenAI),
+            provider: Some(requested_provider.clone()),
             ..Default::default()
         })
         .await
@@ -380,6 +401,29 @@ pub(in crate::routers::openai) async fn route_responses(
         return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
     }
 
+    let upstream_url = match provider.upstream_url(
+        worker.url(),
+        endpoint_override
+            .as_ref()
+            .map(|endpoint_override| endpoint_override.target_url.as_str()),
+    ) {
+        Ok(url) => url,
+        Err(e) => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model,
+                metrics_labels::ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_VALIDATION,
+            );
+            return error::bad_request(
+                "invalid_request",
+                format!("Provider upstream URL error: {e}"),
+            );
+        }
+    };
+
     let request_headers = headers.cloned().map(|mut headers| {
         if endpoint_override.is_some() {
             headers.remove("x-provider-endpoint");
@@ -404,10 +448,7 @@ pub(in crate::routers::openai) async fn route_responses(
 
     ctx.state.payload = Some(PayloadState {
         json: payload,
-        url: endpoint_override
-            .as_ref()
-            .map(|endpoint_override| endpoint_override.target_url.clone())
-            .unwrap_or_else(|| format!("{}/v1/responses", worker.url())),
+        url: upstream_url,
     });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
@@ -453,8 +494,10 @@ mod tests {
     use serde_json::{json, to_value};
 
     use super::{
-        endpoint_override_from_headers, normalize_provider_endpoint, EndpointOverrideError,
+        endpoint_override_from_headers, normalize_provider_endpoint, provider_from_headers,
+        EndpointOverrideError,
     };
+    use crate::worker::ProviderType;
 
     fn headers_with_model_provider(provider: &'static str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -463,17 +506,27 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_override_without_endpoint_accepts_valid_provider_hint() {
+    fn endpoint_override_without_endpoint_accepts_valid_provider_header() {
         let headers = headers_with_model_provider("openai");
-        let result = endpoint_override_from_headers(Some(&headers));
+        let result = endpoint_override_from_headers(Some(&headers), ProviderType::OpenAI);
 
         assert!(matches!(result, Ok(None)));
     }
 
     #[test]
-    fn endpoint_override_without_endpoint_rejects_invalid_provider_hint() {
+    fn endpoint_override_without_endpoint_accepts_gemini_provider_header() {
         let headers = headers_with_model_provider("gemini");
-        let result = endpoint_override_from_headers(Some(&headers));
+        let provider = provider_from_headers(Some(&headers));
+        let result = endpoint_override_from_headers(Some(&headers), ProviderType::Gemini);
+
+        assert!(matches!(provider, Ok(ProviderType::Gemini)));
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn endpoint_override_without_endpoint_rejects_invalid_provider_header() {
+        let headers = headers_with_model_provider("unknown");
+        let result = provider_from_headers(Some(&headers));
 
         assert!(matches!(
             result,
@@ -484,9 +537,17 @@ mod tests {
     #[test]
     fn endpoint_override_without_endpoint_or_provider_is_absent() {
         let headers = HeaderMap::new();
-        let result = endpoint_override_from_headers(Some(&headers));
+        let result = endpoint_override_from_headers(Some(&headers), ProviderType::OpenAI);
 
         assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn provider_defaults_to_openai_without_header_even_for_gemini_model_name() {
+        let headers = HeaderMap::new();
+        let provider = provider_from_headers(Some(&headers));
+
+        assert!(matches!(provider, Ok(ProviderType::OpenAI)));
     }
 
     #[test]
