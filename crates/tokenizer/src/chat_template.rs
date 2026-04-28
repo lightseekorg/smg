@@ -3,7 +3,7 @@
 //! This module provides functionality to apply chat templates to messages,
 //! similar to HuggingFace transformers' apply_chat_template method.
 
-use std::{collections::HashMap, fs};
+use std::{borrow::Cow, collections::HashMap, fs};
 
 use anyhow::{anyhow, Result};
 use minijinja::{
@@ -443,8 +443,9 @@ fn detect_all(
 
 /// AST detection of content format and think-in-prefill.
 fn detect_all_with_ast(template: &str) -> (ChatTemplateContentFormat, bool) {
+    let template = normalize_template_for_minijinja(template);
     let ast = match parse(
-        template,
+        &template,
         "template",
         SyntaxConfig {},
         WhitespaceConfig::default(),
@@ -460,6 +461,205 @@ fn detect_all_with_ast(template: &str) -> (ChatTemplateContentFormat, bool) {
         ChatTemplateContentFormat::String
     };
     (content_format, think_in_prefill)
+}
+
+/// Normalize Python Jinja2 syntax that MiniJinja does not parse.
+///
+/// HuggingFace chat templates occasionally use numeric dot access such as
+/// `message.content.0.type`, which Jinja2 treats like `message.content[0].type`.
+/// MiniJinja tokenizes `.0` as a float fragment, so rewrite that form inside
+/// Jinja tags while leaving raw template text and string literals untouched.
+fn normalize_template_for_minijinja(template: &str) -> Cow<'_, str> {
+    if !template
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'.' && w[1].is_ascii_digit())
+    {
+        return Cow::Borrowed(template);
+    }
+
+    let mut out = String::with_capacity(template.len());
+    let mut changed = false;
+    let mut i = 0;
+
+    while i < template.len() {
+        let rest = &template[i..];
+        let close = if rest.starts_with("{{") {
+            Some("}}")
+        } else if rest.starts_with("{%") {
+            Some("%}")
+        } else {
+            None
+        };
+
+        let Some(close) = close else {
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+
+        out.push_str(&template[i..i + 2]);
+        let body_start = i + 2;
+
+        let Some(body_end) = find_jinja_tag_end(template, body_start, close) else {
+            out.push_str(&template[body_start..]);
+            break;
+        };
+
+        let body = &template[body_start..body_end];
+        let normalized_body = normalize_numeric_dot_access(body);
+        changed |= matches!(normalized_body, Cow::Owned(_));
+        out.push_str(&normalized_body);
+        out.push_str(close);
+        i = body_end + close.len();
+    }
+
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(template)
+    }
+}
+
+fn find_jinja_tag_end(template: &str, start: usize, close: &str) -> Option<usize> {
+    let mut i = start;
+    let mut quote: Option<char> = None;
+
+    while i < template.len() {
+        let rest = &template[i..];
+        let ch = rest.chars().next()?;
+
+        if let Some(q) = quote {
+            if ch == '\\' {
+                i += ch.len_utf8();
+                if i < template.len() {
+                    let escaped = template[i..].chars().next()?;
+                    i += escaped.len_utf8();
+                }
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if rest.starts_with(close) {
+            return Some(i);
+        }
+
+        i += ch.len_utf8();
+    }
+
+    None
+}
+
+fn normalize_numeric_dot_access(tag: &str) -> Cow<'_, str> {
+    if !tag
+        .as_bytes()
+        .windows(2)
+        .any(|w| w[0] == b'.' && w[1].is_ascii_digit())
+    {
+        return Cow::Borrowed(tag);
+    }
+
+    let bytes = tag.as_bytes();
+    let mut out = String::with_capacity(tag.len());
+    let mut changed = false;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+
+    while i < tag.len() {
+        let rest = &tag[i..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+
+        if let Some(q) = quote {
+            out.push(ch);
+            i += ch.len_utf8();
+            if ch == '\\' && i < tag.len() {
+                if let Some(escaped) = tag[i..].chars().next() {
+                    out.push(escaped);
+                    i += escaped.len_utf8();
+                }
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '.'
+            && i + 1 < tag.len()
+            && bytes[i + 1].is_ascii_digit()
+            && dot_has_attribute_base(bytes, i)
+        {
+            let digit_start = i + 1;
+            let mut digit_end = digit_start;
+            while digit_end < tag.len() && bytes[digit_end].is_ascii_digit() {
+                digit_end += 1;
+            }
+
+            if digit_end == tag.len() || !is_ident_byte(bytes[digit_end]) {
+                out.push('[');
+                out.push_str(&tag[digit_start..digit_end]);
+                out.push(']');
+                i = digit_end;
+                changed = true;
+                continue;
+            }
+        }
+
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(tag)
+    }
+}
+
+fn dot_has_attribute_base(bytes: &[u8], dot_index: usize) -> bool {
+    if dot_index == 0 {
+        return false;
+    }
+
+    match bytes[dot_index - 1] {
+        b']' | b')' => true,
+        b if is_ident_byte(b) => {
+            let mut start = dot_index - 1;
+            while start > 0 && is_ident_byte(bytes[start - 1]) {
+                start -= 1;
+            }
+            bytes[start].is_ascii_alphabetic() || bytes[start] == b'_'
+        }
+        _ => false,
+    }
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Parameters for chat template application
@@ -578,6 +778,7 @@ fn sort_json_keys(value: &JsonValue) -> JsonValue {
 /// environment carries no borrows.
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
+    let template = normalize_template_for_minijinja(&template).into_owned();
 
     // Match HuggingFace's Jinja2 defaults: trim_blocks and lstrip_blocks are
     // enabled in Python's transformers but default to false in minijinja.
@@ -602,10 +803,7 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.add_function(
         "raise_exception",
         |msg: String| -> Result<String, minijinja::Error> {
-            Err(minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                msg,
-            ))
+            Err(minijinja::Error::new(ErrorKind::InvalidOperation, msg))
         },
     );
 
@@ -897,6 +1095,55 @@ mod tests {
     fn test_chat_template_processor_invalid_template() {
         let result = ChatTemplateProcessor::new("{% invalid".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_numeric_dot_access_is_jinja2_compatible() {
+        let template = r#"
+{%- for m in messages -%}
+{%- if m.content is iterable and m.content.0.type == "tool_reference" -%}
+{{ m.content.0.name }}
+{%- endif -%}
+{%- endfor -%}
+"#;
+        let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
+
+        let messages = vec![serde_json::json!({
+            "role": "tool",
+            "content": [
+                {
+                    "type": "tool_reference",
+                    "name": "get_weather"
+                }
+            ]
+        })];
+
+        let result = state
+            .apply(&messages, ChatTemplateParams::default())
+            .unwrap();
+
+        assert_eq!(result, "get_weather");
+    }
+
+    #[test]
+    fn test_numeric_dot_access_normalization_ignores_strings_and_text() {
+        let template = r#"plain .0 {{ ".0" }} {{ values.0 }} {{ 1.0 }}"#;
+        let state = ChatTemplateState::new(Some(template.to_string())).unwrap();
+
+        let mut template_kwargs = HashMap::new();
+        template_kwargs.insert("values".to_string(), serde_json::json!(["first", "second"]));
+
+        let result = state
+            .apply(
+                &[],
+                ChatTemplateParams {
+                    template_kwargs: Some(&template_kwargs),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result, "plain .0 .0 first 1.0");
     }
 
     #[test]
