@@ -286,7 +286,16 @@ pub(crate) async fn load_input_history(
             // assembled input underestimates the true conversation size. Use the
             // raw DB count + current input item count for an accurate target_item_end.
             if let Some(raw_count) = raw_stored_item_count {
-                info.total_items = raw_count + current_input_count;
+                // Only apply the raw-count correction when no response chain
+                // was also loaded. If previous_response_id was set, the chain
+                // merge ran last and overwrote request_body.input with the full
+                // replayed history — count_conversation_turn_info already saw
+                // every item, so no correction is needed. (conversation and
+                // previous_response_id are mutually exclusive per the API spec,
+                // but we guard here for safety.)
+                if previous_response_id.is_none() {
+                    info.total_items = raw_count + current_input_count;
+                }
             }
             Some(info)
         }

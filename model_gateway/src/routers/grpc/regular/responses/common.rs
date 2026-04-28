@@ -410,11 +410,20 @@ pub(super) async fn load_conversation_history(
             // out of the inference window. Use the raw DB count instead so
             // target_item_end points at the correct absolute position.
             if let Some(raw_count) = raw_stored_item_count {
-                let current_input_count = match &request.input {
-                    ResponseInput::Text(_) => 1,
-                    ResponseInput::Items(items) => items.len(),
-                };
-                info.total_items = raw_count + current_input_count;
+                // Only apply the raw-count correction when no response chain
+                // was also loaded. If previous_response_id was set, the chain
+                // merge ran last and overwrote modified_request.input with the
+                // full replayed history — count_conversation_turn_info already
+                // saw every item, so no correction is needed. (conversation and
+                // previous_response_id are mutually exclusive in the API, but
+                // we guard here for safety.)
+                if request.previous_response_id.is_none() {
+                    let current_input_count = match &request.input {
+                        ResponseInput::Text(_) => 1,
+                        ResponseInput::Items(items) => items.len(),
+                    };
+                    info.total_items = raw_count + current_input_count;
+                }
             }
             Some(info)
         }
