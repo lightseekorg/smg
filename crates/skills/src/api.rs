@@ -373,10 +373,7 @@ impl SkillService {
         skill_id: &str,
         selector: SkillVersionSelector<'_>,
     ) -> Result<PinnedSkillVersion, SkillServiceError> {
-        let tenant_id =
-            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
-        let skill_id =
-            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let (tenant_id, skill_id) = normalize_skill_ids(tenant_id, skill_id)?;
         let metadata_store = self
             .metadata_store()
             .ok_or(SkillServiceError::MissingComponent {
@@ -409,10 +406,7 @@ impl SkillService {
         skill_id: &str,
         selector: SkillVersionSelector<'_>,
     ) -> Result<Option<PinnedSkillVersion>, SkillServiceError> {
-        let tenant_id =
-            normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
-        let skill_id =
-            normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+        let (tenant_id, skill_id) = normalize_skill_ids(tenant_id, skill_id)?;
         let metadata_store = self
             .metadata_store()
             .ok_or(SkillServiceError::MissingComponent {
@@ -886,6 +880,17 @@ fn normalize_required_value(
         return Err(error);
     }
     Ok(value.to_string())
+}
+
+fn normalize_skill_ids(
+    tenant_id: &str,
+    skill_id: &str,
+) -> Result<(String, String), SkillServiceError> {
+    let tenant_id =
+        normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+    let skill_id =
+        normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+    Ok((tenant_id, skill_id))
 }
 
 fn normalize_upload_bundle(

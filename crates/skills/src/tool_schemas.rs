@@ -107,33 +107,26 @@ fn is_execution_configured(config: &SkillsExecutionConfig) -> bool {
     has_url && has_key
 }
 
-static READ_SKILL_INPUT_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+fn skill_id_only_input_schema(description: &'static str) -> Value {
     json!({
         "type": "object",
         "properties": {
             "skill_id": {
                 "type": "string",
-                "description": "Skill id exactly as it appears in the skills_instructions listing."
+                "description": description
             }
         },
         "required": ["skill_id"],
         "additionalProperties": false
     })
+}
+
+static READ_SKILL_INPUT_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    skill_id_only_input_schema("Skill id exactly as it appears in the skills_instructions listing.")
 });
 
-static SKILL_ID_ONLY_INPUT_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-        "type": "object",
-        "properties": {
-            "skill_id": {
-                "type": "string",
-                "description": "Skill id from the skills_instructions listing."
-            }
-        },
-        "required": ["skill_id"],
-        "additionalProperties": false
-    })
-});
+static SKILL_ID_ONLY_INPUT_SCHEMA: LazyLock<Value> =
+    LazyLock::new(|| skill_id_only_input_schema("Skill id from the skills_instructions listing."));
 
 static READ_SKILL_FILE_INPUT_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
