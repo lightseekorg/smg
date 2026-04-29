@@ -27,7 +27,7 @@ use openai_protocol::{
 use serde_json::json;
 use smg_mcp::McpToolSession;
 
-use super::conversions;
+use super::{common::append_assistant_prefix_to_transcript, conversions};
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
@@ -153,6 +153,17 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
                     .collect()
             })
             .unwrap_or_default();
+        let first_choice = accumulated.choices.first();
+        let message_text = first_choice.and_then(|c| c.message.content.clone());
+        let reasoning_text = first_choice.and_then(|c| c.message.reasoning_content.clone());
+        if !state.pending_tool_calls.is_empty() {
+            append_assistant_prefix_to_transcript(
+                state,
+                &accumulated.id,
+                reasoning_text.as_deref(),
+                message_text.as_deref(),
+            );
+        }
         if let Some(usage) = accumulated.usage.as_ref() {
             self.last_usage = Some(UsageInfo {
                 prompt_tokens: usage.prompt_tokens,
@@ -166,6 +177,8 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
             });
         }
         state.latest_turn = Some(LoopModelTurn {
+            message_text: message_text.filter(|s| !s.is_empty()),
+            reasoning_text: reasoning_text.filter(|s| !s.is_empty()),
             usage: accumulated.usage.as_ref().map(|u| Usage {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
@@ -174,7 +187,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
                 completion_tokens_details: u.completion_tokens_details.clone(),
             }),
             request_id: Some(accumulated.id.clone()),
-            ..Default::default()
         });
         Ok(())
     }

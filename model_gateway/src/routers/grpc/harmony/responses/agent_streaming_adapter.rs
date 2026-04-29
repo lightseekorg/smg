@@ -86,7 +86,7 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
             ctx.original_request,
             state,
             IterationRequestOptions::with_tool_override(
-                IterationInputOptions::preserved_simple_message(),
+                IterationInputOptions::preserved_message(),
                 None,
                 self.upstream_tools.clone(),
             ),

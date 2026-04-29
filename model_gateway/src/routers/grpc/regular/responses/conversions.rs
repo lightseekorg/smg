@@ -218,7 +218,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
     }
 
     // 3. Extract function tools from ResponseTools.
-    // MCP tools are merged later by the tool loop (see tool_loop.rs:prepare_chat_tools_and_choice).
+    // MCP tools are merged by the regular agent-loop adapters after conversion.
     let function_tools = extract_tools_from_response_tools(req.tools.as_deref());
     let tools = if function_tools.is_empty() {
         None

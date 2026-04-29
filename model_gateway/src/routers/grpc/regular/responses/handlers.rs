@@ -95,7 +95,7 @@ async fn route_responses_streaming(
     let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
     let prepared = loaded.prepared;
 
-    let (_has_mcp_tools, mcp_servers) =
+    let (_, mcp_servers) =
         match ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await {
             Ok(result) => result,
             Err(response) => return response,

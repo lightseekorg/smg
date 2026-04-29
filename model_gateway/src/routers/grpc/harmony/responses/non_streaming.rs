@@ -33,7 +33,7 @@ pub(crate) async fn serve_harmony_responses(
     let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
     let prepared = loaded.prepared;
 
-    let (_has_mcp_tools, mcp_servers) =
+    let (_, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await?;
 
     // Always create a session so the loop driver can speak to MCP

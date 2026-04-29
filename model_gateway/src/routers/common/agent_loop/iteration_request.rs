@@ -2,43 +2,27 @@
 
 use openai_protocol::responses::{
     self, ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseTool,
-    ResponsesRequest, ResponsesToolChoice, StringOrContentParts, ToolChoiceOptions,
+    ResponsesRequest, ResponsesToolChoice, ToolChoiceOptions,
 };
 use uuid::Uuid;
 
 use super::state::AgentLoopState;
 
 #[derive(Clone, Copy)]
-pub(crate) enum IterationTextInputShape {
-    Message,
-    SimpleInputMessage,
-}
-
-#[derive(Clone, Copy)]
 pub(crate) struct IterationInputOptions {
     normalize_items: bool,
-    text_input_shape: IterationTextInputShape,
 }
 
 impl IterationInputOptions {
     pub(crate) const fn normalized_message() -> Self {
         Self {
             normalize_items: true,
-            text_input_shape: IterationTextInputShape::Message,
         }
     }
 
     pub(crate) const fn preserved_message() -> Self {
         Self {
             normalize_items: false,
-            text_input_shape: IterationTextInputShape::Message,
-        }
-    }
-
-    pub(crate) const fn preserved_simple_message() -> Self {
-        Self {
-            normalize_items: false,
-            text_input_shape: IterationTextInputShape::SimpleInputMessage,
         }
     }
 }
@@ -88,7 +72,7 @@ pub(crate) fn build_iteration_input_items(
             .map(responses::normalize_input_item)
             .collect::<Vec<_>>(),
         ResponseInput::Items(items) => items.clone(),
-        ResponseInput::Text(text) => vec![text_input_item(text, options.text_input_shape)],
+        ResponseInput::Text(text) => vec![text_input_item(text)],
     };
 
     let mut combined = Vec::with_capacity(upstream_items.len() + state.transcript.len());
@@ -136,25 +120,15 @@ pub(crate) fn build_responses_iteration_request(
     request
 }
 
-fn text_input_item(text: &str, shape: IterationTextInputShape) -> ResponseInputOutputItem {
-    match shape {
-        IterationTextInputShape::Message => ResponseInputOutputItem::Message {
-            id: format!("msg_u_{}", Uuid::now_v7()),
-            role: "user".to_string(),
-            content: vec![ResponseContentPart::InputText {
-                text: text.to_string(),
-            }],
-            status: Some("completed".to_string()),
-            phase: None,
-        },
-        IterationTextInputShape::SimpleInputMessage => {
-            ResponseInputOutputItem::SimpleInputMessage {
-                content: StringOrContentParts::String(text.to_string()),
-                role: "user".to_string(),
-                r#type: None,
-                phase: None,
-            }
-        }
+fn text_input_item(text: &str) -> ResponseInputOutputItem {
+    ResponseInputOutputItem::Message {
+        id: format!("msg_u_{}", Uuid::now_v7()),
+        role: "user".to_string(),
+        content: vec![ResponseContentPart::InputText {
+            text: text.to_string(),
+        }],
+        status: Some("completed".to_string()),
+        phase: None,
     }
 }
 
@@ -181,21 +155,6 @@ mod tests {
                         content.as_slice(),
                         [ResponseContentPart::InputText { text }] if text == "hello"
                     )
-        ));
-    }
-
-    #[test]
-    fn builds_simple_text_input_for_harmony_style() {
-        let items = build_iteration_input_items(
-            &state_with_text("hello"),
-            IterationInputOptions::preserved_simple_message(),
-        );
-
-        assert!(matches!(
-            items.as_slice(),
-            [ResponseInputOutputItem::SimpleInputMessage { role, content, .. }]
-                if role == "user"
-                    && matches!(content, StringOrContentParts::String(text) if text == "hello")
         ));
     }
 }

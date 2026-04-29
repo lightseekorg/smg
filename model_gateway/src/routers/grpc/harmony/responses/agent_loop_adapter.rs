@@ -114,7 +114,7 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for HarmonyAdapter<'a> {
             _ctx.original_request,
             state,
             IterationRequestOptions::with_tool_override(
-                IterationInputOptions::preserved_simple_message(),
+                IterationInputOptions::preserved_message(),
                 None,
                 self.upstream_tools.clone(),
             ),

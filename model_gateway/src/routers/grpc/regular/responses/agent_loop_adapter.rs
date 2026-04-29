@@ -34,7 +34,7 @@ use openai_protocol::{
 };
 use smg_mcp::McpToolSession;
 
-use super::conversions;
+use super::{common::append_assistant_prefix_to_transcript, conversions};
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
@@ -174,6 +174,14 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for RegularAdapter<'a> {
         let reasoning_text = first_choice.and_then(|c| c.message.reasoning_content.clone());
 
         state.pending_tool_calls = extract_tool_calls(&chat_response);
+        if !state.pending_tool_calls.is_empty() {
+            append_assistant_prefix_to_transcript(
+                state,
+                &chat_response.id,
+                reasoning_text.as_deref(),
+                message_text.as_deref(),
+            );
+        }
         state.latest_turn = Some(LoopModelTurn {
             message_text: message_text.filter(|s| !s.is_empty()),
             reasoning_text: reasoning_text.filter(|s| !s.is_empty()),

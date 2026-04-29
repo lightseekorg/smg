@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -22,30 +23,34 @@ use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 
 use super::super::mcp::prepare_mcp_tools_as_functions;
-use crate::routers::{
-    common::{
-        agent_loop::{
-            build_iteration_input_items, build_response_from_state, normalize_output_item_id,
-            AgentLoopAdapter, AgentLoopContext, AgentLoopError, AgentLoopState, ExecutedCall,
-            IterationInputOptions, LoopEvent, LoopModelTurn, LoopToolCall, OutputFamily,
-            PendingToolExecution, RenderMode, ResponseBuildHooks, StreamSink, ToolPresentation,
-            ToolTransferDescriptor, ToolVisibility, UsageShape,
+use crate::{
+    routers::{
+        common::{
+            agent_loop::{
+                build_iteration_input_items, build_response_from_state, normalize_output_item_id,
+                AgentLoopAdapter, AgentLoopContext, AgentLoopError, AgentLoopState, ExecutedCall,
+                IterationInputOptions, LoopEvent, LoopModelTurn, LoopToolCall, OutputFamily,
+                PendingToolExecution, RenderMode, ResponseBuildHooks, StreamSink, ToolPresentation,
+                ToolTransferDescriptor, ToolVisibility, UsageShape,
+            },
+            header_utils::ApiProvider,
+            mcp_utils::collect_user_function_names,
+            responses_streaming::{OutputItemType, ResponseStreamEventEmitter},
         },
-        header_utils::ApiProvider,
-        mcp_utils::collect_user_function_names,
-        responses_streaming::{OutputItemType, ResponseStreamEventEmitter},
-    },
-    error,
-    openai::{
-        context::StreamingEventContext,
-        responses::{
-            common::{parse_sse_block, ChunkProcessor},
-            streaming::{forward_streaming_event, SseEventData},
-            upstream_stream_parser::{
-                OpenAiUpstreamStreamParser, ParsedFunctionCall, StreamParserAction,
+        error,
+        openai::{
+            context::StreamingEventContext,
+            provider::Provider,
+            responses::{
+                common::{parse_sse_block, ChunkProcessor},
+                streaming::{forward_streaming_event, SseEventData},
+                upstream_stream_parser::{
+                    OpenAiUpstreamStreamParser, ParsedFunctionCall, StreamParserAction,
+                },
             },
         },
     },
+    worker::Endpoint,
 };
 
 #[derive(Clone)]
@@ -54,6 +59,7 @@ pub(crate) struct OpenAiUpstreamHandle {
     pub url: String,
     pub headers: Option<HeaderMap>,
     pub api_key: Option<String>,
+    pub provider: Arc<dyn Provider>,
     pub base_payload: Value,
 }
 
@@ -116,6 +122,7 @@ fn build_iteration_payload(
     base_payload: &Value,
     state: &AgentLoopState,
     session: &McpToolSession<'_>,
+    provider: &dyn Provider,
     stream: bool,
 ) -> Result<Value, AgentLoopError> {
     let mut payload = base_payload.clone();
@@ -152,6 +159,10 @@ fn build_iteration_payload(
     if state.iteration > 1 && obj.get("tools").is_some() {
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
     }
+
+    provider
+        .transform_request(&mut payload, Endpoint::Responses)
+        .map_err(|e| AgentLoopError::InvalidRequest(format!("Provider transform error: {e}")))?;
 
     Ok(payload)
 }
@@ -259,7 +270,13 @@ impl<S: StreamSink> AgentLoopAdapter<S> for OpenAiNonStreamingAdapter {
         let session = ctx.session.ok_or_else(|| {
             AgentLoopError::Internal("OpenAI adapter missing MCP session".to_string())
         })?;
-        let payload = build_iteration_payload(&self.upstream.base_payload, state, session, false)?;
+        let payload = build_iteration_payload(
+            &self.upstream.base_payload,
+            state,
+            session,
+            self.upstream.provider.as_ref(),
+            false,
+        )?;
         let response_json = self.upstream.post_json(&payload).await?;
         let response: ResponsesResponse = serde_json::from_value(response_json).map_err(|e| {
             AgentLoopError::Internal(format!(
@@ -723,7 +740,13 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         let session = ctx.session.ok_or_else(|| {
             AgentLoopError::Internal("OpenAI streaming adapter missing MCP session".to_string())
         })?;
-        let payload = build_iteration_payload(&self.upstream.base_payload, state, session, true)?;
+        let payload = build_iteration_payload(
+            &self.upstream.base_payload,
+            state,
+            session,
+            self.upstream.provider.as_ref(),
+            true,
+        )?;
 
         let mut request_builder = self.upstream.client.post(&self.upstream.url).json(&payload);
         let provider = ApiProvider::from_url(&self.upstream.url);
@@ -925,5 +948,58 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         }
         sink.emit_final_response(&response);
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::responses::{ResponseContentPart, ResponseInput, ResponseInputOutputItem};
+    use serde_json::json;
+    use smg_mcp::{McpOrchestrator, McpToolSession};
+
+    use super::*;
+    use crate::routers::openai::provider::XAIProvider;
+
+    #[test]
+    fn iteration_payload_reapplies_provider_transform_to_replayed_items() {
+        let orchestrator = McpOrchestrator::new_test();
+        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let mut state = AgentLoopState::new(
+            ResponseInput::Items(vec![ResponseInputOutputItem::Message {
+                id: "msg_user".to_string(),
+                role: "user".to_string(),
+                content: vec![ResponseContentPart::InputText {
+                    text: "hello".to_string(),
+                }],
+                status: Some("completed".to_string()),
+                phase: None,
+            }]),
+            Default::default(),
+        );
+        state.transcript.push(ResponseInputOutputItem::Message {
+            id: "msg_assistant".to_string(),
+            role: "assistant".to_string(),
+            content: vec![ResponseContentPart::OutputText {
+                text: "prior answer".to_string(),
+                annotations: vec![],
+                logprobs: None,
+            }],
+            status: Some("completed".to_string()),
+            phase: None,
+        });
+
+        let payload = build_iteration_payload(
+            &json!({ "model": "grok-4", "input": [], "store": false }),
+            &state,
+            &session,
+            &XAIProvider,
+            false,
+        )
+        .expect("iteration payload builds");
+        let input = payload["input"].as_array().expect("input array");
+
+        assert!(input[1].get("id").is_none());
+        assert!(input[1].get("status").is_none());
+        assert_eq!(input[1]["content"][0]["type"], json!("input_text"));
     }
 }

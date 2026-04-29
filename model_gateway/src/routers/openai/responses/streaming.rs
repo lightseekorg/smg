@@ -532,8 +532,8 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         Some(request) => request.clone(),
         None => return error::internal_error("internal_error", "Expected responses request"),
     };
-    let worker = match ctx.worker() {
-        Some(worker) => worker.clone(),
+    let (worker, provider) = match ctx.state.worker.as_ref() {
+        Some(selection) => (selection.worker.clone(), selection.provider.clone()),
         None => return error::internal_error("internal_error", "Worker not selected"),
     };
     let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
@@ -541,7 +541,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         None => return error::internal_error("internal_error", "MCP orchestrator required"),
     };
 
-    let (_has_gateway_tools, mcp_servers) =
+    let (_, mcp_servers) =
         match ensure_mcp_connection(&mcp_orchestrator, original_request.tools.as_deref()).await {
             Ok(result) => result,
             Err(response) => return response,
@@ -584,6 +584,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         url: payload_state.url,
         headers: request_headers,
         api_key: worker.api_key().cloned(),
+        provider,
         base_payload: payload_state.json,
     };
 

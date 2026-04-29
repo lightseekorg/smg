@@ -46,8 +46,8 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
-    let worker = match ctx.worker() {
-        Some(w) => w.clone(),
+    let (worker, provider) = match ctx.state.worker.as_ref() {
+        Some(selection) => (selection.worker.clone(), selection.provider.clone()),
         None => {
             return error::internal_error("internal_error", "Worker not selected");
         }
@@ -59,7 +59,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
-    let (_has_gateway_tools, mcp_servers) =
+    let (_, mcp_servers) =
         match ensure_mcp_connection(&mcp_orchestrator, original_request.tools.as_deref()).await {
             Ok(result) => result,
             Err(response) => return response,
@@ -97,6 +97,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             url: payload_state.url,
             headers: ctx.headers().cloned(),
             api_key: worker.api_key().cloned(),
+            provider,
             base_payload: payload_state.json,
         },
     );
