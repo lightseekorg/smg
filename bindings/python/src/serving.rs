@@ -163,10 +163,15 @@ fn parse_reasoning_complete(py: Python<'_>, output: &str, parser_name: &str) -> 
 ///   to the rest of the runtime. Each handler clones these locals and
 ///   uses :func:`pyo3_async_runtimes::tokio::into_future_with_locals`
 ///   so the Python coroutine gets scheduled on the right loop.
+/// * an optional Jinja chat-template processor — when present, the
+///   handler renders the request's ``messages`` array into a single
+///   prompt string before sending to the engine; when ``None`` we fall
+///   back to taking ``messages[-1].content`` verbatim.
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Py<PyAny>>,
     locals: Arc<pyo3_async_runtimes::TaskLocals>,
+    chat_template: Option<Arc<llm_tokenizer::chat_template::ChatTemplateProcessor>>,
 }
 
 /// Drive ``engine.generate_request(GenerateReqInput(text=..., sampling_params=...))``
@@ -283,16 +288,36 @@ async def _consume_to_last(engine, obj):
     return last
 "#;
 
-/// Pull the user's last message text out of an OAI-shape body. First-cut
-/// shortcut: skip chat-template rendering and just take whatever the user
-/// said most recently. We do this on Rust side because chat-template
-/// support requires loading the model's HF tokenizer; lands as a
-/// follow-up.
-fn extract_prompt_from_oai(body: &Value) -> Result<String, String> {
+/// Render an OAI-shape ``messages`` array into a prompt string the
+/// engine can tokenize.
+///
+/// * If a chat-template processor is wired into the server, run it
+///   over the full ``messages`` array — that is the OAI contract and
+///   the only path that produces a correct prompt for assistant /
+///   tool / system roles.
+/// * Otherwise fall back to ``messages[-1].content`` verbatim. That
+///   single-turn shortcut is what the first cut shipped with; it stays
+///   in place so callers that already pre-render their own template
+///   (and just want a transport for raw text) don't break.
+fn render_prompt_from_oai(
+    body: &Value,
+    chat_template: Option<&llm_tokenizer::chat_template::ChatTemplateProcessor>,
+) -> Result<String, String> {
     let messages = body
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(|| "request body missing 'messages' array".to_string())?;
+
+    if let Some(processor) = chat_template {
+        let params = llm_tokenizer::chat_template::ChatTemplateParams {
+            add_generation_prompt: true,
+            ..Default::default()
+        };
+        return processor
+            .apply_chat_template(messages, params)
+            .map_err(|e| format!("chat_template render failed: {e}"));
+    }
+
     let last = messages
         .last()
         .ok_or_else(|| "'messages' is empty".to_string())?;
@@ -301,10 +326,10 @@ fn extract_prompt_from_oai(body: &Value) -> Result<String, String> {
         .ok_or_else(|| "last message has no 'content'".to_string())?;
     match content {
         Value::String(s) => Ok(s.clone()),
-        // Vision / multipart content arrays are documented as a follow-up.
+        // Vision / multipart content arrays are a follow-up.
         Value::Array(_) => Err(
-            "multipart/array message content is not supported in the first-cut serve_oai; \
-             pass a plain string"
+            "multipart/array message content is not supported without a chat_template; \
+             pass a plain string or wire chat_template into serve_oai"
                 .to_string(),
         ),
         other => Err(format!("unsupported content shape: {other}")),
@@ -567,7 +592,7 @@ async fn chat_completions_handler(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let prompt = match extract_prompt_from_oai(&body) {
+    let prompt = match render_prompt_from_oai(&body, state.chat_template.as_deref()) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
     };
@@ -664,42 +689,81 @@ async fn chat_completions_handler(
 /// Run smg's OAI-compatible HTTP server in-process, driving the supplied
 /// engine via PyO3 callbacks.
 ///
+/// Parameters
+/// ----------
+/// engine
+///     A TokenSpeed-style ``AsyncLLM`` instance. Only
+///     ``async def generate_request(obj)`` is exercised; the contract
+///     is "yield output dicts of shape
+///     ``{'text': str, 'output_ids': [int], 'meta_info': {...}}`` until
+///     ``StopAsyncIteration``."
+/// host, port
+///     Listen socket. Defaults match openai-python's expectations.
+/// chat_template
+///     Optional Jinja chat-template string (the value of the
+///     ``chat_template`` field in a HuggingFace ``tokenizer_config.json``).
+///     When supplied, requests' ``messages`` arrays are rendered through
+///     this template before being sent to the engine — that's the
+///     OAI-correct path. When ``None``, ``messages[-1].content`` is
+///     forwarded verbatim (single-turn shortcut for callers that already
+///     pre-render their own template).
+///
 /// Intended call site (``tokenspeed serve``)::
 ///
 ///     async_llm = AsyncLLM(server_args)
+///     chat_template = open(args.chat_template).read() if args.chat_template else None
 ///     smg_rs.serve_oai(
 ///         engine=async_llm,
 ///         host=args.host,
 ///         port=args.port,
+///         chat_template=chat_template,
 ///     )
 ///
 /// The function blocks the calling Python thread for the lifetime of the
 /// server (until the process is signaled). It releases the GIL while
 /// awaiting HTTP requests and re-acquires it for each engine call.
 ///
-/// **First-cut limitations** (all tracked as separate follow-ups):
+/// **Current limitations** (all tracked as separate follow-ups):
 ///
-/// * Non-streaming only — streaming SSE goes through pyo3-async-runtimes
-///   wrapping ``__anext__`` per chunk.
-/// * Skips chat-template rendering — passes the last ``messages[-1].content``
-///   directly to the engine. The full path will use the ``llm-tokenizer``
-///   crate's minijinja chat template.
-/// * No tool / reasoning post-processing — the parsers are exposed
-///   separately as :py:func:`parse_tool_call_complete` and
-///   :py:func:`parse_reasoning_complete` for now.
+/// * No tool / reasoning streaming post-processing — the parsers are
+///   exposed separately as :py:func:`parse_tool_call_complete` and
+///   :py:func:`parse_reasoning_complete` for non-streaming use.
 /// * Only ``/v1/chat/completions`` is wired; ``/v1/completions``,
 ///   ``/v1/responses``, ``/v1/embeddings`` etc. land later.
 #[pyfunction]
-#[pyo3(signature = (engine, host = "127.0.0.1", port = 8000))]
-fn serve_oai(py: Python<'_>, engine: PyObject, host: &str, port: u16) -> PyResult<()> {
+#[pyo3(signature = (engine, host = "127.0.0.1", port = 8000, chat_template = None))]
+fn serve_oai(
+    py: Python<'_>,
+    engine: PyObject,
+    host: &str,
+    port: u16,
+    chat_template: Option<String>,
+) -> PyResult<()> {
     let host_owned = host.to_string();
     let addr: SocketAddr = format!("{host_owned}:{port}")
         .parse()
         .map_err(|e| PyValueError::new_err(format!("invalid host:port {host_owned}:{port}: {e}")))?;
 
+    // Compile the chat template up front so a malformed template fails
+    // at startup rather than on the first request.
+    let chat_template_arc: Option<Arc<llm_tokenizer::chat_template::ChatTemplateProcessor>> =
+        match chat_template {
+            Some(template_src) => {
+                let processor =
+                    llm_tokenizer::chat_template::ChatTemplateProcessor::new(template_src)
+                        .map_err(|e| {
+                            PyValueError::new_err(format!(
+                                "chat_template failed to parse: {e}"
+                            ))
+                        })?;
+                Some(Arc::new(processor))
+            }
+            None => None,
+        };
+
     let engine_arc = Arc::new(engine);
 
-    debug!(%addr, "smg_rs.serve_oai starting on {addr}");
+    debug!(%addr, has_chat_template = chat_template_arc.is_some(), "smg_rs.serve_oai starting");
 
     // ``pyo3_async_runtimes::tokio::run`` sets up an asyncio event loop
     // on a supervisor thread, builds a tokio runtime, registers both
@@ -720,6 +784,7 @@ fn serve_oai(py: Python<'_>, engine: PyObject, host: &str, port: u16) -> PyResul
         let state = AppState {
             engine: engine_arc,
             locals: Arc::new(locals),
+            chat_template: chat_template_arc,
         };
         let app = Router::new()
             .route("/v1/chat/completions", post(chat_completions_handler))
