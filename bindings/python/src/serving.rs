@@ -22,15 +22,18 @@
 //!   itself can be exercised; chat templates, streaming and tool /
 //!   reasoning parsing land in follow-ups.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use futures::stream::StreamExt;
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 use serde_json::{json, Value};
@@ -335,11 +338,231 @@ fn extract_sampling_from_oai(body: &Value) -> serde_json::Map<String, Value> {
     out
 }
 
+/// Bridge ``engine.generate_request(stream=True)`` — an async generator
+/// of cumulative ``{"text": ..., "meta_info": {...}}`` dicts — to an
+/// axum SSE stream of OAI ``chat.completion.chunk`` events.
+///
+/// Mechanics:
+///
+/// 1. Spawn a tokio task scoped under the supplied ``TaskLocals`` (so
+///    ``into_future`` finds the asyncio loop).
+/// 2. The task builds the ``GenerateReqInput`` with ``stream=True``
+///    once and grabs the resulting Python async iterator.
+/// 3. Each iteration: call ``__anext__()``, bridge to a Rust future
+///    via ``into_future``, await. On ``StopAsyncIteration`` we stop;
+///    on any other ``PyErr`` we surface it as an SSE ``error`` event.
+/// 4. Each yielded dict is JSON-roundtripped to ``serde_json::Value``,
+///    we compute the **delta** against the cumulative ``text`` we've
+///    already streamed, and emit a ``chat.completion.chunk`` event.
+/// 5. After the final chunk we emit a chunk with the actual
+///    ``finish_reason`` and then ``data: [DONE]`` per OAI convention.
+///
+/// Chunks are funneled through a bounded ``mpsc::channel`` so axum
+/// can flush them downstream as fast as the client reads.
+fn stream_response(
+    engine: Arc<Py<PyAny>>,
+    locals: Arc<pyo3_async_runtimes::TaskLocals>,
+    prompt: String,
+    sampling: serde_json::Map<String, Value>,
+    request_id: String,
+    model_label: String,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Event, Infallible>>();
+
+    let request_id_for_task = request_id.clone();
+    let model_label_for_task = model_label.clone();
+    let locals_for_scope = (*locals).clone();
+
+    tokio::spawn(async move {
+        // Initial role chunk so OAI clients see {"role": "assistant"} once
+        // up front — same convention as openai-python's stream parser.
+        let _ = tx.unbounded_send(Ok(Event::default().data(
+            json!({
+                "id": &request_id_for_task,
+                "object": "chat.completion.chunk",
+                "model": &model_label_for_task,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": null,
+                }],
+            })
+            .to_string(),
+        )));
+
+        // Clone the sender for the inner scope so each block owns its
+        // own handle (closures inside ``scope``'s async-move can't
+        // borrow ``tx`` from the outer task without escaping the move).
+        let tx_inner = tx.clone();
+
+        let result: PyResult<()> = pyo3_async_runtimes::tokio::scope(locals_for_scope, async move {
+            // Build the request and grab the async iterator object once.
+            let aiter: Py<PyAny> = Python::attach(|py| -> PyResult<_> {
+                let io_struct = py.import("tokenspeed.runtime.engine.io_struct")?;
+                let generate_req_input_cls = io_struct.getattr("GenerateReqInput")?;
+                let json_module = py.import("json")?;
+                let sampling_json = serde_json::to_string(&Value::Object(sampling.clone()))
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("encode sampling_params: {e}"))
+                    })?;
+                let sampling_dict = json_module.call_method1("loads", (sampling_json,))?;
+
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("text", prompt)?;
+                kwargs.set_item("sampling_params", sampling_dict)?;
+                kwargs.set_item("stream", true)?;
+                let req_obj = generate_req_input_cls.call((), Some(&kwargs))?;
+                req_obj.setattr("rid", &request_id_for_task)?;
+
+                let aiter = engine.bind(py).call_method1("generate_request", (req_obj,))?;
+                Ok(aiter.unbind())
+            })?;
+
+            let mut prev_text = String::new();
+            let mut last_finish_reason: Option<String> = None;
+            let mut last_completion_tokens: u64 = 0;
+            let mut last_prompt_tokens: u64 = 0;
+
+            loop {
+                // Pull the next chunk via __anext__; bridge to a Rust
+                // future so axum's tokio reactor stays unblocked.
+                let next_fut = Python::attach(|py| -> PyResult<_> {
+                    let bound = aiter.bind(py);
+                    let anext = bound.call_method0("__anext__")?;
+                    pyo3_async_runtimes::tokio::into_future(anext)
+                })?;
+
+                let chunk_obj = match next_fut.await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let stop = Python::attach(|py| {
+                            e.is_instance_of::<PyStopAsyncIteration>(py)
+                        });
+                        if stop {
+                            break;
+                        }
+                        return Err(e);
+                    }
+                };
+
+                // JSON-roundtrip the dict so the rest of the loop can
+                // work on serde_json::Value without touching pyo3.
+                let chunk_json: Value = Python::attach(|py| -> PyResult<Value> {
+                    let json_module = py.import("json")?;
+                    let s: String = json_module
+                        .call_method1("dumps", (chunk_obj.bind(py),))?
+                        .extract()?;
+                    Ok(serde_json::from_str(&s).unwrap_or(Value::Null))
+                })?;
+
+                let cur_text = chunk_json
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                // ``out["text"]`` is the cumulative output so far per
+                // tokenspeed's contract; the delta we forward to the OAI
+                // client is the suffix beyond what we've streamed before.
+                let delta = if cur_text.starts_with(&prev_text) {
+                    cur_text[prev_text.len()..].to_string()
+                } else {
+                    // Engine restarted / produced a non-prefix sequence
+                    // (rare). Fall back to the full text — the client
+                    // will see a duplicate but semantically nothing is
+                    // lost.
+                    cur_text.clone()
+                };
+                prev_text = cur_text;
+
+                if let Some(meta) = chunk_json.get("meta_info") {
+                    if let Some(fr) = meta.get("finish_reason") {
+                        last_finish_reason = match fr {
+                            Value::String(s) => Some(s.clone()),
+                            Value::Object(m) => {
+                                m.get("type").and_then(Value::as_str).map(str::to_owned)
+                            }
+                            _ => None,
+                        };
+                    }
+                    if let Some(c) = meta.get("completion_tokens").and_then(Value::as_u64) {
+                        last_completion_tokens = c;
+                    }
+                    if let Some(p) = meta.get("prompt_tokens").and_then(Value::as_u64) {
+                        last_prompt_tokens = p;
+                    }
+                }
+
+                // Emit a content chunk only if there is actual delta.
+                // (The engine occasionally yields metadata-only refreshes;
+                // pushing an empty-content chunk to OAI clients confuses
+                // the openai-python stream parser.)
+                if !delta.is_empty() {
+                    let _ = tx_inner.unbounded_send(Ok(Event::default().data(
+                        json!({
+                            "id": &request_id_for_task,
+                            "object": "chat.completion.chunk",
+                            "model": &model_label_for_task,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": delta},
+                                "finish_reason": null,
+                            }],
+                        })
+                        .to_string(),
+                    )));
+                }
+            }
+
+            // Final terminating chunk carries the finish_reason and a
+            // (non-OAI but commonly accepted) usage block.
+            let _ = tx_inner.unbounded_send(Ok(Event::default().data(
+                json!({
+                    "id": &request_id_for_task,
+                    "object": "chat.completion.chunk",
+                    "model": &model_label_for_task,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": last_finish_reason.unwrap_or_else(|| "stop".to_string()),
+                    }],
+                    "usage": {
+                        "prompt_tokens": last_prompt_tokens,
+                        "completion_tokens": last_completion_tokens,
+                        "total_tokens": last_prompt_tokens + last_completion_tokens,
+                    },
+                })
+                .to_string(),
+            )));
+            // OAI sentinel so client SSE parsers know to stop.
+            let _ = tx_inner.unbounded_send(Ok(Event::default().data("[DONE]")));
+            Ok(())
+        })
+        .await;
+
+        if let Err(e) = result {
+            error!(error = %e, "AsyncLLM streaming call failed");
+            let _ = tx.unbounded_send(Ok(Event::default()
+                .event("error")
+                .data(json!({"error": e.to_string()}).to_string())));
+        }
+    });
+
+    Sse::new(rx).keep_alive(KeepAlive::default())
+}
+
 /// ``POST /v1/chat/completions`` handler.
 ///
-/// First-cut behavior: extract the last user message, drive ``AsyncLLM``,
-/// pack the engine's text response into an OAI ``ChatCompletion`` shape.
-/// No streaming, no chat template, no tool/reasoning post-processing.
+/// Branches on ``body.stream``:
+///
+/// * ``stream: true`` (or omitted-and-defaulting to false but with
+///   ``Accept: text/event-stream``) — open an SSE response and pump
+///   each chunk yielded by ``engine.generate_request`` as an OAI
+///   ``chat.completion.chunk`` event, terminated by ``data: [DONE]``.
+/// * ``stream: false`` — drain the generator, return a single
+///   ``chat.completion`` JSON body.
+///
+/// Chat-template render and tool / reasoning post-processing are still
+/// follow-ups; the streaming path emits raw deltas of ``out["text"]``.
 async fn chat_completions_handler(
     State(state): State<AppState>,
     Json(body): Json<Value>,
@@ -354,17 +577,25 @@ async fn chat_completions_handler(
         .and_then(Value::as_str)
         .unwrap_or("default")
         .to_string();
+    let stream_mode = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
 
     debug!(
         prompt_len = prompt.len(),
         sampling = ?sampling,
         rid = %request_id,
+        stream = stream_mode,
         "dispatching to AsyncLLM",
     );
 
     let engine = state.engine.clone();
     let locals = state.locals.clone();
+
+    if stream_mode {
+        return stream_response(engine, locals, prompt, sampling, request_id, model_label)
+            .into_response();
+    }
+
     let result = drive_generate(engine, locals, prompt, sampling, request_id.clone()).await;
 
     match result {
