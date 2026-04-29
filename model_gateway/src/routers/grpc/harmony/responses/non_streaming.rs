@@ -34,7 +34,7 @@ use crate::{
         grpc::{
             common::responses::{
                 collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
-                ResponsesContext,
+                utils::redact_response_for_client, ResponsesContext,
             },
             harmony::processor::ResponsesIterationResult,
         },
@@ -109,10 +109,11 @@ async fn execute_with_mcp_loop(
     // Extract user's max_tool_calls limit (if set)
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
-    // Preserve original tools for response (before merging MCP tools)
+    // Preserve original request view for response redaction before merging MCP tools.
     // The response should show the user's original request tools, not internal MCP tools
-    let mut original_tools = current_request.tools.clone();
-    let user_function_names = collect_user_function_names(&current_request);
+    let client_request = current_request.clone();
+    let mut original_tools = client_request.tools.clone();
+    let user_function_names = collect_user_function_names(&client_request);
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
@@ -253,6 +254,7 @@ async fn execute_with_mcp_loop(
                             &user_function_names,
                         );
                     }
+                    redact_response_for_client(&mut response, &client_request, Some(&session));
 
                     return Ok(response);
                 }
@@ -309,6 +311,7 @@ async fn execute_with_mcp_loop(
                             &user_function_names,
                         );
                     }
+                    redact_response_for_client(&mut response, &client_request, Some(&session));
 
                     return Ok(response);
                 }
@@ -343,6 +346,7 @@ async fn execute_with_mcp_loop(
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.take().unwrap_or_default();
+                redact_response_for_client(&mut response, &client_request, Some(&session));
 
                 debug!(
                     mcp_calls = mcp_tracking.total_calls(),

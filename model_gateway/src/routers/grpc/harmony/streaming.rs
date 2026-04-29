@@ -1,7 +1,7 @@
 //! Harmony streaming response processor
 
 use std::{
-    collections::{hash_map::Entry::Vacant, HashMap},
+    collections::{hash_map::Entry::Vacant, HashMap, HashSet},
     io,
     sync::Arc,
     time::Instant,
@@ -36,6 +36,7 @@ use crate::{
             responses::{
                 build_sse_response,
                 streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+                utils::should_hide_mcp_streaming_tool,
             },
         },
         context,
@@ -499,15 +500,25 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        user_function_names: &HashSet<String>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(stream, emitter, tx, session, 0).await
+                Self::process_decode_stream(stream, emitter, tx, session, user_function_names, 0)
+                    .await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(prefill, *decode, emitter, tx, session).await
+                Self::process_responses_dual_stream(
+                    prefill,
+                    *decode,
+                    emitter,
+                    tx,
+                    session,
+                    user_function_names,
+                )
+                .await
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
@@ -521,6 +532,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        user_function_names: &HashSet<String>,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
@@ -534,9 +546,15 @@ impl HarmonyStreamingProcessor {
         let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
 
         // Phase 2: Process decode stream
-        let result =
-            Self::process_decode_stream(decode_stream, emitter, tx, session, prefill_cached_tokens)
-                .await;
+        let result = Self::process_decode_stream(
+            decode_stream,
+            emitter,
+            tx,
+            session,
+            user_function_names,
+            prefill_cached_tokens,
+        )
+        .await;
 
         prefill_stream.mark_completed();
         result
@@ -548,6 +566,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        user_function_names: &HashSet<String>,
         prefill_cached_tokens: u32,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
@@ -685,86 +704,96 @@ impl HarmonyStreamingProcessor {
                                         None
                                     }
                                 });
-
-                                // Determine output item type and JSON type string
-                                let output_item_type =
-                                    ResponseStreamEventEmitter::output_item_type_for_format(
+                                let hide_from_client = session.is_some_and(|s| {
+                                    should_hide_mcp_streaming_tool(
+                                        tool_name,
                                         response_format.as_ref(),
-                                    );
-                                let type_str = ResponseStreamEventEmitter::type_str_for_format(
-                                    response_format.as_ref(),
-                                );
-
-                                let (output_index, item_id) =
-                                    emitter.allocate_output_index(output_item_type);
-
-                                tool_call_tracking.insert(
-                                    call_index,
-                                    (output_index, item_id.clone(), response_format.clone()),
-                                );
-
-                                // Build output_item.added event
-                                let mut item = json!({
-                                    "id": item_id,
-                                    "type": type_str,
-                                    "name": tool_name,
-                                    "call_id": call_id,
-                                    "arguments": "",
-                                    "status": "in_progress"
+                                        s,
+                                        user_function_names,
+                                    )
                                 });
 
-                                let label = session
-                                    .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
-                                attach_mcp_server_label(
-                                    &mut item,
-                                    Some(label.as_str()),
-                                    response_format.as_ref(),
-                                );
-
-                                let event = emitter.emit_output_item_added(output_index, &item);
-                                emitter.send_event_best_effort(&event, tx);
-
-                                // Emit in_progress event for MCP tools
-                                if let Some(ref fmt) = response_format {
-                                    let event = emitter.emit_tool_call_in_progress(
-                                        output_index,
-                                        &item_id,
-                                        fmt,
+                                if !hide_from_client {
+                                    // Determine output item type and JSON type string
+                                    let output_item_type =
+                                        ResponseStreamEventEmitter::output_item_type_for_format(
+                                            response_format.as_ref(),
+                                        );
+                                    let type_str = ResponseStreamEventEmitter::type_str_for_format(
+                                        response_format.as_ref(),
                                     );
+
+                                    let (output_index, item_id) =
+                                        emitter.allocate_output_index(output_item_type);
+
+                                    tool_call_tracking.insert(
+                                        call_index,
+                                        (output_index, item_id.clone(), response_format.clone()),
+                                    );
+
+                                    // Build output_item.added event
+                                    let mut item = json!({
+                                        "id": item_id,
+                                        "type": type_str,
+                                        "name": tool_name,
+                                        "call_id": call_id,
+                                        "arguments": "",
+                                        "status": "in_progress"
+                                    });
+
+                                    let label = session
+                                        .map(|s| s.resolve_tool_server_label(tool_name))
+                                        .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
+                                    attach_mcp_server_label(
+                                        &mut item,
+                                        Some(label.as_str()),
+                                        response_format.as_ref(),
+                                    );
+
+                                    let event = emitter.emit_output_item_added(output_index, &item);
                                     emitter.send_event_best_effort(&event, tx);
 
-                                    // Emit searching/interpreting event for builtin tools
-                                    if let Some(event) = emitter.emit_tool_call_searching(
-                                        output_index,
-                                        &item_id,
-                                        fmt,
-                                    ) {
+                                    // Emit in_progress event for MCP tools
+                                    if let Some(ref fmt) = response_format {
+                                        let event = emitter.emit_tool_call_in_progress(
+                                            output_index,
+                                            &item_id,
+                                            fmt,
+                                        );
+                                        emitter.send_event_best_effort(&event, tx);
+
+                                        // Emit searching/interpreting event for builtin tools
+                                        if let Some(event) = emitter.emit_tool_call_searching(
+                                            output_index,
+                                            &item_id,
+                                            fmt,
+                                        ) {
+                                            emitter.send_event_best_effort(&event, tx);
+                                        }
+                                    }
+
+                                    // Emit initial arguments delta for mcp_call / function_call
+                                    // only. Hosted built-in tools (web_search_call,
+                                    // code_interpreter_call, file_search_call,
+                                    // image_generation_call) surface progress via
+                                    // the structured `*.in_progress` /
+                                    // `*.searching` / `*.generating` events emitted
+                                    // above instead of streaming their arguments.
+                                    if streams_arguments(response_format.as_ref()) {
+                                        let event = match &response_format {
+                                            Some(_) => emitter.emit_mcp_call_arguments_delta(
+                                                output_index,
+                                                &item_id,
+                                                "",
+                                            ),
+                                            None => emitter.emit_function_call_arguments_delta(
+                                                output_index,
+                                                &item_id,
+                                                "",
+                                            ),
+                                        };
                                         emitter.send_event_best_effort(&event, tx);
                                     }
-                                }
-
-                                // Emit initial arguments delta for mcp_call / function_call
-                                // only. Hosted built-in tools (web_search_call,
-                                // code_interpreter_call, file_search_call,
-                                // image_generation_call) surface progress via
-                                // the structured `*.in_progress` /
-                                // `*.searching` / `*.generating` events emitted
-                                // above instead of streaming their arguments.
-                                if streams_arguments(response_format.as_ref()) {
-                                    let event = match &response_format {
-                                        Some(_) => emitter.emit_mcp_call_arguments_delta(
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        ),
-                                        None => emitter.emit_function_call_arguments_delta(
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        ),
-                                    };
-                                    emitter.send_event_best_effort(&event, tx);
                                 }
                             } else {
                                 // Continuing tool call: emit arguments delta
