@@ -4,14 +4,11 @@
 //! chunk-level events into a `GrpcResponseStreamSink`.
 
 use async_trait::async_trait;
-use openai_protocol::{
-    common::Usage,
-    responses::{
-        ResponseContentPart, ResponseInputOutputItem, ResponseReasoningContent, ResponseTool,
-        ResponsesRequest,
-    },
+use openai_protocol::responses::{
+    ResponseContentPart, ResponseInputOutputItem, ResponseReasoningContent, ResponseTool,
+    ResponsesRequest,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use smg_mcp::McpToolSession;
 
 use super::{
@@ -39,11 +36,6 @@ pub(crate) struct HarmonyStreamingAdapter<'a> {
     ctx: &'a ResponsesContext,
     tenant_request_meta: TenantRequestMeta,
     upstream_tools: Option<Vec<ResponseTool>>,
-    /// Latest turn's usage. Streaming completion needs to surface
-    /// `input_tokens_details.cached_tokens` whenever the prefill phase
-    /// reports them, so the adapter retains the full Usage struct
-    /// rather than the loop's smaller `LoopModelTurn::usage`.
-    last_usage: Option<Usage>,
 }
 
 impl<'a> HarmonyStreamingAdapter<'a> {
@@ -67,9 +59,27 @@ impl<'a> HarmonyStreamingAdapter<'a> {
             ctx,
             tenant_request_meta,
             upstream_tools: upstream.tools,
-            last_usage: None,
         }
     }
+}
+
+fn usage_to_stream_json(usage: &openai_protocol::common::Usage) -> Value {
+    let mut obj = json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    });
+    if let Some(details) = &usage.prompt_tokens_details {
+        if details.cached_tokens > 0 {
+            obj["input_tokens_details"] = json!({ "cached_tokens": details.cached_tokens });
+        }
+    }
+    if let Some(details) = &usage.completion_tokens_details {
+        if let Some(reasoning) = details.reasoning_tokens {
+            obj["output_tokens_details"] = json!({ "reasoning_tokens": reasoning });
+        }
+    }
+    obj
 }
 
 #[async_trait]
@@ -171,8 +181,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
                         arguments: tc.function.arguments.unwrap_or_default(),
                         approval_request_id: None,
                     }));
-                self.last_usage = Some(usage.clone());
-
                 state.latest_turn = Some(LoopModelTurn {
                     message_text: if partial_text.is_empty() {
                         None
@@ -185,7 +193,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
                 });
             }
             ResponsesIterationResult::Completed { response: _, usage } => {
-                self.last_usage = Some(usage.clone());
                 state.latest_turn = Some(LoopModelTurn {
                     usage: Some(usage),
                     ..Default::default()
@@ -197,31 +204,17 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
     }
 
     async fn render_final(
-        mut self,
+        self,
         ctx: &AgentLoopContext<'_>,
-        _state: AgentLoopState,
+        state: AgentLoopState,
         mode: RenderMode,
         sink: &mut GrpcResponseStreamSink,
     ) -> Result<(), AgentLoopError> {
-        let usage_for_persist = self.last_usage.clone();
-        let usage_json = self.last_usage.take().map(|u| {
-            let mut obj = json!({
-                "input_tokens": u.prompt_tokens,
-                "output_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens,
-            });
-            if let Some(details) = &u.prompt_tokens_details {
-                if details.cached_tokens > 0 {
-                    obj["input_tokens_details"] = json!({ "cached_tokens": details.cached_tokens });
-                }
-            }
-            if let Some(details) = &u.completion_tokens_details {
-                if let Some(reasoning) = details.reasoning_tokens {
-                    obj["output_tokens_details"] = json!({ "reasoning_tokens": reasoning });
-                }
-            }
-            obj
-        });
+        let usage_for_persist = state
+            .latest_turn
+            .as_ref()
+            .and_then(|turn| turn.usage.clone());
+        let usage_json = usage_for_persist.as_ref().map(usage_to_stream_json);
         sink.set_final_usage(usage_json);
 
         finalize_streamed_response_for_persist(
@@ -238,7 +231,7 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
         )
         .await;
 
-        // The sink emits `response.completed` after the driver sends the
+        // The sink emits the terminal SSE event after the driver sends the
         // terminal loop event.
         Ok(())
     }

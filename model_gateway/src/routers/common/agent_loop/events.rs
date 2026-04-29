@@ -111,13 +111,12 @@ pub(crate) enum LoopEvent<'a> {
     /// contract (one boundary at a time).
     ApprovalRequested { pending: &'a PendingToolExecution },
 
-    /// Final-channel `response.completed` (or incomplete-equivalent)
-    /// event. Closes the SSE stream.
+    /// Final-channel `response.completed` event. Closes the SSE stream.
     ResponseFinished,
 
     /// Replaces `ResponseFinished` when the loop terminates with
-    /// `incomplete_details`. Sinks still emit `response.completed`,
-    /// but with the incomplete reason attached.
+    /// `incomplete_details`. Sinks emit `response.incomplete` with the
+    /// incomplete reason attached.
     ResponseIncomplete { reason: &'a str },
 }
 

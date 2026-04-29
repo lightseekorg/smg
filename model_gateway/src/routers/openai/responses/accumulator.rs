@@ -11,7 +11,7 @@ use super::common::{extract_output_index, get_event_type, parse_sse_block};
 pub(crate) struct StreamingResponseAccumulator {
     /// The initial `response.created` payload (if emitted).
     initial_response: Option<Value>,
-    /// The final `response.completed` payload (if emitted).
+    /// The final `response.completed` / `response.incomplete` payload (if emitted).
     completed_response: Option<Value>,
     /// Collected output items keyed by the upstream output index, used when
     /// a final response payload is absent and we need to synthesize one.
@@ -97,7 +97,7 @@ impl StreamingResponseAccumulator {
                     self.initial_response = Some(response.clone());
                 }
             }
-            ResponseEvent::COMPLETED => {
+            ResponseEvent::COMPLETED | ResponseEvent::INCOMPLETE => {
                 if let Some(response) = parsed.get("response") {
                     self.completed_response = Some(response.clone());
                 }
@@ -114,5 +114,41 @@ impl StreamingResponseAccumulator {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn captures_response_incomplete_as_final_response() {
+        let mut accumulator = StreamingResponseAccumulator::new();
+        let payload = json!({
+            "type": ResponseEvent::INCOMPLETE,
+            "response": {
+                "id": "resp_1",
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "output": []
+            }
+        });
+
+        accumulator.ingest_block(&format!(
+            "event: {}\ndata: {}\n\n",
+            ResponseEvent::INCOMPLETE,
+            payload
+        ));
+
+        let response = accumulator
+            .snapshot_final_response()
+            .expect("final response snapshot");
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
     }
 }

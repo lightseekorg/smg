@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::{
     common::{ConversationRef, Tool, Usage},
-    responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
+    responses::{ResponseStatus, ResponseTool, ResponsesRequest, ResponsesResponse},
 };
 use serde_json::{json, to_value};
 use smg_data_connector::{
@@ -134,6 +134,7 @@ pub(crate) async fn finalize_streamed_response_for_persist(
             });
     final_response.store = original_request.store.unwrap_or(true);
     if let RenderMode::Incomplete { reason, .. } = mode {
+        final_response.status = ResponseStatus::Incomplete;
         final_response.incomplete_details = Some(json!({ "reason": reason }));
     }
 

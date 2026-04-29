@@ -142,11 +142,9 @@ pub(crate) async fn run_agent_loop<S: StreamSink, A: AgentLoopAdapter<S>>(
             NextAction::CallLlm => {
                 state.iteration += 1;
                 if state.iteration > effective_iteration_cap() {
-                    state.incomplete = Some(IncompleteTermination {
-                        reason: "max_iterations".to_string(),
-                    });
-                    state.set_next_action(NextAction::Finish);
-                    continue;
+                    return Err(AgentLoopError::Internal(
+                        "agent loop iteration cap exceeded".to_string(),
+                    ));
                 }
 
                 adapter.call_upstream(&ctx, &mut state, &mut sink).await?;
@@ -206,7 +204,7 @@ pub(crate) async fn run_agent_loop<S: StreamSink, A: AgentLoopAdapter<S>>(
                 };
                 // Same ordering as `InterruptForApproval`: stage usage
                 // through `render_final` first, then fire the
-                // termination event so `response.completed` carries the
+                // termination event so the final SSE event carries the
                 // final-turn usage on the wire.
                 let final_response = adapter.render_final(&ctx, state, mode, &mut sink).await?;
                 match finish_reason {
@@ -532,11 +530,10 @@ fn decide_after_call_llm(
             let _drop_extra_gated = gated_iter; // explicit: rest discarded by design.
             NextAction::InterruptForApproval(enrich_pending(first, session))
         }
-        // Unreachable: caller already exited via `gateway_calls.is_empty()`
-        // and the immediate-vs-gated partition above; if we reach here the
-        // partition flipped without the caller noticing. Finish gracefully
-        // rather than panic.
-        None => NextAction::Finish,
+        None => {
+            tracing::error!("gateway call partition produced no immediate or gated calls");
+            NextAction::Finish
+        }
     }
 }
 

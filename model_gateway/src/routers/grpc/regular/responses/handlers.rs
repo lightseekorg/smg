@@ -19,7 +19,6 @@ use axum::{
 };
 use bytes::Bytes;
 use openai_protocol::responses::ResponsesRequest;
-use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
@@ -98,17 +97,11 @@ async fn route_responses_streaming(
             Ok(result) => result,
             Err(response) => return response,
         };
-    let ResponsesLoopSetup {
-        current_request: modified_request,
-        prepared,
-        state,
-        max_tool_calls,
-        mcp_servers,
-    } = ResponsesLoopSetup::from_history(loaded, mcp_servers);
+    let setup = ResponsesLoopSetup::from_history(loaded, mcp_servers);
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
     let response_id = format!("resp_{}", Uuid::now_v7());
-    let model = modified_request.model.clone();
+    let model = setup.current_request.model.clone();
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -125,11 +118,17 @@ async fn route_responses_streaming(
     tokio::spawn(async move {
         let ctx = &ctx_clone;
         let session_request_id = format!("resp_{}", Uuid::now_v7());
-        let mut session =
-            McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-        if let Some(tools) = original_request.tools.as_deref() {
-            session.configure_approval_policy(tools);
-        }
+        let session = setup.session(
+            &ctx.mcp_orchestrator,
+            &session_request_id,
+            &original_request,
+        );
+        let ResponsesLoopSetup {
+            prepared,
+            state,
+            max_tool_calls,
+            ..
+        } = setup;
         let upstream_handle = RegularStreamingUpstreamHandle {
             headers: params.headers.clone(),
             model_id: params.model_id.clone(),

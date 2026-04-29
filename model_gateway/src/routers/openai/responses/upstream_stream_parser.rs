@@ -256,7 +256,7 @@ impl OpenAiUpstreamStreamParser {
                 }
                 StreamParserAction::Forward
             }
-            ResponseEvent::COMPLETED => StreamParserAction::Forward,
+            ResponseEvent::COMPLETED | ResponseEvent::INCOMPLETE => StreamParserAction::Forward,
             OutputItemEvent::ADDED => self.handle_output_item_added(&parsed),
             FunctionCallEvent::ARGUMENTS_DELTA => self.handle_arguments_delta(&parsed),
             FunctionCallEvent::ARGUMENTS_DONE => self.handle_arguments_done(&parsed),

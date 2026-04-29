@@ -6,7 +6,6 @@
 
 use axum::response::Response;
 use openai_protocol::responses::{ResponsesRequest, ResponsesResponse};
-use smg_mcp::McpToolSession;
 use uuid::Uuid;
 
 use super::agent_loop_adapter::HarmonyAdapter;
@@ -35,23 +34,21 @@ pub(crate) async fn serve_harmony_responses(
 
     let (_, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await?;
+    let setup = ResponsesLoopSetup::from_history(loaded, mcp_servers);
+    let session_request_id = format!("resp_{}", Uuid::now_v7());
+    let session = setup.session(
+        &ctx.mcp_orchestrator,
+        &session_request_id,
+        &original_request,
+    );
+
     let ResponsesLoopSetup {
         current_request,
         prepared,
         state,
         max_tool_calls,
-        mcp_servers,
-    } = ResponsesLoopSetup::from_history(loaded, mcp_servers);
-
-    // Always create a session so the loop driver can speak to MCP
-    // unconditionally; an empty `mcp_servers` list yields a session
-    // with no exposed tools, which the loop tolerates (every model
-    // turn produces zero `pending_gateway_tool_calls`).
-    let session_request_id = format!("resp_{}", Uuid::now_v7());
-    let mut session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-    if let Some(tools) = original_request.tools.as_deref() {
-        session.configure_approval_policy(tools);
-    }
+        ..
+    } = setup;
 
     let adapter = HarmonyAdapter::new(ctx, tenant_request_meta, &current_request, &session);
 

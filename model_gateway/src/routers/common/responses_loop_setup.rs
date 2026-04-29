@@ -5,8 +5,10 @@
 //! call details; this module only packages the common prepared input, MCP
 //! server bindings, loop state, and tool budget.
 
+use std::collections::HashMap;
+
 use openai_protocol::responses::ResponsesRequest;
-use smg_mcp::McpServerBinding;
+use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession};
 
 use super::{
     agent_loop::{AgentLoopState, PreparedLoopInput},
@@ -53,5 +55,33 @@ impl ResponsesLoopSetup {
             max_tool_calls,
             mcp_servers,
         }
+    }
+
+    pub(crate) fn session<'a>(
+        &self,
+        orchestrator: &'a McpOrchestrator,
+        request_id: impl Into<String>,
+        approval_request: &ResponsesRequest,
+    ) -> McpToolSession<'a> {
+        self.session_with_headers(orchestrator, request_id, HashMap::new(), approval_request)
+    }
+
+    pub(crate) fn session_with_headers<'a>(
+        &self,
+        orchestrator: &'a McpOrchestrator,
+        request_id: impl Into<String>,
+        forwarded_headers: HashMap<String, String>,
+        approval_request: &ResponsesRequest,
+    ) -> McpToolSession<'a> {
+        let mut session = McpToolSession::new_with_headers(
+            orchestrator,
+            self.mcp_servers.clone(),
+            request_id,
+            forwarded_headers,
+        );
+        if let Some(tools) = approval_request.tools.as_deref() {
+            session.configure_approval_policy(tools);
+        }
+        session
     }
 }

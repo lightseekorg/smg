@@ -19,12 +19,9 @@ use openai_protocol::{
     chat::{
         ChatChoice, ChatCompletionMessage, ChatCompletionResponse, ChatCompletionStreamResponse,
     },
-    common::{
-        CompletionTokensDetails, FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue,
-        Usage, UsageInfo,
-    },
+    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use smg_mcp::McpToolSession;
 
 use super::{common::append_assistant_prefix_to_transcript, conversions};
@@ -53,9 +50,6 @@ pub(crate) struct RegularStreamingAdapter<'a> {
     ctx: &'a ResponsesContext,
     upstream: RegularStreamingUpstreamHandle,
     mcp_chat_tools: Vec<openai_protocol::common::Tool>,
-    /// Final-channel usage staged into the sink before the driver
-    /// fires `LoopEvent::ResponseFinished`.
-    last_usage: Option<UsageInfo>,
 }
 
 impl<'a> RegularStreamingAdapter<'a> {
@@ -69,9 +63,24 @@ impl<'a> RegularStreamingAdapter<'a> {
             ctx,
             upstream,
             mcp_chat_tools,
-            last_usage: None,
         }
     }
+}
+
+fn usage_to_stream_json(usage: &Usage) -> Value {
+    let mut obj = json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    });
+    if let Some(reasoning) = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.reasoning_tokens)
+    {
+        obj["output_tokens_details"] = json!({ "reasoning_tokens": reasoning });
+    }
+    obj
 }
 
 #[async_trait]
@@ -161,18 +170,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
                 message_text.as_deref(),
             );
         }
-        if let Some(usage) = accumulated.usage.as_ref() {
-            self.last_usage = Some(UsageInfo {
-                prompt_tokens: usage.prompt_tokens,
-                completion_tokens: usage.completion_tokens,
-                total_tokens: usage.total_tokens,
-                reasoning_tokens: usage
-                    .completion_tokens_details
-                    .as_ref()
-                    .and_then(|d| d.reasoning_tokens),
-                prompt_tokens_details: None,
-            });
-        }
         state.latest_turn = Some(LoopModelTurn {
             message_text: message_text.filter(|s| !s.is_empty()),
             reasoning_text: reasoning_text.filter(|s| !s.is_empty()),
@@ -189,39 +186,22 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
     }
 
     async fn render_final(
-        mut self,
+        self,
         ctx: &AgentLoopContext<'_>,
-        _state: AgentLoopState,
+        state: AgentLoopState,
         mode: RenderMode,
         sink: &mut GrpcResponseStreamSink,
     ) -> Result<(), AgentLoopError> {
         // Stage usage so the sink's `ResponseFinished` /
         // `ResponseIncomplete` emit attaches it to the final
-        // `response.completed`. The loop driver fires that event after
+        // terminal SSE event. The loop driver fires that event after
         // this method returns. Carry `reasoning_tokens` so the stored
         // record matches the SSE-side `usage_json` below.
-        let usage_for_persist = self.last_usage.clone().map(|u| Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-            prompt_tokens_details: None,
-            completion_tokens_details: u.reasoning_tokens.map(|n| CompletionTokensDetails {
-                reasoning_tokens: Some(n),
-                accepted_prediction_tokens: None,
-                rejected_prediction_tokens: None,
-            }),
-        });
-        let usage_json = self.last_usage.take().map(|u| {
-            let mut obj = json!({
-                "input_tokens": u.prompt_tokens,
-                "output_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens,
-            });
-            if let Some(reasoning) = u.reasoning_tokens {
-                obj["output_tokens_details"] = json!({ "reasoning_tokens": reasoning });
-            }
-            obj
-        });
+        let usage_for_persist = state
+            .latest_turn
+            .as_ref()
+            .and_then(|turn| turn.usage.clone());
+        let usage_json = usage_for_persist.as_ref().map(usage_to_stream_json);
         sink.set_final_usage(usage_json);
 
         finalize_streamed_response_for_persist(

@@ -11,7 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use openai_protocol::responses::ResponsesRequest;
-use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -53,17 +52,11 @@ pub(crate) async fn serve_harmony_responses_stream(
             Ok(result) => result,
             Err(response) => return response,
         };
-    let ResponsesLoopSetup {
-        current_request,
-        prepared,
-        state,
-        max_tool_calls,
-        mcp_servers,
-    } = ResponsesLoopSetup::from_history(loaded, mcp_servers);
+    let setup = ResponsesLoopSetup::from_history(loaded, mcp_servers);
 
     let (tx, rx) = mpsc::unbounded_channel();
     let response_id = format!("resp_{}", Uuid::now_v7());
-    let model = current_request.model.clone();
+    let model = setup.current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -81,11 +74,18 @@ pub(crate) async fn serve_harmony_responses_stream(
     tokio::spawn(async move {
         let ctx = &ctx_clone;
         let session_request_id = format!("resp_{}", Uuid::now_v7());
-        let mut session =
-            McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-        if let Some(tools) = original_for_persist.tools.as_deref() {
-            session.configure_approval_policy(tools);
-        }
+        let session = setup.session(
+            &ctx.mcp_orchestrator,
+            &session_request_id,
+            &original_for_persist,
+        );
+        let ResponsesLoopSetup {
+            current_request,
+            prepared,
+            state,
+            max_tool_calls,
+            ..
+        } = setup;
         let adapter =
             HarmonyStreamingAdapter::new(ctx, tenant_request_meta, &current_request, &session);
         // `loop_ctx.original_request` carries the user-provided shape
@@ -110,8 +110,8 @@ pub(crate) async fn serve_harmony_responses_stream(
             session.server_label_snapshot(),
         );
         // The driver returns once Finish/ApprovalInterrupt/Incomplete is
-        // reached; the sink itself has already emitted
-        // response.completed by then.
+        // reached; the sink itself has already emitted the terminal SSE
+        // event by then.
         let result = run_agent_loop(adapter, loop_ctx, state, sink).await;
 
         match result {

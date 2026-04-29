@@ -3,7 +3,8 @@
 //!
 //! The sink owns an [`ResponseStreamEventEmitter`] and the SSE channel.
 //! `LoopEvent`s the agent-loop driver emits map onto the emitter's
-//! high-level "response.created / response.completed" calls; chunk-level
+//! high-level "response.created / response.completed / response.incomplete"
+//! calls; chunk-level
 //! events (message deltas, content_part.added/done, output_text.delta,
 //! function_call_arguments.delta for *caller-declared* function tools)
 //! stay inside the surface adapter — those need parser-context the
@@ -105,7 +106,7 @@ pub(crate) struct GrpcResponseStreamSink {
     /// Final-turn usage bundle the adapter stages from inside its
     /// `render_final` (which the driver calls *before*
     /// `Sink::emit(LoopEvent::ResponseFinished)`). Carries the numbers
-    /// the `response.completed` payload reports back to the client.
+    /// the terminal response payload reports back to the client.
     final_usage: Option<Value>,
     /// Per-call_id wire-side state. Used to pair
     /// `ToolCallEmissionStarted` with later `ArgumentsFragment` /
@@ -316,22 +317,8 @@ impl GrpcResponseStreamSink {
     fn emit_response_completed(&mut self, incomplete_reason: Option<&str>) {
         let mut usage = self.final_usage.take();
         if let Some(reason) = incomplete_reason {
-            // `response.completed` carries `incomplete_details` instead
-            // of a bespoke `response.incomplete` event so the wire
-            // termination path stays one branch — same contract as the
-            // non-streaming `RenderMode::Incomplete` path.
-            let mut completed = self.emitter.emit_completed(usage.as_ref());
-            if let Some(obj) = completed.as_object_mut() {
-                if let Some(response_value) =
-                    obj.get_mut("response").and_then(|v| v.as_object_mut())
-                {
-                    response_value.insert(
-                        "incomplete_details".to_string(),
-                        json!({ "reason": reason }),
-                    );
-                }
-            }
-            self.send(&completed);
+            let event = self.emitter.emit_incomplete(reason, usage.as_ref());
+            self.send(&event);
             return;
         }
         // Reattach in case nobody read it (idempotent close).
@@ -371,7 +358,6 @@ impl GrpcResponseStreamSink {
             "id": id,
             "type": "mcp_list_tools",
             "server_label": server_label,
-            "status": "in_progress",
             "tools": [],
         });
         // The emitter's per-output-index allocator is what assigns the
@@ -398,7 +384,6 @@ impl GrpcResponseStreamSink {
             "id": id,
             "type": "mcp_list_tools",
             "server_label": server_label,
-            "status": "completed",
             "tools": tool_items,
         });
         let event = self.emitter.emit_output_item_done(output_index, &item_done);
@@ -998,6 +983,49 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn incomplete_finish_emits_response_incomplete() {
+        let (mut sink, mut rx) = make_sink(HashMap::new(), HashMap::new());
+
+        sink.emit(LoopEvent::ResponseIncomplete {
+            reason: "max_output_tokens",
+        });
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "response.incomplete");
+        assert_eq!(events[0]["response"]["status"], "incomplete");
+        assert_eq!(
+            events[0]["response"]["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+    }
+
+    #[test]
+    fn streamed_mcp_list_tools_items_omit_status() {
+        let (mut sink, mut rx) = make_sink(HashMap::new(), HashMap::new());
+        let item = ResponseOutputItem::McpListTools {
+            id: "mcpl_test".to_string(),
+            server_label: "deepwiki".to_string(),
+            tools: vec![],
+            error: None,
+        };
+
+        sink.emit(LoopEvent::McpListToolsItem { item: &item });
+
+        let events = drain_events(&mut rx);
+        let added = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.added")
+            .expect("mcp_list_tools added event");
+        assert!(added["item"].get("status").is_none());
+        let done = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.done")
+            .expect("mcp_list_tools done event");
+        assert!(done["item"].get("status").is_none());
     }
 
     /// Caller-declared function tools stream through

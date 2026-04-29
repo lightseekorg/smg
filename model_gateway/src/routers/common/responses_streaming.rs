@@ -1,6 +1,7 @@
 //! Shared OpenAI-compatible SSE infrastructure for `/v1/responses`.
 
 use axum::{body::Body, http::StatusCode, response::Response};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
 use openai_protocol::{
@@ -24,6 +25,16 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::routers::common::agent_loop::OutputFamily;
+
+fn random_obfuscation() -> String {
+    use rand::Rng as _;
+
+    let mut rng = rand::rng();
+    let len = rng.random_range(8..=16);
+    let mut bytes = [0_u8; 16];
+    rng.fill(&mut bytes);
+    URL_SAFE_NO_PAD.encode(&bytes[..len])
+}
 
 pub(crate) enum OutputItemType {
     Message,
@@ -61,6 +72,7 @@ struct OutputItemState {
 /// - response.output_item.added
 /// - response.output_item.done
 /// - response.completed
+/// - response.incomplete
 /// - response.content_part.added
 /// - response.content_part.done
 /// - response.output_text.delta
@@ -202,7 +214,7 @@ impl ResponseStreamEventEmitter {
             "item_id": item_id,
             "content_index": content_index,
             "delta": delta,
-            "obfuscation": null
+            "obfuscation": random_obfuscation()
         })
     }
 
@@ -241,9 +253,23 @@ impl ResponseStreamEventEmitter {
         })
     }
 
+    pub fn emit_completed(&mut self, usage: Option<&Value>) -> Value {
+        self.emit_terminal(ResponseEvent::COMPLETED, "completed", None, usage)
+    }
+
+    pub fn emit_incomplete(&mut self, reason: &str, usage: Option<&Value>) -> Value {
+        self.emit_terminal(ResponseEvent::INCOMPLETE, "incomplete", Some(reason), usage)
+    }
+
     // INVARIANT: this method is terminal — it drains internal state via `take()`
     // and must only be called once per emitter lifetime.
-    pub fn emit_completed(&mut self, usage: Option<&Value>) -> Value {
+    fn emit_terminal(
+        &mut self,
+        event_type: &str,
+        status: &str,
+        incomplete_reason: Option<&str>,
+        usage: Option<&Value>,
+    ) -> Value {
         // Build output array from tracked items
         let output: Vec<Value> = self
             .output_items
@@ -277,7 +303,7 @@ impl ResponseStreamEventEmitter {
             "id": self.response_id,
             "object": "response",
             "created_at": self.created_at,
-            "status": "completed",
+            "status": status,
             "model": self.model,
             "output": output
         });
@@ -341,10 +367,12 @@ impl ResponseStreamEventEmitter {
         response_obj["moderation"] = Value::Null;
         response_obj["completed_at"] = Value::Null;
         response_obj["error"] = Value::Null;
-        response_obj["incomplete_details"] = Value::Null;
+        response_obj["incomplete_details"] = incomplete_reason
+            .map(|reason| json!({ "reason": reason }))
+            .unwrap_or(Value::Null);
 
         json!({
-            "type": ResponseEvent::COMPLETED,
+            "type": event_type,
             "sequence_number": self.next_sequence(),
             "response": response_obj
         })
@@ -398,7 +426,7 @@ impl ResponseStreamEventEmitter {
             "output_index": output_index,
             "item_id": item_id,
             "delta": delta,
-            "obfuscation": null
+            "obfuscation": random_obfuscation()
         })
     }
 
@@ -639,7 +667,7 @@ impl ResponseStreamEventEmitter {
             "output_index": output_index,
             "item_id": item_id,
             "delta": delta,
-            "obfuscation": null
+            "obfuscation": random_obfuscation()
         })
     }
 
@@ -861,7 +889,7 @@ impl ResponseStreamEventEmitter {
             "item_id": item_id,
             "summary_index": 0,
             "delta": delta,
-            "obfuscation": null
+            "obfuscation": random_obfuscation()
         });
         self.send_event(&event, tx)
     }
@@ -895,7 +923,7 @@ impl ResponseStreamEventEmitter {
                 "output_index": output_index,
                 "item_id": item_id,
                 "summary_index": 0,
-                "part": { "type": "summary_text", "text": "" }
+                "part": { "type": "summary_text", "text": text.clone() }
             });
             self.send_event(&event, tx)?;
         }
@@ -1124,7 +1152,6 @@ impl ResponseStreamEventEmitter {
             "id": item_id,
             "type": "mcp_list_tools",
             "server_label": server_label,
-            "status": "in_progress",
             "tools": []
         });
 
@@ -1145,7 +1172,6 @@ impl ResponseStreamEventEmitter {
             "id": item_id,
             "type": "mcp_list_tools",
             "server_label": server_label,
-            "status": "completed",
             "tools": tool_items
         });
 
@@ -1180,4 +1206,107 @@ pub(crate) fn build_sse_response(
         .header("Connection", HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
         .expect("infallible: static headers and valid status code")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn emitter() -> ResponseStreamEventEmitter {
+        ResponseStreamEventEmitter::new("resp_test".to_string(), "model".to_string(), 123)
+    }
+
+    fn parse_sse_payload(bytes: Bytes) -> Value {
+        let text = std::str::from_utf8(&bytes).expect("sse is utf8");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("sse data line");
+        serde_json::from_str(data).expect("valid event json")
+    }
+
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<Result<Bytes, std::io::Error>>) -> Vec<Value> {
+        let mut events = Vec::new();
+        while let Ok(Ok(bytes)) = rx.try_recv() {
+            events.push(parse_sse_payload(bytes));
+        }
+        events
+    }
+
+    fn assert_obfuscation(event: &Value) {
+        let obfuscation = event
+            .get("obfuscation")
+            .and_then(Value::as_str)
+            .expect("obfuscation string");
+        assert!(!obfuscation.is_empty());
+    }
+
+    #[test]
+    fn incomplete_terminal_event_uses_response_incomplete() {
+        let mut emitter = emitter();
+
+        let event = emitter.emit_incomplete("max_output_tokens", None);
+
+        assert_eq!(event["type"], json!(ResponseEvent::INCOMPLETE));
+        assert_eq!(event["response"]["status"], json!("incomplete"));
+        assert_eq!(
+            event["response"]["incomplete_details"]["reason"],
+            json!("max_output_tokens")
+        );
+    }
+
+    #[test]
+    fn mcp_list_tools_sequence_omits_status_on_items() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = emitter();
+
+        emitter
+            .emit_mcp_list_tools_sequence("deepwiki", &[], &tx)
+            .expect("sequence emits");
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["type"], json!(OutputItemEvent::ADDED));
+        assert!(events[0]["item"].get("status").is_none());
+        assert_eq!(events[3]["type"], json!(OutputItemEvent::DONE));
+        assert!(events[3]["item"].get("status").is_none());
+    }
+
+    #[test]
+    fn streaming_delta_events_carry_obfuscation_strings() {
+        let mut emitter = emitter();
+
+        assert_obfuscation(&emitter.emit_text_delta("hello", 0, "msg_1", 0));
+        assert_obfuscation(&emitter.emit_mcp_call_arguments_delta(1, "mcp_1", "{}"));
+        assert_obfuscation(&emitter.emit_function_call_arguments_delta(2, "fc_1", "{}"));
+    }
+
+    #[test]
+    fn reasoning_summary_part_done_carries_accumulated_text() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = emitter();
+
+        emitter
+            .process_reasoning_delta("first ", &tx)
+            .expect("reasoning delta emits");
+        emitter
+            .process_reasoning_delta("second", &tx)
+            .expect("reasoning delta emits");
+        emitter
+            .finish_reasoning_item(&tx)
+            .expect("reasoning item finishes");
+
+        let events = drain_events(&mut rx);
+        let delta = events
+            .iter()
+            .find(|event| event["type"] == json!("response.reasoning_summary_text.delta"))
+            .expect("summary delta event");
+        assert_obfuscation(delta);
+
+        let part_done = events
+            .iter()
+            .find(|event| event["type"] == json!("response.reasoning_summary_part.done"))
+            .expect("summary part done event");
+        assert_eq!(part_done["part"]["text"], json!("first second"));
+    }
 }

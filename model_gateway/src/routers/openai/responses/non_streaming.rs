@@ -6,7 +6,6 @@ use axum::{
     Json,
 };
 use serde_json::to_value;
-use smg_mcp::McpToolSession;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -67,13 +66,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             Err(response) => return response,
         };
 
-    let ResponsesLoopSetup {
-        prepared,
-        state,
-        max_tool_calls,
-        mcp_servers,
-        ..
-    } = ResponsesLoopSetup::new(
+    let setup = ResponsesLoopSetup::new(
         current_request,
         prepared,
         existing_mcp_list_tools_labels,
@@ -85,15 +78,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         .clone()
         .unwrap_or_else(|| format!("resp_{}", Uuid::now_v7()));
     let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
-    let mut session = McpToolSession::new_with_headers(
+    let session = setup.session_with_headers(
         &mcp_orchestrator,
-        mcp_servers,
         &session_request_id,
         forwarded_headers,
+        &original_request,
     );
-    if let Some(tools) = original_request.tools.as_deref() {
-        session.configure_approval_policy(tools);
-    }
+
+    let ResponsesLoopSetup {
+        prepared,
+        state,
+        max_tool_calls,
+        ..
+    } = setup;
 
     let loop_ctx = AgentLoopContext {
         prepared: &prepared,

@@ -14,8 +14,8 @@ use openai_protocol::{
     common::{CompletionTokensDetails, PromptTokenUsageInfo, Usage},
     event_types::ResponseEvent,
     responses::{
-        ResponseContentPart, ResponseInputOutputItem, ResponseOutputItem, ResponsesRequest,
-        ResponsesResponse,
+        ResponseContentPart, ResponseInputOutputItem, ResponseOutputItem, ResponseStatus,
+        ResponsesRequest, ResponsesResponse,
     },
 };
 use serde_json::{to_value, Value};
@@ -160,7 +160,7 @@ fn build_iteration_payload(
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
     }
 
-    normalize_openai_reasoning_input(&mut payload);
+    sanitize_openai_replay_input(&mut payload);
 
     provider
         .transform_request(&mut payload, Endpoint::Responses)
@@ -169,7 +169,7 @@ fn build_iteration_payload(
     Ok(payload)
 }
 
-fn normalize_openai_reasoning_input(payload: &mut Value) {
+fn sanitize_openai_replay_input(payload: &mut Value) {
     let Some(input) = payload
         .as_object_mut()
         .and_then(|obj| obj.get_mut("input"))
@@ -180,6 +180,11 @@ fn normalize_openai_reasoning_input(payload: &mut Value) {
 
     for item in input.iter_mut().filter_map(Value::as_object_mut) {
         if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+            // OpenAI accepts replayed reasoning items, but not the gateway's
+            // output-side fields. In-loop calls use `store: false`, so a
+            // retained `rs_*` id would make OpenAI look up a non-persisted item.
+            // Keep `summary` / `encrypted_content` because those are valid
+            // reasoning replay inputs.
             item.remove("id");
             item.remove("status");
             item.remove("content");
@@ -444,8 +449,13 @@ impl OpenAiResponseStreamSink {
         if self.disconnected {
             return;
         }
+        let event_type = if response.status == ResponseStatus::Incomplete {
+            ResponseEvent::INCOMPLETE
+        } else {
+            ResponseEvent::COMPLETED
+        };
         let payload = serde_json::json!({
-            "type": ResponseEvent::COMPLETED,
+            "type": event_type,
             "sequence_number": self.emitter.next_sequence(),
             "response": response,
         });
@@ -483,7 +493,6 @@ impl OpenAiResponseStreamSink {
             "id": id,
             "type": "mcp_list_tools",
             "server_label": server_label,
-            "status": "in_progress",
             "tools": [],
         });
         let event = self
@@ -502,7 +511,6 @@ impl OpenAiResponseStreamSink {
             "id": id,
             "type": "mcp_list_tools",
             "server_label": server_label,
-            "status": "completed",
             "tools": tool_items,
         });
         let event = self.emitter.emit_output_item_done(output_index, &done_item);
@@ -973,15 +981,48 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::responses::{
-        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseReasoningContent,
-        SummaryTextContent,
+    use openai_protocol::{
+        event_types::OutputItemEvent,
+        responses::{
+            ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseReasoningContent,
+            SummaryTextContent,
+        },
     };
     use serde_json::json;
     use smg_mcp::{McpOrchestrator, McpToolSession};
 
     use super::*;
     use crate::routers::openai::provider::{OpenAIProvider, XAIProvider};
+
+    fn parse_sse_payload(bytes: Bytes) -> Value {
+        let text = std::str::from_utf8(&bytes).expect("sse is utf8");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("sse data line");
+        serde_json::from_str(data).expect("valid event json")
+    }
+
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<Result<Bytes, io::Error>>) -> Vec<Value> {
+        let mut events = Vec::new();
+        while let Ok(Ok(bytes)) = rx.try_recv() {
+            events.push(parse_sse_payload(bytes));
+        }
+        events
+    }
+
+    fn stream_sink() -> (
+        OpenAiResponseStreamSink,
+        mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let emitter =
+            ResponseStreamEventEmitter::new("resp_test".to_string(), "model".to_string(), 123);
+        (
+            OpenAiResponseStreamSink::new(tx, emitter, HashMap::new(), HashMap::new()),
+            rx,
+        )
+    }
 
     #[test]
     fn iteration_payload_reapplies_provider_transform_to_replayed_items() {
@@ -1027,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn iteration_payload_normalizes_reasoning_items_for_openai_replay() {
+    fn iteration_payload_preserves_reasoning_replay_but_strips_output_fields() {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
         let state = AgentLoopState::new(
@@ -1066,5 +1107,51 @@ mod tests {
             Some(&json!("encrypted-payload"))
         );
         assert_eq!(item["summary"][0]["text"], json!("summary survives"));
+    }
+
+    #[test]
+    fn openai_stream_final_response_uses_incomplete_event() {
+        let (mut sink, mut rx) = stream_sink();
+        let response = ResponsesResponse::builder("resp_test", "model")
+            .status(ResponseStatus::Incomplete)
+            .incomplete_details(json!({ "reason": "max_output_tokens" }))
+            .build();
+
+        sink.emit_final_response(&response);
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], json!(ResponseEvent::INCOMPLETE));
+        assert_eq!(events[0]["response"]["status"], json!("incomplete"));
+        assert_eq!(
+            events[0]["response"]["incomplete_details"]["reason"],
+            json!("max_output_tokens")
+        );
+    }
+
+    #[test]
+    fn openai_stream_mcp_list_tools_items_omit_status() {
+        let (mut sink, mut rx) = stream_sink();
+        let item = ResponseOutputItem::McpListTools {
+            id: "mcpl_test".to_string(),
+            server_label: "deepwiki".to_string(),
+            tools: vec![],
+            error: None,
+        };
+
+        sink.emit(LoopEvent::McpListToolsItem { item: &item });
+        sink.flush_buffered_mcp_list_tools();
+
+        let events = drain_events(&mut rx);
+        let added = events
+            .iter()
+            .find(|event| event["type"] == json!(OutputItemEvent::ADDED))
+            .expect("mcp_list_tools added event");
+        assert!(added["item"].get("status").is_none());
+        let done = events
+            .iter()
+            .find(|event| event["type"] == json!(OutputItemEvent::DONE))
+            .expect("mcp_list_tools done event");
+        assert!(done["item"].get("status").is_none());
     }
 }

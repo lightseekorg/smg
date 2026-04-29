@@ -108,7 +108,7 @@ pub(crate) fn build_response_from_state(
             response.output.extend(approval_items);
         }
         RenderMode::Incomplete { reason } => {
-            response.status = ResponseStatus::Completed;
+            response.status = ResponseStatus::Incomplete;
             response.incomplete_details = Some(json!({ "reason": reason }));
         }
     }
@@ -284,10 +284,8 @@ mod tests {
         }
     }
 
-    /// `RenderMode::Incomplete` keeps top-level `status` as `Completed`
-    /// and attaches `incomplete_details.reason`.
     #[test]
-    fn incomplete_mode_keeps_status_completed_and_attaches_details() {
+    fn incomplete_mode_sets_status_incomplete_and_attaches_details() {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
         let state = fresh_state();
@@ -302,7 +300,7 @@ mod tests {
             &hooks(),
             &session,
         );
-        assert_eq!(response.status, ResponseStatus::Completed);
+        assert_eq!(response.status, ResponseStatus::Incomplete);
         assert_eq!(
             response
                 .incomplete_details

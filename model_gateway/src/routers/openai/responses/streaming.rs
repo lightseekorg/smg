@@ -22,7 +22,6 @@ use openai_protocol::{
     responses::ResponsesRequest,
 };
 use serde_json::{json, Value};
-use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -365,7 +364,10 @@ pub(super) fn forward_streaming_event(
     };
 
     let event_type = get_event_type(event_name, &parsed_data);
-    if event_type == ResponseEvent::COMPLETED {
+    if matches!(
+        event_type,
+        ResponseEvent::COMPLETED | ResponseEvent::INCOMPLETE
+    ) {
         return true;
     }
 
@@ -547,13 +549,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
             Err(response) => return response,
         };
 
-    let ResponsesLoopSetup {
-        prepared,
-        state,
-        max_tool_calls: loop_ctx_max_tool_calls,
-        mcp_servers,
-        ..
-    } = ResponsesLoopSetup::new(
+    let setup = ResponsesLoopSetup::new(
         current_request,
         prepared,
         existing_mcp_list_tools_labels,
@@ -602,15 +598,18 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         reason = "fire-and-forget streaming loop; gateway shutdown need not wait for individual response streams"
     )]
     tokio::spawn(async move {
-        let mut session = McpToolSession::new_with_headers(
+        let session = setup.session_with_headers(
             &mcp_orchestrator,
-            mcp_servers,
             &session_request_id,
             forwarded_headers,
+            &loop_ctx_request,
         );
-        if let Some(tools) = loop_ctx_request.tools.as_deref() {
-            session.configure_approval_policy(tools);
-        }
+        let ResponsesLoopSetup {
+            prepared,
+            state,
+            max_tool_calls: loop_ctx_max_tool_calls,
+            ..
+        } = setup;
         let loop_ctx = AgentLoopContext {
             prepared: &prepared,
             session: Some(&session),
