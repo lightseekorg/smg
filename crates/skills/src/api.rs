@@ -18,8 +18,8 @@ use crate::{
         TenantAliasStore,
     },
     types::{
-        NormalizedSkillBundle, ParsedSkillBundle, SkillFileRecord, SkillParseWarning, SkillRecord,
-        SkillVersionRecord,
+        NormalizedSkillBundle, ParsedSkillBundle, PinnedSkillVersion, SkillFileRecord,
+        SkillParseWarning, SkillRecord, SkillVersionRecord, SkillVersionSelector,
     },
     validation::{
         is_code_file_path, normalize_skill_bundle_zip_with_limits, parse_skill_bundle,
@@ -365,6 +365,68 @@ impl SkillService {
                 component: "metadata_store",
             })?;
         resolve_skill_version_record(&*metadata_store, &tenant_id, &skill_id, &version_ref).await
+    }
+
+    pub async fn pin_skill_version(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+        selector: SkillVersionSelector<'_>,
+    ) -> Result<PinnedSkillVersion, SkillServiceError> {
+        let (tenant_id, skill_id) = normalize_skill_ids(tenant_id, skill_id)?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+        let skill = metadata_store
+            .get_skill(&tenant_id, &skill_id)
+            .await?
+            .ok_or_else(|| SkillServiceError::SkillNotFound {
+                tenant_id: tenant_id.clone(),
+                skill_id: skill_id.clone(),
+            })?;
+
+        let record = resolve_skill_version_record_for_selector(
+            &*metadata_store,
+            &tenant_id,
+            &skill,
+            selector,
+        )
+        .await?;
+        Ok(PinnedSkillVersion {
+            version: record.version,
+            version_number: record.version_number,
+        })
+    }
+
+    pub async fn try_pin_skill_version(
+        &self,
+        tenant_id: &str,
+        skill_id: &str,
+        selector: SkillVersionSelector<'_>,
+    ) -> Result<Option<PinnedSkillVersion>, SkillServiceError> {
+        let (tenant_id, skill_id) = normalize_skill_ids(tenant_id, skill_id)?;
+        let metadata_store = self
+            .metadata_store()
+            .ok_or(SkillServiceError::MissingComponent {
+                component: "metadata_store",
+            })?;
+        let Some(skill) = metadata_store.get_skill(&tenant_id, &skill_id).await? else {
+            return Ok(None);
+        };
+
+        let record = resolve_skill_version_record_for_selector(
+            &*metadata_store,
+            &tenant_id,
+            &skill,
+            selector,
+        )
+        .await?;
+        Ok(Some(PinnedSkillVersion {
+            version: record.version,
+            version_number: record.version_number,
+        }))
     }
 
     pub async fn list_skill_versions(
@@ -820,6 +882,17 @@ fn normalize_required_value(
     Ok(value.to_string())
 }
 
+fn normalize_skill_ids(
+    tenant_id: &str,
+    skill_id: &str,
+) -> Result<(String, String), SkillServiceError> {
+    let tenant_id =
+        normalize_required_value(tenant_id.to_string(), SkillServiceError::MissingTenantId)?;
+    let skill_id =
+        normalize_required_value(skill_id.to_string(), SkillServiceError::MissingSkillId)?;
+    Ok((tenant_id, skill_id))
+}
+
 fn normalize_upload_bundle(
     upload: SkillUpload,
     limits: SkillUploadLimits,
@@ -1066,6 +1139,65 @@ async fn resolve_skill_version_record(
     })
 }
 
+async fn resolve_skill_version_record_for_selector(
+    metadata_store: &dyn SkillMetadataStore,
+    tenant_id: &str,
+    skill: &SkillRecord,
+    selector: SkillVersionSelector<'_>,
+) -> Result<SkillVersionRecord, SkillServiceError> {
+    match selector {
+        SkillVersionSelector::Default => {
+            let version = skill.default_version.as_deref().ok_or_else(|| {
+                SkillServiceError::MissingDefaultVersion {
+                    tenant_id: tenant_id.to_string(),
+                    skill_id: skill.skill_id.clone(),
+                }
+            })?;
+            get_exact_skill_version(metadata_store, tenant_id, &skill.skill_id, version).await
+        }
+        SkillVersionSelector::Latest => {
+            let version = skill.latest_version.as_deref().ok_or_else(|| {
+                SkillServiceError::SkillVersionNotFound {
+                    tenant_id: tenant_id.to_string(),
+                    skill_id: skill.skill_id.clone(),
+                    version: "latest".to_string(),
+                }
+            })?;
+            get_exact_skill_version(metadata_store, tenant_id, &skill.skill_id, version).await
+        }
+        SkillVersionSelector::Exact(version) => {
+            get_exact_skill_version(metadata_store, tenant_id, &skill.skill_id, version).await
+        }
+        SkillVersionSelector::VersionNumber(version_number) => {
+            let versions = metadata_store.list_skill_versions(&skill.skill_id).await?;
+            versions
+                .into_iter()
+                .find(|record| record.version_number == version_number)
+                .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+                    tenant_id: tenant_id.to_string(),
+                    skill_id: skill.skill_id.clone(),
+                    version: version_number.to_string(),
+                })
+        }
+    }
+}
+
+async fn get_exact_skill_version(
+    metadata_store: &dyn SkillMetadataStore,
+    tenant_id: &str,
+    skill_id: &str,
+    version: &str,
+) -> Result<SkillVersionRecord, SkillServiceError> {
+    metadata_store
+        .get_skill_version(skill_id, version)
+        .await?
+        .ok_or_else(|| SkillServiceError::SkillVersionNotFound {
+            tenant_id: tenant_id.to_string(),
+            skill_id: skill_id.to_string(),
+            version: version.to_string(),
+        })
+}
+
 fn apply_skill_projection_from_version(skill: &mut SkillRecord, version: &SkillVersionRecord) {
     skill.name.clone_from(&version.name);
     skill
@@ -1099,6 +1231,7 @@ mod tests {
         SkillServiceError, SkillServiceMode, SkillUpload, SkillUploadLimits, UpdateSkillRequest,
         UpdateSkillVersionRequest, UploadedSkillFile,
     };
+    use crate::SkillVersionSelector;
 
     #[test]
     fn placeholder_service_reports_placeholder_mode() {
@@ -1270,6 +1403,84 @@ mod tests {
             next.skill.default_version,
             Some(created.version.version.clone())
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pin_skill_version_resolves_domain_selectors() -> Result<()> {
+        let root = TempDir::new()?;
+        let blob_store = Arc::new(FilesystemBlobStore::new(root.path())?);
+        let service = SkillService::in_memory(blob_store);
+
+        let created = service
+            .create_skill(CreateSkillRequest {
+                tenant_id: "tenant-a".to_string(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:map\ndescription: Map the repo\n---\nUse rg."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+        let second = service
+            .create_skill_version(CreateSkillVersionRequest {
+                tenant_id: "tenant-a".to_string(),
+                skill_id: created.skill.skill_id.clone(),
+                upload: SkillUpload::Files(vec![UploadedSkillFile {
+                    relative_path: "SKILL.md".to_string(),
+                    contents: b"---\nname: acme:search\ndescription: Search the repo\n---\nUse fd."
+                        .to_vec(),
+                    media_type: Some("text/markdown".to_string()),
+                }]),
+            })
+            .await?;
+
+        let default_pin = service
+            .pin_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                SkillVersionSelector::Default,
+            )
+            .await?;
+        let latest_pin = service
+            .pin_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                SkillVersionSelector::Latest,
+            )
+            .await?;
+        let exact_pin = service
+            .pin_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                SkillVersionSelector::Exact(&created.version.version),
+            )
+            .await?;
+        let number_pin = service
+            .pin_skill_version(
+                "tenant-a",
+                &created.skill.skill_id,
+                SkillVersionSelector::VersionNumber(2),
+            )
+            .await?;
+
+        assert_eq!(default_pin.version, created.version.version);
+        assert_eq!(default_pin.version_number, 1);
+        assert_eq!(latest_pin.version, second.version.version);
+        assert_eq!(latest_pin.version_number, 2);
+        assert_eq!(exact_pin.version, created.version.version);
+        assert_eq!(number_pin.version, second.version.version);
+
+        let missing = service
+            .try_pin_skill_version(
+                "tenant-a",
+                "openai-provider-skill",
+                SkillVersionSelector::Default,
+            )
+            .await?;
+        assert_eq!(missing, None);
 
         Ok(())
     }
