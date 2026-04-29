@@ -558,7 +558,7 @@ async fn execute_tool_loop_streaming_internal(
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
             for binding in session.mcp_servers() {
-                if session.is_internal_non_builtin_server_label(&binding.label) {
+                if session.is_internal_server_label(&binding.label) {
                     continue;
                 }
                 let tools_for_server = session.list_tools_for_server(&binding.server_key);

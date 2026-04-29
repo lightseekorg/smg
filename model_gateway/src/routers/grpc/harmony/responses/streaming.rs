@@ -179,7 +179,7 @@ async fn execute_mcp_tool_loop_streaming(
 
     // Emit mcp_list_tools on first iteration
     for binding in session.mcp_servers() {
-        if session.is_internal_non_builtin_server_label(&binding.label) {
+        if session.is_internal_server_label(&binding.label) {
             continue;
         }
         let tools_for_server = session.list_tools_for_server(&binding.server_key);
