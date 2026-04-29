@@ -289,7 +289,7 @@ pub fn extract_auth_header(
 /// requests (tracing, auth, routing). Does **not** include MCP-specific headers;
 /// use [`extract_mcp_forward_headers`] for those.
 pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
-    extract_headers_matching(headers, should_forward_request_header)
+    extract_matching_headers(headers, should_forward_request_header)
 }
 
 /// Extract headers forwarded only to MCP tool calls (e.g., OCI delegation token).
@@ -297,11 +297,25 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
 /// These are embedded in `_meta.extra_headers` of the JSON-RPC request and
 /// must not be sent to LLM provider calls.
 pub fn extract_mcp_forward_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
-    extract_headers_matching(headers, is_mcp_forward_header)
+    extract_matching_headers(headers, is_mcp_forward_header)
+}
+
+/// Headers where multiple values are comma-joined per RFC 9110.
+/// All other headers are treated as singletons (first value wins).
+const CSV_MERGE_HEADERS: &[&str] = &["tracestate", "traceparent"];
+
+/// Returns `true` if repeated values for `name` should be comma-joined.
+fn is_csv_mergeable(name: &str) -> bool {
+    CSV_MERGE_HEADERS
+        .iter()
+        .any(|h| name.eq_ignore_ascii_case(h))
 }
 
 /// Shared extraction logic: collect headers whose names pass `predicate`.
-fn extract_headers_matching(
+///
+/// Headers listed in [`CSV_MERGE_HEADERS`] have repeated values comma-joined.
+/// All other headers are singletons — only the first value is kept.
+fn extract_matching_headers(
     headers: Option<&HeaderMap>,
     predicate: fn(&str) -> bool,
 ) -> HashMap<String, String> {
@@ -324,8 +338,11 @@ fn extract_headers_matching(
         forwarded
             .entry(name_str.to_string())
             .and_modify(|existing: &mut String| {
-                existing.push_str(", ");
-                existing.push_str(value);
+                if is_csv_mergeable(name_str) {
+                    existing.push_str(", ");
+                    existing.push_str(value);
+                }
+                // Singleton headers: keep the first value, ignore subsequent.
             })
             .or_insert_with(|| value.to_string());
     }
@@ -585,16 +602,49 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_forwardable_request_headers_preserves_repeated_values() {
+    fn test_extract_forwardable_request_headers_csv_merges_tracestate() {
         let mut headers = HeaderMap::new();
         headers.append("tracestate", "vendor1=value1".parse().unwrap());
         headers.append("tracestate", "vendor2=value2".parse().unwrap());
 
         let forwarded = extract_forwardable_request_headers(Some(&headers));
 
+        // tracestate is CSV-mergeable: repeated values are comma-joined.
         assert_eq!(
             forwarded.get("tracestate"),
             Some(&"vendor1=value1, vendor2=value2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_singleton_headers_keep_first_value() {
+        let mut headers = HeaderMap::new();
+        headers.append("authorization", "Bearer first".parse().unwrap());
+        headers.append("authorization", "Bearer second".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        // Singleton: first value wins, no comma-joining.
+        assert_eq!(
+            forwarded.get("authorization"),
+            Some(&"Bearer first".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mcp_singleton_headers_keep_first_value() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-smg-oci-delegation-token", "token-first".parse().unwrap());
+        headers.append(
+            "x-smg-oci-delegation-token",
+            "token-second".parse().unwrap(),
+        );
+
+        let mcp = extract_mcp_forward_headers(Some(&headers));
+
+        assert_eq!(
+            mcp.get("x-smg-oci-delegation-token"),
+            Some(&"token-first".to_string())
         );
     }
 

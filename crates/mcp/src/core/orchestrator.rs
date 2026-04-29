@@ -1458,7 +1458,7 @@ impl McpOrchestrator {
     /// Execute a tool call on a server.
     ///
     /// When `forwarded_headers` is non-empty, cherry-picked headers are passed to
-    /// the MCP server inside the JSON-RPC `_meta.forwarded_headers` field rather
+    /// the MCP server inside the JSON-RPC `_meta.extra_headers` field rather
     /// than at the HTTP transport level.
     async fn execute_on_server(
         &self,
@@ -1484,7 +1484,7 @@ impl McpOrchestrator {
     /// Send a `tools/call` JSON-RPC request to an MCP peer.
     ///
     /// When `forwarded_headers` is non-empty, they are embedded in the
-    /// `_meta.forwarded_headers` field of the request so the MCP server can
+    /// `_meta.extra_headers` field of the request so the MCP server can
     /// read them from the protocol message.
     async fn call_tool_on_peer(
         &self,
@@ -2114,10 +2114,11 @@ impl<'a> McpRequestContext<'a> {
             arguments: args_map,
         };
 
-        let result = client
-            .call_tool(request)
-            .await
-            .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {e}")))?;
+        let server_key = entry.server_key();
+        let result = self
+            .orchestrator
+            .call_tool_on_peer(client.peer(), server_key, request, &self.forwarded_headers)
+            .await?;
 
         let output = McpOrchestrator::transform_result(
             &result,
