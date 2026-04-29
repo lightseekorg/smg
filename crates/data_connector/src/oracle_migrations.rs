@@ -70,7 +70,8 @@ const ORACLE_V12: Migration = Migration {
 
 /// Core history-backend migrations required by the SQL response/conversation
 /// storage path during normal gateway startup.
-pub(crate) static ORACLE_HISTORY_MIGRATIONS: [Migration; 3] = [ORACLE_V1, ORACLE_V2, ORACLE_V3];
+pub(crate) static ORACLE_HISTORY_MIGRATIONS: [Migration; 4] =
+    [ORACLE_V1, ORACLE_V2, ORACLE_V3, ORACLE_V12];
 
 /// Oracle migration list. Append new migrations here.
 pub(crate) static ORACLE_MIGRATIONS: [Migration; 12] = [
@@ -523,7 +524,7 @@ mod tests {
             .iter()
             .map(|migration| migration.version)
             .collect();
-        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(versions, vec![1, 2, 3, 12]);
     }
 
     #[test]
