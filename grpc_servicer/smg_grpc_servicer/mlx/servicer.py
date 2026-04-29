@@ -24,35 +24,106 @@ from smg_grpc_proto.generated import common_pb2
 logger = logging.getLogger(__name__)
 
 
+class _PendingRequest:
+    """A Generate() call queued to enter the next fresh batch.
+
+    Holds the inputs we need to feed BatchGenerator.insert() plus an
+    asyncio.Future that the generation thread resolves with the assigned
+    uid once the request actually enters the batch. Generate() awaits
+    that future before it starts pulling tokens off ``queue``.
+    """
+
+    __slots__ = (
+        "token_ids",
+        "max_tokens",
+        "sampler",
+        "logits_processors",
+        "state_machine",
+        "queue",
+        "uid_future",
+        "request_id",
+    )
+
+    def __init__(
+        self,
+        token_ids,
+        max_tokens,
+        sampler,
+        logits_processors,
+        state_machine,
+        queue,
+        uid_future,
+        request_id,
+    ):
+        self.token_ids = token_ids
+        self.max_tokens = max_tokens
+        self.sampler = sampler
+        self.logits_processors = logits_processors
+        self.state_machine = state_machine
+        self.queue = queue
+        self.uid_future = uid_future
+        self.request_id = request_id
+
+
 class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
     """gRPC servicer implementing the MlxEngine service for MLX backends.
 
-    Thread-safety model
-    -------------------
-    mlx-lm's ``BatchGenerator`` is not thread-safe: ``next()`` mutates
-    ``_prompt_batch`` / ``_generation_batch`` / ``_unprocessed_sequences``
-    while running mlx kernels (which release the GIL), and ``remove()``
-    rebuilds those same structures. This servicer runs ``next()`` on a
-    background thread and services ``insert()`` / ``remove()`` from the
-    asyncio event loop, so we need synchronization.
+    Concurrency model: drain-and-batch
+    ----------------------------------
+    mlx-lm's ``BatchGenerator`` does not support inserting new sequences
+    while the active batch is in its decode phase: the rope offset cache
+    is sized at the start of decode and a mid-decode ``insert()`` leaves
+    it out of sync with the new batch shape, which surfaces as
 
-    ``self._gen_lock`` is acquired by:
-      * the gen thread for the whole ``next() + dispatch + finished-remove``
-        block (one critical section per loop iteration — keeps the batch
-        snapshot consistent);
-      * the event loop around ``insert() + _uid_queues[uid] = queue`` in
-        ``Generate`` (fast path, also closes the register-queue-before-first-
-        response race);
-      * the event loop around ``remove()`` in ``Abort`` (rare).
+        ValueError: [rope] offset must be a scalar or vector with N
+            elements but has shape (N-1).
 
-    ``insert()`` itself only appends to a ``deque`` and increments a counter
-    (both atomic under the GIL), but the lock still wraps it so the uid
-    can't become visible to the gen thread before its queue is registered.
+    inside ``mx.fast.rope`` on the next ``_step()``. mlx-lm.server avoids
+    this by serving each batch to completion before accepting the next
+    set of requests; we mirror that here.
+
+    Flow:
+
+      * Incoming ``Generate`` calls build a :class:`_PendingRequest` and
+        push it onto ``self._pending``, then await ``uid_future``.
+      * The generation thread's main loop, between iterations, checks
+        whether the active batch has drained (``_active_uids`` empty).
+        When it has, it drains ``_pending`` in one shot and feeds the
+        whole list to a single ``BatchGenerator.insert()`` call — this
+        keeps batching for concurrent arrivals while ensuring no insert
+        ever happens during decode.
+      * Each request's ``uid_future`` is resolved as soon as its uid is
+        known, so ``Generate`` can register its uid for ``Abort`` lookup
+        and start consuming tokens from its per-uid queue.
+
+    Trade-off: a request arriving while a batch is mid-decode waits for
+    that batch to drain before its first token. That's the same behavior
+    as ``mlx-lm.server`` and is the correctness fix for the rope crash;
+    re-introducing true dynamic batching is a separate optimization that
+    requires fixes in mlx-lm's BatchGenerator.
+
+    Thread-safety
+    -------------
+    ``self._gen_lock`` protects all mutations of the BatchGenerator and
+    of ``_active_uids`` / ``_uid_queues``. It is acquired by:
+
+      * the gen thread, around the whole drain-pending + ``next()`` +
+        dispatch + finished-``remove()`` block (one critical section per
+        loop iteration);
+      * the event loop in ``Generate``'s ``finally`` for the
+        client-disconnect cleanup ``remove()``;
+      * the event loop in ``Abort`` for the in-flight ``remove()``.
+
+    ``self._pending_lock`` protects the pending list/index and is held
+    only briefly: append in ``Generate``, drain in the gen thread, pop in
+    ``Abort``. It is always acquired *outside* ``_gen_lock`` to avoid
+    nesting.
 
     Cost model: the event loop can block up to one ``next()`` step
-    (~10-50 ms on M-series) while the gen thread holds the lock. Acceptable
-    for single-worker Mac inference; if you need 1000+ concurrent reqs/s,
-    refactor to a command-queue / actor model (see vLLM's AsyncLLMEngine).
+    (~10–50 ms on M-series) while the gen thread holds ``_gen_lock``.
+    Acceptable for single-worker Mac inference; if you need
+    1000+ concurrent req/s, refactor to a command-queue / actor model
+    (see vLLM's AsyncLLMEngine).
     """
 
     def __init__(
@@ -67,12 +138,25 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         self._active_requests = 0
         self._request_uid_map = {}
         self._uid_queues = {}
+        # Set of uids currently live in the BatchGenerator. Mutated only
+        # under ``_gen_lock``. The gen thread inspects ``not _active_uids``
+        # to decide whether it's safe to drain ``_pending`` into a fresh
+        # ``insert()``.
+        self._active_uids: set[int] = set()
         self._shutdown_event = threading.Event()
         self._loop = None
         self._gen_thread = None
-        # Protects mlx-lm BatchGenerator state + self._uid_queues against
-        # the background gen thread. See class docstring.
+        # Protects mlx-lm BatchGenerator state + ``_uid_queues`` +
+        # ``_active_uids`` against the background gen thread. See class
+        # docstring.
         self._gen_lock = threading.Lock()
+        # Drain-and-batch state. New ``Generate`` calls land here and
+        # wait for the gen thread to pull them into a fresh batch once
+        # the previous batch drains. Index by request_id so ``Abort``
+        # can cancel a request that hasn't entered the batch yet.
+        self._pending: list[_PendingRequest] = []
+        self._pending_by_request_id: dict[str, _PendingRequest] = {}
+        self._pending_lock = threading.Lock()
         # Resolve context length once — config doesn't change at runtime,
         # and Generate was previously scanning these keys on every request.
         self._ctx_limit = 0
@@ -318,31 +402,70 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         while not self._shutdown_event.is_set():
             prompt_responses: list = []
             gen_responses: list = []
+            inserted_this_iter = False
             try:
-                # Single critical section: next() + dispatch + finished-remove.
-                # Holding the lock across dispatch keeps the batch snapshot
-                # consistent with the responses we just produced; event-loop
-                # insert/remove serializes naturally against this block.
+                # Phase 1: drain-and-fill. Pulled outside _gen_lock to
+                # avoid nesting locks; we re-check active_uids inside the
+                # gen lock before actually inserting, since only the gen
+                # thread mutates _active_uids it can't change between
+                # the read and the insert.
                 with self._gen_lock:
-                    with mx.stream(generation_stream):
-                        prompt_responses, gen_responses = self.batch_generator.next()
+                    if not self._active_uids:
+                        with self._pending_lock:
+                            batch = self._pending[:]
+                            self._pending.clear()
+                            for p in batch:
+                                self._pending_by_request_id.pop(p.request_id, None)
 
-                    for r in gen_responses:
-                        queue = self._uid_queues.get(r.uid)
-                        if queue is not None:
-                            self._loop.call_soon_threadsafe(queue.put_nowait, r)
-                        if r.finish_reason is not None:
-                            try:
-                                self.batch_generator.remove([r.uid])
-                            except Exception:
-                                logger.exception("Error removing uid %d", r.uid)
+                        # Filter out requests whose uid_future was already
+                        # cancelled (client disconnected before drain).
+                        batch = [p for p in batch if not p.uid_future.cancelled()]
+
+                        if batch:
+                            uids = self.batch_generator.insert(
+                                prompts=[p.token_ids for p in batch],
+                                max_tokens=[p.max_tokens for p in batch],
+                                samplers=[p.sampler for p in batch],
+                                logits_processors=[p.logits_processors for p in batch],
+                                state_machines=[p.state_machine for p in batch],
+                            )
+                            for uid, p in zip(uids, batch):
+                                self._uid_queues[uid] = p.queue
+                                self._active_uids.add(uid)
+                                # Hand the uid back to Generate so it can
+                                # register for Abort and start consuming.
+                                self._loop.call_soon_threadsafe(p.uid_future.set_result, uid)
+                            inserted_this_iter = True
+
+                    # Phase 2: drive the active batch one step. Skip if the
+                    # batch is empty *and* we didn't just insert anything —
+                    # next() on an empty batch is wasted work.
+                    if self._active_uids:
+                        with mx.stream(generation_stream):
+                            prompt_responses, gen_responses = self.batch_generator.next()
+
+                        for r in gen_responses:
+                            queue = self._uid_queues.get(r.uid)
+                            if queue is not None:
+                                self._loop.call_soon_threadsafe(queue.put_nowait, r)
+                            if r.finish_reason is not None:
+                                try:
+                                    self.batch_generator.remove([r.uid])
+                                except Exception:
+                                    logger.exception("Error removing uid %d", r.uid)
+                                self._active_uids.discard(r.uid)
             except Exception:
                 logger.exception("Error in generation loop")
                 continue
 
-            if not prompt_responses and not gen_responses:
-                # Idle — release the lock and briefly sleep so the event
-                # loop can slot in insert/remove work without contention.
+            if (
+                not prompt_responses
+                and not gen_responses
+                and not inserted_this_iter
+                and not self._active_uids
+            ):
+                # Truly idle — sleep so the event loop can append to
+                # _pending without contending on the gen lock.
                 time.sleep(0.001)
 
     async def Generate(self, request, context):
@@ -374,19 +497,37 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 mx.random.seed(sp.seed)
 
             queue: asyncio.Queue = asyncio.Queue()
-            # Insert + queue registration must be atomic against the gen
-            # thread's next()+remove block so a one-step completion can't
-            # be dispatched and removed before its queue is visible.
-            with self._gen_lock:
-                uids = self.batch_generator.insert(
-                    prompts=[token_ids],
-                    max_tokens=[max_tokens],
-                    samplers=[sampler],
-                    logits_processors=[logits_processors],
-                    state_machines=[state_machine],
-                )
-                uid = uids[0]
-                self._uid_queues[uid] = queue
+            uid_future: asyncio.Future = asyncio.get_running_loop().create_future()
+            pending = _PendingRequest(
+                token_ids=token_ids,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                state_machine=state_machine,
+                queue=queue,
+                uid_future=uid_future,
+                request_id=request_id,
+            )
+            # Hand off to the gen thread. It'll insert this request into
+            # the next fresh batch and resolve uid_future once the uid
+            # is assigned. We register on _pending_by_request_id first so
+            # an Abort that races with this append can still find us.
+            with self._pending_lock:
+                self._pending_by_request_id[request_id] = pending
+                self._pending.append(pending)
+            try:
+                uid = await uid_future
+            except asyncio.CancelledError:
+                # Client disconnect before we entered the batch — make
+                # sure we're scrubbed from pending so the gen thread
+                # doesn't insert us anyway.
+                with self._pending_lock:
+                    self._pending_by_request_id.pop(request_id, None)
+                    try:
+                        self._pending.remove(pending)
+                    except ValueError:
+                        pass
+                raise
             self._request_uid_map[request_id] = uid
             self._active_requests += 1
             prompt_tokens = len(token_ids)
@@ -466,11 +607,14 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 # Ensure the backend request is removed on any Generate exit
                 # (client disconnect, deadline, CancelledError, unexpected
                 # exception). Without this, a cancelled request keeps decoding
-                # until its own stop/max-tokens condition, wasting batch slots.
-                # Safe to double-call: gen thread's finish-path remove and
-                # Abort's remove both land here if racing, and remove() is
-                # idempotent-ish (raises on unknown uid, which we swallow).
+                # until its own stop/max-tokens condition, wasting batch slots
+                # — and, crucially, holds drain-and-batch up so new requests
+                # in _pending can't enter until this one finishes naturally.
+                # Safe to double-call: the gen thread's finish-path remove
+                # and Abort's remove both land here if racing, and remove()
+                # raises on unknown uid (which we swallow).
                 with self._gen_lock:
+                    self._active_uids.discard(uid)
                     try:
                         self.batch_generator.remove([uid])
                     except Exception:
@@ -486,6 +630,21 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
 
     async def Abort(self, request, context):
         for request_id in request.request_ids:
+            # Case A: request hasn't entered the batch yet — pop from
+            # pending and cancel its uid_future so Generate exits cleanly.
+            with self._pending_lock:
+                pending = self._pending_by_request_id.pop(request_id, None)
+                if pending is not None:
+                    try:
+                        self._pending.remove(pending)
+                    except ValueError:
+                        pass
+            if pending is not None:
+                if not pending.uid_future.done():
+                    pending.uid_future.cancel()
+                continue
+
+            # Case B: already inserted — existing in-flight remove path.
             uid = self._request_uid_map.pop(request_id, None)
             if uid is not None:
                 queue = self._uid_queues.pop(uid, None)
@@ -504,6 +663,7 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 # remove() races with the gen thread's next() without the
                 # lock — see class docstring.
                 with self._gen_lock:
+                    self._active_uids.discard(uid)
                     try:
                         self.batch_generator.remove([uid])
                     except Exception:
