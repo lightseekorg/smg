@@ -167,11 +167,17 @@ fn parse_reasoning_complete(py: Python<'_>, output: &str, parser_name: &str) -> 
 ///   handler renders the request's ``messages`` array into a single
 ///   prompt string before sending to the engine; when ``None`` we fall
 ///   back to taking ``messages[-1].content`` verbatim.
+/// * optional names of tool / reasoning parsers from the workspace
+///   crates' factories. Each streaming request instantiates fresh
+///   parser instances (the state machines are stateful) so we only
+///   store the names here, not the parser objects themselves.
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Py<PyAny>>,
     locals: Arc<pyo3_async_runtimes::TaskLocals>,
     chat_template: Option<Arc<llm_tokenizer::chat_template::ChatTemplateProcessor>>,
+    tool_parser_name: Option<Arc<String>>,
+    reasoning_parser_name: Option<Arc<String>>,
 }
 
 /// Drive ``engine.generate_request(GenerateReqInput(text=..., sampling_params=...))``
@@ -391,6 +397,9 @@ fn stream_response(
     sampling: serde_json::Map<String, Value>,
     request_id: String,
     model_label: String,
+    tool_parser_name: Option<Arc<String>>,
+    reasoning_parser_name: Option<Arc<String>>,
+    tools: Vec<openai_protocol::common::Tool>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Event, Infallible>>();
 
@@ -419,6 +428,41 @@ fn stream_response(
         // own handle (closures inside ``scope``'s async-move can't
         // borrow ``tx`` from the outer task without escaping the move).
         let tx_inner = tx.clone();
+
+        // Build per-stream parser instances. These are stateful state
+        // machines (they buffer partial JSON / partial reasoning tags
+        // across chunks), so each request needs its own. Construction
+        // is fallible only if the caller passed an unknown name; we
+        // surface that as an SSE error event and fall back to raw text.
+        let mut tool_parser: Option<Box<dyn tool_parser::ToolParser>> =
+            tool_parser_name.as_ref().and_then(|name| {
+                let factory = tool_parser::ParserFactory::new();
+                let p = factory.registry().create_parser(name);
+                if p.is_none() {
+                    let _ = tx.unbounded_send(Ok(Event::default().event("error").data(
+                        json!({"error": format!("unknown tool_parser: {}", name)}).to_string(),
+                    )));
+                }
+                p
+            });
+        let mut reasoning_parser_instance: Option<
+            Box<dyn reasoning_parser::ReasoningParser>,
+        > = reasoning_parser_name.as_ref().and_then(|name| {
+            let factory = reasoning_parser::ParserFactory::new();
+            let p = factory.registry().create_parser(name);
+            if p.is_none() {
+                let _ = tx.unbounded_send(Ok(Event::default().event("error").data(
+                    json!({"error": format!("unknown reasoning_parser: {}", name)}).to_string(),
+                )));
+            }
+            p
+        });
+
+        // Tool indexes we've already emitted ``id`` for. The first chunk
+        // for a tool index carries the OAI ``id`` and ``function.name``;
+        // subsequent chunks for the same index only ship incremental
+        // ``function.arguments`` JSON.
+        let mut seen_tool_indexes = std::collections::HashSet::<usize>::new();
 
         let result: PyResult<()> = pyo3_async_runtimes::tokio::scope(locals_for_scope, async move {
             // Build the request and grab the async iterator object once.
@@ -517,25 +561,114 @@ fn stream_response(
                     }
                 }
 
-                // Emit a content chunk only if there is actual delta.
-                // (The engine occasionally yields metadata-only refreshes;
-                // pushing an empty-content chunk to OAI clients confuses
-                // the openai-python stream parser.)
-                if !delta.is_empty() {
-                    let _ = tx_inner.unbounded_send(Ok(Event::default().data(
-                        json!({
-                            "id": &request_id_for_task,
-                            "object": "chat.completion.chunk",
-                            "model": &model_label_for_task,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"content": delta},
-                                "finish_reason": null,
-                            }],
-                        })
-                        .to_string(),
-                    )));
+                if delta.is_empty() {
+                    continue;
                 }
+
+                // 1. Reasoning parser strips ``<think>...</think>`` (or
+                //    Qwen3 thinking tags / DSeek-R1 markers) from the
+                //    delta and gives back ``(visible_text, reasoning_text)``.
+                //    Apply it FIRST — reasoning blocks usually wrap the
+                //    rest of the content, and feeding them into the tool
+                //    parser would just confuse it.
+                let (after_reasoning, reasoning_delta) = if let Some(rp) =
+                    reasoning_parser_instance.as_mut()
+                {
+                    match rp.parse_reasoning_streaming_incremental(&delta) {
+                        Ok(r) => (r.normal_text, r.reasoning_text),
+                        Err(e) => {
+                            error!(error = %e, "reasoning_parser streaming failed");
+                            (delta.clone(), String::new())
+                        }
+                    }
+                } else {
+                    (delta.clone(), String::new())
+                };
+
+                // 2. Tool parser detects partial JSON / format-specific
+                //    tool-call activity in the remaining text and gives
+                //    back ``(prose_text, [ToolCallItem ...])``.
+                let (visible_text, tool_calls): (String, Vec<tool_parser::types::ToolCallItem>) =
+                    if let Some(tp) = tool_parser.as_mut() {
+                        match tp.parse_incremental(&after_reasoning, &tools).await {
+                            Ok(r) => (r.normal_text, r.calls),
+                            Err(e) => {
+                                error!(error = %e, "tool_parser streaming failed");
+                                (after_reasoning, Vec::new())
+                            }
+                        }
+                    } else {
+                        (after_reasoning, Vec::new())
+                    };
+
+                // 3. Compose the OAI delta event. Multiple delta fields
+                //    can coexist on a single chunk per OAI spec.
+                let mut delta_obj = serde_json::Map::new();
+                if !reasoning_delta.is_empty() {
+                    // OAI extension popularized by DeepSeek-R1 / Qwen3
+                    // and accepted by most current chat clients.
+                    delta_obj.insert("reasoning_content".into(), Value::String(reasoning_delta));
+                }
+                if !visible_text.is_empty() {
+                    delta_obj.insert("content".into(), Value::String(visible_text));
+                }
+                if !tool_calls.is_empty() {
+                    let tcs: Vec<Value> = tool_calls
+                        .into_iter()
+                        .map(|item| {
+                            let mut function_obj = serde_json::Map::new();
+                            if let Some(name) = item.name.as_ref() {
+                                function_obj.insert("name".into(), Value::String(name.clone()));
+                            }
+                            if !item.parameters.is_empty() {
+                                function_obj.insert(
+                                    "arguments".into(),
+                                    Value::String(item.parameters.clone()),
+                                );
+                            }
+
+                            let mut tc = serde_json::Map::new();
+                            tc.insert("index".into(), Value::from(item.tool_index));
+                            // The first chunk for a tool index gets the
+                            // ``id``+``type`` envelope; later chunks for
+                            // the same index just ship argument deltas.
+                            if seen_tool_indexes.insert(item.tool_index) {
+                                tc.insert(
+                                    "id".into(),
+                                    Value::String(format!(
+                                        "call_{}_{}",
+                                        &request_id_for_task, item.tool_index
+                                    )),
+                                );
+                                tc.insert("type".into(), Value::String("function".into()));
+                            }
+                            tc.insert("function".into(), Value::Object(function_obj));
+                            Value::Object(tc)
+                        })
+                        .collect();
+                    delta_obj.insert("tool_calls".into(), Value::Array(tcs));
+                }
+
+                // Skip empty deltas (parser swallowed the chunk into its
+                // buffer waiting for more) — pushing an empty chunk
+                // confuses openai-python's parser.
+                if delta_obj.is_empty() {
+                    continue;
+                }
+
+                let _ = tx_inner.unbounded_send(Ok(Event::default().data(
+                    json!({
+                        "id": &request_id_for_task,
+                        "object": "chat.completion.chunk",
+                        "model": &model_label_for_task,
+                        "choices": [{
+                            "index": 0,
+                            "delta": Value::Object(delta_obj),
+                            "finish_reason": null,
+                        }],
+                    })
+                    .to_string(),
+                )));
             }
 
             // Final terminating chunk carries the finish_reason and a
@@ -616,9 +749,29 @@ async fn chat_completions_handler(
     let engine = state.engine.clone();
     let locals = state.locals.clone();
 
+    // Pull the OAI ``tools`` array out of the request body — the
+    // streaming json/llama/qwen tool parsers want it to validate
+    // emitted tool names against. Drop silently on parse error
+    // (clients that don't pass tools just get raw text deltas).
+    let tools: Vec<openai_protocol::common::Tool> = body
+        .get("tools")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
     if stream_mode {
-        return stream_response(engine, locals, prompt, sampling, request_id, model_label)
-            .into_response();
+        return stream_response(
+            engine,
+            locals,
+            prompt,
+            sampling,
+            request_id,
+            model_label,
+            state.tool_parser_name.clone(),
+            state.reasoning_parser_name.clone(),
+            tools,
+        )
+        .into_response();
     }
 
     let result = drive_generate(engine, locals, prompt, sampling, request_id.clone()).await;
@@ -686,6 +839,121 @@ async fn chat_completions_handler(
     }
 }
 
+/// ``POST /v1/completions`` handler — legacy OAI completions endpoint.
+///
+/// Differs from chat-completions in that it takes a raw ``prompt``
+/// string (no chat template, no messages array) and returns ``text``
+/// instead of ``message``. We intentionally do NOT branch on
+/// ``stream: true`` for this first cut — most modern callers go through
+/// chat-completions, and adding a second SSE path would duplicate the
+/// streaming code without insight. Returns a single JSON ``completion``
+/// object.
+async fn completions_handler(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let prompt = match body.get("prompt") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => {
+            // OAI accepts an array of prompts. We only honor the first
+            // one for now (batch=1); the engine doesn't currently
+            // multiplex /v1/completions batches across choices, and
+            // openai-python's typical usage is a single prompt anyway.
+            match arr.first() {
+                Some(Value::String(s)) => s.clone(),
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "'prompt' array must contain strings"})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "request body missing 'prompt' string"})),
+            )
+                .into_response();
+        }
+    };
+    let sampling = extract_sampling_from_oai(&body);
+    let model_label = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+        .to_string();
+    let request_id = format!("cmpl-{}", uuid::Uuid::new_v4().simple());
+
+    let engine = state.engine.clone();
+    let locals = state.locals.clone();
+    let result = drive_generate(engine, locals, prompt, sampling, request_id.clone()).await;
+
+    match result {
+        Ok(out) => {
+            let text = out
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let finish_reason = out
+                .get("meta_info")
+                .and_then(|m| m.get("finish_reason"))
+                .map(|fr| match fr {
+                    Value::String(s) => s.clone(),
+                    Value::Object(m) => m
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("stop")
+                        .to_string(),
+                    _ => "stop".to_string(),
+                })
+                .unwrap_or_else(|| "stop".to_string());
+            let prompt_tokens = out
+                .get("meta_info")
+                .and_then(|m| m.get("prompt_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let completion_tokens = out
+                .get("meta_info")
+                .and_then(|m| m.get("completion_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+
+            let body = json!({
+                "id": request_id,
+                "object": "text_completion",
+                "created": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "model": model_label,
+                "choices": [{
+                    "index": 0,
+                    "text": text,
+                    "logprobs": null,
+                    "finish_reason": finish_reason,
+                }],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            });
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => {
+            error!(error = %e, "AsyncLLM call failed (completions)");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Run smg's OAI-compatible HTTP server in-process, driving the supplied
 /// engine via PyO3 callbacks.
 ///
@@ -731,13 +999,22 @@ async fn chat_completions_handler(
 /// * Only ``/v1/chat/completions`` is wired; ``/v1/completions``,
 ///   ``/v1/responses``, ``/v1/embeddings`` etc. land later.
 #[pyfunction]
-#[pyo3(signature = (engine, host = "127.0.0.1", port = 8000, chat_template = None))]
+#[pyo3(signature = (
+    engine,
+    host = "127.0.0.1",
+    port = 8000,
+    chat_template = None,
+    tool_parser = None,
+    reasoning_parser = None,
+))]
 fn serve_oai(
     py: Python<'_>,
     engine: PyObject,
     host: &str,
     port: u16,
     chat_template: Option<String>,
+    tool_parser: Option<String>,
+    reasoning_parser: Option<String>,
 ) -> PyResult<()> {
     let host_owned = host.to_string();
     let addr: SocketAddr = format!("{host_owned}:{port}")
@@ -761,9 +1038,37 @@ fn serve_oai(
             None => None,
         };
 
+    // Validate parser names eagerly: if the operator passes ``"qwen"`` and
+    // we don't have one, we'd rather fail at server startup than per
+    // request.
+    if let Some(name) = tool_parser.as_ref() {
+        let factory = ::tool_parser::ParserFactory::new();
+        if !factory.has_parser(name) {
+            return Err(PyValueError::new_err(format!(
+                "unknown tool_parser: {name:?} (available: {:?})",
+                factory.list_parsers()
+            )));
+        }
+    }
+    if let Some(name) = reasoning_parser.as_ref() {
+        let factory = ::reasoning_parser::ParserFactory::new();
+        if !factory.list_parsers().contains(name) {
+            return Err(PyValueError::new_err(format!(
+                "unknown reasoning_parser: {name:?} (available: {:?})",
+                factory.list_parsers()
+            )));
+        }
+    }
+
     let engine_arc = Arc::new(engine);
 
-    debug!(%addr, has_chat_template = chat_template_arc.is_some(), "smg_rs.serve_oai starting");
+    debug!(
+        %addr,
+        has_chat_template = chat_template_arc.is_some(),
+        tool_parser = ?tool_parser,
+        reasoning_parser = ?reasoning_parser,
+        "smg_rs.serve_oai starting",
+    );
 
     // ``pyo3_async_runtimes::tokio::run`` sets up an asyncio event loop
     // on a supervisor thread, builds a tokio runtime, registers both
@@ -785,9 +1090,12 @@ fn serve_oai(
             engine: engine_arc,
             locals: Arc::new(locals),
             chat_template: chat_template_arc,
+            tool_parser_name: tool_parser.map(Arc::new),
+            reasoning_parser_name: reasoning_parser.map(Arc::new),
         };
         let app = Router::new()
             .route("/v1/chat/completions", post(chat_completions_handler))
+            .route("/v1/completions", post(completions_handler))
             .with_state(state);
 
         let listener = tokio::net::TcpListener::bind(addr)
