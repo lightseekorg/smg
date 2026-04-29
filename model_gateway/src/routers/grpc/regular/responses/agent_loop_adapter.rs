@@ -40,9 +40,8 @@ use crate::{
     routers::{
         common::agent_loop::{
             build_response_from_state, build_responses_iteration_request, AgentLoopAdapter,
-            AgentLoopContext, AgentLoopError, AgentLoopState, IterationInputOptions,
-            IterationRequestOptions, LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks,
-            StreamSink, UsageShape,
+            AgentLoopContext, AgentLoopError, AgentLoopState, GrpcIterationRequestFlavor,
+            LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks, StreamSink, UsageShape,
         },
         grpc::common::responses::{collect_user_function_names, ResponsesContext},
     },
@@ -124,10 +123,7 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for RegularAdapter<'a> {
         let request = build_responses_iteration_request(
             ctx.original_request,
             state,
-            IterationRequestOptions::with_original_tools(
-                IterationInputOptions::normalized_message(),
-                None,
-            ),
+            GrpcIterationRequestFlavor::RegularChat { stream: None },
         );
 
         let mut chat_request = conversions::responses_to_chat(&request).map_err(|e| {

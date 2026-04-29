@@ -504,12 +504,11 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
     };
     use crate::routers::{
         common::{
-            agent_loop::{
-                run_agent_loop, AgentLoopContext, AgentLoopState, ToolTransferDescriptor,
-            },
+            agent_loop::{run_agent_loop, AgentLoopContext, ToolTransferDescriptor},
             header_utils::extract_forwardable_request_headers,
             mcp_utils::ensure_mcp_connection,
             persistence_utils::persist_conversation_items,
+            responses_loop_setup::ResponsesLoopSetup,
             responses_streaming::ResponseStreamEventEmitter,
         },
         openai::context::{ResponsesPayloadState, StorageHandles},
@@ -521,6 +520,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
     };
     let ResponsesPayloadState {
         existing_mcp_list_tools_labels,
+        current_request,
         prepared,
     } = match ctx.take_responses_payload() {
         Some(state) => state,
@@ -547,11 +547,18 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
             Err(response) => return response,
         };
 
-    let state = AgentLoopState::new(
-        prepared.upstream_input.clone(),
-        existing_mcp_list_tools_labels.into_iter().collect(),
+    let ResponsesLoopSetup {
+        prepared,
+        state,
+        max_tool_calls: loop_ctx_max_tool_calls,
+        mcp_servers,
+        ..
+    } = ResponsesLoopSetup::new(
+        current_request,
+        prepared,
+        existing_mcp_list_tools_labels,
+        mcp_servers,
     );
-    let loop_ctx_max_tool_calls = original_request.max_tool_calls.map(|value| value as usize);
     let loop_ctx_request = original_request.clone();
     let session_request_id = original_request
         .request_id

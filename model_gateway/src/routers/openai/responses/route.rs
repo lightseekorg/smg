@@ -7,7 +7,7 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::{http::HeaderMap, response::Response};
-use openai_protocol::responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest};
+use openai_protocol::responses::ResponsesRequest;
 use serde_json::to_value;
 
 use super::{
@@ -108,9 +108,6 @@ pub(in crate::routers::openai) async fn route_responses(
     }
 
     request_body.store = Some(false);
-    if let ResponseInput::Items(ref mut items) = request_body.input {
-        items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
-    }
 
     let mut payload = match to_value(&request_body) {
         Ok(v) => v,
@@ -166,6 +163,7 @@ pub(in crate::routers::openai) async fn route_responses(
             .existing_mcp_list_tools_labels
             .into_iter()
             .collect(),
+        current_request: request_body.clone(),
         prepared: prepared_history.prepared,
     });
 

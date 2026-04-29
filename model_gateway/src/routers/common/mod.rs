@@ -27,6 +27,7 @@ pub mod header_utils;
 pub mod mcp_utils;
 pub mod persistence_utils;
 pub mod responses_history;
+pub mod responses_loop_setup;
 pub mod responses_streaming;
 pub mod retry;
 pub mod skill_resolution;

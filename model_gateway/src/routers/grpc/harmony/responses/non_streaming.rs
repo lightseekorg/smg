@@ -13,7 +13,10 @@ use super::agent_loop_adapter::HarmonyAdapter;
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink},
+        common::{
+            agent_loop::{run_agent_loop, AgentLoopContext, NoopSink},
+            responses_loop_setup::ResponsesLoopSetup,
+        },
         grpc::common::responses::{
             ensure_mcp_connection, persist_response_if_needed, prepare_request_history,
             ResponsesContext,
@@ -29,12 +32,16 @@ pub(crate) async fn serve_harmony_responses(
     let original_request = request.clone();
 
     let loaded = prepare_request_history(ctx, &request).await?;
-    let current_request = loaded.request;
-    let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let prepared = loaded.prepared;
 
     let (_, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await?;
+    let ResponsesLoopSetup {
+        current_request,
+        prepared,
+        state,
+        max_tool_calls,
+        mcp_servers,
+    } = ResponsesLoopSetup::from_history(loaded, mcp_servers);
 
     // Always create a session so the loop driver can speak to MCP
     // unconditionally; an empty `mcp_servers` list yields a session
@@ -46,10 +53,8 @@ pub(crate) async fn serve_harmony_responses(
         session.configure_approval_policy(tools);
     }
 
-    let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
     let adapter = HarmonyAdapter::new(ctx, tenant_request_meta, &current_request, &session);
 
-    let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
     // `loop_ctx.original_request` carries the *user-provided* request
     // shape (still holding `previous_response_id` / `conversation`)
     // so the adapter's `render_final` can echo those fields onto the

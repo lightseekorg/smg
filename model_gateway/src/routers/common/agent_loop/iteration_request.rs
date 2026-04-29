@@ -27,35 +27,32 @@ impl IterationInputOptions {
     }
 }
 
-pub(crate) enum IterationTools {
-    Original,
-    Override(Option<Vec<ResponseTool>>),
+pub(crate) enum GrpcIterationRequestFlavor {
+    /// gRPC regular converts the typed Responses sub-request into a Chat
+    /// Completion request, so normalize input items before conversion and keep
+    /// the caller's original Responses tools on the sub-request.
+    RegularChat { stream: Option<bool> },
+    /// gRPC harmony consumes Responses-shaped requests directly and owns its
+    /// upstream tool set after MCP/builtin normalization.
+    HarmonyResponses { tools: Option<Vec<ResponseTool>> },
 }
 
-pub(crate) struct IterationRequestOptions {
-    pub(crate) input: IterationInputOptions,
-    pub(crate) stream: Option<bool>,
-    pub(crate) tools: IterationTools,
-}
-
-impl IterationRequestOptions {
-    pub(crate) fn with_original_tools(input: IterationInputOptions, stream: Option<bool>) -> Self {
-        Self {
-            input,
-            stream,
-            tools: IterationTools::Original,
+impl GrpcIterationRequestFlavor {
+    fn input_options(&self) -> IterationInputOptions {
+        match self {
+            GrpcIterationRequestFlavor::RegularChat { .. } => {
+                IterationInputOptions::normalized_message()
+            }
+            GrpcIterationRequestFlavor::HarmonyResponses { .. } => {
+                IterationInputOptions::preserved_message()
+            }
         }
     }
 
-    pub(crate) fn with_tool_override(
-        input: IterationInputOptions,
-        stream: Option<bool>,
-        tools: Option<Vec<ResponseTool>>,
-    ) -> Self {
-        Self {
-            input,
-            stream,
-            tools: IterationTools::Override(tools),
+    fn stream(&self) -> Option<bool> {
+        match self {
+            GrpcIterationRequestFlavor::RegularChat { stream } => *stream,
+            GrpcIterationRequestFlavor::HarmonyResponses { .. } => None,
         }
     }
 }
@@ -85,24 +82,25 @@ pub(crate) fn build_iteration_input_items(
 pub(crate) fn build_responses_iteration_request(
     original: &ResponsesRequest,
     state: &AgentLoopState,
-    options: IterationRequestOptions,
+    flavor: GrpcIterationRequestFlavor,
 ) -> ResponsesRequest {
     let mut request = original.clone();
-    request.input = ResponseInput::Items(build_iteration_input_items(state, options.input));
+    request.input =
+        ResponseInput::Items(build_iteration_input_items(state, flavor.input_options()));
     request.store = Some(false);
     request.previous_response_id = None;
     request.conversation = None;
-    if let Some(stream) = options.stream {
+    if let Some(stream) = flavor.stream() {
         request.stream = Some(stream);
     }
 
-    match options.tools {
-        IterationTools::Original => {
+    match flavor {
+        GrpcIterationRequestFlavor::RegularChat { .. } => {
             if state.tool_budget_exhausted {
                 request.tools = None;
             }
         }
-        IterationTools::Override(tools) => {
+        GrpcIterationRequestFlavor::HarmonyResponses { tools } => {
             request.tools = if state.tool_budget_exhausted {
                 None
             } else {
@@ -154,7 +152,50 @@ mod tests {
                     && matches!(
                         content.as_slice(),
                         [ResponseContentPart::InputText { text }] if text == "hello"
-                    )
+            )
+        ));
+    }
+
+    #[test]
+    fn regular_chat_flavor_sets_stream_and_keeps_original_tools() {
+        let original = ResponsesRequest {
+            input: ResponseInput::Text("hello".to_string()),
+            tools: Some(vec![ResponseTool::Computer]),
+            ..Default::default()
+        };
+
+        let request = build_responses_iteration_request(
+            &original,
+            &state_with_text("hello"),
+            GrpcIterationRequestFlavor::RegularChat { stream: Some(true) },
+        );
+
+        assert_eq!(request.stream, Some(true));
+        assert!(matches!(
+            request.tools.as_deref(),
+            Some([ResponseTool::Computer])
+        ));
+    }
+
+    #[test]
+    fn harmony_flavor_uses_adapter_tool_override() {
+        let original = ResponsesRequest {
+            input: ResponseInput::Text("hello".to_string()),
+            tools: None,
+            ..Default::default()
+        };
+
+        let request = build_responses_iteration_request(
+            &original,
+            &state_with_text("hello"),
+            GrpcIterationRequestFlavor::HarmonyResponses {
+                tools: Some(vec![ResponseTool::Computer]),
+            },
+        );
+
+        assert!(matches!(
+            request.tools.as_deref(),
+            Some([ResponseTool::Computer])
         ));
     }
 }

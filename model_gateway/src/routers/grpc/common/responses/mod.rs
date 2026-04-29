@@ -12,7 +12,9 @@ pub(crate) use agent_loop_sink::GrpcResponseStreamSink;
 pub(crate) use context::ResponsesContext;
 pub(crate) use history::prepare_request_history;
 pub(crate) use streaming::build_sse_response;
-pub(crate) use utils::persist_response_if_needed;
+pub(crate) use utils::{
+    finalize_streamed_response_for_persist, persist_response_if_needed, StreamingPersistHandles,
+};
 
 pub(crate) use crate::routers::common::mcp_utils::{
     collect_user_function_names, ensure_mcp_connection,

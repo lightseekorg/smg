@@ -374,10 +374,11 @@ fn prime_pending_from_approval(
             // Build a fully-enriched `PlannedToolExecution` directly:
             // session lookups happen here in the driver. The adapter
             // never participates — its only job is to surface the
-            // model's raw fc emission. The continuation path bypasses
-            // `decide_after_call_llm` entirely (we set
-            // `next_action = ExecuteTools(...)` below) so policy is
-            // never re-checked for this call_id.
+            // model's raw fc emission. Approval continuations skip the
+            // CallLlm classification transition because the approved
+            // call was already classified when the approval request was
+            // rendered; setting `next_action = ExecuteTools(...)` below
+            // resumes execution for that exact call_id.
             let presentation =
                 ToolPresentation::from_mcp_format(&s.tool_response_format(tool_name));
             planned.push(PlannedToolExecution {

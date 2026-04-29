@@ -17,7 +17,10 @@ use super::{
     common::ResponsesCallContext,
 };
 use crate::routers::{
-    common::agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink},
+    common::{
+        agent_loop::{run_agent_loop, AgentLoopContext, NoopSink},
+        responses_loop_setup::ResponsesLoopSetup,
+    },
     grpc::common::responses::{
         ensure_mcp_connection, persist_response_if_needed, prepare_request_history,
         ResponsesContext,
@@ -32,12 +35,16 @@ pub(super) async fn route_responses_internal(
     let original_request = (*request).clone();
 
     let loaded = prepare_request_history(ctx, &request).await?;
-    let modified_request = loaded.request;
-    let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let prepared = loaded.prepared;
 
     let (_, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await?;
+    let ResponsesLoopSetup {
+        current_request: modified_request,
+        prepared,
+        state,
+        max_tool_calls,
+        mcp_servers,
+    } = ResponsesLoopSetup::from_history(loaded, mcp_servers);
 
     // Always create the session — empty `mcp_servers` yields a session
     // with no exposed tools, which the loop driver tolerates (every
@@ -57,10 +64,8 @@ pub(super) async fn route_responses_internal(
         response_id: params.response_id.clone(),
         tenant_request_meta: params.tenant_request_meta.clone(),
     };
-    let max_tool_calls = modified_request.max_tool_calls.map(|n| n as usize);
     let adapter = RegularAdapter::new(ctx, upstream_handle, &modified_request, &session);
 
-    let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
     // `loop_ctx.original_request` keeps the user-provided request
     // shape (with `previous_response_id` / `conversation` still set)
     // so `render_final` can echo those fields. `build_iteration_request`

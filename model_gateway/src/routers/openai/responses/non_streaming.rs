@@ -13,10 +13,11 @@ use uuid::Uuid;
 use super::agent_loop_adapter::{OpenAiNonStreamingAdapter, OpenAiUpstreamHandle};
 use crate::routers::{
     common::{
-        agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink},
+        agent_loop::{run_agent_loop, AgentLoopContext, NoopSink},
         header_utils::extract_forwardable_request_headers,
         mcp_utils::ensure_mcp_connection,
         persistence_utils::persist_conversation_items,
+        responses_loop_setup::ResponsesLoopSetup,
     },
     error,
     openai::context::{RequestContext, ResponsesPayloadState},
@@ -32,6 +33,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     };
     let ResponsesPayloadState {
         existing_mcp_list_tools_labels,
+        current_request,
         prepared,
     } = match ctx.take_responses_payload() {
         Some(state) => state,
@@ -65,6 +67,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             Err(response) => return response,
         };
 
+    let ResponsesLoopSetup {
+        prepared,
+        state,
+        max_tool_calls,
+        mcp_servers,
+        ..
+    } = ResponsesLoopSetup::new(
+        current_request,
+        prepared,
+        existing_mcp_list_tools_labels,
+        mcp_servers,
+    );
+
     let session_request_id = original_request
         .request_id
         .clone()
@@ -80,15 +95,11 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         session.configure_approval_policy(tools);
     }
 
-    let state = AgentLoopState::new(
-        prepared.upstream_input.clone(),
-        existing_mcp_list_tools_labels.into_iter().collect(),
-    );
     let loop_ctx = AgentLoopContext {
         prepared: &prepared,
         session: Some(&session),
         original_request: &original_request,
-        max_tool_calls: original_request.max_tool_calls.map(|value| value as usize),
+        max_tool_calls,
     };
     let adapter = OpenAiNonStreamingAdapter::new(
         &original_request,

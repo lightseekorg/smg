@@ -33,11 +33,11 @@ use crate::{
     routers::{
         common::agent_loop::{
             build_responses_iteration_request, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
-            AgentLoopState, IterationInputOptions, IterationRequestOptions, LoopModelTurn,
-            LoopToolCall, RenderMode,
+            AgentLoopState, GrpcIterationRequestFlavor, LoopModelTurn, LoopToolCall, RenderMode,
         },
         grpc::common::responses::{
-            persist_response_if_needed, GrpcResponseStreamSink, ResponsesContext,
+            finalize_streamed_response_for_persist, GrpcResponseStreamSink, ResponsesContext,
+            StreamingPersistHandles,
         },
     },
 };
@@ -87,10 +87,7 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
         let request = build_responses_iteration_request(
             ctx.original_request,
             state,
-            IterationRequestOptions::with_original_tools(
-                IterationInputOptions::normalized_message(),
-                Some(true),
-            ),
+            GrpcIterationRequestFlavor::RegularChat { stream: Some(true) },
         );
         let mut chat_request = conversions::responses_to_chat(&request).map_err(|e| {
             AgentLoopError::InvalidRequest(format!("Failed to convert request: {e}"))
@@ -227,33 +224,17 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
         });
         sink.set_final_usage(usage_json);
 
-        // Persist the streamed response so a follow-up request whose
-        // `previous_response_id` points at this turn can resolve the
-        // chain. Built non-destructively so the sink's later
-        // `emit_completed` (fired via `LoopEvent::ResponseFinished`
-        // right after we return) sees the same accumulated state for
-        // the SSE payload.
-        let mut final_response = sink.emitter.finalize(usage_for_persist);
-        final_response
-            .previous_response_id
-            .clone_from(&ctx.original_request.previous_response_id);
-        final_response.conversation = ctx.original_request.conversation.as_ref().map(|c| {
-            openai_protocol::common::ConversationRef::Object {
-                id: c.as_id().to_string(),
-            }
-        });
-        final_response.store = ctx.original_request.store.unwrap_or(true);
-        if let RenderMode::Incomplete { reason, .. } = &mode {
-            // Match the non-streaming `RenderMode::Incomplete` contract.
-            final_response.incomplete_details = Some(json!({ "reason": reason }));
-        }
-        persist_response_if_needed(
-            self.ctx.conversation_storage.clone(),
-            self.ctx.conversation_item_storage.clone(),
-            self.ctx.response_storage.clone(),
-            &final_response,
+        finalize_streamed_response_for_persist(
+            sink,
+            usage_for_persist,
+            &mode,
             ctx.original_request,
-            self.ctx.request_context.clone(),
+            StreamingPersistHandles {
+                conversation_storage: self.ctx.conversation_storage.clone(),
+                conversation_item_storage: self.ctx.conversation_item_storage.clone(),
+                response_storage: self.ctx.response_storage.clone(),
+                request_context: self.ctx.request_context.clone(),
+            },
         )
         .await;
         Ok(())

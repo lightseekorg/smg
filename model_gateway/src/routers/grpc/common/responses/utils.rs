@@ -4,18 +4,22 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use openai_protocol::{
-    common::Tool,
+    common::{ConversationRef, Tool, Usage},
     responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
 };
-use serde_json::to_value;
+use serde_json::{json, to_value};
 use smg_data_connector::{
     ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
     ResponseStorage,
 };
 use tracing::{debug, warn};
 
+use super::agent_loop_sink::GrpcResponseStreamSink;
 use crate::{
-    routers::{common::persistence_utils::persist_conversation_items, error},
+    routers::{
+        common::{agent_loop::RenderMode, persistence_utils::persist_conversation_items},
+        error,
+    },
     worker::WorkerRegistry,
 };
 
@@ -95,4 +99,51 @@ pub(crate) async fn persist_response_if_needed(
             debug!("Persisted response: {}", response.id);
         }
     }
+}
+
+pub(crate) struct StreamingPersistHandles {
+    pub(crate) conversation_storage: Arc<dyn ConversationStorage>,
+    pub(crate) conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    pub(crate) response_storage: Arc<dyn ResponseStorage>,
+    pub(crate) request_context: Option<StorageRequestContext>,
+}
+
+/// Finalize the SSE accumulator into the response record used for persistence.
+///
+/// Streaming paths emit wire events incrementally, so final persistence must
+/// reuse the sink emitter's accumulated item ids/order rather than rebuilding
+/// from loop primitives. The request metadata patch mirrors the non-streaming
+/// builder contract.
+pub(crate) async fn finalize_streamed_response_for_persist(
+    sink: &mut GrpcResponseStreamSink,
+    usage_for_persist: Option<Usage>,
+    mode: &RenderMode,
+    original_request: &ResponsesRequest,
+    handles: StreamingPersistHandles,
+) {
+    let mut final_response = sink.emitter.finalize(usage_for_persist);
+    final_response
+        .previous_response_id
+        .clone_from(&original_request.previous_response_id);
+    final_response.conversation =
+        original_request
+            .conversation
+            .as_ref()
+            .map(|c| ConversationRef::Object {
+                id: c.as_id().to_string(),
+            });
+    final_response.store = original_request.store.unwrap_or(true);
+    if let RenderMode::Incomplete { reason, .. } = mode {
+        final_response.incomplete_details = Some(json!({ "reason": reason }));
+    }
+
+    persist_response_if_needed(
+        handles.conversation_storage,
+        handles.conversation_item_storage,
+        handles.response_storage,
+        &final_response,
+        original_request,
+        handles.request_context,
+    )
+    .await;
 }

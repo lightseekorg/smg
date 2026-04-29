@@ -30,8 +30,8 @@ pub(crate) use driver::{run_agent_loop, AgentLoopAdapter, AgentLoopContext, Rend
 pub(crate) use error::AgentLoopError;
 pub(crate) use events::{LoopEvent, NoopSink, StreamSink};
 pub(crate) use iteration_request::{
-    build_iteration_input_items, build_responses_iteration_request, IterationInputOptions,
-    IterationRequestOptions,
+    build_iteration_input_items, build_responses_iteration_request, GrpcIterationRequestFlavor,
+    IterationInputOptions,
 };
 pub(crate) use prepared::PreparedLoopInput;
 pub(crate) use presentation::{

@@ -34,9 +34,8 @@ use crate::{
     routers::{
         common::agent_loop::{
             build_response_from_state, build_responses_iteration_request, AgentLoopAdapter,
-            AgentLoopContext, AgentLoopError, AgentLoopState, IterationInputOptions,
-            IterationRequestOptions, LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks,
-            StreamSink, UsageShape,
+            AgentLoopContext, AgentLoopError, AgentLoopState, GrpcIterationRequestFlavor,
+            LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks, StreamSink, UsageShape,
         },
         grpc::common::responses::{collect_user_function_names, ResponsesContext},
     },
@@ -113,11 +112,9 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for HarmonyAdapter<'a> {
             // do not have to keep a second copy here.
             _ctx.original_request,
             state,
-            IterationRequestOptions::with_tool_override(
-                IterationInputOptions::preserved_message(),
-                None,
-                self.upstream_tools.clone(),
-            ),
+            GrpcIterationRequestFlavor::HarmonyResponses {
+                tools: self.upstream_tools.clone(),
+            },
         );
 
         let iteration_result = self

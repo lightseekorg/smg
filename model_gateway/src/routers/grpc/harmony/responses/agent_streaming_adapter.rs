@@ -23,12 +23,12 @@ use crate::{
     routers::{
         common::agent_loop::{
             build_responses_iteration_request, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
-            AgentLoopState, IterationInputOptions, IterationRequestOptions, LoopModelTurn,
-            LoopToolCall, RenderMode,
+            AgentLoopState, GrpcIterationRequestFlavor, LoopModelTurn, LoopToolCall, RenderMode,
         },
         grpc::{
             common::responses::{
-                persist_response_if_needed, GrpcResponseStreamSink, ResponsesContext,
+                finalize_streamed_response_for_persist, GrpcResponseStreamSink, ResponsesContext,
+                StreamingPersistHandles,
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
@@ -85,11 +85,9 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
         let request = build_responses_iteration_request(
             ctx.original_request,
             state,
-            IterationRequestOptions::with_tool_override(
-                IterationInputOptions::preserved_message(),
-                None,
-                self.upstream_tools.clone(),
-            ),
+            GrpcIterationRequestFlavor::HarmonyResponses {
+                tools: self.upstream_tools.clone(),
+            },
         );
 
         let (execution_result, _load_guards) = self
@@ -226,42 +224,17 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
         });
         sink.set_final_usage(usage_json);
 
-        // Persist the streamed response so a subsequent request that
-        // sets `previous_response_id` to this turn's id can resolve
-        // it. The emitter's `finalize` reads its accumulated
-        // output_items non-destructively, so the matching
-        // `emit_completed` (fired via `LoopEvent::ResponseFinished`
-        // right after `render_final` returns) still sees the same
-        // state for the SSE payload.
-        let mut final_response = sink.emitter.finalize(usage_for_persist);
-        // Echo prev/conv from the user-provided request shape to
-        // match what the non-streaming render path produces. The
-        // stream emitter's per-event response object already carries
-        // these (see the conversation echo normalization in
-        // `emit_completed`), but the persisted record needs them too
-        // so the `previous_response_id` lookup chain resolves.
-        final_response
-            .previous_response_id
-            .clone_from(&ctx.original_request.previous_response_id);
-        final_response.conversation = ctx.original_request.conversation.as_ref().map(|c| {
-            openai_protocol::common::ConversationRef::Object {
-                id: c.as_id().to_string(),
-            }
-        });
-        final_response.store = ctx.original_request.store.unwrap_or(true);
-        if let RenderMode::Incomplete { reason, .. } = &mode {
-            // Match the non-streaming `RenderMode::Incomplete` contract:
-            // top-level `status` stays `Completed`, with the reason
-            // attached to `incomplete_details`.
-            final_response.incomplete_details = Some(json!({ "reason": reason }));
-        }
-        persist_response_if_needed(
-            self.ctx.conversation_storage.clone(),
-            self.ctx.conversation_item_storage.clone(),
-            self.ctx.response_storage.clone(),
-            &final_response,
+        finalize_streamed_response_for_persist(
+            sink,
+            usage_for_persist,
+            &mode,
             ctx.original_request,
-            self.ctx.request_context.clone(),
+            StreamingPersistHandles {
+                conversation_storage: self.ctx.conversation_storage.clone(),
+                conversation_item_storage: self.ctx.conversation_item_storage.clone(),
+                response_storage: self.ctx.response_storage.clone(),
+                request_context: self.ctx.request_context.clone(),
+            },
         )
         .await;
 

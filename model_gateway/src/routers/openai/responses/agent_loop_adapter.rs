@@ -160,11 +160,31 @@ fn build_iteration_payload(
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
     }
 
+    normalize_openai_reasoning_input(&mut payload);
+
     provider
         .transform_request(&mut payload, Endpoint::Responses)
         .map_err(|e| AgentLoopError::InvalidRequest(format!("Provider transform error: {e}")))?;
 
     Ok(payload)
+}
+
+fn normalize_openai_reasoning_input(payload: &mut Value) {
+    let Some(input) = payload
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("input"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for item in input.iter_mut().filter_map(Value::as_object_mut) {
+        if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+            item.remove("id");
+            item.remove("status");
+            item.remove("content");
+        }
+    }
 }
 
 fn extract_pending_tool_calls(response: &ResponsesResponse) -> Vec<LoopToolCall> {
@@ -953,12 +973,15 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::responses::{ResponseContentPart, ResponseInput, ResponseInputOutputItem};
+    use openai_protocol::responses::{
+        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseReasoningContent,
+        SummaryTextContent,
+    };
     use serde_json::json;
     use smg_mcp::{McpOrchestrator, McpToolSession};
 
     use super::*;
-    use crate::routers::openai::provider::XAIProvider;
+    use crate::routers::openai::provider::{OpenAIProvider, XAIProvider};
 
     #[test]
     fn iteration_payload_reapplies_provider_transform_to_replayed_items() {
@@ -1001,5 +1024,47 @@ mod tests {
         assert!(input[1].get("id").is_none());
         assert!(input[1].get("status").is_none());
         assert_eq!(input[1]["content"][0]["type"], json!("input_text"));
+    }
+
+    #[test]
+    fn iteration_payload_normalizes_reasoning_items_for_openai_replay() {
+        let orchestrator = McpOrchestrator::new_test();
+        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let state = AgentLoopState::new(
+            ResponseInput::Items(vec![ResponseInputOutputItem::new_reasoning_encrypted(
+                "rs_123".to_string(),
+                vec![SummaryTextContent::SummaryText {
+                    text: "summary survives".to_string(),
+                }],
+                vec![ResponseReasoningContent::ReasoningText {
+                    text: "raw reasoning text is not valid OpenAI input replay".to_string(),
+                }],
+                "encrypted-payload".to_string(),
+                Some("completed".to_string()),
+            )]),
+            Default::default(),
+        );
+
+        let payload = build_iteration_payload(
+            &json!({ "model": "gpt-5-mini", "input": [], "store": false }),
+            &state,
+            &session,
+            &OpenAIProvider,
+            false,
+        )
+        .expect("iteration payload builds");
+        let item = payload["input"][0]
+            .as_object()
+            .expect("reasoning item object");
+
+        assert_eq!(item.get("type"), Some(&json!("reasoning")));
+        assert!(item.get("id").is_none());
+        assert!(item.get("status").is_none());
+        assert!(item.get("content").is_none());
+        assert_eq!(
+            item.get("encrypted_content"),
+            Some(&json!("encrypted-payload"))
+        );
+        assert_eq!(item["summary"][0]["text"], json!("summary survives"));
     }
 }

@@ -20,9 +20,8 @@ use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::{
-            agent_loop::{
-                run_agent_loop, AgentLoopContext, AgentLoopState, ToolTransferDescriptor,
-            },
+            agent_loop::{run_agent_loop, AgentLoopContext, ToolTransferDescriptor},
+            responses_loop_setup::ResponsesLoopSetup,
             responses_streaming::ResponseStreamEventEmitter,
         },
         grpc::common::responses::{
@@ -47,9 +46,6 @@ pub(crate) async fn serve_harmony_responses_stream(
         Ok(history) => history,
         Err(err_response) => return err_response,
     };
-    let current_request = loaded.request;
-    let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let prepared = loaded.prepared;
 
     let (_, mcp_servers) =
         match ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await
@@ -57,6 +53,13 @@ pub(crate) async fn serve_harmony_responses_stream(
             Ok(result) => result,
             Err(response) => return response,
         };
+    let ResponsesLoopSetup {
+        current_request,
+        prepared,
+        state,
+        max_tool_calls,
+        mcp_servers,
+    } = ResponsesLoopSetup::from_history(loaded, mcp_servers);
 
     let (tx, rx) = mpsc::unbounded_channel();
     let response_id = format!("resp_{}", Uuid::now_v7());
@@ -83,11 +86,8 @@ pub(crate) async fn serve_harmony_responses_stream(
         if let Some(tools) = original_for_persist.tools.as_deref() {
             session.configure_approval_policy(tools);
         }
-        let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
-
         let adapter =
             HarmonyStreamingAdapter::new(ctx, tenant_request_meta, &current_request, &session);
-        let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
         // `loop_ctx.original_request` carries the user-provided shape
         // (with `previous_response_id` / `conversation` set) so the
         // streaming adapter's `render_final` can echo those fields.
