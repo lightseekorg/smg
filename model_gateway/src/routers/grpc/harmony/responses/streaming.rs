@@ -22,11 +22,13 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{collect_user_function_names, DEFAULT_MAX_ITERATIONS},
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
-                streaming::ResponseStreamEventEmitter, ResponsesContext,
+                streaming::ResponseStreamEventEmitter,
+                utils::{redact_response_completed_event, redact_response_for_client},
+                ResponsesContext,
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
@@ -173,9 +175,13 @@ async fn execute_mcp_tool_loop_streaming(
     strip_image_generation_from_request_tools(&mut current_request, &session);
 
     let mut mcp_tracking = McpCallTracking::new();
+    let user_function_names = collect_user_function_names(original_request);
 
     // Emit mcp_list_tools on first iteration
     for binding in session.mcp_servers() {
+        if session.is_internal_server_label(&binding.label) {
+            continue;
+        }
         let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
         if emitter
@@ -241,6 +247,7 @@ async fn execute_mcp_tool_loop_streaming(
             emitter,
             tx,
             Some(&session),
+            &user_function_names,
         )
         .await
         {
@@ -304,7 +311,8 @@ async fn execute_mcp_tool_loop_streaming(
                         "total_tokens": usage.total_tokens,
                         "incomplete_details": incomplete_details,
                     });
-                    let event = emitter.emit_completed(Some(&usage_json));
+                    let mut event = emitter.emit_completed(Some(&usage_json));
+                    redact_response_completed_event(&mut event, original_request, Some(&session));
                     emitter.send_event_best_effort(&event, tx);
                     return;
                 }
@@ -357,7 +365,8 @@ async fn execute_mcp_tool_loop_streaming(
                         "output_tokens": usage.completion_tokens,
                         "total_tokens": usage.total_tokens,
                     });
-                    let event = emitter.emit_completed(Some(&usage_json));
+                    let mut event = emitter.emit_completed(Some(&usage_json));
+                    redact_response_completed_event(&mut event, original_request, Some(&session));
                     emitter.send_event_best_effort(&event, tx);
                     return;
                 }
@@ -385,7 +394,8 @@ async fn execute_mcp_tool_loop_streaming(
                 );
 
                 // Finalize response from emitter's accumulated data
-                let final_response = emitter.finalize(Some(usage.clone()));
+                let mut final_response = emitter.finalize(Some(usage.clone()));
+                redact_response_for_client(&mut final_response, original_request, Some(&session));
 
                 // Persist response to storage if store=true
                 persist_response_if_needed(
@@ -410,7 +420,8 @@ async fn execute_mcp_tool_loop_streaming(
                             json!({ "cached_tokens": details.cached_tokens });
                     }
                 }
-                let event = emitter.emit_completed(Some(&usage_json));
+                let mut event = emitter.emit_completed(Some(&usage_json));
+                redact_response_completed_event(&mut event, original_request, Some(&session));
                 emitter.send_event_best_effort(&event, tx);
                 return;
             }
@@ -450,11 +461,13 @@ async fn execute_without_mcp_streaming(
     };
 
     // Process stream (no MCP context, all tools treated as function tools)
+    let user_function_names = std::collections::HashSet::new();
     let iteration_result = match HarmonyStreamingProcessor::process_responses_iteration_stream(
         execution_result,
         emitter,
         tx,
         None,
+        &user_function_names,
     )
     .await
     {

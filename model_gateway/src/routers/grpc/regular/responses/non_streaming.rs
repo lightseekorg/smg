@@ -28,7 +28,7 @@ use crate::{
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
-            ResponsesContext,
+            utils::redact_response_for_client, ResponsesContext,
         },
     },
 };
@@ -241,6 +241,7 @@ pub(super) async fn execute_tool_loop(
                 );
             }
 
+            redact_response_for_client(&mut responses_response, original_request, Some(&session));
             return Ok(responses_response);
         } else {
             state.iteration += 1;
@@ -269,7 +270,7 @@ pub(super) async fn execute_tool_loop(
             // If ANY tool call is a function tool, return to caller immediately
             if !function_tool_calls.is_empty() {
                 // Convert chat response to responses format (includes all tool calls)
-                let responses_response = conversions::chat_to_responses(
+                let mut responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
                     params.response_id.clone(),
@@ -289,6 +290,11 @@ pub(super) async fn execute_tool_loop(
                 })?;
 
                 // Return response with function tool calls to caller
+                redact_response_for_client(
+                    &mut responses_response,
+                    original_request,
+                    Some(&session),
+                );
                 return Ok(responses_response);
             }
 
@@ -332,6 +338,11 @@ pub(super) async fn execute_tool_loop(
                 responses_response.status = ResponseStatus::Completed;
                 responses_response.incomplete_details = Some(json!({ "reason": "max_tool_calls" }));
 
+                redact_response_for_client(
+                    &mut responses_response,
+                    original_request,
+                    Some(&session),
+                );
                 return Ok(responses_response);
             }
 
