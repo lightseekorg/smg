@@ -285,11 +285,26 @@ pub fn extract_auth_header(
         .or_else(|| worker_api_key.and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok()))
 }
 
-/// Extract the subset of request headers that SMG forwards to MCP tool calls.
-///
-/// Includes both the general forwarding allowlist (tracing, auth, routing)
-/// and MCP-specific headers (OCI delegation token, compartment ID).
+/// Extract the subset of request headers that SMG forwards to upstream HTTP
+/// requests (tracing, auth, routing). Does **not** include MCP-specific headers;
+/// use [`extract_mcp_forward_headers`] for those.
 pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    extract_headers_matching(headers, should_forward_request_header)
+}
+
+/// Extract headers forwarded only to MCP tool calls (e.g., OCI delegation token).
+///
+/// These are embedded in `_meta.extra_headers` of the JSON-RPC request and
+/// must not be sent to LLM provider calls.
+pub fn extract_mcp_forward_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    extract_headers_matching(headers, is_mcp_forward_header)
+}
+
+/// Shared extraction logic: collect headers whose names pass `predicate`.
+fn extract_headers_matching(
+    headers: Option<&HeaderMap>,
+    predicate: fn(&str) -> bool,
+) -> HashMap<String, String> {
     let Some(headers) = headers else {
         return HashMap::new();
     };
@@ -298,7 +313,7 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
 
     for (name, value) in headers {
         let name_str = name.as_str();
-        if !should_forward_request_header(name_str) && !is_mcp_forward_header(name_str) {
+        if !predicate(name_str) {
             continue;
         }
 
@@ -522,6 +537,51 @@ mod tests {
         );
         assert_eq!(forwarded.get("x-request-id"), Some(&"req-123".to_string()));
         assert!(!forwarded.contains_key("x-custom-header"));
+    }
+
+    #[test]
+    fn test_extract_forwardable_excludes_mcp_only_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc".parse().unwrap());
+        headers.insert("x-smg-oci-delegation-token", "dt-secret".parse().unwrap());
+        headers.insert("x-smg-oci-compartment-id", "ocid1.comp".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        assert!(forwarded.contains_key("authorization"));
+        assert!(!forwarded.contains_key("x-smg-oci-delegation-token"));
+        assert!(!forwarded.contains_key("x-smg-oci-compartment-id"));
+    }
+
+    #[test]
+    fn test_extract_mcp_forward_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc".parse().unwrap());
+        headers.insert("x-smg-oci-delegation-token", "dt-secret".parse().unwrap());
+        headers.insert("x-smg-oci-compartment-id", "ocid1.comp".parse().unwrap());
+        headers.insert("traceparent", "00-trace".parse().unwrap());
+
+        let mcp = extract_mcp_forward_headers(Some(&headers));
+
+        assert_eq!(mcp.len(), 2);
+        assert_eq!(
+            mcp.get("x-smg-oci-delegation-token"),
+            Some(&"dt-secret".to_string())
+        );
+        assert_eq!(
+            mcp.get("x-smg-oci-compartment-id"),
+            Some(&"ocid1.comp".to_string())
+        );
+        assert!(!mcp.contains_key("authorization"));
+        assert!(!mcp.contains_key("traceparent"));
+    }
+
+    #[test]
+    fn test_extract_mcp_forward_headers_empty_when_none() {
+        assert!(extract_mcp_forward_headers(None).is_empty());
+
+        let headers = HeaderMap::new();
+        assert!(extract_mcp_forward_headers(Some(&headers)).is_empty());
     }
 
     #[test]
