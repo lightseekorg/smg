@@ -146,7 +146,12 @@ async def serve_grpc(
 
     # Start server
     listen_addr = f"{server_args.host}:{server_args.port}"
-    if server_args.ssl_certfile and server_args.ssl_keyfile:
+    # Forward-compatible: ServerArgs on upstream sglang ≥0.5.10 has ssl_* fields,
+    # but older forks (e.g. TGL vmourya-qwen397b-grpc-metrics) don't. Use getattr
+    # so we don't AttributeError on those — block is skipped (no SSL configured).
+    if getattr(server_args, "ssl_certfile", None) and getattr(
+        server_args, "ssl_keyfile", None
+    ):
         if server_args.ssl_keyfile_password:
             raise ValueError(
                 "gRPC mode does not support encrypted SSL key files "

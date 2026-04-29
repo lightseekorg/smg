@@ -37,7 +37,12 @@ from sglang.srt.observability.req_time_stats import (
 )
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_or_create_event_loop, kill_process_tree
-from sglang.srt.utils.network import get_zmq_socket
+
+# Forward-compatible: get_zmq_socket lives in sglang/srt/utils/network.py on
+# upstream sglang ≥0.5.10, but older forks (e.g. TGL vmourya-qwen397b-grpc-metrics)
+# keep it in common.py and only re-export it via srt/utils/__init__.py. The
+# top-level import works on both layouts; the .network path does not.
+from sglang.srt.utils import get_zmq_socket
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
