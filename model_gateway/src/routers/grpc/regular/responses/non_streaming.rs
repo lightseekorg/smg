@@ -14,14 +14,13 @@ use uuid::Uuid;
 
 use super::{
     agent_loop_adapter::{RegularAdapter, RegularUpstreamHandle},
-    common::{load_conversation_history, ResponsesCallContext},
+    common::ResponsesCallContext,
 };
 use crate::routers::{
-    common::agent_loop::{
-        run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink, PreparedLoopInput,
-    },
+    common::agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink},
     grpc::common::responses::{
-        ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+        ensure_mcp_connection, persist_response_if_needed, prepare_request_history,
+        ResponsesContext,
     },
 };
 
@@ -32,13 +31,13 @@ pub(super) async fn route_responses_internal(
 ) -> Result<ResponsesResponse, Response> {
     let original_request = (*request).clone();
 
-    let loaded = load_conversation_history(ctx, &request).await?;
+    let loaded = prepare_request_history(ctx, &request).await?;
     let modified_request = loaded.request;
     let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let control_items = loaded.control_items;
+    let prepared = loaded.prepared;
 
     let (_has_mcp_tools, mcp_servers) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
+        ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await?;
 
     // Always create the session — empty `mcp_servers` yields a session
     // with no exposed tools, which the loop driver tolerates (every
@@ -48,7 +47,7 @@ pub(super) async fn route_responses_internal(
         .clone()
         .unwrap_or_else(|| format!("resp_{}", Uuid::now_v7()));
     let mut session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-    if let Some(tools) = modified_request.tools.as_deref() {
+    if let Some(tools) = original_request.tools.as_deref() {
         session.configure_approval_policy(tools);
     }
 
@@ -61,7 +60,6 @@ pub(super) async fn route_responses_internal(
     let max_tool_calls = modified_request.max_tool_calls.map(|n| n as usize);
     let adapter = RegularAdapter::new(ctx, upstream_handle, &modified_request, &session);
 
-    let prepared = PreparedLoopInput::new(modified_request.input.clone(), control_items);
     let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
     // `loop_ctx.original_request` keeps the user-provided request
     // shape (with `previous_response_id` / `conversation` still set)

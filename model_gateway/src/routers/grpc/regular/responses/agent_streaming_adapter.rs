@@ -9,10 +9,7 @@
 //! `function_call_arguments.done` triples for any
 //! caller-visible function tool calls before the loop exits.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use axum::http;
@@ -26,23 +23,21 @@ use openai_protocol::{
         CompletionTokensDetails, FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue,
         Usage, UsageInfo,
     },
-    responses::{ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest},
 };
 use serde_json::json;
 use smg_mcp::McpToolSession;
-use uuid::Uuid;
 
 use super::conversions;
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::agent_loop::{
-            AgentLoopAdapter, AgentLoopContext, AgentLoopError, AgentLoopState, LoopModelTurn,
+            build_responses_iteration_request, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
+            AgentLoopState, IterationInputOptions, IterationRequestOptions, LoopModelTurn,
             LoopToolCall, RenderMode,
         },
         grpc::common::responses::{
-            collect_user_function_names, persist_response_if_needed, GrpcResponseStreamSink,
-            ResponsesContext,
+            persist_response_if_needed, GrpcResponseStreamSink, ResponsesContext,
         },
     },
 };
@@ -57,13 +52,7 @@ pub(crate) struct RegularStreamingUpstreamHandle {
 pub(crate) struct RegularStreamingAdapter<'a> {
     ctx: &'a ResponsesContext,
     upstream: RegularStreamingUpstreamHandle,
-    user_function_names: HashSet<String>,
     mcp_chat_tools: Vec<openai_protocol::common::Tool>,
-    /// Most recent iteration's accumulated chat response. Used by
-    /// `render_final` to construct the persisted `ResponsesResponse`
-    /// and by the driver to detect tool calls (mirroring the
-    /// non-streaming adapter).
-    cached_response: Option<ChatCompletionResponse>,
     /// Final-channel usage staged into the sink before the driver
     /// fires `LoopEvent::ResponseFinished`.
     last_usage: Option<UsageInfo>,
@@ -73,59 +62,16 @@ impl<'a> RegularStreamingAdapter<'a> {
     pub(crate) fn new(
         ctx: &'a ResponsesContext,
         upstream: RegularStreamingUpstreamHandle,
-        request: &ResponsesRequest,
         session: &McpToolSession<'_>,
     ) -> Self {
-        let user_function_names = collect_user_function_names(request);
         let mcp_chat_tools = session.build_chat_function_tools();
         Self {
             ctx,
             upstream,
-            user_function_names,
             mcp_chat_tools,
-            cached_response: None,
             last_usage: None,
         }
     }
-}
-
-fn build_iteration_request(
-    original: &ResponsesRequest,
-    state: &AgentLoopState,
-) -> ResponsesRequest {
-    let upstream_items = match &state.upstream_input {
-        ResponseInput::Items(items) => items
-            .iter()
-            .map(openai_protocol::responses::normalize_input_item)
-            .collect::<Vec<_>>(),
-        ResponseInput::Text(text) => vec![ResponseInputOutputItem::Message {
-            id: format!("msg_u_{}", Uuid::now_v7()),
-            role: "user".to_string(),
-            content: vec![ResponseContentPart::InputText { text: text.clone() }],
-            status: Some("completed".to_string()),
-            phase: None,
-        }],
-    };
-    let mut combined: Vec<ResponseInputOutputItem> =
-        Vec::with_capacity(upstream_items.len() + state.transcript.len());
-    combined.extend(upstream_items);
-    combined.extend(state.transcript.iter().cloned());
-
-    let mut request = original.clone();
-    request.input = ResponseInput::Items(combined);
-    request.store = Some(false);
-    request.previous_response_id = None;
-    request.conversation = None;
-    request.stream = Some(true);
-    if state.tool_budget_exhausted {
-        request.tools = None;
-        request.tool_choice = None;
-    } else if state.iteration > 1 {
-        request.tool_choice = Some(openai_protocol::responses::ResponsesToolChoice::Options(
-            openai_protocol::responses::ToolChoiceOptions::Auto,
-        ));
-    }
-    request
 }
 
 #[async_trait]
@@ -138,7 +84,14 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
         state: &mut AgentLoopState,
         sink: &mut GrpcResponseStreamSink,
     ) -> Result<(), AgentLoopError> {
-        let request = build_iteration_request(ctx.original_request, state);
+        let request = build_responses_iteration_request(
+            ctx.original_request,
+            state,
+            IterationRequestOptions::with_original_tools(
+                IterationInputOptions::normalized_message(),
+                Some(true),
+            ),
+        );
         let mut chat_request = conversions::responses_to_chat(&request).map_err(|e| {
             AgentLoopError::InvalidRequest(format!("Failed to convert request: {e}"))
         })?;
@@ -223,7 +176,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
             request_id: Some(accumulated.id.clone()),
             ..Default::default()
         });
-        self.cached_response = Some(accumulated);
         Ok(())
     }
 
@@ -292,8 +244,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a
             self.ctx.request_context.clone(),
         )
         .await;
-
-        let _ = self.user_function_names;
         Ok(())
     }
 }

@@ -505,8 +505,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
     use crate::routers::{
         common::{
             agent_loop::{
-                run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
-                ToolTransferDescriptor,
+                run_agent_loop, AgentLoopContext, AgentLoopState, ToolTransferDescriptor,
             },
             header_utils::extract_forwardable_request_headers,
             mcp_utils::ensure_mcp_connection,
@@ -521,16 +520,18 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         None => return error::internal_error("internal_error", "Payload not prepared"),
     };
     let ResponsesPayloadState {
-        previous_response_id: _,
         existing_mcp_list_tools_labels,
-        prepared_input,
-        control_items,
-    } = ctx.take_responses_payload().unwrap_or_default();
+        prepared,
+    } = match ctx.take_responses_payload() {
+        Some(state) => state,
+        None => {
+            return error::internal_error("internal_error", "Responses payload not prepared");
+        }
+    };
     let original_request = match ctx.responses_request() {
         Some(request) => request.clone(),
         None => return error::internal_error("internal_error", "Expected responses request"),
     };
-    let prepared_input = prepared_input.unwrap_or_else(|| original_request.input.clone());
     let worker = match ctx.worker() {
         Some(worker) => worker.clone(),
         None => return error::internal_error("internal_error", "Worker not selected"),
@@ -546,7 +547,6 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
             Err(response) => return response,
         };
 
-    let prepared = PreparedLoopInput::new(prepared_input, control_items);
     let state = AgentLoopState::new(
         prepared.upstream_input.clone(),
         existing_mcp_list_tools_labels.into_iter().collect(),

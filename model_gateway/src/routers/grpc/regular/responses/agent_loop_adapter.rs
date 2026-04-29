@@ -30,18 +30,18 @@ use axum::http;
 use openai_protocol::{
     chat::ChatCompletionResponse,
     common::{ToolChoice, ToolChoiceValue},
-    responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest, ResponsesResponse},
+    responses::{ResponsesRequest, ResponsesResponse},
 };
 use smg_mcp::McpToolSession;
-use uuid::Uuid;
 
 use super::conversions;
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::agent_loop::{
-            build_response_from_state, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
-            AgentLoopState, LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks,
+            build_response_from_state, build_responses_iteration_request, AgentLoopAdapter,
+            AgentLoopContext, AgentLoopError, AgentLoopState, IterationInputOptions,
+            IterationRequestOptions, LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks,
             StreamSink, UsageShape,
         },
         grpc::common::responses::{collect_user_function_names, ResponsesContext},
@@ -87,49 +87,6 @@ impl<'a> RegularAdapter<'a> {
     }
 }
 
-/// Build the per-iteration `ResponsesRequest` from loop state. Items
-/// come from `state.upstream_input` plus the transcript the driver
-/// has been accumulating; the original request supplies all other
-/// fields (model, sampling, instructions, etc.).
-fn build_iteration_request(
-    original: &ResponsesRequest,
-    state: &AgentLoopState,
-) -> ResponsesRequest {
-    use openai_protocol::responses::ResponseContentPart;
-    let upstream_items = match &state.upstream_input {
-        ResponseInput::Items(items) => items
-            .iter()
-            .map(openai_protocol::responses::normalize_input_item)
-            .collect::<Vec<_>>(),
-        ResponseInput::Text(text) => vec![ResponseInputOutputItem::Message {
-            id: format!("msg_u_{}", Uuid::now_v7()),
-            role: "user".to_string(),
-            content: vec![ResponseContentPart::InputText { text: text.clone() }],
-            status: Some("completed".to_string()),
-            phase: None,
-        }],
-    };
-    let mut combined: Vec<ResponseInputOutputItem> =
-        Vec::with_capacity(upstream_items.len() + state.transcript.len());
-    combined.extend(upstream_items);
-    combined.extend(state.transcript.iter().cloned());
-
-    let mut request = original.clone();
-    request.input = ResponseInput::Items(combined);
-    request.store = Some(false);
-    request.previous_response_id = None;
-    request.conversation = None;
-    if state.tool_budget_exhausted {
-        request.tools = None;
-        request.tool_choice = None;
-    } else if state.iteration > 1 {
-        request.tool_choice = Some(openai_protocol::responses::ResponsesToolChoice::Options(
-            openai_protocol::responses::ToolChoiceOptions::Auto,
-        ));
-    }
-    request
-}
-
 fn extract_tool_calls(response: &ChatCompletionResponse) -> Vec<LoopToolCall> {
     response
         .choices
@@ -164,7 +121,14 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for RegularAdapter<'a> {
         state: &mut AgentLoopState,
         _sink: &mut S,
     ) -> Result<(), AgentLoopError> {
-        let request = build_iteration_request(ctx.original_request, state);
+        let request = build_responses_iteration_request(
+            ctx.original_request,
+            state,
+            IterationRequestOptions::with_original_tools(
+                IterationInputOptions::normalized_message(),
+                None,
+            ),
+        );
 
         let mut chat_request = conversions::responses_to_chat(&request).map_err(|e| {
             AgentLoopError::InvalidRequest(format!("Failed to convert request: {e}"))

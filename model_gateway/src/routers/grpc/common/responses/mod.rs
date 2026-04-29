@@ -10,7 +10,7 @@ pub(crate) mod utils;
 // Re-export commonly used items
 pub(crate) use agent_loop_sink::GrpcResponseStreamSink;
 pub(crate) use context::ResponsesContext;
-pub(crate) use history::load_request_history;
+pub(crate) use history::prepare_request_history;
 pub(crate) use streaming::build_sse_response;
 pub(crate) use utils::persist_response_if_needed;
 

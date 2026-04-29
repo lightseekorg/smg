@@ -1,77 +1,29 @@
-//! OpenAI Responses wrapper around the shared history loader.
-
-use std::collections::HashSet;
+//! OpenAI Responses wrapper around the shared history preparer.
 
 use axum::response::Response;
-use openai_protocol::responses::{
-    self, ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponsesRequest,
-};
+use openai_protocol::responses::ResponsesRequest;
 
 use crate::routers::{
     common::{
-        agent_loop::PreparedLoopInput,
         header_utils::ConversationMemoryConfig,
-        responses_history::load_request_history,
-        transcript_lower::{
-            extract_control_items, extract_mcp_list_tools_server_labels, lower_transcript,
+        responses_history::{
+            prepare_request_history as prepare_shared_request_history, PreparedRequestHistory,
         },
     },
     openai::context::ResponsesComponents,
 };
 
-pub(crate) struct PreparedResponsesHistory {
-    pub request: ResponsesRequest,
-    pub prepared: PreparedLoopInput,
-    pub existing_mcp_list_tools_labels: HashSet<String>,
-    pub previous_response_id: Option<String>,
-}
-
 pub(crate) async fn prepare_request_history(
     components: &ResponsesComponents,
     request: &ResponsesRequest,
-) -> Result<PreparedResponsesHistory, Response> {
-    let loaded = load_request_history(
+) -> Result<PreparedRequestHistory, Response> {
+    prepare_shared_request_history(
         &components.response_storage,
         &components.conversation_storage,
         &components.conversation_item_storage,
         request,
     )
-    .await?;
-
-    let mut existing_mcp_list_tools_labels = loaded.existing_mcp_list_tools_labels;
-    let mut control_items = loaded.control_items;
-    let mut modified_request = request.clone();
-    let mut combined = loaded.items;
-
-    match &modified_request.input {
-        ResponseInput::Items(items) => {
-            existing_mcp_list_tools_labels.extend(extract_mcp_list_tools_server_labels(items));
-            control_items.extend(extract_control_items(items));
-            for item in items {
-                combined.push(responses::normalize_input_item(item));
-            }
-        }
-        ResponseInput::Text(text) => {
-            combined.push(ResponseInputOutputItem::Message {
-                id: format!("msg_u_{}", uuid::Uuid::now_v7()),
-                role: "user".to_string(),
-                content: vec![ResponseContentPart::InputText { text: text.clone() }],
-                status: Some("completed".to_string()),
-                phase: None,
-            });
-        }
-    }
-
-    let previous_response_id = modified_request.previous_response_id.take();
-    modified_request.input = ResponseInput::Items(lower_transcript(combined));
-    modified_request.conversation = None;
-
-    Ok(PreparedResponsesHistory {
-        prepared: PreparedLoopInput::new(modified_request.input.clone(), control_items),
-        request: modified_request,
-        existing_mcp_list_tools_labels,
-        previous_response_id,
-    })
+    .await
 }
 
 /// Memory hook entrypoint for Responses API.

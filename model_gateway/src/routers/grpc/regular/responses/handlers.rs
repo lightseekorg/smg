@@ -26,19 +26,18 @@ use uuid::Uuid;
 
 use super::{
     agent_streaming_adapter::{RegularStreamingAdapter, RegularStreamingUpstreamHandle},
-    common::{load_conversation_history, ResponsesCallContext},
+    common::ResponsesCallContext,
     non_streaming,
 };
 use crate::routers::{
     common::{
-        agent_loop::{
-            run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
-            ToolTransferDescriptor,
-        },
+        agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, ToolTransferDescriptor},
         responses_streaming::ResponseStreamEventEmitter,
     },
     error,
-    grpc::common::responses::{ensure_mcp_connection, GrpcResponseStreamSink, ResponsesContext},
+    grpc::common::responses::{
+        ensure_mcp_connection, prepare_request_history, GrpcResponseStreamSink, ResponsesContext,
+    },
 };
 
 pub(crate) async fn route_responses(
@@ -88,13 +87,13 @@ async fn route_responses_streaming(
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
 ) -> Response {
-    let loaded = match load_conversation_history(ctx, &request).await {
+    let loaded = match prepare_request_history(ctx, &request).await {
         Ok(history) => history,
         Err(response) => return response,
     };
     let modified_request = loaded.request;
     let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let control_items = loaded.control_items;
+    let prepared = loaded.prepared;
 
     let (_has_mcp_tools, mcp_servers) =
         match ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await {
@@ -123,7 +122,7 @@ async fn route_responses_streaming(
         let session_request_id = format!("resp_{}", Uuid::now_v7());
         let mut session =
             McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-        if let Some(tools) = modified_request.tools.as_deref() {
+        if let Some(tools) = original_request.tools.as_deref() {
             session.configure_approval_policy(tools);
         }
         let max_tool_calls = modified_request.max_tool_calls.map(|n| n as usize);
@@ -133,10 +132,8 @@ async fn route_responses_streaming(
             model_id: params.model_id.clone(),
             tenant_request_meta: params.tenant_request_meta.clone(),
         };
-        let adapter =
-            RegularStreamingAdapter::new(ctx, upstream_handle, &modified_request, &session);
+        let adapter = RegularStreamingAdapter::new(ctx, upstream_handle, &session);
 
-        let prepared = PreparedLoopInput::new(modified_request.input.clone(), control_items);
         let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
         // `loop_ctx.original_request` carries the user-provided shape
         // (with `previous_response_id` / `conversation` set) so the

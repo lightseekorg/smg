@@ -1,17 +1,18 @@
-//! Thin wrapper around the cross-router Responses history loader.
+//! Thin wrapper around the cross-router Responses history preparer.
 
 use axum::response::Response;
 use openai_protocol::responses::ResponsesRequest;
 
 use super::ResponsesContext;
-use crate::routers::common::responses_history::load_request_history as load_shared_request_history;
-pub(crate) use crate::routers::common::responses_history::LoadedHistory;
+use crate::routers::common::responses_history::{
+    prepare_request_history as prepare_shared_request_history, PreparedRequestHistory,
+};
 
-pub(crate) async fn load_request_history(
+pub(crate) async fn prepare_request_history(
     ctx: &ResponsesContext,
     request: &ResponsesRequest,
-) -> Result<LoadedHistory, Response> {
-    load_shared_request_history(
+) -> Result<PreparedRequestHistory, Response> {
+    prepare_shared_request_history(
         &ctx.response_storage,
         &ctx.conversation_storage,
         &ctx.conversation_item_storage,

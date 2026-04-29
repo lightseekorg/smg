@@ -13,9 +13,7 @@ use uuid::Uuid;
 use super::agent_loop_adapter::{OpenAiNonStreamingAdapter, OpenAiUpstreamHandle};
 use crate::routers::{
     common::{
-        agent_loop::{
-            run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink, PreparedLoopInput,
-        },
+        agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink},
         header_utils::extract_forwardable_request_headers,
         mcp_utils::ensure_mcp_connection,
         persistence_utils::persist_conversation_items,
@@ -33,11 +31,14 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
     let ResponsesPayloadState {
-        previous_response_id: _,
         existing_mcp_list_tools_labels,
-        prepared_input,
-        control_items,
-    } = ctx.take_responses_payload().unwrap_or_default();
+        prepared,
+    } = match ctx.take_responses_payload() {
+        Some(state) => state,
+        None => {
+            return error::internal_error("internal_error", "Responses payload not prepared");
+        }
+    };
 
     let original_request = match ctx.responses_request() {
         Some(r) => r.clone(),
@@ -45,8 +46,6 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
-    let prepared_input = prepared_input.unwrap_or_else(|| original_request.input.clone());
-
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
@@ -81,7 +80,6 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         session.configure_approval_policy(tools);
     }
 
-    let prepared = PreparedLoopInput::new(prepared_input.clone(), control_items);
     let state = AgentLoopState::new(
         prepared.upstream_input.clone(),
         existing_mcp_list_tools_labels.into_iter().collect(),

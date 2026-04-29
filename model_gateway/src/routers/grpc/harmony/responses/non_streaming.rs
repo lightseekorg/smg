@@ -9,15 +9,14 @@ use openai_protocol::responses::{ResponsesRequest, ResponsesResponse};
 use smg_mcp::McpToolSession;
 use uuid::Uuid;
 
-use super::{agent_loop_adapter::HarmonyAdapter, common::load_previous_messages};
+use super::agent_loop_adapter::HarmonyAdapter;
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::agent_loop::{
-            run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink, PreparedLoopInput,
-        },
+        common::agent_loop::{run_agent_loop, AgentLoopContext, AgentLoopState, NoopSink},
         grpc::common::responses::{
-            ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+            ensure_mcp_connection, persist_response_if_needed, prepare_request_history,
+            ResponsesContext,
         },
     },
 };
@@ -29,13 +28,13 @@ pub(crate) async fn serve_harmony_responses(
 ) -> Result<ResponsesResponse, Response> {
     let original_request = request.clone();
 
-    let loaded = load_previous_messages(ctx, request).await?;
+    let loaded = prepare_request_history(ctx, &request).await?;
     let current_request = loaded.request;
     let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let control_items = loaded.control_items;
+    let prepared = loaded.prepared;
 
     let (_has_mcp_tools, mcp_servers) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
+        ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await?;
 
     // Always create a session so the loop driver can speak to MCP
     // unconditionally; an empty `mcp_servers` list yields a session
@@ -43,14 +42,13 @@ pub(crate) async fn serve_harmony_responses(
     // turn produces zero `pending_gateway_tool_calls`).
     let session_request_id = format!("resp_{}", Uuid::now_v7());
     let mut session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-    if let Some(tools) = current_request.tools.as_deref() {
+    if let Some(tools) = original_request.tools.as_deref() {
         session.configure_approval_policy(tools);
     }
 
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
     let adapter = HarmonyAdapter::new(ctx, tenant_request_meta, &current_request, &session);
 
-    let prepared = PreparedLoopInput::new(current_request.input.clone(), control_items);
     let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
     // `loop_ctx.original_request` carries the *user-provided* request
     // shape (still holding `previous_response_id` / `conversation`)

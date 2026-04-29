@@ -3,14 +3,12 @@
 //! Uses `pipeline::execute_harmony_responses_streaming` and feeds
 //! chunk-level events into a `GrpcResponseStreamSink`.
 
-use std::collections::HashSet;
-
 use async_trait::async_trait;
 use openai_protocol::{
     common::Usage,
     responses::{
-        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseReasoningContent,
-        ResponseTool, ResponsesRequest, ResponsesToolChoice, ToolChoiceOptions,
+        ResponseContentPart, ResponseInputOutputItem, ResponseReasoningContent, ResponseTool,
+        ResponsesRequest,
     },
 };
 use serde_json::json;
@@ -24,13 +22,13 @@ use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::agent_loop::{
-            AgentLoopAdapter, AgentLoopContext, AgentLoopError, AgentLoopState, LoopModelTurn,
+            build_responses_iteration_request, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
+            AgentLoopState, IterationInputOptions, IterationRequestOptions, LoopModelTurn,
             LoopToolCall, RenderMode,
         },
         grpc::{
             common::responses::{
-                collect_user_function_names, persist_response_if_needed, GrpcResponseStreamSink,
-                ResponsesContext,
+                persist_response_if_needed, GrpcResponseStreamSink, ResponsesContext,
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
@@ -40,8 +38,6 @@ use crate::{
 pub(crate) struct HarmonyStreamingAdapter<'a> {
     ctx: &'a ResponsesContext,
     tenant_request_meta: TenantRequestMeta,
-    original_tools: Option<Vec<ResponseTool>>,
-    user_function_names: HashSet<String>,
     upstream_tools: Option<Vec<ResponseTool>>,
     /// Latest turn's usage. Streaming completion needs to surface
     /// `input_tokens_details.cached_tokens` whenever the prefill phase
@@ -57,9 +53,6 @@ impl<'a> HarmonyStreamingAdapter<'a> {
         request: &ResponsesRequest,
         session: &McpToolSession<'_>,
     ) -> Self {
-        let original_tools = request.tools.clone();
-        let user_function_names = collect_user_function_names(request);
-
         let mut upstream = request.clone();
         let mcp_tools = session.mcp_tools();
         if !mcp_tools.is_empty() {
@@ -73,50 +66,10 @@ impl<'a> HarmonyStreamingAdapter<'a> {
         Self {
             ctx,
             tenant_request_meta,
-            original_tools,
-            user_function_names,
             upstream_tools: upstream.tools,
             last_usage: None,
         }
     }
-}
-
-fn build_iteration_request(
-    original: &ResponsesRequest,
-    upstream_tools: Option<Vec<ResponseTool>>,
-    state: &AgentLoopState,
-) -> ResponsesRequest {
-    use openai_protocol::responses::StringOrContentParts;
-    let upstream_items = match &state.upstream_input {
-        ResponseInput::Items(items) => items.clone(),
-        ResponseInput::Text(text) => vec![ResponseInputOutputItem::SimpleInputMessage {
-            content: StringOrContentParts::String(text.clone()),
-            role: "user".to_string(),
-            r#type: None,
-            phase: None,
-        }],
-    };
-    let mut combined: Vec<ResponseInputOutputItem> =
-        Vec::with_capacity(upstream_items.len() + state.transcript.len());
-    combined.extend(upstream_items);
-    combined.extend(state.transcript.iter().cloned());
-
-    let mut request = original.clone();
-    request.input = ResponseInput::Items(combined);
-    request.tools = if state.tool_budget_exhausted {
-        None
-    } else {
-        upstream_tools
-    };
-    if state.tool_budget_exhausted {
-        request.tool_choice = None;
-    } else if state.iteration > 1 {
-        request.tool_choice = Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto));
-    }
-    request.store = Some(false);
-    request.previous_response_id = None;
-    request.conversation = None;
-    request
 }
 
 #[async_trait]
@@ -129,8 +82,15 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
         state: &mut AgentLoopState,
         sink: &mut GrpcResponseStreamSink,
     ) -> Result<(), AgentLoopError> {
-        let request =
-            build_iteration_request(ctx.original_request, self.upstream_tools.clone(), state);
+        let request = build_responses_iteration_request(
+            ctx.original_request,
+            state,
+            IterationRequestOptions::with_tool_override(
+                IterationInputOptions::preserved_simple_message(),
+                None,
+                self.upstream_tools.clone(),
+            ),
+        );
 
         let (execution_result, _load_guards) = self
             .ctx
@@ -307,8 +267,6 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
 
         // The sink emits `response.completed` after the driver sends the
         // terminal loop event.
-        let _ = self.original_tools;
-        let _ = self.user_function_names;
         Ok(())
     }
 }

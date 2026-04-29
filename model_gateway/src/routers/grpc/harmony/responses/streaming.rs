@@ -15,19 +15,19 @@ use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{agent_streaming_adapter::HarmonyStreamingAdapter, common::load_previous_messages};
+use super::agent_streaming_adapter::HarmonyStreamingAdapter;
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::{
             agent_loop::{
-                run_agent_loop, AgentLoopContext, AgentLoopState, PreparedLoopInput,
-                ToolTransferDescriptor,
+                run_agent_loop, AgentLoopContext, AgentLoopState, ToolTransferDescriptor,
             },
             responses_streaming::ResponseStreamEventEmitter,
         },
         grpc::common::responses::{
-            build_sse_response, ensure_mcp_connection, GrpcResponseStreamSink, ResponsesContext,
+            build_sse_response, ensure_mcp_connection, prepare_request_history,
+            GrpcResponseStreamSink, ResponsesContext,
         },
     },
 };
@@ -43,23 +43,20 @@ pub(crate) async fn serve_harmony_responses_stream(
 ) -> Response {
     let original_request = request.clone();
 
-    let loaded = match load_previous_messages(ctx, request).await {
+    let loaded = match prepare_request_history(ctx, &request).await {
         Ok(history) => history,
         Err(err_response) => return err_response,
     };
     let current_request = loaded.request;
     let emitted_mcp_server_labels = loaded.existing_mcp_list_tools_labels;
-    let control_items = loaded.control_items;
+    let prepared = loaded.prepared;
 
-    let (_has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
-        &ctx.mcp_orchestrator,
-        current_request.tools.as_deref(),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(response) => return response,
-    };
+    let (_has_mcp_tools, mcp_servers) =
+        match ensure_mcp_connection(&ctx.mcp_orchestrator, original_request.tools.as_deref()).await
+        {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
 
     let (tx, rx) = mpsc::unbounded_channel();
     let response_id = format!("resp_{}", Uuid::now_v7());
@@ -83,14 +80,13 @@ pub(crate) async fn serve_harmony_responses_stream(
         let session_request_id = format!("resp_{}", Uuid::now_v7());
         let mut session =
             McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
-        if let Some(tools) = current_request.tools.as_deref() {
+        if let Some(tools) = original_for_persist.tools.as_deref() {
             session.configure_approval_policy(tools);
         }
         let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
         let adapter =
             HarmonyStreamingAdapter::new(ctx, tenant_request_meta, &current_request, &session);
-        let prepared = PreparedLoopInput::new(current_request.input.clone(), control_items);
         let state = AgentLoopState::new(prepared.upstream_input.clone(), emitted_mcp_server_labels);
         // `loop_ctx.original_request` carries the user-provided shape
         // (with `previous_response_id` / `conversation` set) so the

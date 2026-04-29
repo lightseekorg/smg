@@ -3,10 +3,7 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
-use openai_protocol::{
-    chat::ChatCompletionRequest,
-    responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest},
-};
+use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
 use smg_data_connector::{
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
@@ -16,8 +13,11 @@ use smg_mcp::McpOrchestrator;
 
 use super::provider::Provider;
 use crate::{
-    config::RouterConfig, memory::MemoryExecutionContext, middleware,
-    middleware::TenantRequestMeta, routers::common::agent_loop::ToolTransferDescriptor,
+    config::RouterConfig,
+    memory::MemoryExecutionContext,
+    middleware,
+    middleware::TenantRequestMeta,
+    routers::common::agent_loop::{PreparedLoopInput, ToolTransferDescriptor},
     worker::Worker,
 };
 
@@ -119,7 +119,7 @@ impl ComponentRefs {
 pub struct ProcessingState {
     pub worker: Option<WorkerSelection>,
     pub payload: Option<PayloadState>,
-    pub responses_payload: Option<ResponsesPayloadState>,
+    pub(crate) responses_payload: Option<ResponsesPayloadState>,
 }
 
 pub struct WorkerSelection {
@@ -132,12 +132,9 @@ pub struct PayloadState {
     pub url: String,
 }
 
-#[derive(Default)]
-pub struct ResponsesPayloadState {
-    pub previous_response_id: Option<String>,
-    pub existing_mcp_list_tools_labels: Vec<String>,
-    pub prepared_input: Option<ResponseInput>,
-    pub control_items: Vec<ResponseInputOutputItem>,
+pub(crate) struct ResponsesPayloadState {
+    pub(crate) existing_mcp_list_tools_labels: Vec<String>,
+    pub(crate) prepared: PreparedLoopInput,
 }
 
 impl RequestContext {
@@ -253,7 +250,7 @@ impl RequestContext {
         self.state.payload.take()
     }
 
-    pub fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
+    pub(crate) fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
         self.state.responses_payload.take()
     }
 }

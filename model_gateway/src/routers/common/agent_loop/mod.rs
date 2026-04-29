@@ -19,6 +19,7 @@ pub(crate) mod build_response;
 pub(crate) mod driver;
 pub(crate) mod error;
 pub(crate) mod events;
+pub(crate) mod iteration_request;
 pub(crate) mod prepared;
 pub(crate) mod presentation;
 pub(crate) mod state;
@@ -28,6 +29,10 @@ pub(crate) use build_response::{build_response_from_state, ResponseBuildHooks, U
 pub(crate) use driver::{run_agent_loop, AgentLoopAdapter, AgentLoopContext, RenderMode};
 pub(crate) use error::AgentLoopError;
 pub(crate) use events::{LoopEvent, NoopSink, StreamSink};
+pub(crate) use iteration_request::{
+    build_iteration_input_items, build_responses_iteration_request, IterationInputOptions,
+    IterationRequestOptions,
+};
 pub(crate) use prepared::PreparedLoopInput;
 pub(crate) use presentation::{
     normalize_output_item_id, OutputFamily, ToolPresentation, ToolTransferDescriptor,

@@ -13,8 +13,8 @@ use openai_protocol::{
     common::{CompletionTokensDetails, PromptTokenUsageInfo, Usage},
     event_types::ResponseEvent,
     responses::{
-        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponsesRequest, ResponsesResponse,
+        ResponseContentPart, ResponseInputOutputItem, ResponseOutputItem, ResponsesRequest,
+        ResponsesResponse,
     },
 };
 use serde_json::{to_value, Value};
@@ -25,11 +25,11 @@ use super::super::mcp::prepare_mcp_tools_as_functions;
 use crate::routers::{
     common::{
         agent_loop::{
-            build_response_from_state, normalize_output_item_id, AgentLoopAdapter,
-            AgentLoopContext, AgentLoopError, AgentLoopState, ExecutedCall, LoopEvent,
-            LoopModelTurn, LoopToolCall, OutputFamily, PendingToolExecution, RenderMode,
-            ResponseBuildHooks, StreamSink, ToolPresentation, ToolTransferDescriptor,
-            ToolVisibility, UsageShape,
+            build_iteration_input_items, build_response_from_state, normalize_output_item_id,
+            AgentLoopAdapter, AgentLoopContext, AgentLoopError, AgentLoopState, ExecutedCall,
+            IterationInputOptions, LoopEvent, LoopModelTurn, LoopToolCall, OutputFamily,
+            PendingToolExecution, RenderMode, ResponseBuildHooks, StreamSink, ToolPresentation,
+            ToolTransferDescriptor, ToolVisibility, UsageShape,
         },
         header_utils::ApiProvider,
         mcp_utils::collect_user_function_names,
@@ -134,31 +134,14 @@ fn build_iteration_payload(
         .as_object_mut()
         .ok_or_else(|| AgentLoopError::Internal("payload not an object".to_string()))?;
 
-    let mut input_items = Vec::new();
-    match &state.upstream_input {
-        ResponseInput::Text(text) => {
-            input_items.push(serde_json::json!({
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": text }]
-            }));
-        }
-        ResponseInput::Items(items) => {
-            let serialized = to_value(items).map_err(|e| {
-                AgentLoopError::Internal(format!("Failed to serialize prepared input items: {e}"))
-            })?;
-            if let Some(arr) = serialized.as_array() {
-                input_items.extend(arr.iter().cloned());
-            }
-        }
-    }
-
-    let serialized_transcript = to_value(&state.transcript).map_err(|e| {
-        AgentLoopError::Internal(format!("Failed to serialize loop transcript: {e}"))
+    let input_items =
+        build_iteration_input_items(state, IterationInputOptions::preserved_message());
+    let serialized_input = to_value(&input_items).map_err(|e| {
+        AgentLoopError::Internal(format!("Failed to serialize iteration input items: {e}"))
     })?;
-    if let Some(arr) = serialized_transcript.as_array() {
-        input_items.extend(arr.iter().cloned());
-    }
+    let input_items = serialized_input.as_array().cloned().ok_or_else(|| {
+        AgentLoopError::Internal("serialized iteration input was not an array".to_string())
+    })?;
 
     obj.insert("input".to_string(), Value::Array(input_items));
     obj.insert("stream".to_string(), Value::Bool(stream));

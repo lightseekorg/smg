@@ -88,30 +88,6 @@ pub(in crate::routers::openai) async fn route_responses(
         }
     };
 
-    // Validate mutual exclusivity of conversation and previous_response_id
-    // Treat empty strings as unset to match other metadata paths. The
-    // `conversation` field is a `Option<ConversationRef>` union (bare string
-    // or `{ id }` object); `ConversationRef::is_empty` covers both shapes.
-    let conversation = body.conversation.as_ref().filter(|c| !c.is_empty());
-    let has_previous_response = body
-        .previous_response_id
-        .as_ref()
-        .is_some_and(|s| !s.is_empty());
-    if conversation.is_some() && has_previous_response {
-        Metrics::record_router_error(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
-            model,
-            metrics_labels::ENDPOINT_RESPONSES,
-            metrics_labels::ERROR_VALIDATION,
-        );
-        return error::bad_request(
-            "invalid_request",
-            "Cannot specify both 'conversation' and 'previous_response_id'".to_string(),
-        );
-    }
-
     let mut request_body = body.clone();
     request_body.model = model_id.to_string();
 
@@ -186,13 +162,11 @@ pub(in crate::routers::openai) async fn route_responses(
         url: format!("{}/v1/responses", worker.url()),
     });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
-        previous_response_id: prepared_history.previous_response_id,
         existing_mcp_list_tools_labels: prepared_history
             .existing_mcp_list_tools_labels
             .into_iter()
             .collect(),
-        prepared_input: Some(request_body.input.clone()),
-        control_items: prepared_history.prepared.control_items,
+        prepared: prepared_history.prepared,
     });
 
     let response = if ctx.is_streaming() {

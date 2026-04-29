@@ -20,8 +20,8 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use openai_protocol::responses::{
-    ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseReasoningContent,
-    ResponseTool, ResponsesRequest, ResponsesResponse, ResponsesToolChoice, ToolChoiceOptions,
+    ResponseContentPart, ResponseInputOutputItem, ResponseReasoningContent, ResponseTool,
+    ResponsesRequest, ResponsesResponse,
 };
 use smg_mcp::McpToolSession;
 
@@ -33,8 +33,9 @@ use crate::{
     middleware::TenantRequestMeta,
     routers::{
         common::agent_loop::{
-            build_response_from_state, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
-            AgentLoopState, LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks,
+            build_response_from_state, build_responses_iteration_request, AgentLoopAdapter,
+            AgentLoopContext, AgentLoopError, AgentLoopState, IterationInputOptions,
+            IterationRequestOptions, LoopModelTurn, LoopToolCall, RenderMode, ResponseBuildHooks,
             StreamSink, UsageShape,
         },
         grpc::common::responses::{collect_user_function_names, ResponsesContext},
@@ -95,54 +96,6 @@ impl<'a> HarmonyAdapter<'a> {
     }
 }
 
-/// Build the next iteration's `ResponsesRequest` from loop state.
-/// Items come from `state.upstream_input` plus the transcript the
-/// driver has been accumulating; tools / sampling fields are pulled
-/// from the original request.
-fn build_iteration_request(
-    original: &ResponsesRequest,
-    upstream_tools: Option<Vec<ResponseTool>>,
-    state: &AgentLoopState,
-) -> ResponsesRequest {
-    use openai_protocol::responses::StringOrContentParts;
-
-    let upstream_items = match &state.upstream_input {
-        ResponseInput::Items(items) => items.clone(),
-        ResponseInput::Text(text) => vec![ResponseInputOutputItem::SimpleInputMessage {
-            content: StringOrContentParts::String(text.clone()),
-            role: "user".to_string(),
-            r#type: None,
-            phase: None,
-        }],
-    };
-
-    let mut combined: Vec<ResponseInputOutputItem> =
-        Vec::with_capacity(upstream_items.len() + state.transcript.len());
-    combined.extend(upstream_items);
-    combined.extend(state.transcript.iter().cloned());
-
-    let mut request = original.clone();
-    request.input = ResponseInput::Items(combined);
-    request.tools = if state.tool_budget_exhausted {
-        None
-    } else {
-        upstream_tools
-    };
-    // `tool_choice = auto` on continuations prevents a forced selection
-    // from repeating after a tool result lands.
-    if state.tool_budget_exhausted {
-        request.tool_choice = None;
-    } else if state.iteration > 1 {
-        request.tool_choice = Some(ResponsesToolChoice::Options(ToolChoiceOptions::Auto));
-    }
-    // Each iteration's sub-call is a gateway-internal step; never
-    // persist or recursively look up history for it.
-    request.store = Some(false);
-    request.previous_response_id = None;
-    request.conversation = None;
-    request
-}
-
 #[async_trait]
 impl<'a, S: StreamSink> AgentLoopAdapter<S> for HarmonyAdapter<'a> {
     type FinalResponse = ResponsesResponse;
@@ -153,14 +106,18 @@ impl<'a, S: StreamSink> AgentLoopAdapter<S> for HarmonyAdapter<'a> {
         state: &mut AgentLoopState,
         _sink: &mut S,
     ) -> Result<(), AgentLoopError> {
-        let request = build_iteration_request(
+        let request = build_responses_iteration_request(
             // The adapter clones the user's `ResponsesRequest` into
             // `upstream_tools` storage at construction; the driver
             // exposes the original via ctx.original_request so we
             // do not have to keep a second copy here.
             _ctx.original_request,
-            self.upstream_tools.clone(),
             state,
+            IterationRequestOptions::with_tool_override(
+                IterationInputOptions::preserved_simple_message(),
+                None,
+                self.upstream_tools.clone(),
+            ),
         );
 
         let iteration_result = self
