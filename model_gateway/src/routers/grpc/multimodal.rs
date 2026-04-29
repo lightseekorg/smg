@@ -619,6 +619,30 @@ fn expand_tokens(
 // Assembly: convert MultimodalIntermediate → backend-specific MultimodalData
 // ---------------------------------------------------------------------------
 
+/// Collapse consecutive runs of a media placeholder token ID to a single
+/// occurrence. TRT-LLM's `KimiK25InputProcessor` re-expands each single
+/// placeholder to N vision tokens based on `grid_thws`, so sending N
+/// placeholders causes double-expansion and a count mismatch error.
+///
+/// SGLang expects N placeholders (it uses them directly for embedding lookup),
+/// so this function must only be called for TRT-LLM requests.
+pub(crate) fn collapse_media_placeholders(token_ids: &[u32], im_token_id: u32) -> Vec<u32> {
+    let mut result = Vec::with_capacity(token_ids.len());
+    let mut prev_was_placeholder = false;
+    for &tok in token_ids {
+        if tok == im_token_id {
+            if !prev_was_placeholder {
+                result.push(tok);
+            }
+            prev_was_placeholder = true;
+        } else {
+            result.push(tok);
+            prev_was_placeholder = false;
+        }
+    }
+    result
+}
+
 /// Assemble backend-specific multimodal data from the intermediate.
 ///
 /// Called in request_building after worker selection, when the backend is known.
