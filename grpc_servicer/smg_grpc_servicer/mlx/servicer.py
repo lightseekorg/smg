@@ -505,11 +505,25 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                             if queue is not None:
                                 self._loop.call_soon_threadsafe(queue.put_nowait, r)
                             if r.finish_reason is not None:
+                                # Discard from _active_uids ONLY after a
+                                # successful remove. _active_uids is the
+                                # gate that admits new pending requests;
+                                # if remove() fails for a real backend
+                                # reason (not just an already-removed
+                                # uid), discarding would let drain-and-
+                                # fill insert into a still-live batch
+                                # and reintroduce the rope crash this
+                                # whole change is fixing.
                                 try:
                                     self.batch_generator.remove([r.uid])
+                                    self._active_uids.discard(r.uid)
                                 except Exception:
-                                    logger.exception("Error removing uid %d", r.uid)
-                                self._active_uids.discard(r.uid)
+                                    logger.exception(
+                                        "BatchGenerator.remove failed for uid %d "
+                                        "(keeping it in _active_uids to preserve "
+                                        "the drain gate)",
+                                        r.uid,
+                                    )
             except Exception:
                 logger.exception("Error in generation loop")
                 continue
@@ -578,35 +592,45 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 #  (1) Gen thread hasn't drained us yet — scrub from
                 #      pending so it doesn't insert a doomed request.
                 #  (2) Gen thread inserted us right before the cancel
-                #      landed (set_result raced our task cancellation).
-                #      The future has a usable result; we still need to
-                #      run the same backend cleanup the normal finally
-                #      would have done, otherwise the uid keeps decoding
-                #      and the batch never drains.
+                #      landed. We must still run the same backend
+                #      cleanup the normal finally would have done,
+                #      otherwise the uid keeps decoding and the batch
+                #      never drains.
                 with self._pending_lock:
                     self._pending_by_request_id.pop(request_id, None)
                     try:
                         self._pending.remove(pending)
                     except ValueError:
                         pass
+                # Recover the uid: prefer the future's result, but fall
+                # back to _request_uid_map (the gen thread publishes the
+                # mapping *before* scheduling set_result, so it's
+                # populated even when the cancel arrived first and put
+                # the future into the cancelled state).
                 inserted_uid = None
                 if uid_future.done() and not uid_future.cancelled():
                     try:
                         inserted_uid = uid_future.result()
                     except Exception:
                         inserted_uid = None
-                if inserted_uid is not None:
-                    # Mirror the normal finally cleanup (the gen thread
-                    # populated _request_uid_map / _uid_queues /
-                    # _active_uids before resolving the future).
-                    self._request_uid_map.pop(request_id, None)
-                    self._uid_queues.pop(inserted_uid, None)
-                    with self._gen_lock:
-                        self._active_uids.discard(inserted_uid)
+                with self._gen_lock:
+                    if inserted_uid is None:
+                        inserted_uid = self._request_uid_map.pop(request_id, None)
+                    else:
+                        self._request_uid_map.pop(request_id, None)
+                    if inserted_uid is not None:
+                        self._uid_queues.pop(inserted_uid, None)
                         try:
                             self.batch_generator.remove([inserted_uid])
+                            self._active_uids.discard(inserted_uid)
                         except Exception:
-                            pass
+                            # Don't drop _active_uids on a failed remove
+                            # — keep the gate honest so drain-and-fill
+                            # doesn't insert into a partial batch.
+                            logger.exception(
+                                "Failed to remove uid %s during cancel cleanup",
+                                inserted_uid,
+                            )
                 raise
             # Note: _request_uid_map[request_id] = uid is published by
             # the gen thread BEFORE waking us, so Abort can find this
@@ -696,11 +720,17 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 # and Abort's remove both land here if racing, and remove()
                 # raises on unknown uid (which we swallow).
                 with self._gen_lock:
-                    self._active_uids.discard(uid)
                     try:
                         self.batch_generator.remove([uid])
+                        self._active_uids.discard(uid)
                     except Exception:
-                        # Already removed by the gen thread or Abort — fine.
+                        # Already removed by the gen thread or Abort —
+                        # in those paths, _active_uids was already
+                        # discarded after the successful remove. If the
+                        # remove failed for a real backend reason on
+                        # *every* path, the uid stays in _active_uids
+                        # so drain-and-fill won't insert into a still-
+                        # live batch.
                         pass
 
         except ValueError as e:
@@ -745,10 +775,15 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 # remove() races with the gen thread's next() without the
                 # lock — see class docstring.
                 with self._gen_lock:
-                    self._active_uids.discard(uid)
                     try:
                         self.batch_generator.remove([uid])
+                        self._active_uids.discard(uid)
                     except Exception:
+                        # Same invariant as Generate's finally: only
+                        # discard from _active_uids on a successful
+                        # remove. If this fails because the gen thread
+                        # already removed, _active_uids was already
+                        # cleared on that success path.
                         logger.warning("Failed to remove uid %d for request %s", uid, request_id)
         return mlx_engine_pb2.AbortResponse()
 
