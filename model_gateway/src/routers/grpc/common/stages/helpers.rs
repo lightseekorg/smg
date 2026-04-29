@@ -100,7 +100,7 @@ pub(crate) fn compute_and_log_message_hashes(
             (role.to_string(), hash[..12].to_string())
         })
         .collect();
-    info!(
+    debug!(
         target: "smg::request",
         request_id = %request_id,
         message_hashes = ?hashes,
@@ -142,7 +142,7 @@ pub(crate) fn compute_and_log_input_message_hashes(
             (role.to_string(), hash[..12].to_string())
         })
         .collect();
-    info!(
+    debug!(
         target: "smg::request",
         request_id = %request_id,
         message_hashes = ?hashes,
