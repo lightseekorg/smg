@@ -41,6 +41,15 @@ impl BaseReasoningParser {
             || (self.config.think_end_token.starts_with(text)
                 && self.config.think_end_token != text)
     }
+
+    /// Find the earliest tool-section start marker in `text`.
+    fn find_tool_section_start(&self, text: &str) -> Option<usize> {
+        self.config
+            .tool_section_start_markers
+            .iter()
+            .filter_map(|marker| text.find(marker.as_str()))
+            .min()
+    }
 }
 
 impl ReasoningParser for BaseReasoningParser {
@@ -63,7 +72,11 @@ impl ReasoningParser for BaseReasoningParser {
             .to_string();
 
         if !processed_text.contains(&self.config.think_end_token) {
-            // Assume reasoning was truncated before end token
+            if let Some(tool_pos) = self.find_tool_section_start(&processed_text) {
+                let reasoning_text = processed_text[..tool_pos].trim().to_string();
+                let normal_text = processed_text[tool_pos..].to_string();
+                return Ok(ParserResult::new(normal_text, reasoning_text));
+            }
             return Ok(ParserResult::reasoning(processed_text));
         }
 
@@ -133,7 +146,13 @@ impl ReasoningParser for BaseReasoningParser {
 
         // Continue with reasoning content
         if self.in_reasoning && self.config.stream_reasoning {
-            // Stream the content immediately
+            if let Some(tool_pos) = self.find_tool_section_start(&current_text) {
+                let reasoning_text = current_text[..tool_pos].trim().to_string();
+                let normal_text = current_text[tool_pos..].to_string();
+                self.buffer.clear();
+                self.in_reasoning = false;
+                return Ok(ParserResult::new(normal_text, reasoning_text));
+            }
             let reasoning_text = current_text;
             self.buffer.clear();
             Ok(ParserResult::reasoning(reasoning_text))
@@ -188,6 +207,7 @@ mod tests {
             stream_reasoning,
             max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             always_in_reasoning,
+            ..Default::default()
         };
         BaseReasoningParser::new(config)
     }
@@ -367,5 +387,56 @@ mod tests {
             }
             _ => panic!("Expected BufferOverflow error"),
         }
+    }
+
+    fn create_parser_with_markers() -> BaseReasoningParser {
+        let config = ParserConfig {
+            think_start_token: "<think>".to_string(),
+            think_end_token: "</think>".to_string(),
+            tool_section_start_markers: vec!["<|tool_calls_section_begin|>".to_string()],
+            ..Default::default()
+        };
+        BaseReasoningParser::new(config)
+    }
+
+    #[test]
+    fn test_tool_marker_stops_reasoning_non_streaming() {
+        let mut parser = create_parser_with_markers();
+        let input = "<think>thinking here<|tool_calls_section_begin|>tool call data";
+        let result = parser.detect_and_parse_reasoning(input).unwrap();
+        assert_eq!(result.reasoning_text, "thinking here");
+        assert_eq!(
+            result.normal_text,
+            "<|tool_calls_section_begin|>tool call data"
+        );
+    }
+
+    #[test]
+    fn test_tool_marker_stops_reasoning_streaming() {
+        let mut parser = create_parser_with_markers();
+        let r1 = parser
+            .parse_reasoning_streaming_incremental("<think>reasoning ")
+            .unwrap();
+        assert_eq!(r1.reasoning_text, "reasoning ");
+        assert!(parser.is_in_reasoning());
+
+        let r2 = parser
+            .parse_reasoning_streaming_incremental("more<|tool_calls_section_begin|>tool data")
+            .unwrap();
+        assert_eq!(r2.reasoning_text, "more");
+        assert_eq!(r2.normal_text, "<|tool_calls_section_begin|>tool data");
+        assert!(!parser.is_in_reasoning());
+    }
+
+    #[test]
+    fn test_no_markers_does_not_stop_reasoning() {
+        let mut parser = create_test_parser(false, true);
+        let input = "<think>thinking<|tool_calls_section_begin|>stuff";
+        let result = parser.detect_and_parse_reasoning(input).unwrap();
+        assert_eq!(
+            result.reasoning_text,
+            "thinking<|tool_calls_section_begin|>stuff"
+        );
+        assert_eq!(result.normal_text, "");
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::{
     parsers::BaseReasoningParser,
-    traits::{ParseError, ParserConfig, ParserResult, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
+    traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
 };
 
 /// Step3 reasoning parser.
@@ -20,9 +20,8 @@ impl Step3Parser {
         let config = ParserConfig {
             think_start_token: "<think>".to_string(),
             think_end_token: "</think>".to_string(),
-            stream_reasoning: true,
-            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
             always_in_reasoning: true,
+            ..Default::default()
         };
 
         Self {
