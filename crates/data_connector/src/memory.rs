@@ -123,6 +123,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
             content: new_item.content,
             status: new_item.status,
             created_at,
+            item_json: new_item.item_json,
         };
         self.inner.write().items.insert(id, item.clone());
         Ok(item)
@@ -564,6 +565,7 @@ mod tests {
             role: role.map(|r| r.to_string()),
             content,
             status: Some("completed".to_string()),
+            item_json: None,
         }
     }
 

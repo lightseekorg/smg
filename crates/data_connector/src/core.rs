@@ -188,6 +188,8 @@ pub struct ConversationItem {
     pub content: Value,
     pub status: Option<String>,
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_json: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +201,8 @@ pub struct NewConversationItem {
     pub role: Option<String>,
     pub content: Value,
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_json: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
