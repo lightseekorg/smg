@@ -18,8 +18,6 @@
 //!   coupling to the `Worker` trait — it lived in `worker/` for
 //!   historical reasons before this extraction.
 //! - [`background`] — background-mode response scaffolding.
-//! - [`skill_resolution`] — request-local skill manifest resolution
-//!   before forwarding to provider-specific routers.
 
 pub mod agent_loop;
 pub mod background;
@@ -30,6 +28,5 @@ pub mod responses_history;
 pub mod responses_loop_setup;
 pub mod responses_streaming;
 pub mod retry;
-pub mod skill_resolution;
 pub mod transcript_lower;
 pub mod worker_selection;
