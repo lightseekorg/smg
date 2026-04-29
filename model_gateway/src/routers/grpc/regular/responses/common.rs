@@ -278,13 +278,13 @@ pub(super) async fn load_conversation_history(
         }
 
         // Load conversation history.
-        // Always fetch cap+1 items so we can detect whether the conversation
-        // has grown past max_conversation_history_items. Fetching one extra row
-        // is harmless (it is just a SQL LIMIT). The rejection below only fires
-        // when STMO is active and the response will be persisted.
+        // Fetch up to cap items. If we get cap rows back the conversation is at
+        // or beyond the configured limit; reject when STMO is active and the
+        // response will be persisted. The SQL LIMIT also bounds the inference
+        // window, so no post-fetch truncation is needed.
         let cap = ctx.max_conversation_history_items;
         let params = data_connector::ListParams {
-            limit: cap.saturating_add(1),
+            limit: cap,
             order: data_connector::SortOrder::Asc,
             after: None,
         };
@@ -298,11 +298,11 @@ pub(super) async fn load_conversation_history(
                 // Only reject oversized conversations when the response will
                 // actually be persisted. store=false requests skip persistence
                 // entirely, so STMO is never enqueued and the cap does not apply.
-                if stm_enabled && request.store.unwrap_or(true) && stored_items.len() > cap {
+                if stm_enabled && request.store.unwrap_or(true) && stored_items.len() >= cap {
                     return Err(error::bad_request(
                         "conversation_too_large",
                         format!(
-                            "Conversation exceeds the configured limit of {cap} history items. \
+                            "Conversation has reached the configured limit of {cap} history items. \
                              Increase max_conversation_history_items in the router config \
                              or reduce conversation length before using short-term memory \
                              optimization.",
