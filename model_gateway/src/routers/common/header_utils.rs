@@ -285,8 +285,10 @@ pub fn extract_auth_header(
         .or_else(|| worker_api_key.and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok()))
 }
 
-/// Extract the subset of request headers that SMG is allowed to preserve for
-/// internal execution paths such as MCP tool calls.
+/// Extract the subset of request headers that SMG forwards to MCP tool calls.
+///
+/// Includes both the general forwarding allowlist (tracing, auth, routing)
+/// and MCP-specific headers (OCI delegation token, compartment ID).
 pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
     let Some(headers) = headers else {
         return HashMap::new();
@@ -295,7 +297,8 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
     let mut forwarded = HashMap::new();
 
     for (name, value) in headers {
-        if !should_forward_request_header(name.as_str()) {
+        let name_str = name.as_str();
+        if !should_forward_request_header(name_str) && !is_mcp_forward_header(name_str) {
             continue;
         }
 
@@ -304,7 +307,7 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
         };
 
         forwarded
-            .entry(name.as_str().to_string())
+            .entry(name_str.to_string())
             .and_modify(|existing: &mut String| {
                 existing.push_str(", ");
                 existing.push_str(value);
@@ -315,6 +318,7 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
     forwarded
 }
 
+/// Headers forwarded to all upstream HTTP requests (LLM providers, etc.).
 #[inline]
 pub fn should_forward_request_header(name: &str) -> bool {
     const REQUEST_ID_PREFIX: &str = "x-request-id-";
@@ -328,6 +332,13 @@ pub fn should_forward_request_header(name: &str) -> bool {
         || name
             .get(..REQUEST_ID_PREFIX.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(REQUEST_ID_PREFIX))
+}
+
+/// Headers forwarded only to MCP tool calls (via `_meta.extra_headers`).
+#[inline]
+pub fn is_mcp_forward_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("x-smg-oci-delegation-token")
+        || name.eq_ignore_ascii_case("x-smg-oci-compartment-id")
 }
 
 // ── Conversation memory config ────────────────────────────────────────────────
@@ -480,7 +491,20 @@ mod tests {
         assert!(!should_forward_request_header("user-agent"));
         assert!(!should_forward_request_header("cookie"));
         assert!(!should_forward_request_header("x-custom-header"));
-        assert!(!should_forward_request_header("x-api-key"));
+        assert!(!should_forward_request_header("x-api-key")); // OCI headers are MCP-only, not in the general forwarding list
+        assert!(!should_forward_request_header("x-smg-oci-delegation-token"));
+        assert!(!should_forward_request_header("x-smg-oci-compartment-id"));
+    }
+
+    #[test]
+    fn test_is_mcp_forward_header() {
+        assert!(is_mcp_forward_header("x-smg-oci-delegation-token"));
+        assert!(is_mcp_forward_header("X-SMG-OCI-Delegation-Token"));
+        assert!(is_mcp_forward_header("x-smg-oci-compartment-id"));
+        assert!(is_mcp_forward_header("X-SMG-OCI-Compartment-Id"));
+        // General headers are not MCP-specific
+        assert!(!is_mcp_forward_header("authorization"));
+        assert!(!is_mcp_forward_header("traceparent"));
     }
 
     #[test]
