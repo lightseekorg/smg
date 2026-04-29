@@ -10,7 +10,7 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, PreparationOutput, RequestContext},
-        multimodal::assemble_multimodal_data,
+        multimodal::{assemble_multimodal_data, collapse_media_placeholders},
         proto_wrapper::ProtoRequest,
     },
 };
@@ -65,7 +65,7 @@ impl PipelineStage for MessageRequestBuildingStage {
         };
 
         let PreparationOutput::Messages {
-            token_ids,
+            mut token_ids,
             processed_messages,
             tool_constraints,
         } = prep
@@ -104,10 +104,19 @@ impl PipelineStage for MessageRequestBuildingStage {
             ));
         }
 
-        // Assemble backend-specific multimodal data now that the backend is known
+        // Assemble backend-specific multimodal data; collapse placeholders for TRT-LLM
+        let im_token_id = processed_messages
+            .multimodal_intermediate
+            .as_ref()
+            .and_then(|i| i.im_token_id);
         let multimodal_data = processed_messages
             .multimodal_intermediate
             .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
+        if builder_client.is_trtllm() {
+            if let Some(id) = im_token_id {
+                token_ids = collapse_media_placeholders(&token_ids, id);
+            }
+        }
 
         let mut proto_request = builder_client
             .build_messages_request(
