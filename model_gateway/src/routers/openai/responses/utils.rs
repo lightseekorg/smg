@@ -42,7 +42,8 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
             insert_optional_value(&mut m, "defer_loading", mcp.defer_loading.as_ref());
             Some(Value::Object(m))
         }
-        ResponseTool::WebSearchPreview(_)
+        ResponseTool::Function(_)
+        | ResponseTool::WebSearchPreview(_)
         | ResponseTool::WebSearch(_)
         | ResponseTool::CodeInterpreter(_)
         | ResponseTool::FileSearch(_)
@@ -54,6 +55,5 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         | ResponseTool::Shell(_)
         | ResponseTool::ApplyPatch
         | ResponseTool::LocalShell => serde_json::to_value(tool).ok(),
-        ResponseTool::Function(_) => None,
     }
 }

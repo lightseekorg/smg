@@ -8,8 +8,9 @@ use openai_protocol::event_types::{
 use serde_json::Value;
 use tracing::warn;
 
-use crate::routers::openai::responses::{
-    extract_output_index, get_event_type, StreamingResponseAccumulator,
+use crate::routers::{
+    common::agent_loop::{OutputFamily, ToolTransferDescriptor, ToolVisibility},
+    openai::responses::{extract_output_index, get_event_type, StreamingResponseAccumulator},
 };
 
 /// Item-type discriminators for output items whose upstream umbrella
@@ -157,16 +158,26 @@ pub(crate) struct OpenAiUpstreamStreamParser {
     /// path and drop the duplicate/mis-ordered umbrella without entering the
     /// intercepted-call path.
     native_passthrough_tool_call_indices: HashSet<usize>,
+    tool_transfers: HashMap<String, ToolTransferDescriptor>,
 }
 
 impl OpenAiUpstreamStreamParser {
+    #[cfg(test)]
     pub fn with_starting_index(start: usize) -> Self {
+        Self::with_starting_index_and_tool_transfers(start, HashMap::new())
+    }
+
+    pub fn with_starting_index_and_tool_transfers(
+        start: usize,
+        tool_transfers: HashMap<String, ToolTransferDescriptor>,
+    ) -> Self {
         Self {
             accumulator: StreamingResponseAccumulator::new(),
             pending_calls: Vec::new(),
             output_index_mapper: OutputIndexMapper::with_start(start),
             original_response_id: None,
             native_passthrough_tool_call_indices: HashSet::new(),
+            tool_transfers,
         }
     }
 
@@ -194,6 +205,28 @@ impl OpenAiUpstreamStreamParser {
 
     pub fn snapshot_final_response(&self) -> Option<Value> {
         self.accumulator.snapshot_final_response()
+    }
+
+    fn transfer_descriptor_for(&self, name: &str) -> ToolTransferDescriptor {
+        self.tool_transfers
+            .get(name)
+            .copied()
+            .unwrap_or_else(ToolTransferDescriptor::caller_function)
+    }
+
+    fn should_forward_intercepted_done(&self, parsed: &Value, call: &ParsedFunctionCall) -> bool {
+        let tool_name = parsed
+            .get("item")
+            .and_then(|item| item.get("name"))
+            .and_then(|value| value.as_str())
+            .filter(|name| !name.is_empty())
+            .or_else(|| (!call.name.is_empty()).then_some(call.name.as_str()));
+        let Some(tool_name) = tool_name else {
+            return false;
+        };
+        let descriptor = self.transfer_descriptor_for(tool_name);
+        matches!(descriptor.family, OutputFamily::Function)
+            && matches!(descriptor.visibility, ToolVisibility::Visible)
     }
 
     /// Process an SSE event and determine what action to take.
@@ -264,8 +297,17 @@ impl OpenAiUpstreamStreamParser {
                 // intercepted-call arm would drop it permanently. The
                 // output_index match ensures that arm only applies to items
                 // tracked by `pending_calls`.
-                let belongs_to_pending_call = done_output_index
-                    .is_some_and(|idx| self.pending_calls.iter().any(|c| c.output_index == idx));
+                let intercepted_done_action = if is_tool_call_done {
+                    done_output_index
+                        .and_then(|idx| self.pending_calls.iter().find(|c| c.output_index == idx))
+                        .filter(|call| call.is_complete())
+                        .map(|call| StreamParserAction::ToolCallReady {
+                            forward_triggering_event: self
+                                .should_forward_intercepted_done(&parsed, call),
+                        })
+                } else {
+                    None
+                };
                 // Native-passthrough guard: an upstream
                 // `output_item.added` for a known hosted tool-call item
                 // type that the intercepted-call path does NOT track
@@ -289,13 +331,12 @@ impl OpenAiUpstreamStreamParser {
                 // this one-shot behaviour both envelopes would be
                 // dropped and the client would never receive a final
                 // umbrella for the passthrough item.
-                if is_tool_call_done && belongs_to_pending_call && self.has_complete_calls() {
+                if let Some(action) = intercepted_done_action {
                     // Intercepted-call path: suppress the upstream umbrella
-                    // event. The sink will emit its own `output_item.done`,
-                    // AFTER `response.<type>.completed`.
-                    StreamParserAction::ToolCallReady {
-                        forward_triggering_event: false,
-                    }
+                    // for gateway-owned items; caller-declared function calls
+                    // forward their own terminal item because no sink will
+                    // synthesize one for them.
+                    action
                 } else if is_tool_call_done
                     && done_output_index
                         .is_some_and(|idx| self.native_passthrough_tool_call_indices.remove(&idx))
@@ -523,6 +564,15 @@ mod tests {
 
     use super::*;
 
+    fn parser_for_gateway_tool(name: &str) -> OpenAiUpstreamStreamParser {
+        let mut tool_transfers = HashMap::new();
+        tool_transfers.insert(
+            name.to_string(),
+            ToolTransferDescriptor::from_family_and_approval(OutputFamily::McpCall, false),
+        );
+        OpenAiUpstreamStreamParser::with_starting_index_and_tool_transfers(0, tool_transfers)
+    }
+
     /// Feed an `output_item.added` for a function_call item so the handler
     /// has a complete pending call registered.
     fn bootstrap_function_call_added(handler: &mut OpenAiUpstreamStreamParser) {
@@ -547,7 +597,7 @@ mod tests {
         // caller NOT to forward the triggering event — the sink will
         // emit its own umbrella `output_item.done` at the correct
         // position after `response.<tool>.completed`.
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        let mut handler = parser_for_gateway_tool("image_generation");
         bootstrap_function_call_added(&mut handler);
 
         let done_event = r#"{
@@ -584,7 +634,7 @@ mod tests {
     /// otherwise slip through and send a duplicate umbrella event to the
     /// wire.
     fn assert_output_item_done_suppressed_for_hosted_tool(item_type: &str) {
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        let mut handler = parser_for_gateway_tool("image_generation");
         bootstrap_function_call_added(&mut handler);
 
         let done_event = format!(
@@ -657,7 +707,7 @@ mod tests {
         // This scenario models a truly spurious/unexpected
         // `output_item.done` whose matching `output_item.added` never
         // arrived — the safe action is to forward it rather than drop.
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        let mut handler = parser_for_gateway_tool("image_generation");
         // Pending function_call at output_index 0 (intercepted-call path).
         bootstrap_function_call_added(&mut handler);
 
@@ -685,11 +735,99 @@ mod tests {
     }
 
     #[test]
+    fn caller_function_output_item_done_forwards() {
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        bootstrap_function_call_added(&mut handler);
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "type": "function_call",
+            "id": "fc_test",
+            "call_id": "call_test",
+            "name": "image_generation",
+            "arguments": "{}",
+            "status": "completed"
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+        match action {
+            StreamParserAction::ToolCallReady {
+                forward_triggering_event,
+            } => assert!(
+                forward_triggering_event,
+                "caller function output_item.done must forward; no sink will synthesize it"
+            ),
+            other => panic!("expected ToolCallReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_item_done_without_name_uses_pending_call_descriptor() {
+        let mut handler = parser_for_gateway_tool("image_generation");
+        bootstrap_function_call_added(&mut handler);
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "type": "function_call",
+            "id": "fc_test",
+            "call_id": "call_test",
+            "arguments": "{}",
+            "status": "completed"
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+        match action {
+            StreamParserAction::ToolCallReady {
+                forward_triggering_event,
+            } => assert!(
+                !forward_triggering_event,
+                "gateway descriptor from pending call must suppress unnamed output_item.done"
+            ),
+            other => panic!("expected ToolCallReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caller_function_output_item_done_without_name_forwards() {
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        bootstrap_function_call_added(&mut handler);
+
+        let done_event = r#"{
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "type": "function_call",
+            "id": "fc_test",
+            "call_id": "call_test",
+            "arguments": "{}",
+            "status": "completed"
+          }
+        }"#;
+
+        let action = handler.process_event(Some("response.output_item.done"), done_event);
+        match action {
+            StreamParserAction::ToolCallReady {
+                forward_triggering_event,
+            } => assert!(
+                forward_triggering_event,
+                "default caller descriptor from pending call must forward unnamed output_item.done"
+            ),
+            other => panic!("expected ToolCallReady, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn arguments_done_marks_call_ready_with_forwarding() {
         // Forwarding is safe for `function_call_arguments.done` because it
         // becomes `mcp_call_arguments.done` — a sub-event that belongs
         // BEFORE `response.<tool>.completed` per spec sub-event ordering.
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        let mut handler = parser_for_gateway_tool("image_generation");
         bootstrap_function_call_added(&mut handler);
 
         let args_done = r#"{
@@ -723,7 +861,7 @@ mod tests {
         // client sees its completion. Only the function_call's own
         // `output_item.done` should be suppressed (the sink will emit
         // the correct umbrella at its proper position).
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        let mut handler = parser_for_gateway_tool("image_generation");
         bootstrap_function_call_added(&mut handler);
 
         let done_event = r#"{
@@ -867,7 +1005,7 @@ mod tests {
         // another. The function_call's done goes through the
         // `ToolCallReady` arm; the hosted tool-call's done goes through the
         // `Drop` arm. Neither re-narrows the other.
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
+        let mut handler = parser_for_gateway_tool("image_generation");
 
         // Intercepted-call path: function_call at output_index 0.
         bootstrap_function_call_added(&mut handler);

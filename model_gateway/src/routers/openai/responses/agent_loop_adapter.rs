@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
     common::{CompletionTokensDetails, PromptTokenUsageInfo, Usage},
-    event_types::{is_function_call_type, OutputItemEvent, ResponseEvent},
+    event_types::ResponseEvent,
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
         ResponsesRequest, ResponsesResponse,
@@ -338,52 +338,6 @@ struct RegisteredGatewayCall {
     item_id: String,
     presentation: ToolPresentation,
     server_label: String,
-}
-
-fn should_forward_caller_function_done(
-    data: &str,
-    handler: &OpenAiUpstreamStreamParser,
-    ctx: &StreamingEventContext<'_>,
-) -> bool {
-    let Ok(parsed) = serde_json::from_str::<Value>(data) else {
-        return false;
-    };
-    if parsed.get("type").and_then(|value| value.as_str()) != Some(OutputItemEvent::DONE) {
-        return false;
-    }
-    let Some(item) = parsed.get("item") else {
-        return false;
-    };
-    let Some(item_type) = item.get("type").and_then(|value| value.as_str()) else {
-        return false;
-    };
-    if !is_function_call_type(item_type) {
-        return false;
-    }
-    let tool_name = item
-        .get("name")
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            let output_index = parsed
-                .get("output_index")
-                .and_then(|value| value.as_u64())
-                .and_then(|value| usize::try_from(value).ok())?;
-            handler
-                .pending_calls
-                .iter()
-                .find(|call| call.output_index == output_index)
-                .map(|call| call.name.as_str())
-        });
-    let Some(tool_name) = tool_name else {
-        return false;
-    };
-    let descriptor = ctx
-        .tool_transfers
-        .get(tool_name)
-        .copied()
-        .unwrap_or_else(ToolTransferDescriptor::caller_function);
-    matches!(descriptor.family, OutputFamily::Function)
-        && matches!(descriptor.visibility, ToolVisibility::Visible)
 }
 
 pub(crate) struct OpenAiResponseStreamSink {
@@ -812,14 +766,17 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         }
 
         let mut upstream_stream = response.bytes_stream();
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(sink.next_output_index());
-        if let Some(ref id) = self.response_id_override {
-            handler.original_response_id = Some(id.clone());
-        }
         let mut chunk_processor = ChunkProcessor::new();
         let mut seen_in_progress = false;
         let tool_transfers = sink.tool_transfers.clone();
         let tool_server_labels = sink.tool_server_labels.clone();
+        let mut handler = OpenAiUpstreamStreamParser::with_starting_index_and_tool_transfers(
+            sink.next_output_index(),
+            tool_transfers.clone(),
+        );
+        if let Some(ref id) = self.response_id_override {
+            handler.original_response_id = Some(id.clone());
+        }
         let streaming_ctx = StreamingEventContext {
             original_request: &self.original_request,
             previous_response_id: self.previous_response_id.as_deref(),
@@ -883,14 +840,8 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
                             StreamParserAction::ToolCallReady {
                                 forward_triggering_event,
                             } => {
-                                let should_forward_triggering_event = forward_triggering_event
-                                    || should_forward_caller_function_done(
-                                        data.as_ref(),
-                                        &handler,
-                                        &streaming_ctx,
-                                    );
                                 let tx = sink.tx.clone();
-                                if should_forward_triggering_event
+                                if forward_triggering_event
                                     && !forward_streaming_event(
                                         SseEventData {
                                             raw_block: &raw_block,
@@ -991,137 +942,5 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         }
         sink.emit_final_response(&response);
         Ok(response)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use serde_json::json;
-
-    use super::*;
-
-    fn streaming_ctx<'a>(
-        request: &'a ResponsesRequest,
-        tool_transfers: &'a HashMap<String, ToolTransferDescriptor>,
-        tool_server_labels: &'a HashMap<String, String>,
-    ) -> StreamingEventContext<'a> {
-        StreamingEventContext {
-            original_request: request,
-            previous_response_id: None,
-            tool_transfers,
-            tool_server_labels,
-        }
-    }
-
-    fn bootstrap_pending_call(
-        handler: &mut OpenAiUpstreamStreamParser,
-        output_index: usize,
-        name: &str,
-    ) {
-        let event = json!({
-            "type": OutputItemEvent::ADDED,
-            "output_index": output_index,
-            "item": {
-                "type": "function_call",
-                "id": "fc_test",
-                "call_id": "call_test",
-                "name": name,
-            }
-        });
-        let _ = handler.process_event(Some(OutputItemEvent::ADDED), &event.to_string());
-    }
-
-    fn function_done_event(output_index: usize, name: Option<&str>) -> String {
-        let mut item = json!({
-            "type": "function_call",
-            "id": "fc_test",
-            "call_id": "call_test",
-            "arguments": "{}",
-            "status": "completed",
-        });
-        if let Some(name) = name {
-            item["name"] = json!(name);
-        }
-
-        json!({
-            "type": OutputItemEvent::DONE,
-            "output_index": output_index,
-            "item": item,
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn visible_caller_function_done_forwards() {
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
-        bootstrap_pending_call(&mut handler, 0, "caller_tool");
-        let request = ResponsesRequest::default();
-        let tool_transfers = HashMap::new();
-        let tool_server_labels = HashMap::new();
-        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
-
-        assert!(should_forward_caller_function_done(
-            &function_done_event(0, Some("caller_tool")),
-            &handler,
-            &ctx,
-        ));
-    }
-
-    #[test]
-    fn gateway_function_done_stays_suppressed() {
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
-        bootstrap_pending_call(&mut handler, 0, "gateway_tool");
-        let request = ResponsesRequest::default();
-        let mut tool_transfers = HashMap::new();
-        tool_transfers.insert(
-            "gateway_tool".to_string(),
-            ToolTransferDescriptor::from_family_and_approval(OutputFamily::McpCall, false),
-        );
-        let tool_server_labels = HashMap::new();
-        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
-
-        assert!(!should_forward_caller_function_done(
-            &function_done_event(0, Some("gateway_tool")),
-            &handler,
-            &ctx,
-        ));
-    }
-
-    #[test]
-    fn function_done_without_name_uses_pending_call_for_caller_function() {
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
-        bootstrap_pending_call(&mut handler, 0, "caller_tool");
-        let request = ResponsesRequest::default();
-        let tool_transfers = HashMap::new();
-        let tool_server_labels = HashMap::new();
-        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
-
-        assert!(should_forward_caller_function_done(
-            &function_done_event(0, None),
-            &handler,
-            &ctx,
-        ));
-    }
-
-    #[test]
-    fn function_done_without_name_uses_pending_call_for_gateway_tool() {
-        let mut handler = OpenAiUpstreamStreamParser::with_starting_index(0);
-        bootstrap_pending_call(&mut handler, 0, "gateway_tool");
-        let request = ResponsesRequest::default();
-        let mut tool_transfers = HashMap::new();
-        tool_transfers.insert(
-            "gateway_tool".to_string(),
-            ToolTransferDescriptor::from_family_and_approval(OutputFamily::McpCall, false),
-        );
-        let tool_server_labels = HashMap::new();
-        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
-
-        assert!(!should_forward_caller_function_done(
-            &function_done_event(0, None),
-            &handler,
-            &ctx,
-        ));
     }
 }

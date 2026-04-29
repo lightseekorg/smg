@@ -19,7 +19,7 @@ use openai_protocol::{
         is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
         OutputItemEvent, ResponseEvent,
     },
-    responses::{ResponseTool, ResponsesRequest},
+    responses::ResponsesRequest,
 };
 use serde_json::{json, Value};
 use smg_mcp::McpToolSession;
@@ -126,23 +126,15 @@ pub(super) fn apply_event_transformations_inplace(
                 }
             }
 
-            // Mask tools from function to MCP format (optimized without cloning)
+            // Restore the client-facing tool list; upstream sees gateway MCP/builtin
+            // tools as function tools during loop execution.
             if response_obj.get("tools").is_some() {
-                let requested_mcp = ctx
-                    .original_request
-                    .tools
-                    .as_ref()
-                    .map(|tools| tools.iter().any(|t| matches!(t, ResponseTool::Mcp(_))))
-                    .unwrap_or(false);
-
-                if requested_mcp {
-                    if let Some(mcp_tools) = build_mcp_tools_value(ctx.original_request) {
-                        response_obj.insert("tools".to_string(), mcp_tools);
-                        response_obj
-                            .entry("tool_choice".to_string())
-                            .or_insert(Value::String("auto".to_string()));
-                        changed = true;
-                    }
+                if let Some(tools) = build_response_tools_value(ctx.original_request) {
+                    response_obj.insert("tools".to_string(), tools);
+                    response_obj
+                        .entry("tool_choice".to_string())
+                        .or_insert(Value::String("auto".to_string()));
+                    changed = true;
                 }
             }
         }
@@ -194,19 +186,15 @@ pub(super) fn apply_event_transformations_inplace(
     changed
 }
 
-/// Helper to build MCP tools value
-fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
+/// Helper to build the client-facing response tools value.
+fn build_response_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
-    let mcp_tools: Vec<Value> = tools
-        .iter()
-        .filter(|t| matches!(t, ResponseTool::Mcp(_)))
-        .filter_map(response_tool_to_value)
-        .collect();
+    let response_tools: Vec<Value> = tools.iter().filter_map(response_tool_to_value).collect();
 
-    if mcp_tools.is_empty() {
+    if response_tools.is_empty() {
         None
     } else {
-        Some(Value::Array(mcp_tools))
+        Some(Value::Array(response_tools))
     }
 }
 
@@ -577,16 +565,13 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         ctx.components.response_storage(),
         ctx.components.conversation_storage(),
         ctx.components.conversation_item_storage(),
-        ctx.components.conversation_memory_writer(),
     ) {
-        (Some(response), Some(conversation), Some(conversation_item), Some(_memory_writer)) => {
-            StorageHandles {
-                response: response.clone(),
-                conversation: conversation.clone(),
-                conversation_item: conversation_item.clone(),
-                request_context: ctx.storage_request_context.clone(),
-            }
-        }
+        (Some(response), Some(conversation), Some(conversation_item)) => StorageHandles {
+            response: response.clone(),
+            conversation: conversation.clone(),
+            conversation_item: conversation_item.clone(),
+            request_context: ctx.storage_request_context.clone(),
+        },
         _ => {
             return error::internal_error(
                 "internal_error",
@@ -681,4 +666,107 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn request_with_tools(tools: Value) -> ResponsesRequest {
+        serde_json::from_value(json!({
+            "model": "gpt-test",
+            "input": "hello",
+            "tools": tools,
+        }))
+        .expect("test request should deserialize")
+    }
+
+    fn streaming_ctx<'a>(
+        request: &'a ResponsesRequest,
+        tool_transfers: &'a HashMap<String, ToolTransferDescriptor>,
+        tool_server_labels: &'a HashMap<String, String>,
+    ) -> StreamingEventContext<'a> {
+        StreamingEventContext {
+            original_request: request,
+            previous_response_id: None,
+            tool_transfers,
+            tool_server_labels,
+        }
+    }
+
+    fn response_created_with_internal_function_tool() -> Value {
+        json!({
+            "type": ResponseEvent::CREATED,
+            "response": {
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1,
+                "status": "in_progress",
+                "model": "gpt-test",
+                "tools": [{
+                    "type": "function",
+                    "name": "internal_gateway_tool",
+                    "parameters": {"type": "object"}
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn response_tools_restore_mixed_mcp_and_caller_function() {
+        let request = request_with_tools(json!([
+            {
+                "type": "mcp",
+                "server_label": "search",
+                "server_url": "https://mcp.example.test/sse",
+                "authorization": "secret-token",
+                "headers": {"x-secret": "hidden"}
+            },
+            {
+                "type": "function",
+                "name": "caller_tool",
+                "description": "caller-owned tool",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        ]));
+        let tool_transfers = HashMap::new();
+        let tool_server_labels = HashMap::new();
+        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
+        let mut event = response_created_with_internal_function_tool();
+
+        assert!(apply_event_transformations_inplace(&mut event, &ctx));
+
+        let tools = event["response"]["tools"]
+            .as_array()
+            .expect("tools should be an array");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["type"], "mcp");
+        assert_eq!(tools[0]["server_label"], "search");
+        assert!(tools[0].get("authorization").is_none());
+        assert!(tools[0].get("headers").is_none());
+        assert_eq!(tools[1]["type"], "function");
+        assert_eq!(tools[1]["name"], "caller_tool");
+    }
+
+    #[test]
+    fn response_tools_restore_builtin_instead_of_internal_function() {
+        let request = request_with_tools(json!([{ "type": "web_search_preview" }]));
+        let tool_transfers = HashMap::new();
+        let tool_server_labels = HashMap::new();
+        let ctx = streaming_ctx(&request, &tool_transfers, &tool_server_labels);
+        let mut event = response_created_with_internal_function_tool();
+
+        assert!(apply_event_transformations_inplace(&mut event, &ctx));
+
+        let tools = event["response"]["tools"]
+            .as_array()
+            .expect("tools should be an array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "web_search_preview");
+        assert_ne!(tools[0]["type"], "function");
+    }
 }
