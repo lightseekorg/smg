@@ -188,7 +188,7 @@ pub(super) fn apply_event_transformations_inplace(
 /// Helper to build the client-facing response tools value.
 fn build_response_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
-    let response_tools: Vec<Value> = tools.iter().filter_map(response_tool_to_value).collect();
+    let response_tools: Vec<Value> = tools.iter().map(response_tool_to_value).collect();
 
     if response_tools.is_empty() {
         None
@@ -516,11 +516,8 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
         openai::context::{ResponsesPayloadState, StorageHandles},
     };
 
-    let payload_state = match ctx.take_payload() {
-        Some(state) => state,
-        None => return error::internal_error("internal_error", "Payload not prepared"),
-    };
     let ResponsesPayloadState {
+        url,
         existing_mcp_list_tools_labels,
         current_request,
         prepared,
@@ -584,11 +581,10 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
     };
     let upstream = OpenAiUpstreamHandle {
         client,
-        url: payload_state.url,
+        url,
         headers: request_headers,
         api_key: worker.api_key().cloned(),
         provider,
-        base_payload: payload_state.json,
     };
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -605,6 +601,7 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
             &loop_ctx_request,
         );
         let ResponsesLoopSetup {
+            current_request,
             prepared,
             state,
             max_tool_calls: loop_ctx_max_tool_calls,
@@ -616,7 +613,8 @@ pub async fn handle_streaming_response(mut ctx: RequestContext) -> Response {
             original_request: &loop_ctx_request,
             max_tool_calls: loop_ctx_max_tool_calls,
         };
-        let adapter = OpenAiStreamingAdapter::new(&loop_ctx_request, upstream);
+        let adapter =
+            OpenAiStreamingAdapter::new(&current_request, &loop_ctx_request, &session, upstream);
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -754,7 +752,7 @@ mod tests {
         assert_eq!(tools[0]["type"], "mcp");
         assert_eq!(tools[0]["server_label"], "search");
         assert!(tools[0].get("authorization").is_none());
-        assert!(tools[0].get("headers").is_none());
+        assert_eq!(tools[0]["headers"], Value::Null);
         assert_eq!(tools[1]["type"], "function");
         assert_eq!(tools[1]["name"], "caller_tool");
     }

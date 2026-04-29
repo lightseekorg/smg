@@ -133,6 +133,7 @@ pub struct PayloadState {
 }
 
 pub(crate) struct ResponsesPayloadState {
+    pub(crate) url: String,
     pub(crate) existing_mcp_list_tools_labels: Vec<String>,
     pub(crate) current_request: ResponsesRequest,
     pub(crate) prepared: PreparedLoopInput,

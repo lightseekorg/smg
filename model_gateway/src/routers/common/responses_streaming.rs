@@ -13,18 +13,18 @@ use openai_protocol::{
         WebSearchCallEvent,
     },
     responses::{
-        InputTokensDetails, OutputTokensDetails, ResponseOutputItem, ResponseStatus, ResponseUsage,
-        ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        response_tool_echo_value, InputTokensDetails, OutputTokensDetails, ResponseOutputItem,
+        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::{json, Value};
-use smg_mcp::{self as mcp};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::warn;
 use uuid::Uuid;
 
-use crate::routers::common::agent_loop::OutputFamily;
+use crate::routers::common::agent_loop::{
+    ExecutedCall, LoopToolCall, OutputFamily, PendingToolExecution, ToolPresentation,
+};
 
 fn random_obfuscation() -> String {
     use rand::Rng as _;
@@ -34,6 +34,13 @@ fn random_obfuscation() -> String {
     let mut bytes = [0_u8; 16];
     rng.fill(&mut bytes);
     URL_SAFE_NO_PAD.encode(&bytes[..len])
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 pub(crate) enum OutputItemType {
@@ -47,6 +54,21 @@ pub(crate) enum OutputItemType {
     CodeInterpreterCall,
     FileSearchCall,
     ImageGenerationCall,
+}
+
+pub(crate) struct ApprovedReplayHandle {
+    pub(crate) output_index: usize,
+    pub(crate) item_id: String,
+    pub(crate) presentation: ToolPresentation,
+}
+
+pub(crate) struct GatewayToolCompletion<'a> {
+    pub(crate) output_index: usize,
+    pub(crate) item_id: &'a str,
+    pub(crate) executed: &'a ExecutedCall,
+    pub(crate) presentation: &'a ToolPresentation,
+    pub(crate) server_label: &'a str,
+    pub(crate) approval_request_id: Option<&'a str>,
 }
 
 /// Status of an output item
@@ -320,16 +342,11 @@ impl ResponseStreamEventEmitter {
             response_obj["max_output_tokens"] = json!(req.max_output_tokens);
             response_obj["max_tool_calls"] = json!(req.max_tool_calls);
             response_obj["previous_response_id"] = json!(req.previous_response_id);
-            // OpenAI Responses always echoes `conversation` as
-            // `{ "id": "conv_..." }`. The request's `ConversationRef`
-            // accepts either a bare string or the `Object` form via
-            // untagged serde — normalize the echo to the canonical
-            // object shape so the wire response is shape-stable
-            // regardless of which input form the client sent.
-            response_obj["conversation"] = match req.conversation.as_ref() {
-                Some(conv) => json!({ "id": conv.as_id() }),
-                None => Value::Null,
-            };
+            // OpenAI Responses omits `conversation` when the request did not
+            // opt into one; when present it echoes the canonical object shape.
+            if let Some(conv) = req.conversation.as_ref() {
+                response_obj["conversation"] = json!({ "id": conv.as_id() });
+            }
             response_obj["reasoning"] = json!(req.reasoning);
             response_obj["temperature"] = json!(req.temperature);
             response_obj["top_p"] = json!(req.top_p);
@@ -347,9 +364,14 @@ impl ResponseStreamEventEmitter {
 
             response_obj["parallel_tool_calls"] = json!(req.parallel_tool_calls.unwrap_or(true));
             response_obj["store"] = json!(req.store.unwrap_or(true));
-            let empty_tools = vec![];
             let empty_metadata = Default::default();
-            response_obj["tools"] = json!(req.tools.as_ref().unwrap_or(&empty_tools));
+            let tools = req.tools.as_deref().unwrap_or(&[]);
+            response_obj["tools"] = Value::Array(
+                tools
+                    .iter()
+                    .map(response_tool_echo_value)
+                    .collect::<Vec<_>>(),
+            );
             response_obj["metadata"] = json!(req.metadata.as_ref().unwrap_or(&empty_metadata));
 
             // tool_choice: serialize if present, otherwise use "auto"
@@ -360,12 +382,12 @@ impl ResponseStreamEventEmitter {
             }
         }
 
-        // Pure response-side fields the gateway does not populate today
-        // but that the OpenAI Responses NS body always carries as `null`.
-        // Emit them here too so streaming stays shape-aligned with NS.
-        response_obj["billing"] = Value::Null;
+        // Pure response-side fields the gateway does not populate today but
+        // that the OpenAI Responses NS body carries as `null`. `billing` is
+        // OpenAI-owned and omitted on self-hosted responses unless upstream
+        // provided it.
         response_obj["moderation"] = Value::Null;
-        response_obj["completed_at"] = Value::Null;
+        response_obj["completed_at"] = json!(unix_timestamp());
         response_obj["error"] = Value::Null;
         response_obj["incomplete_details"] = incomplete_reason
             .map(|reason| json!({ "reason": reason }))
@@ -376,14 +398,6 @@ impl ResponseStreamEventEmitter {
             "sequence_number": self.next_sequence(),
             "response": response_obj
         })
-    }
-
-    /// Convert tool entries to JSON values using the shared `build_mcp_tool_infos` bridge.
-    fn tool_entries_to_json(tools: &[mcp::ToolEntry]) -> Result<Vec<Value>, serde_json::Error> {
-        mcp::build_mcp_tool_infos(tools)
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect()
     }
 
     // ========================================================================
@@ -1100,6 +1114,181 @@ impl ResponseStreamEventEmitter {
         }
     }
 
+    /// Emit the full `mcp_list_tools` output item lifecycle.
+    pub fn emit_mcp_list_tools_item_lifecycle(
+        &mut self,
+        item: &ResponseOutputItem,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let ResponseOutputItem::McpListTools {
+            id,
+            server_label,
+            tools,
+            ..
+        } = item
+        else {
+            return Ok(());
+        };
+
+        let tool_items: Vec<Value> = tools
+            .iter()
+            .map(|tool| serde_json::to_value(tool).unwrap_or(Value::Null))
+            .collect();
+        let (output_index, _allocated_id) =
+            self.allocate_output_index(OutputItemType::McpListTools);
+        let item_in_progress = json!({
+            "id": id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "tools": [],
+        });
+
+        let event = self.emit_output_item_added(output_index, &item_in_progress);
+        self.send_event(&event, tx)?;
+        let event = self.emit_mcp_list_tools_in_progress(output_index, id);
+        self.send_event(&event, tx)?;
+        let event = self.emit_mcp_list_tools_completed(output_index, id, &tool_items);
+        self.send_event(&event, tx)?;
+
+        let item_done = json!({
+            "id": id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "tools": tool_items,
+        });
+        let event = self.emit_output_item_done(output_index, &item_done);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
+
+    /// Emit an approval request as an added/done output item lifecycle.
+    pub fn emit_approval_request_lifecycle(
+        &mut self,
+        pending: &PendingToolExecution,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let (output_index, _allocated_item_id) =
+            self.allocate_output_index(OutputItemType::McpApprovalRequest);
+        let item_id = format!("mcpr_{}", pending.call.call_id);
+        let item = json!({
+            "id": item_id,
+            "type": "mcp_approval_request",
+            "server_label": pending.server_label,
+            "name": pending.call.name,
+            "arguments": pending.call.arguments,
+        });
+
+        let event = self.emit_output_item_added(output_index, &item);
+        self.send_event(&event, tx)?;
+        let event = self.emit_output_item_done(output_index, &item);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
+
+    /// Emit the open-half lifecycle for an approval-continuation replay.
+    pub fn emit_approved_tool_replay_lifecycle(
+        &mut self,
+        call: &LoopToolCall,
+        family: OutputFamily,
+        server_label: &str,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<ApprovedReplayHandle, String> {
+        let presentation = ToolPresentation::from_family(family);
+        let output_item_type = Self::output_item_type_for_family(Some(family));
+        let (output_index, allocated_item_id) = self.allocate_output_index(output_item_type);
+        let item = presentation.render_initial_item(call, server_label, &allocated_item_id);
+
+        let event = self.emit_output_item_added(output_index, &item);
+        self.send_event(&event, tx)?;
+
+        if let Some(event) =
+            self.emit_tool_call_in_progress(output_index, &allocated_item_id, family)
+        {
+            self.send_event(&event, tx)?;
+        }
+
+        if presentation.streams_arguments() {
+            if let Some(event) = self.emit_tool_call_arguments_delta(
+                output_index,
+                &allocated_item_id,
+                &call.arguments,
+                family,
+            ) {
+                self.send_event(&event, tx)?;
+            }
+            if let Some(event) = self.emit_tool_call_arguments_done(
+                output_index,
+                &allocated_item_id,
+                &call.arguments,
+                family,
+            ) {
+                self.send_event(&event, tx)?;
+            }
+        }
+
+        Ok(ApprovedReplayHandle {
+            output_index,
+            item_id: allocated_item_id,
+            presentation,
+        })
+    }
+
+    /// Emit the close-half lifecycle for a gateway-executed tool call.
+    pub fn emit_gateway_tool_completed_lifecycle(
+        &mut self,
+        completion: GatewayToolCompletion<'_>,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let GatewayToolCompletion {
+            output_index,
+            item_id,
+            executed,
+            presentation,
+            server_label,
+            approval_request_id,
+        } = completion;
+        let family = presentation.family;
+        if executed.is_error && presentation.has_failed_event() {
+            let event = self.emit_mcp_call_failed(output_index, item_id, &executed.output_string);
+            self.send_event(&event, tx)?;
+        } else if let Some(event) = self.emit_tool_call_completed(output_index, item_id, family) {
+            self.send_event(&event, tx)?;
+        }
+
+        let mut item = presentation.render_final_item(executed, item_id);
+        if matches!(family, OutputFamily::McpCall) {
+            if let Some(obj) = item.as_object_mut() {
+                if !server_label.is_empty()
+                    && obj
+                        .get("server_label")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                {
+                    obj.insert(
+                        "server_label".to_string(),
+                        Value::String(server_label.to_string()),
+                    );
+                }
+                if let Some(approval_id) = approval_request_id {
+                    obj.insert(
+                        "approval_request_id".to_string(),
+                        Value::String(approval_id.to_string()),
+                    );
+                }
+            }
+        }
+
+        let event = self.emit_output_item_done(output_index, &item);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
+
     /// Emit an error event
     ///
     /// Creates and sends an error event with the given error message.
@@ -1123,65 +1312,6 @@ impl ResponseStreamEventEmitter {
             Err(_) => "data: {\"type\":\"error\",\"code\":\"internal_error\",\"message\":\"serialization failed\",\"param\":null}\n\n".to_string(),
         };
         let _ = tx.send(Ok(Bytes::from(sse_data)));
-    }
-
-    /// Emit the full mcp_list_tools output-item sequence.
-    ///
-    /// Allocates an output index, builds the tool-list JSON, then emits the four
-    /// standard events (output_item.added, mcp_list_tools.in_progress,
-    /// mcp_list_tools.completed, output_item.done) and marks the item complete.
-    ///
-    /// `server_label` is taken as an explicit parameter so callers can iterate
-    /// over multiple MCP servers without mutating the emitter's own label.
-    pub fn emit_mcp_list_tools_sequence(
-        &mut self,
-        server_label: &str,
-        tools: &[mcp::ToolEntry],
-        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
-    ) -> Result<(), String> {
-        let (output_index, item_id) = self.allocate_output_index(OutputItemType::McpListTools);
-
-        // Build per-tool JSON items
-        let tool_items = Self::tool_entries_to_json(tools).unwrap_or_else(|e| {
-            warn!("Failed to serialize McpToolInfo to JSON: {e}");
-            Vec::new()
-        });
-
-        // In-progress item (empty tools)
-        let item_in_progress = json!({
-            "id": item_id,
-            "type": "mcp_list_tools",
-            "server_label": server_label,
-            "tools": []
-        });
-
-        // Emit output_item.added
-        let event = self.emit_output_item_added(output_index, &item_in_progress);
-        self.send_event(&event, tx)?;
-
-        // Emit mcp_list_tools.in_progress
-        let event = self.emit_mcp_list_tools_in_progress(output_index, &item_id);
-        self.send_event(&event, tx)?;
-
-        // Emit mcp_list_tools.completed
-        let event = self.emit_mcp_list_tools_completed(output_index, &item_id, &tool_items);
-        self.send_event(&event, tx)?;
-
-        // Completed item (with tools populated)
-        let item_done = json!({
-            "id": item_id,
-            "type": "mcp_list_tools",
-            "server_label": server_label,
-            "tools": tool_items
-        });
-
-        // Emit output_item.done (also stores item data internally)
-        let event = self.emit_output_item_done(output_index, &item_done);
-        self.send_event(&event, tx)?;
-
-        self.complete_output_item(output_index);
-
-        Ok(())
     }
 }
 
@@ -1210,6 +1340,12 @@ pub(crate) fn build_sse_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use openai_protocol::responses::{
+        McpTool, RequireApproval, RequireApprovalMode, ResponseInput, ResponseTool,
+    };
+
     use super::*;
 
     fn emitter() -> ResponseStreamEventEmitter {
@@ -1249,6 +1385,7 @@ mod tests {
 
         assert_eq!(event["type"], json!(ResponseEvent::INCOMPLETE));
         assert_eq!(event["response"]["status"], json!("incomplete"));
+        assert!(event["response"]["completed_at"].as_i64().is_some());
         assert_eq!(
             event["response"]["incomplete_details"]["reason"],
             json!("max_output_tokens")
@@ -1256,12 +1393,53 @@ mod tests {
     }
 
     #[test]
-    fn mcp_list_tools_sequence_omits_status_on_items() {
+    fn terminal_response_omits_absent_conversation_and_scrubs_tools() {
+        let mut emitter = emitter();
+        emitter.set_original_request(ResponsesRequest {
+            model: "model".to_string(),
+            input: ResponseInput::Text("hi".to_string()),
+            tools: Some(vec![ResponseTool::Mcp(McpTool {
+                server_url: Some("https://mcp.example.test/sse".to_string()),
+                authorization: Some("secret-token".to_string()),
+                headers: Some(HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer secret".to_string(),
+                )])),
+                server_label: "deepwiki".to_string(),
+                server_description: None,
+                require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Never)),
+                allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
+            })]),
+            ..Default::default()
+        });
+
+        let event = emitter.emit_completed(None);
+        let response = &event["response"];
+        let tool = &response["tools"][0];
+
+        assert!(response.get("conversation").is_none());
+        assert!(response.get("billing").is_none());
+        assert!(response["completed_at"].as_i64().is_some());
+        assert_eq!(tool["headers"], Value::Null);
+        assert_eq!(tool["allowed_tools"], Value::Null);
+        assert!(tool.get("authorization").is_none());
+    }
+
+    #[test]
+    fn mcp_list_tools_lifecycle_omits_status_on_items() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut emitter = emitter();
+        let item = ResponseOutputItem::McpListTools {
+            id: "mcpl_test".to_string(),
+            server_label: "deepwiki".to_string(),
+            tools: vec![],
+            error: None,
+        };
 
         emitter
-            .emit_mcp_list_tools_sequence("deepwiki", &[], &tx)
+            .emit_mcp_list_tools_item_lifecycle(&item, &tx)
             .expect("sequence emits");
 
         let events = drain_events(&mut rx);

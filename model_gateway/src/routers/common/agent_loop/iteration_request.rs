@@ -27,32 +27,34 @@ impl IterationInputOptions {
     }
 }
 
-pub(crate) enum GrpcIterationRequestFlavor {
+pub(crate) enum IterationRequestFlavor {
     /// gRPC regular converts the typed Responses sub-request into a Chat
     /// Completion request, so normalize input items before conversion and keep
     /// the caller's original Responses tools on the sub-request.
     RegularChat { stream: Option<bool> },
-    /// gRPC harmony consumes Responses-shaped requests directly and owns its
-    /// upstream tool set after MCP/builtin normalization.
-    HarmonyResponses { tools: Option<Vec<ResponseTool>> },
+    /// Responses-shaped upstreams (gRPC harmony + OpenAI passthrough) consume
+    /// typed Responses requests directly and receive their model-visible tool
+    /// set from the caller.
+    Responses {
+        stream: Option<bool>,
+        tools: Option<Vec<ResponseTool>>,
+    },
 }
 
-impl GrpcIterationRequestFlavor {
+impl IterationRequestFlavor {
     fn input_options(&self) -> IterationInputOptions {
         match self {
-            GrpcIterationRequestFlavor::RegularChat { .. } => {
+            IterationRequestFlavor::RegularChat { .. } => {
                 IterationInputOptions::normalized_message()
             }
-            GrpcIterationRequestFlavor::HarmonyResponses { .. } => {
-                IterationInputOptions::preserved_message()
-            }
+            IterationRequestFlavor::Responses { .. } => IterationInputOptions::preserved_message(),
         }
     }
 
     fn stream(&self) -> Option<bool> {
         match self {
-            GrpcIterationRequestFlavor::RegularChat { stream } => *stream,
-            GrpcIterationRequestFlavor::HarmonyResponses { .. } => None,
+            IterationRequestFlavor::RegularChat { stream }
+            | IterationRequestFlavor::Responses { stream, .. } => *stream,
         }
     }
 }
@@ -82,7 +84,7 @@ pub(crate) fn build_iteration_input_items(
 pub(crate) fn build_responses_iteration_request(
     original: &ResponsesRequest,
     state: &AgentLoopState,
-    flavor: GrpcIterationRequestFlavor,
+    flavor: IterationRequestFlavor,
 ) -> ResponsesRequest {
     let mut request = original.clone();
     request.input =
@@ -95,12 +97,12 @@ pub(crate) fn build_responses_iteration_request(
     }
 
     match flavor {
-        GrpcIterationRequestFlavor::RegularChat { .. } => {
+        IterationRequestFlavor::RegularChat { .. } => {
             if state.tool_budget_exhausted {
                 request.tools = None;
             }
         }
-        GrpcIterationRequestFlavor::HarmonyResponses { tools } => {
+        IterationRequestFlavor::Responses { tools, .. } => {
             request.tools = if state.tool_budget_exhausted {
                 None
             } else {
@@ -167,7 +169,7 @@ mod tests {
         let request = build_responses_iteration_request(
             &original,
             &state_with_text("hello"),
-            GrpcIterationRequestFlavor::RegularChat { stream: Some(true) },
+            IterationRequestFlavor::RegularChat { stream: Some(true) },
         );
 
         assert_eq!(request.stream, Some(true));
@@ -178,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn harmony_flavor_uses_adapter_tool_override() {
+    fn responses_flavor_uses_adapter_tool_override() {
         let original = ResponsesRequest {
             input: ResponseInput::Text("hello".to_string()),
             tools: None,
@@ -188,7 +190,8 @@ mod tests {
         let request = build_responses_iteration_request(
             &original,
             &state_with_text("hello"),
-            GrpcIterationRequestFlavor::HarmonyResponses {
+            IterationRequestFlavor::Responses {
+                stream: None,
                 tools: Some(vec![ResponseTool::Computer]),
             },
         );

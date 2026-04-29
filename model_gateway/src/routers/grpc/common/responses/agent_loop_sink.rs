@@ -61,7 +61,7 @@ use crate::routers::common::{
         ExecutedCall, LoopEvent, LoopToolCall, OutputFamily, PendingToolExecution, StreamSink,
         ToolPresentation, ToolTransferDescriptor, ToolVisibility,
     },
-    responses_streaming::{OutputItemType, ResponseStreamEventEmitter},
+    responses_streaming::{GatewayToolCompletion, ResponseStreamEventEmitter},
 };
 
 /// Bookkeeping for a single in-flight tool call's wire-side lifecycle.
@@ -163,10 +163,7 @@ impl GrpcResponseStreamSink {
     /// registered under an MCP exposure) default to visible
     /// [`OutputFamily::Function`].
     fn transfer_descriptor(&self, name: &str) -> ToolTransferDescriptor {
-        self.tool_transfers
-            .get(name)
-            .copied()
-            .unwrap_or_else(ToolTransferDescriptor::caller_function)
+        ToolTransferDescriptor::lookup(&self.tool_transfers, name)
     }
 
     /// Adapter-side hook for the surface-specific tail. The adapter
@@ -302,7 +299,7 @@ impl GrpcResponseStreamSink {
         if self.disconnected {
             return;
         }
-        if self.emitter.send_event(value, &self.tx).is_err() {
+        if !self.emitter.send_event_best_effort(value, &self.tx) {
             self.disconnected = true;
         }
     }
@@ -330,65 +327,16 @@ impl GrpcResponseStreamSink {
     }
 
     fn emit_mcp_list_tools(&mut self, item: &ResponseOutputItem) {
-        let ResponseOutputItem::McpListTools {
-            id,
-            server_label,
-            tools,
-            ..
-        } = item
-        else {
-            return;
-        };
         if self.disconnected {
             return;
         }
-
-        // Emit the same four-event sequence as
-        // `ResponseStreamEventEmitter::emit_mcp_list_tools_sequence`,
-        // but feed pre-rendered `McpToolInfo`s straight from the
-        // `ResponseOutputItem` rather than re-deriving them from a
-        // session's `ToolEntry`s. The driver only knows about output
-        // items, so this lets the sink stay surface-agnostic.
-        let tool_items: Vec<Value> = tools
-            .iter()
-            .map(|t| serde_json::to_value(t).unwrap_or(Value::Null))
-            .collect();
-
-        let item_in_progress = json!({
-            "id": id,
-            "type": "mcp_list_tools",
-            "server_label": server_label,
-            "tools": [],
-        });
-        // The emitter's per-output-index allocator is what assigns the
-        // numeric index that `output_item.added` and `.done` must agree
-        // on; reuse it so the index space stays consistent with whatever
-        // the adapter has already emitted.
-        let (output_index, _allocated_id) = self
+        if self
             .emitter
-            .allocate_output_index(OutputItemType::McpListTools);
-        let event = self
-            .emitter
-            .emit_output_item_added(output_index, &item_in_progress);
-        self.send(&event);
-        let event = self
-            .emitter
-            .emit_mcp_list_tools_in_progress(output_index, id);
-        self.send(&event);
-        let event = self
-            .emitter
-            .emit_mcp_list_tools_completed(output_index, id, &tool_items);
-        self.send(&event);
-
-        let item_done = json!({
-            "id": id,
-            "type": "mcp_list_tools",
-            "server_label": server_label,
-            "tools": tool_items,
-        });
-        let event = self.emitter.emit_output_item_done(output_index, &item_done);
-        self.send(&event);
-        self.emitter.complete_output_item(output_index);
+            .emit_mcp_list_tools_item_lifecycle(item, &self.tx)
+            .is_err()
+        {
+            self.disconnected = true;
+        }
     }
 
     /// Adapter saw a tool call's first chunk in the model token
@@ -690,12 +638,6 @@ impl GrpcResponseStreamSink {
         if self.disconnected {
             return;
         }
-        let presentation = ToolPresentation::from_family(family);
-        let output_item_type =
-            ResponseStreamEventEmitter::output_item_type_for_family(Some(family));
-        let (output_index, allocated_item_id) =
-            self.emitter.allocate_output_index(output_item_type);
-
         let call = LoopToolCall {
             call_id: call_id.to_string(),
             item_id: item_id_hint.to_string(),
@@ -703,42 +645,20 @@ impl GrpcResponseStreamSink {
             arguments: full_args.to_string(),
             approval_request_id: approval_request_id.map(str::to_string),
         };
-        let item = presentation.render_initial_item(&call, server_label, &allocated_item_id);
-        let event = self.emitter.emit_output_item_added(output_index, &item);
-        self.send(&event);
-
-        if let Some(event) =
+        let Ok(handle) =
             self.emitter
-                .emit_tool_call_in_progress(output_index, &allocated_item_id, family)
-        {
-            self.send(&event);
-        }
-
-        if presentation.streams_arguments() {
-            if let Some(event) = self.emitter.emit_tool_call_arguments_delta(
-                output_index,
-                &allocated_item_id,
-                full_args,
-                family,
-            ) {
-                self.send(&event);
-            }
-            if let Some(event) = self.emitter.emit_tool_call_arguments_done(
-                output_index,
-                &allocated_item_id,
-                full_args,
-                family,
-            ) {
-                self.send(&event);
-            }
-        }
+                .emit_approved_tool_replay_lifecycle(&call, family, server_label, &self.tx)
+        else {
+            self.disconnected = true;
+            return;
+        };
 
         self.tool_call_tracking.insert(
             call_id.to_string(),
             ToolCallTracking {
-                output_index: Some(output_index),
-                item_id: Some(allocated_item_id),
-                presentation,
+                output_index: Some(handle.output_index),
+                item_id: Some(handle.item_id),
+                presentation: handle.presentation,
                 name: name.to_string(),
                 server_label: server_label.to_string(),
                 approval_request_id: approval_request_id.map(str::to_string),
@@ -767,59 +687,26 @@ impl GrpcResponseStreamSink {
             return;
         };
 
-        let family = tracking.presentation.family;
         let (Some(output_index), Some(item_id)) = (tracking.output_index, tracking.item_id) else {
             return;
         };
-        // Families with a dedicated failure event (`mcp_call.failed`
-        // today) emit it on `is_error`; the rest surface failure
-        // inside the `*.completed` payload.
-        if executed.is_error && tracking.presentation.has_failed_event() {
-            let event =
-                self.emitter
-                    .emit_mcp_call_failed(output_index, &item_id, &executed.output_string);
-            self.send(&event);
-        } else if let Some(event) =
-            self.emitter
-                .emit_tool_call_completed(output_index, &item_id, family)
+        if self
+            .emitter
+            .emit_gateway_tool_completed_lifecycle(
+                GatewayToolCompletion {
+                    output_index,
+                    item_id: &item_id,
+                    executed,
+                    presentation: &tracking.presentation,
+                    server_label: &tracking.server_label,
+                    approval_request_id: tracking.approval_request_id.as_deref(),
+                },
+                &self.tx,
+            )
+            .is_err()
         {
-            self.send(&event);
+            self.disconnected = true;
         }
-
-        // Family-specific final item shape comes from the renderer.
-        // It re-stamps `id` to the streaming-allocated item id and
-        // forces `status: failed` / `error: <msg>` / `output: null`
-        // on the error path so the wire-side `output_item.done`
-        // payload never contradicts the preceding `*.failed` event.
-        let mut item = tracking.presentation.render_final_item(executed, &item_id);
-
-        // Backfill stream-time-known metadata onto the rendered item
-        // when the executor's `transformed_item` left them blank.
-        if matches!(family, OutputFamily::McpCall) {
-            if let Some(obj) = item.as_object_mut() {
-                if !tracking.server_label.is_empty()
-                    && obj
-                        .get("server_label")
-                        .and_then(|v| v.as_str())
-                        .is_none_or(|s| s.is_empty())
-                {
-                    obj.insert(
-                        "server_label".to_string(),
-                        Value::String(tracking.server_label.clone()),
-                    );
-                }
-                if let Some(ref approval_id) = tracking.approval_request_id {
-                    obj.insert(
-                        "approval_request_id".to_string(),
-                        Value::String(approval_id.clone()),
-                    );
-                }
-            }
-        }
-
-        let event = self.emitter.emit_output_item_done(output_index, &item);
-        self.send(&event);
-        self.emitter.complete_output_item(output_index);
     }
 
     /// Emit the `mcp_approval_request` output item lifecycle for the
@@ -833,29 +720,13 @@ impl GrpcResponseStreamSink {
         if self.disconnected {
             return;
         }
-        let (output_index, _allocated_item_id) = self
+        if self
             .emitter
-            .allocate_output_index(OutputItemType::McpApprovalRequest);
-        // Use the canonical `mcpr_<call_id>` id that the driver's
-        // NS-side `build_mcp_approval_request_items` uses
-        // (`driver.rs:692`). The allocator-issued id would put
-        // streaming on a different wire id from the persisted /
-        // history form, so a continuation that copies the streamed
-        // id and hits the chain on a later turn could orphan-reject.
-        let item_id = format!("mcpr_{}", pending.call.call_id);
-
-        let item = json!({
-            "id": item_id,
-            "type": "mcp_approval_request",
-            "server_label": pending.server_label,
-            "name": pending.call.name,
-            "arguments": pending.call.arguments,
-        });
-        let event = self.emitter.emit_output_item_added(output_index, &item);
-        self.send(&event);
-        let event = self.emitter.emit_output_item_done(output_index, &item);
-        self.send(&event);
-        self.emitter.complete_output_item(output_index);
+            .emit_approval_request_lifecycle(pending, &self.tx)
+            .is_err()
+        {
+            self.disconnected = true;
+        }
     }
 }
 

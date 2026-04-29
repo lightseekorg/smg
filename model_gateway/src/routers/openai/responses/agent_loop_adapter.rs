@@ -15,27 +15,26 @@ use openai_protocol::{
     event_types::ResponseEvent,
     responses::{
         ResponseContentPart, ResponseInputOutputItem, ResponseOutputItem, ResponseStatus,
-        ResponsesRequest, ResponsesResponse,
+        ResponseTool, ResponsesRequest, ResponsesResponse,
     },
 };
 use serde_json::{to_value, Value};
 use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 
-use super::super::mcp::prepare_mcp_tools_as_functions;
 use crate::{
     routers::{
         common::{
             agent_loop::{
-                build_iteration_input_items, build_response_from_state, normalize_output_item_id,
-                AgentLoopAdapter, AgentLoopContext, AgentLoopError, AgentLoopState, ExecutedCall,
-                IterationInputOptions, LoopEvent, LoopModelTurn, LoopToolCall, OutputFamily,
-                PendingToolExecution, RenderMode, ResponseBuildHooks, StreamSink, ToolPresentation,
-                ToolTransferDescriptor, ToolVisibility, UsageShape,
+                build_response_from_state, build_responses_iteration_request,
+                normalize_output_item_id, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
+                AgentLoopState, ExecutedCall, IterationRequestFlavor, LoopEvent, LoopModelTurn,
+                LoopToolCall, OutputFamily, PendingToolExecution, RenderMode, ResponseBuildHooks,
+                StreamSink, ToolPresentation, ToolTransferDescriptor, ToolVisibility, UsageShape,
             },
             header_utils::ApiProvider,
             mcp_utils::collect_user_function_names,
-            responses_streaming::{OutputItemType, ResponseStreamEventEmitter},
+            responses_streaming::{GatewayToolCompletion, ResponseStreamEventEmitter},
         },
         error,
         openai::{
@@ -60,7 +59,6 @@ pub(crate) struct OpenAiUpstreamHandle {
     pub headers: Option<HeaderMap>,
     pub api_key: Option<String>,
     pub provider: Arc<dyn Provider>,
-    pub base_payload: Value,
 }
 
 impl OpenAiUpstreamHandle {
@@ -102,63 +100,66 @@ impl OpenAiUpstreamHandle {
 
 pub(crate) struct OpenAiNonStreamingAdapter {
     upstream: OpenAiUpstreamHandle,
-    original_tools: Option<Vec<openai_protocol::responses::ResponseTool>>,
+    iteration_request: ResponsesRequest,
+    upstream_tools: Option<Vec<ResponseTool>>,
+    original_tools: Option<Vec<ResponseTool>>,
     user_function_names: HashSet<String>,
     completed_response: Option<ResponsesResponse>,
 }
 
 impl OpenAiNonStreamingAdapter {
-    pub(crate) fn new(request: &ResponsesRequest, upstream: OpenAiUpstreamHandle) -> Self {
+    pub(crate) fn new(
+        iteration_request: &ResponsesRequest,
+        echo_request: &ResponsesRequest,
+        session: &McpToolSession<'_>,
+        upstream: OpenAiUpstreamHandle,
+    ) -> Self {
         Self {
             upstream,
-            original_tools: request.tools.clone(),
-            user_function_names: collect_user_function_names(request),
+            iteration_request: iteration_request.clone(),
+            upstream_tools: build_openai_upstream_tools(iteration_request, session),
+            original_tools: echo_request.tools.clone(),
+            user_function_names: collect_user_function_names(echo_request),
             completed_response: None,
         }
     }
 }
 
-fn build_iteration_payload(
-    base_payload: &Value,
-    state: &AgentLoopState,
+fn build_openai_upstream_tools(
+    request: &ResponsesRequest,
     session: &McpToolSession<'_>,
+) -> Option<Vec<ResponseTool>> {
+    let original_tools = request.tools.clone().unwrap_or_default();
+    if session.mcp_tools().is_empty() {
+        return (!original_tools.is_empty()).then_some(original_tools);
+    }
+
+    let mut tools: Vec<ResponseTool> = original_tools
+        .into_iter()
+        .filter(|tool| matches!(tool, ResponseTool::Function(_)))
+        .collect();
+    tools.extend(session.build_response_tools());
+    (!tools.is_empty()).then_some(tools)
+}
+
+fn build_iteration_payload(
+    original_request: &ResponsesRequest,
+    upstream_tools: Option<Vec<ResponseTool>>,
+    state: &AgentLoopState,
     provider: &dyn Provider,
     stream: bool,
 ) -> Result<Value, AgentLoopError> {
-    let mut payload = base_payload.clone();
-
-    if state.tool_budget_exhausted {
-        let obj = payload
-            .as_object_mut()
-            .ok_or_else(|| AgentLoopError::Internal("payload not an object".to_string()))?;
-        obj.remove("tools");
-        obj.remove("tool_choice");
-    } else if !session.mcp_tools().is_empty() {
-        prepare_mcp_tools_as_functions(&mut payload, session);
-    }
-
-    let obj = payload
-        .as_object_mut()
-        .ok_or_else(|| AgentLoopError::Internal("payload not an object".to_string()))?;
-
-    let input_items =
-        build_iteration_input_items(state, IterationInputOptions::preserved_message());
-    let serialized_input = to_value(&input_items).map_err(|e| {
-        AgentLoopError::Internal(format!("Failed to serialize iteration input items: {e}"))
+    let typed_request = build_responses_iteration_request(
+        original_request,
+        state,
+        IterationRequestFlavor::Responses {
+            stream: Some(stream),
+            tools: upstream_tools,
+        },
+    );
+    let mut payload = to_value(&typed_request).map_err(|e| {
+        AgentLoopError::Internal(format!("Failed to serialize iteration request: {e}"))
     })?;
-    let input_items = serialized_input.as_array().cloned().ok_or_else(|| {
-        AgentLoopError::Internal("serialized iteration input was not an array".to_string())
-    })?;
-
-    obj.insert("input".to_string(), Value::Array(input_items));
-    obj.insert("stream".to_string(), Value::Bool(stream));
-    obj.insert("store".to_string(), Value::Bool(false));
-    obj.remove("previous_response_id");
-    obj.remove("conversation");
-
-    if state.iteration > 1 && obj.get("tools").is_some() {
-        obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
-    }
 
     sanitize_openai_replay_input(&mut payload);
 
@@ -292,13 +293,15 @@ impl<S: StreamSink> AgentLoopAdapter<S> for OpenAiNonStreamingAdapter {
         state: &mut AgentLoopState,
         _sink: &mut S,
     ) -> Result<(), AgentLoopError> {
-        let session = ctx.session.ok_or_else(|| {
-            AgentLoopError::Internal("OpenAI adapter missing MCP session".to_string())
-        })?;
+        if ctx.session.is_none() {
+            return Err(AgentLoopError::Internal(
+                "OpenAI adapter missing MCP session".to_string(),
+            ));
+        }
         let payload = build_iteration_payload(
-            &self.upstream.base_payload,
+            &self.iteration_request,
+            self.upstream_tools.clone(),
             state,
-            session,
             self.upstream.provider.as_ref(),
             false,
         )?;
@@ -402,10 +405,7 @@ impl OpenAiResponseStreamSink {
     }
 
     fn transfer_descriptor(&self, name: &str) -> ToolTransferDescriptor {
-        self.tool_transfers
-            .get(name)
-            .copied()
-            .unwrap_or_else(ToolTransferDescriptor::caller_function)
+        ToolTransferDescriptor::lookup(&self.tool_transfers, name)
     }
 
     fn server_label_for(&self, name: &str, family: OutputFamily) -> String {
@@ -466,56 +466,22 @@ impl OpenAiResponseStreamSink {
         if self.disconnected {
             return;
         }
-        if self.emitter.send_event(payload, &self.tx).is_err() {
+        if !self.emitter.send_event_best_effort(payload, &self.tx) {
             self.disconnected = true;
         }
     }
 
     fn emit_mcp_list_tools_item(&mut self, item: &ResponseOutputItem) {
-        let ResponseOutputItem::McpListTools {
-            id,
-            server_label,
-            tools,
-            ..
-        } = item
-        else {
+        if self.disconnected {
             return;
-        };
-
-        let tool_items: Vec<Value> = tools
-            .iter()
-            .filter_map(|tool| to_value(tool).ok())
-            .collect();
-        let (output_index, _allocated_id) = self
+        }
+        if self
             .emitter
-            .allocate_output_index(OutputItemType::McpListTools);
-        let added_item = serde_json::json!({
-            "id": id,
-            "type": "mcp_list_tools",
-            "server_label": server_label,
-            "tools": [],
-        });
-        let event = self
-            .emitter
-            .emit_output_item_added(output_index, &added_item);
-        self.send(&event);
-        let event = self
-            .emitter
-            .emit_mcp_list_tools_in_progress(output_index, id);
-        self.send(&event);
-        let event = self
-            .emitter
-            .emit_mcp_list_tools_completed(output_index, id, &tool_items);
-        self.send(&event);
-        let done_item = serde_json::json!({
-            "id": id,
-            "type": "mcp_list_tools",
-            "server_label": server_label,
-            "tools": tool_items,
-        });
-        let event = self.emitter.emit_output_item_done(output_index, &done_item);
-        self.send(&event);
-        self.emitter.complete_output_item(output_index);
+            .emit_mcp_list_tools_item_lifecycle(item, &self.tx)
+            .is_err()
+        {
+            self.disconnected = true;
+        }
     }
 
     fn emit_gateway_execution_started(&mut self, call_id: &str) {
@@ -538,69 +504,36 @@ impl OpenAiResponseStreamSink {
             return;
         };
 
-        let family = tracking.presentation.family;
-        if executed.is_error && matches!(family, OutputFamily::McpCall) {
-            let event = self.emitter.emit_mcp_call_failed(
-                tracking.output_index,
-                &tracking.item_id,
-                &executed.output_string,
-            );
-            self.send(&event);
-        } else if let Some(event) =
-            self.emitter
-                .emit_tool_call_completed(tracking.output_index, &tracking.item_id, family)
-        {
-            self.send(&event);
-        }
-
-        let mut final_item = tracking
-            .presentation
-            .render_final_item(executed, &tracking.item_id);
-        if matches!(family, OutputFamily::McpCall) {
-            if let Some(obj) = final_item.as_object_mut() {
-                if obj
-                    .get("server_label")
-                    .and_then(|value| value.as_str())
-                    .is_none_or(|label| label.is_empty())
-                {
-                    obj.insert(
-                        "server_label".to_string(),
-                        Value::String(tracking.server_label.clone()),
-                    );
-                }
-            }
-        }
-        let event = self
+        if self
             .emitter
-            .emit_output_item_done(tracking.output_index, &final_item);
-        self.send(&event);
-        self.emitter.complete_output_item(tracking.output_index);
+            .emit_gateway_tool_completed_lifecycle(
+                GatewayToolCompletion {
+                    output_index: tracking.output_index,
+                    item_id: &tracking.item_id,
+                    executed,
+                    presentation: &tracking.presentation,
+                    server_label: &tracking.server_label,
+                    approval_request_id: None,
+                },
+                &self.tx,
+            )
+            .is_err()
+        {
+            self.disconnected = true;
+        }
     }
 
     fn emit_approval_requested(&mut self, pending: &PendingToolExecution) {
-        let (output_index, _allocated_item_id) = self
+        if self.disconnected {
+            return;
+        }
+        if self
             .emitter
-            .allocate_output_index(OutputItemType::McpApprovalRequest);
-        let item_id = format!("mcpr_{}", pending.call.call_id);
-        let item = serde_json::json!({
-            "id": item_id.clone(),
-            "type": "mcp_approval_request",
-            "server_label": pending.server_label,
-            "name": pending.call.name,
-            "arguments": pending.call.arguments,
-        });
-        let event = self.emitter.emit_output_item_added(output_index, &item);
-        self.send(&event);
-        let done_item = serde_json::json!({
-            "id": item_id,
-            "type": "mcp_approval_request",
-            "server_label": pending.server_label,
-            "name": pending.call.name,
-            "arguments": pending.call.arguments,
-        });
-        let event = self.emitter.emit_output_item_done(output_index, &done_item);
-        self.send(&event);
-        self.emitter.complete_output_item(output_index);
+            .emit_approval_request_lifecycle(pending, &self.tx)
+            .is_err()
+        {
+            self.disconnected = true;
+        }
     }
 
     #[expect(
@@ -617,11 +550,6 @@ impl OpenAiResponseStreamSink {
         server_label: &str,
         approval_request_id: Option<&str>,
     ) {
-        let output_item_type =
-            ResponseStreamEventEmitter::output_item_type_for_family(Some(family));
-        let (output_index, allocated_item_id) =
-            self.emitter.allocate_output_index(output_item_type);
-        let presentation = ToolPresentation::from_family(family);
         let call = LoopToolCall {
             call_id: call_id.to_string(),
             item_id: item_id_hint.to_string(),
@@ -629,43 +557,20 @@ impl OpenAiResponseStreamSink {
             arguments: full_args.to_string(),
             approval_request_id: approval_request_id.map(str::to_string),
         };
-        let item = presentation.render_initial_item(&call, server_label, &allocated_item_id);
-
-        let event = self.emitter.emit_output_item_added(output_index, &item);
-        self.send(&event);
-
-        if let Some(event) =
+        let Ok(handle) =
             self.emitter
-                .emit_tool_call_in_progress(output_index, &allocated_item_id, family)
-        {
-            self.send(&event);
-        }
-
-        if presentation.streams_arguments() {
-            if let Some(event) = self.emitter.emit_tool_call_arguments_delta(
-                output_index,
-                &allocated_item_id,
-                full_args,
-                family,
-            ) {
-                self.send(&event);
-            }
-            if let Some(event) = self.emitter.emit_tool_call_arguments_done(
-                output_index,
-                &allocated_item_id,
-                full_args,
-                family,
-            ) {
-                self.send(&event);
-            }
-        }
+                .emit_approved_tool_replay_lifecycle(&call, family, server_label, &self.tx)
+        else {
+            self.disconnected = true;
+            return;
+        };
 
         self.registered_gateway_calls.insert(
             call_id.to_string(),
             RegisteredGatewayCall {
-                output_index,
-                item_id: allocated_item_id,
-                presentation,
+                output_index: handle.output_index,
+                item_id: handle.item_id,
+                presentation: handle.presentation,
                 server_label: server_label.to_string(),
             },
         );
@@ -710,8 +615,10 @@ impl StreamSink for OpenAiResponseStreamSink {
 
 pub(crate) struct OpenAiStreamingAdapter {
     upstream: OpenAiUpstreamHandle,
+    iteration_request: ResponsesRequest,
     original_request: ResponsesRequest,
-    original_tools: Option<Vec<openai_protocol::responses::ResponseTool>>,
+    upstream_tools: Option<Vec<ResponseTool>>,
+    original_tools: Option<Vec<ResponseTool>>,
     user_function_names: HashSet<String>,
     completed_response: Option<ResponsesResponse>,
     response_id_override: Option<String>,
@@ -719,15 +626,22 @@ pub(crate) struct OpenAiStreamingAdapter {
 }
 
 impl OpenAiStreamingAdapter {
-    pub(crate) fn new(request: &ResponsesRequest, upstream: OpenAiUpstreamHandle) -> Self {
+    pub(crate) fn new(
+        iteration_request: &ResponsesRequest,
+        echo_request: &ResponsesRequest,
+        session: &McpToolSession<'_>,
+        upstream: OpenAiUpstreamHandle,
+    ) -> Self {
         Self {
             upstream,
-            original_request: request.clone(),
-            original_tools: request.tools.clone(),
-            user_function_names: collect_user_function_names(request),
+            iteration_request: iteration_request.clone(),
+            original_request: echo_request.clone(),
+            upstream_tools: build_openai_upstream_tools(iteration_request, session),
+            original_tools: echo_request.tools.clone(),
+            user_function_names: collect_user_function_names(echo_request),
             completed_response: None,
             response_id_override: None,
-            previous_response_id: request.previous_response_id.clone(),
+            previous_response_id: echo_request.previous_response_id.clone(),
         }
     }
 
@@ -765,13 +679,15 @@ impl AgentLoopAdapter<OpenAiResponseStreamSink> for OpenAiStreamingAdapter {
         state: &mut AgentLoopState,
         sink: &mut OpenAiResponseStreamSink,
     ) -> Result<(), AgentLoopError> {
-        let session = ctx.session.ok_or_else(|| {
-            AgentLoopError::Internal("OpenAI streaming adapter missing MCP session".to_string())
-        })?;
+        if ctx.session.is_none() {
+            return Err(AgentLoopError::Internal(
+                "OpenAI streaming adapter missing MCP session".to_string(),
+            ));
+        }
         let payload = build_iteration_payload(
-            &self.upstream.base_payload,
+            &self.iteration_request,
+            self.upstream_tools.clone(),
             state,
-            session,
             self.upstream.provider.as_ref(),
             true,
         )?;
@@ -989,7 +905,6 @@ mod tests {
         },
     };
     use serde_json::json;
-    use smg_mcp::{McpOrchestrator, McpToolSession};
 
     use super::*;
     use crate::routers::openai::provider::{OpenAIProvider, XAIProvider};
@@ -1026,8 +941,6 @@ mod tests {
 
     #[test]
     fn iteration_payload_reapplies_provider_transform_to_replayed_items() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
         let mut state = AgentLoopState::new(
             ResponseInput::Items(vec![ResponseInputOutputItem::Message {
                 id: "msg_user".to_string(),
@@ -1051,17 +964,20 @@ mod tests {
             status: Some("completed".to_string()),
             phase: None,
         });
+        let request = ResponsesRequest {
+            model: "grok-4".to_string(),
+            input: ResponseInput::Items(Vec::new()),
+            store: Some(true),
+            previous_response_id: Some("resp_previous".to_string()),
+            ..Default::default()
+        };
 
-        let payload = build_iteration_payload(
-            &json!({ "model": "grok-4", "input": [], "store": false }),
-            &state,
-            &session,
-            &XAIProvider,
-            false,
-        )
-        .expect("iteration payload builds");
+        let payload = build_iteration_payload(&request, None, &state, &XAIProvider, false)
+            .expect("iteration payload builds");
         let input = payload["input"].as_array().expect("input array");
 
+        assert_eq!(payload["store"], json!(false));
+        assert!(payload.get("previous_response_id").is_none());
         assert!(input[1].get("id").is_none());
         assert!(input[1].get("status").is_none());
         assert_eq!(input[1]["content"][0]["type"], json!("input_text"));
@@ -1069,8 +985,6 @@ mod tests {
 
     #[test]
     fn iteration_payload_preserves_reasoning_replay_but_strips_output_fields() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
         let state = AgentLoopState::new(
             ResponseInput::Items(vec![ResponseInputOutputItem::new_reasoning_encrypted(
                 "rs_123".to_string(),
@@ -1085,15 +999,14 @@ mod tests {
             )]),
             Default::default(),
         );
+        let request = ResponsesRequest {
+            model: "gpt-5-mini".to_string(),
+            input: ResponseInput::Items(Vec::new()),
+            ..Default::default()
+        };
 
-        let payload = build_iteration_payload(
-            &json!({ "model": "gpt-5-mini", "input": [], "store": false }),
-            &state,
-            &session,
-            &OpenAIProvider,
-            false,
-        )
-        .expect("iteration payload builds");
+        let payload = build_iteration_payload(&request, None, &state, &OpenAIProvider, false)
+            .expect("iteration payload builds");
         let item = payload["input"][0]
             .as_object()
             .expect("reasoning item object");

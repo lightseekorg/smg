@@ -140,6 +140,16 @@ impl ToolTransferDescriptor {
         }
     }
 
+    pub(crate) fn lookup(
+        descriptors: &HashMap<String, ToolTransferDescriptor>,
+        name: &str,
+    ) -> Self {
+        descriptors
+            .get(name)
+            .copied()
+            .unwrap_or_else(Self::caller_function)
+    }
+
     pub(crate) const fn from_family_and_approval(
         family: OutputFamily,
         requires_approval: bool,

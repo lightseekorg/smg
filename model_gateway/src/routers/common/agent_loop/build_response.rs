@@ -38,6 +38,13 @@ use super::{
 };
 use crate::routers::common::mcp_utils::inject_mcp_output_items;
 
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// Surface-specific knobs the unified builder needs but cannot derive
 /// from loop state alone. Each adapter assembles one of these from its
 /// own request-scoped fields and hands it to
@@ -111,6 +118,18 @@ pub(crate) fn build_response_from_state(
             response.status = ResponseStatus::Incomplete;
             response.incomplete_details = Some(json!({ "reason": reason }));
         }
+    }
+
+    if response.completed_at.is_none()
+        && matches!(
+            response.status,
+            ResponseStatus::Completed
+                | ResponseStatus::Incomplete
+                | ResponseStatus::Failed
+                | ResponseStatus::Cancelled
+        )
+    {
+        response.completed_at = Some(unix_timestamp());
     }
 
     inject_mcp_output_items(
@@ -209,14 +228,12 @@ fn build_base_from_state(
         output.push(make_function_call_item(tool_call));
     }
 
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let created_at = unix_timestamp();
 
     ResponsesResponse::builder(&request_id, &request.model)
         .copy_from_request(request)
         .created_at(created_at)
+        .completed_at(created_at)
         .status(ResponseStatus::Completed)
         .output(output)
         .usage(shape_usage(&usage, hooks.usage_shape))

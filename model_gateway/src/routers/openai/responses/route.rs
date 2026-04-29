@@ -8,13 +8,12 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{http::HeaderMap, response::Response};
 use openai_protocol::responses::ResponsesRequest;
-use serde_json::to_value;
 
 use super::{
     super::{
         context::{
-            ComponentRefs, PayloadState, RequestContext, ResponsesComponents,
-            ResponsesPayloadState, WorkerSelection,
+            ComponentRefs, RequestContext, ResponsesComponents, ResponsesPayloadState,
+            WorkerSelection,
         },
         provider::ProviderRegistry,
         router::resolve_provider,
@@ -24,14 +23,11 @@ use super::{
 use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::{
-        common::{
-            header_utils::extract_conversation_memory_config,
-            worker_selection::{SelectWorkerRequest, WorkerSelector},
-        },
-        error,
+    routers::common::{
+        header_utils::extract_conversation_memory_config,
+        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
-    worker::{Endpoint, ProviderType, WorkerRegistry},
+    worker::{ProviderType, WorkerRegistry},
 };
 
 /// Shared context passed to responses routing functions.
@@ -109,36 +105,7 @@ pub(in crate::routers::openai) async fn route_responses(
 
     request_body.store = Some(false);
 
-    let mut payload = match to_value(&request_body) {
-        Ok(v) => v,
-        Err(e) => {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_VALIDATION,
-            );
-            return error::bad_request(
-                "invalid_request",
-                format!("Failed to serialize request: {e}"),
-            );
-        }
-    };
-
     let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
-    if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
-        Metrics::record_router_error(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
-            model,
-            metrics_labels::ENDPOINT_RESPONSES,
-            metrics_labels::ERROR_VALIDATION,
-        );
-        return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
-    }
 
     let mut ctx = RequestContext::for_responses(
         Arc::new(body.clone()),
@@ -154,11 +121,8 @@ pub(in crate::routers::openai) async fn route_responses(
         provider: Arc::clone(&provider),
     });
 
-    ctx.state.payload = Some(PayloadState {
-        json: payload,
-        url: format!("{}/v1/responses", worker.url()),
-    });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
+        url: format!("{}/v1/responses", worker.url()),
         existing_mcp_list_tools_labels: prepared_history
             .existing_mcp_list_tools_labels
             .into_iter()

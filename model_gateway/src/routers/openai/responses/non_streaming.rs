@@ -24,13 +24,8 @@ use crate::routers::{
 
 /// Handle a non-streaming responses request.
 pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response {
-    let payload_state = match ctx.state.payload.take() {
-        Some(ps) => ps,
-        None => {
-            return error::internal_error("internal_error", "Payload not prepared");
-        }
-    };
     let ResponsesPayloadState {
+        url,
         existing_mcp_list_tools_labels,
         current_request,
         prepared,
@@ -86,6 +81,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     );
 
     let ResponsesLoopSetup {
+        current_request,
         prepared,
         state,
         max_tool_calls,
@@ -99,14 +95,15 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         max_tool_calls,
     };
     let adapter = OpenAiNonStreamingAdapter::new(
+        &current_request,
         &original_request,
+        &session,
         OpenAiUpstreamHandle {
             client: ctx.components.client().clone(),
-            url: payload_state.url,
+            url,
             headers: ctx.headers().cloned(),
             api_key: worker.api_key().cloned(),
             provider,
-            base_payload: payload_state.json,
         },
     );
 

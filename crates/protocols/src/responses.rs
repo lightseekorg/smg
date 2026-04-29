@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use serde_with::DefaultOnNull;
 use validator::{Validate, ValidationError};
 
@@ -3715,8 +3715,9 @@ pub struct ResponsesResponse {
     /// Incomplete details if response was truncated
     pub incomplete_details: Option<Value>,
 
-    /// Billing information. Present for OpenAI Responses schema parity;
-    /// currently not populated by SMG.
+    /// Billing information. OpenAI passthrough responses keep the upstream
+    /// value; self-hosted responses omit it when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<Value>,
 
     /// System instructions used
@@ -3777,8 +3778,9 @@ pub struct ResponsesResponse {
     #[serde(default = "default_tool_choice")]
     pub tool_choice: Value,
 
-    /// Available tools. Omitted from the wire when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Available tools. Response-side serialization scrubs request-only
+    /// secrets while preserving OpenAI's echoed field set.
+    #[serde(default, serialize_with = "serialize_response_tools")]
     pub tools: Vec<ResponseTool>,
 
     /// Number of top logprobs requested.
@@ -3812,6 +3814,42 @@ fn default_object_type() -> String {
 
 fn default_tool_choice() -> Value {
     Value::String("auto".to_string())
+}
+
+/// Convert a request-side tool into the response echo shape.
+///
+/// MCP entries may contain request-only secrets (`authorization`) or headers
+/// that must not be reflected to clients. OpenAI still echoes a stable MCP
+/// field set, so sensitive values are scrubbed while non-sensitive optional
+/// fields serialize as explicit `null`.
+pub fn response_tool_echo_value(tool: &ResponseTool) -> Value {
+    match tool {
+        ResponseTool::Mcp(mcp) => json!({
+            "type": "mcp",
+            "server_label": &mcp.server_label,
+            "server_url": &mcp.server_url,
+            "server_description": &mcp.server_description,
+            "require_approval": &mcp.require_approval,
+            "allowed_tools": &mcp.allowed_tools,
+            "connector_id": &mcp.connector_id,
+            "defer_loading": &mcp.defer_loading,
+            "headers": Value::Null,
+        }),
+        _ => serde_json::to_value(tool).unwrap_or(Value::Null),
+    }
+}
+
+fn serialize_response_tools<S>(tools: &[ResponseTool], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize as _;
+
+    tools
+        .iter()
+        .map(response_tool_echo_value)
+        .collect::<Vec<_>>()
+        .serialize(serializer)
 }
 
 /// `serde_with` adapter forcing response-side `conversation` to always

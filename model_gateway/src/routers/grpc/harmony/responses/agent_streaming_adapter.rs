@@ -20,7 +20,7 @@ use crate::{
     routers::{
         common::agent_loop::{
             build_responses_iteration_request, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
-            AgentLoopState, GrpcIterationRequestFlavor, LoopModelTurn, LoopToolCall, RenderMode,
+            AgentLoopState, IterationRequestFlavor, LoopModelTurn, LoopToolCall, RenderMode,
         },
         grpc::{
             common::responses::{
@@ -95,7 +95,8 @@ impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for HarmonyStreamingAdapter<'a
         let request = build_responses_iteration_request(
             ctx.original_request,
             state,
-            GrpcIterationRequestFlavor::HarmonyResponses {
+            IterationRequestFlavor::Responses {
+                stream: None,
                 tools: self.upstream_tools.clone(),
             },
         );

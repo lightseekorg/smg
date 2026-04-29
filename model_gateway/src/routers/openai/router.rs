@@ -177,7 +177,14 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             provider_registry: &self.provider_registry,
             responses_components: &self.responses_components,
         };
-        responses_route::route_responses(&deps, headers, tenant_meta, body, model_id).await
+        Box::pin(responses_route::route_responses(
+            &deps,
+            headers,
+            tenant_meta,
+            body,
+            model_id,
+        ))
+        .await
     }
 
     async fn route_realtime_session(

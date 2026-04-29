@@ -641,8 +641,11 @@ async fn test_final_response_hides_internal_mcp_trace_items() {
         "internal MCP tool usage should not appear in final output: {body_json}"
     );
     assert!(
-        body_json.get("tools").is_none(),
-        "internal MCP tool should not be restored into final tools"
+        body_json
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "internal MCP tool should not be restored into final tools: {body_json}"
     );
 
     worker.stop().await;
