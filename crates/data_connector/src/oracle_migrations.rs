@@ -494,8 +494,13 @@ fn oracle_v12_up(schema: &SchemaConfig) -> Vec<String> {
         let idx = oracle_qualified_name(schema, "IDX_CONV_LINK_ID");
 
         // ORA-00955 = "name is already used by an existing object".
+        // ORDER (vs NOORDER) makes the sequence strictly monotonic in request
+        // order across RAC / multi-instance deployments at the cost of a
+        // cross-instance lock; on single-instance Oracle (e.g. ATP serverless)
+        // it is a no-op. Required for the deterministic ordering goal that
+        // LINK_ID backs.
         stmts.push(format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE SEQUENCE {seq} START WITH 1 INCREMENT BY 1 NOCACHE NOORDER'; \
+            "BEGIN EXECUTE IMMEDIATE 'CREATE SEQUENCE {seq} START WITH 1 INCREMENT BY 1 NOCACHE ORDER'; \
              EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         ));
         stmts.push(format!(
