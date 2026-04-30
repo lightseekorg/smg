@@ -27,4 +27,5 @@ pub mod mcp_utils;
 pub mod persistence_utils;
 pub mod retry;
 pub mod skill_resolution;
+pub mod turn_info;
 pub mod worker_selection;
