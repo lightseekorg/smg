@@ -1120,6 +1120,14 @@ class RouterArgs:
         args_dict = {}
         disable_arg_fallback = bool(cli_args_dict.get(f"{prefix}disable_arg_fallback", False))
 
+        # Router-only attrs that have no backend-side equivalent. The unprefixed
+        # CLI flags (--host, --port) ARE the router's flags (the backend gets
+        # its own via --worker-host/--worker-base-port), so they should always
+        # be honored — never gated by --router-disable-arg-fallback. Without
+        # this carve-out, setting --port under --router-disable-arg-fallback
+        # silently falls through to RouterArgs.port default (30000).
+        ROUTER_ONLY_ATTRS = {"host", "port"}
+
         for attr in dataclasses.fields(cls):
             # Auto strip prefix from args.
             # Prefer the prefixed version (e.g. --router-model-path) when
@@ -1130,7 +1138,7 @@ class RouterArgs:
             if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
                 args_dict[attr.name] = cli_args_dict[prefixed_key]
             elif (
-                not disable_arg_fallback
+                (attr.name in ROUTER_ONLY_ATTRS or not disable_arg_fallback)
                 and attr.name in cli_args_dict
                 and cli_args_dict[attr.name] not in (None, "")
             ):
