@@ -33,9 +33,9 @@ impl PyTokenizer {
     /// Otherwise it is fetched from the HuggingFace Hub (set `HF_TOKEN` env var
     /// for gated models).
     ///
-    /// All errors are currently raised as `ValueError`; future versions may
-    /// distinguish input errors (`ValueError`) from runtime/network errors
-    /// (`RuntimeError`).
+    /// `from_file` raises `ValueError` on invalid inputs (bad path, malformed
+    /// arguments). `encode`, `decode`, and `apply_chat_template` raise
+    /// `RuntimeError` on tokenizer operation failures.
     #[staticmethod]
     #[pyo3(signature = (path))]
     fn from_file(path: &str) -> PyResult<Self> {

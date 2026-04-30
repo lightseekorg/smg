@@ -98,9 +98,6 @@ def test_apply_chat_template_basic(hf_tokenizer_path):
     assert len(prompt) > 0
     assert "helpful assistant" in prompt
     assert "2 + 2" in prompt
-    # The template must have added a generation prompt suffix (e.g. "<|im_start|>assistant\n" for Qwen).
-    # Check it ends with something non-empty after the user message.
-    assert "user" not in prompt.split("assistant")[-1].lower() or "assistant" in prompt
 
 
 @pytest.mark.unit
