@@ -13,9 +13,10 @@ impl Provider for GoogleProvider {
 
     fn transform_request(
         &self,
-        _payload: &mut Value,
-        _endpoint: Endpoint,
+        payload: &mut Value,
+        endpoint: Endpoint,
     ) -> Result<(), ProviderError> {
+        GoogleProvider::transform_request_impl(payload, endpoint);
         Ok(())
     }
 
