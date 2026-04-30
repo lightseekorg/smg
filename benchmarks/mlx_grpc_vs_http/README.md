@@ -120,6 +120,21 @@ python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) 
 - **vllm-metal optional**: if `$VLLM_VENV` doesn't exist, the vllm phase
   is skipped with a log message rather than failing the whole run.
 
+## CI vs local model defaults
+
+| Environment | `MODEL` default | Why |
+|---|---|---|
+| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx-community/gemma-3-1b-it-4bit` (~0.6 GB) | `macos-latest` runners expose only ~5 GB Metal memory. A 4 B-class model (3 GB) plus vllm-metal's ~1.7 GB overhead leaves a negative KV-cache budget, so the vllm phase OOMs at startup. The 1 B variant fits comfortably and lets all three backends run in CI. |
+| Local Mac (`run.sh`) | `mlx-community/gemma-3-4b-it-qat-4bit` (~3 GB) | M-series Pro/Max with 16+ GB unified memory has plenty of headroom; the larger model produces more representative absolute throughput / latency numbers. |
+
+The bench compares all three backends on the *same* model — switching
+to the 1 B variant for CI keeps the **relative** router/streaming
+comparison meaningful (TTFT shape, RPS scaling with concurrency, TPOT
+correctness). For production-shaped *absolute* numbers at 4 B or
+larger, use the local `run.sh` defaults or override `MODEL` via
+`workflow_dispatch` on a runner with more RAM (e.g. self-hosted M-Pro,
+or `macos-latest-xlarge` with 14 GB).
+
 ## CI
 
 `.github/workflows/nightly-mlx-bench.yml` runs this on `macos-latest`
