@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from smg import smg_rs as smg
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tokenizer"

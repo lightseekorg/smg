@@ -6,10 +6,11 @@
 
 use std::sync::Arc;
 
-use llm_tokenizer::chat_template::ChatTemplateParams;
-use llm_tokenizer::traits::Tokenizer as TokenizerTrait;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::prelude::*;
+use llm_tokenizer::{chat_template::ChatTemplateParams, traits::Tokenizer as TokenizerTrait};
+use pyo3::{
+    exceptions::{PyRuntimeError, PyValueError},
+    prelude::*,
+};
 use serde_json::Value;
 
 /// Python-facing tokenizer handle.
