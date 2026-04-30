@@ -45,6 +45,20 @@ def main(argv: list[str] | None = None) -> None:
     if not any(a == "--sampling-backend" or a.startswith("--sampling-backend=") for a in argv):
         argv = [*argv, "--sampling-backend", "flashinfer"]
 
+    # TokenSpeed's logprob computation is gated by ``--enable-output-logprobs``
+    # (default OFF, see ``ServerArgs.enable_output_logprobs``); without the
+    # flag, requests asking for logprobs receive empty arrays rather than an
+    # error. The smg gateway's OpenAI-compat path expects per-token logprobs
+    # whenever ``logprobs=True`` is set, so flip the flag on by default for a
+    # gateway-fronted gRPC servicer. Operators who want the smaller CUDA-graph
+    # footprint can pass ``--enable-output-logprobs=False`` explicitly.
+    # ``--enable-top-logprobs`` is intentionally NOT injected: TokenSpeed
+    # raises at startup when it's set (the path is not yet implemented).
+    if not any(
+        a == "--enable-output-logprobs" or a.startswith("--enable-output-logprobs=") for a in argv
+    ):
+        argv = [*argv, "--enable-output-logprobs"]
+
     server_args = prepare_server_args(argv)
     # The scheduler processes will read these env vars; make sure we ran
     # through TokenSpeed's shared env/resource setup path instead of

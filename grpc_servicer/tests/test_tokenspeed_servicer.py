@@ -829,3 +829,137 @@ class TestBuildGenerateReq:
         req = tokenspeed_scheduler_pb2.GenerateRequest(request_id="x")
         with pytest.raises(ValueError, match="tokenized"):
             servicer._build_generate_req(req)
+
+
+# ---------------------------------------------------------------------------
+# Output logprobs proto conversion
+# ---------------------------------------------------------------------------
+
+
+class TestConvertOutputLogprobsToProto:
+    """``_convert_output_logprobs_to_proto`` reads the cumulative
+    ``meta_info["output_token_logprobs"]`` / ``output_top_logprobs`` lists
+    that TokenSpeed accumulates per request, slices the last
+    ``len(output_ids)`` entries (the tokens this frame emitted), and keeps
+    the first ``n_keep`` so the result aligns with whatever
+    ``_generated_output_ids`` returned (which may have stripped a trailing
+    stop token)."""
+
+    def test_returns_none_when_logprobs_empty(self):
+        # ``--enable-output-logprobs`` not set on the server → the keys exist
+        # in meta_info but the lists are empty. Must not return a half-built
+        # proto in this case (gateway would treat empty as "logprobs missing").
+        out = {
+            "output_ids": [10, 20, 30],
+            "meta_info": {"output_token_logprobs": [], "output_top_logprobs": []},
+        }
+        assert TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=3) is None
+
+    def test_returns_none_when_keys_missing(self):
+        # Logprobs not requested at all → meta_info lacks the keys entirely.
+        out = {"output_ids": [10, 20, 30], "meta_info": {}}
+        assert TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=3) is None
+
+    def test_returns_none_when_n_keep_zero(self):
+        # Stop-token strip can leave n_keep == 0 for a 1-token frame whose
+        # only token was the stop. Don't emit a proto with a length mismatch.
+        out = {
+            "output_ids": [99],
+            "meta_info": {
+                "output_token_logprobs": [(-0.1, 99, None)],
+                "output_top_logprobs": [None],
+            },
+        }
+        assert TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=0) is None
+
+    def test_non_streaming_full_output(self):
+        # Non-streaming: output_ids covers the entire generation; cumulative
+        # meta_info matches it exactly. n_keep == len(output_ids) → emit all.
+        out = {
+            "output_ids": [10, 20, 30],
+            "meta_info": {
+                "output_token_logprobs": [
+                    (-0.5, 10, None),
+                    (-0.3, 20, None),
+                    (-0.1, 30, None),
+                ],
+                "output_top_logprobs": [None, None, None],
+            },
+        }
+        proto = TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=3)
+        assert proto is not None
+        assert list(proto.token_logprobs) == pytest.approx([-0.5, -0.3, -0.1])
+        assert list(proto.token_ids) == [10, 20, 30]
+        assert len(proto.top_logprobs) == 3
+        # ``None`` entries in raw_top translate to empty TopLogProbs placeholders.
+        for tl in proto.top_logprobs:
+            assert list(tl.values) == []
+            assert list(tl.token_ids) == []
+
+    def test_streaming_chunk_emits_only_delta(self):
+        # Streaming chunk: output_ids has just the new tokens for this chunk,
+        # but meta_info is cumulative across the entire request. The slice
+        # ``[-len(output_ids):]`` on the cumulative list must yield exactly
+        # the delta this chunk represents.
+        out = {
+            "output_ids": [40, 50],  # 2 new tokens this chunk
+            "meta_info": {
+                # cumulative: 4 prior tokens + 2 new
+                "output_token_logprobs": [
+                    (-1.1, 10, None),
+                    (-1.2, 20, None),
+                    (-1.3, 30, None),
+                    (-1.4, 99, None),
+                    (-0.7, 40, None),
+                    (-0.6, 50, None),
+                ],
+                "output_top_logprobs": [None] * 6,
+            },
+        }
+        proto = TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=2)
+        assert proto is not None
+        assert list(proto.token_logprobs) == pytest.approx([-0.7, -0.6])
+        assert list(proto.token_ids) == [40, 50]
+
+    def test_top_k_alternatives(self):
+        # When the user requests top_logprobs=3, each position in
+        # output_top_logprobs is a list of K (logprob, token_id, text) tuples.
+        # Translate each into a TopLogProbs proto with parallel value/id arrays.
+        out = {
+            "output_ids": [40],
+            "meta_info": {
+                "output_token_logprobs": [(-0.7, 40, None)],
+                "output_top_logprobs": [
+                    [(-0.7, 40, None), (-1.2, 41, None), (-2.5, 42, None)],
+                ],
+            },
+        }
+        proto = TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=1)
+        assert proto is not None
+        assert len(proto.top_logprobs) == 1
+        tl = proto.top_logprobs[0]
+        assert list(tl.values) == pytest.approx([-0.7, -1.2, -2.5])
+        assert list(tl.token_ids) == [40, 41, 42]
+
+    def test_strips_stop_token_alignment(self):
+        # When ``_generated_output_ids`` strips a trailing stop token,
+        # n_keep == len(output_ids) - 1. The converter must take the first
+        # n_keep entries of this frame's cumulative slice — emitting the
+        # logprob for the stripped stop token would misalign with the
+        # ``token_ids`` field on the proto.
+        out = {
+            "output_ids": [10, 20, 99],  # 99 = stop, will be stripped → n_keep=2
+            "meta_info": {
+                "output_token_logprobs": [
+                    (-0.5, 10, None),
+                    (-0.3, 20, None),
+                    (-0.1, 99, None),  # logprob for the stop we just stripped
+                ],
+                "output_top_logprobs": [None, None, None],
+            },
+        }
+        proto = TokenSpeedSchedulerServicer._convert_output_logprobs_to_proto(out, n_keep=2)
+        assert proto is not None
+        # Note: 99's logprob is dropped; emitted logprobs match the kept tokens.
+        assert list(proto.token_logprobs) == pytest.approx([-0.5, -0.3])
+        assert list(proto.token_ids) == [10, 20]

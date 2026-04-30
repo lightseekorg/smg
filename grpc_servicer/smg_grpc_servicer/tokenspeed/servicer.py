@@ -674,6 +674,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 prompt_tokens=int(meta.get("prompt_tokens", 0)),
                 completion_tokens=int(meta.get("completion_tokens", len(token_ids))),
                 cached_tokens=int(meta.get("cached_tokens", 0)),
+                output_logprobs=self._convert_output_logprobs_to_proto(output, len(token_ids)),
                 index=choice_index,
             ),
         )
@@ -710,9 +711,74 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 prompt_tokens=int(meta.get("prompt_tokens", 0)),
                 completion_tokens=int(meta.get("completion_tokens", len(token_ids))),
                 cached_tokens=int(meta.get("cached_tokens", 0)),
+                output_logprobs=self._convert_output_logprobs_to_proto(output, len(token_ids)),
                 index=choice_index,
                 **matched_kwargs,
             ),
+        )
+
+    @staticmethod
+    def _convert_output_logprobs_to_proto(
+        output: dict, n_keep: int
+    ) -> tokenspeed_scheduler_pb2.OutputLogProbs | None:
+        """Build an ``OutputLogProbs`` proto from a tokenspeed output dict.
+
+        TokenSpeed accumulates the request's logprobs in per-request state
+        across chunks; ``meta_info["output_token_logprobs"]`` is therefore the
+        running cumulative list of detokenized
+        ``(logprob: float, token_id: int, text: Optional[str])`` tuples, and
+        ``meta_info["output_top_logprobs"]`` is the parallel list of top-K
+        alternatives per position (each entry is ``None`` or a list of the
+        same tuple shape).
+
+        We slice the cumulative list down to just **this frame's tokens** by
+        taking the last ``len(output["output_ids"])`` entries — that's how
+        many new tokens this frame emitted — and then keep only the first
+        ``n_keep`` of those, so the alignment matches whatever
+        ``_generated_output_ids`` returned (it strips a trailing stop token
+        when the finish reason is ``stop``, leaving the last logprob entry
+        with no corresponding output id).
+
+        Returns ``None`` when there are no logprobs to emit — either the
+        client did not request them, or the server was started without
+        ``--enable-output-logprobs`` (in which case TokenSpeed silently
+        leaves these meta_info lists empty rather than raising).
+        """
+        if n_keep <= 0:
+            return None
+        meta = output.get("meta_info", {}) or {}
+        raw_token = meta.get("output_token_logprobs") or []
+        if not raw_token:
+            return None
+        n_chunk = len(output.get("output_ids", []) or [])
+        if n_chunk <= 0:
+            return None
+
+        raw_top = meta.get("output_top_logprobs") or []
+        chunk_token = raw_token[-n_chunk:] if len(raw_token) >= n_chunk else raw_token
+        chunk_top = raw_top[-n_chunk:] if len(raw_top) >= n_chunk else raw_top
+        delta_token = chunk_token[:n_keep]
+        delta_top = chunk_top[:n_keep]
+
+        top_proto = []
+        for entry in delta_top:
+            if entry:
+                top_proto.append(
+                    tokenspeed_scheduler_pb2.TopLogProbs(
+                        values=[t[0] for t in entry],
+                        token_ids=[t[1] for t in entry],
+                    )
+                )
+            else:
+                # Position with no top-K data (e.g. ``--enable-top-logprobs``
+                # is not yet implemented in TokenSpeed; we still emit a
+                # placeholder per position so the gateway can align indices).
+                top_proto.append(tokenspeed_scheduler_pb2.TopLogProbs())
+
+        return tokenspeed_scheduler_pb2.OutputLogProbs(
+            token_logprobs=[t[0] for t in delta_token],
+            token_ids=[t[1] for t in delta_token],
+            top_logprobs=top_proto,
         )
 
 

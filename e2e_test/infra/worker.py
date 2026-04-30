@@ -299,6 +299,15 @@ class Worker:
             # which silently drops the constraint and lets the model free-run.
             "--grammar-backend",
             "xgrammar",
+            # Per-token sampled-token logprobs are gated by this flag in
+            # tokenspeed (``ServerArgs.enable_output_logprobs`` defaults
+            # OFF). Without it, requests asking for logprobs silently
+            # receive empty arrays — see test_chat_completion[*-5-*] which
+            # exercises ``logprobs=True, top_logprobs=5`` and asserts
+            # logprobs are returned. Top-K logprobs are still missing
+            # upstream (``--enable-top-logprobs`` is not yet implemented),
+            # so those parametrize variants stay skipped.
+            "--enable-output-logprobs",
         ]
         extra = spec.get("tokenspeed_args", [])
         if extra:
