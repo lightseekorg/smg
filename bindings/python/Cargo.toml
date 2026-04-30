@@ -35,6 +35,9 @@ workspace = true
 [dependencies.llm-tokenizer]
 workspace = true
 
+[dependencies.serde_json]
+workspace = true
+
 [features]
 default = ["pyo3/extension-module"]
 vendored-openssl = ["smg/vendored-openssl"]

@@ -6,9 +6,11 @@
 
 use std::sync::Arc;
 
+use llm_tokenizer::chat_template::ChatTemplateParams;
 use llm_tokenizer::traits::Tokenizer as TokenizerTrait;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use serde_json::Value;
 
 /// Python-facing tokenizer handle.
 ///
@@ -69,7 +71,68 @@ impl PyTokenizer {
             .map_err(|e| PyRuntimeError::new_err(format!("decode failed: {e}")))
     }
 
+    /// Apply the tokenizer's chat template to a list of messages.
+    ///
+    /// `messages` is a list of dicts (e.g. `[{"role": "user", "content": "..."}]`).
+    /// `tools`, when provided, is a list of OpenAI-style tool dicts that the
+    /// chat template can render into the prompt.
+    ///
+    /// `add_generation_prompt` defaults to true (matches HuggingFace and
+    /// SGLang/vLLM convention for serving).
+    #[pyo3(signature = (messages, tools = None, add_generation_prompt = true))]
+    fn apply_chat_template(
+        &self,
+        messages: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<String> {
+        let messages_value = py_to_json(messages)?;
+        let messages_vec: Vec<Value> = match messages_value {
+            Value::Array(arr) => arr,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "messages must be a list of message dicts",
+                ));
+            }
+        };
+
+        let tools_vec: Vec<Value> = match tools {
+            None => Vec::new(),
+            Some(t) => match py_to_json(t)? {
+                Value::Array(arr) => arr,
+                _ => {
+                    return Err(PyValueError::new_err("tools must be a list of tool dicts"));
+                }
+            },
+        };
+        let empty_docs: [Value; 0] = [];
+
+        let params = ChatTemplateParams {
+            add_generation_prompt,
+            tools: Some(&tools_vec),
+            documents: Some(&empty_docs),
+            template_kwargs: None,
+            ..Default::default()
+        };
+
+        self.inner
+            .apply_chat_template(&messages_vec, params)
+            .map_err(|e| PyRuntimeError::new_err(format!("apply_chat_template failed: {e}")))
+    }
+
     fn __repr__(&self) -> String {
         format!("Tokenizer(vocab_size={})", self.inner.vocab_size())
     }
+}
+
+/// Convert a Python object (dict, list, etc.) to `serde_json::Value` by going
+/// through Python's JSON serializer. This is the simplest correct way to
+/// bridge arbitrary nested Python data to serde without writing a custom
+/// `FromPyObject` for every shape.
+fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let py = obj.py();
+    let json = py.import("json")?;
+    let s: String = json.call_method1("dumps", (obj,))?.extract()?;
+    serde_json::from_str(&s)
+        .map_err(|e| PyValueError::new_err(format!("failed to convert Python object to JSON: {e}")))
 }

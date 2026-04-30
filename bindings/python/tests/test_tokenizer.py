@@ -1,8 +1,13 @@
 """Tests for smg.Tokenizer PyO3 binding."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from smg import smg_rs as smg
+
+FIXTURES = Path(__file__).parent / "fixtures" / "tokenizer"
 
 
 @pytest.mark.unit
@@ -81,3 +86,19 @@ def test_decode_skip_special_tokens_flag(hf_tokenizer_path):
     kept = tok.decode(ids, skip_special_tokens=False)
     skipped = tok.decode(ids, skip_special_tokens=True)
     assert len(kept) >= len(skipped)
+
+
+@pytest.mark.unit
+def test_apply_chat_template_basic(hf_tokenizer_path):
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    messages = json.loads((FIXTURES / "messages_basic.json").read_text())
+
+    prompt = tok.apply_chat_template(messages)
+
+    assert isinstance(prompt, str)
+    assert len(prompt) > 0
+    assert "helpful assistant" in prompt
+    assert "2 + 2" in prompt
+    # The template must have added a generation prompt suffix (e.g. "<|im_start|>assistant\n" for Qwen).
+    # Check it ends with something non-empty after the user message.
+    assert "user" not in prompt.split("assistant")[-1].lower() or "assistant" in prompt
