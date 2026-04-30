@@ -131,3 +131,13 @@ def test_apply_chat_template_without_generation_prompt(hf_tokenizer_path):
     assert len(with_prompt) >= len(without_prompt)
     # And the additional content should not be present in the without version.
     assert with_prompt != without_prompt
+
+
+@pytest.mark.unit
+def test_public_smg_export(hf_tokenizer_path):
+    """smg.Tokenizer should be the same class as smg.smg_rs.Tokenizer."""
+    import smg as smg_pkg
+
+    assert smg_pkg.Tokenizer is smg.Tokenizer
+    tok = smg_pkg.Tokenizer.from_file(hf_tokenizer_path)
+    assert "Tokenizer" in repr(tok)
