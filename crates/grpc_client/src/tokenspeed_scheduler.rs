@@ -502,7 +502,13 @@ mod translate {
             }),
             sampling_params: r.sampling_params.map(sampling_params),
             return_logprob: r.return_logprob,
-            logprob_start_len: r.logprob_start_len,
+            // SGLang's wire-side `logprob_start_len` is non-optional `i32`
+            // with `-1` as the "no input logprobs" sentinel; TokenSpeed's
+            // proto makes the field `optional` so the servicer can tell
+            // "unset" from "explicit 0". Always wrap in `Some(...)` so
+            // existing SGLang-shaped callers preserve their sentinel
+            // through to the Python side.
+            logprob_start_len: Some(r.logprob_start_len),
             top_logprobs_num: r.top_logprobs_num,
             token_ids_logprob: r.token_ids_logprob,
             stream: r.stream,

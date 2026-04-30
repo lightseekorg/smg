@@ -95,7 +95,9 @@ message GenerateRequest {
 
   // Logprob options.
   bool return_logprob = 4;
-  int32 logprob_start_len = 5;
+  // Optional so the servicer can distinguish "client omitted" (use SGLang's
+  // ``-1`` default = no input logprobs) from an explicit value like 0.
+  optional int32 logprob_start_len = 5;
   int32 top_logprobs_num = 6;
   repeated uint32 token_ids_logprob = 7;
 

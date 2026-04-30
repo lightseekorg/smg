@@ -72,6 +72,12 @@ def _finish_reason_to_dict(reason: Any) -> dict | None:
     We duck-type on ``to_json()`` rather than importing the concrete
     ``BaseFinishReason`` class so the servicer module loads without pulling
     in TokenSpeed's full request-processing graph.
+
+    Raises ``TypeError`` for unknown shapes rather than coercing to a fake
+    ``stop``: silently flipping ``length``/``abort`` to ``stop`` and leaking
+    a debug ``repr()`` into the user-facing ``matched_stop_str`` field would
+    hide real bugs and corrupt the OpenAI ``finish_reason`` semantics. The
+    caller wraps this in ``try/except`` and turns it into ``StatusCode.INTERNAL``.
     """
     if reason is None:
         return None
@@ -81,12 +87,21 @@ def _finish_reason_to_dict(reason: Any) -> dict | None:
     if callable(to_json):
         try:
             result = to_json()
-            if isinstance(result, dict):
-                return result
-        except Exception:  # noqa: BLE001
-            logger.exception("Finish reason to_json() raised; falling back")
-    # Unknown shape — coerce to string-type stop to avoid crashing the stream.
-    return {"type": "stop", "matched": str(reason)}
+        except Exception as e:  # noqa: BLE001
+            raise TypeError(
+                f"finish_reason of type {type(reason).__name__!r} raised in "
+                f"to_json(); refusing to silently emit a fake stop. {e}"
+            ) from e
+        if isinstance(result, dict):
+            return result
+        raise TypeError(
+            f"finish_reason {type(reason).__name__!r}.to_json() returned "
+            f"{type(result).__name__!r}; expected dict with at least 'type'."
+        )
+    raise TypeError(
+        f"Unknown finish_reason shape {type(reason).__name__!r}; expected "
+        f"a dict or an object with a to_json() method."
+    )
 
 
 class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerServicer):
@@ -432,11 +447,52 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     # Helpers
     # ------------------------------------------------------------------
 
-    async def shutdown(self) -> None:
-        """Graceful shutdown hook — drain AsyncLLM's sigterm watchdog."""
+    async def shutdown(self, drain_timeout_secs: float = 30.0) -> None:
+        """Graceful shutdown — drain in-flight requests, then kill scheduler children.
+
+        AsyncLLM's ``sigterm_watchdog`` polls ``gracefully_exit`` every 5s,
+        drains ``rid_to_state`` and finally calls
+        ``kill_process_tree(getpid, include_parent=True)``. That works in
+        steady-state but the gRPC server's main coroutine may unwind before
+        the watchdog ticks again, in which case the scheduler subprocesses
+        outlive the parent and end up orphaned. To avoid that, we:
+
+        1. Flag ``gracefully_exit`` so AsyncLLM stops accepting work and
+           the watchdog will eventually run its own cleanup.
+        2. Wait up to ``drain_timeout_secs`` for ``rid_to_state`` to empty.
+        3. Forcibly kill the subprocess tree (``include_parent=False``) so
+           the scheduler children are reaped regardless of whether the
+           watchdog tick fires before this coroutine returns. Idempotent
+           with the watchdog's own ``kill_process_tree`` call.
+        """
         self.async_llm.gracefully_exit = True
         if self.health_servicer:
             self.health_servicer.set_not_serving()
+
+        deadline = time.monotonic() + drain_timeout_secs
+        while time.monotonic() < deadline:
+            if not getattr(self.async_llm, "rid_to_state", None):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            logger.warning(
+                "shutdown drain timed out after %.1fs with %d in-flight requests; "
+                "killing scheduler children anyway",
+                drain_timeout_secs,
+                len(getattr(self.async_llm, "rid_to_state", {}) or {}),
+            )
+
+        # Reap the scheduler subprocesses without taking down our own PID;
+        # server.py's stop sequence still needs us alive to finish gRPC drain.
+        try:
+            from tokenspeed.runtime.utils.process import kill_process_tree
+        except ImportError:
+            logger.exception(
+                "Could not import tokenspeed.runtime.utils.process.kill_process_tree; "
+                "scheduler subprocesses may be orphaned"
+            )
+            return
+        kill_process_tree(os.getpid(), include_parent=False)
 
     def _build_generate_req(self, request: tokenspeed_scheduler_pb2.GenerateRequest):
         """Translate proto GenerateRequest → TokenSpeed GenerateReqInput.
@@ -460,8 +516,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             sampling_params=sampling,
             stream=bool(request.stream),
             return_logprob=bool(request.return_logprob),
+            # ``logprob_start_len`` is ``optional int32`` on the wire — use
+            # presence-tracking, not the proto3 zero-default, to distinguish
+            # "client omitted" (→ SGLang's ``-1`` = no input logprobs) from
+            # an explicit ``0`` (→ start input logprobs at position 0).
             logprob_start_len=(
-                request.logprob_start_len if request.logprob_start_len is not None else -1
+                request.logprob_start_len if request.HasField("logprob_start_len") else -1
             ),
             top_logprobs_num=int(request.top_logprobs_num or 0),
             token_ids_logprob=(
