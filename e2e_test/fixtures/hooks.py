@@ -82,12 +82,18 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Skip tests marked with ``@pytest.mark.skip_for_runtime``."""
-    marker = item.get_closest_marker("skip_for_runtime")
-    if marker:
-        current_runtime = get_runtime()
-        skip_runtimes = marker.args
-        if current_runtime in skip_runtimes:
+    """Skip tests marked with ``@pytest.mark.skip_for_runtime``.
+
+    A single test item can carry multiple ``skip_for_runtime`` marks — e.g. a
+    method-level ``@pytest.mark.skip_for_runtime("trtllm", ...)`` plus a
+    parametrize-attached ``pytest.param(5, marks=skip_for_runtime("tokenspeed",
+    ...))``. ``get_closest_marker`` only returns one of them, which silently
+    drops the others. Iterate every mark so a runtime that's named in any of
+    them gets skipped, regardless of which is "closest".
+    """
+    current_runtime = get_runtime()
+    for marker in item.iter_markers(name="skip_for_runtime"):
+        if current_runtime in marker.args:
             reason = marker.kwargs.get("reason", f"Not supported on {current_runtime}")
             pytest.skip(f"Skipping for {current_runtime}: {reason}")
 
