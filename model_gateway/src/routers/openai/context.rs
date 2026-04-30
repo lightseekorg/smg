@@ -51,6 +51,8 @@ pub struct ResponsesComponents {
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
     pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+    /// Registry of Responses-API interceptors (empty by default).
+    pub interceptors: smg_extensions::InterceptorRegistry,
 }
 
 pub enum ComponentRefs {
