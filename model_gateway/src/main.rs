@@ -826,6 +826,8 @@ fn parse_cross_region_peer(peer: &str) -> Result<CrossRegionPeerConfig, String> 
     let mut sync_url = None;
     let mut realm = None;
     let mut environment = None;
+    let mut expected_mtls_identity = None;
+    let mut enabled = true;
 
     for part in peer.split(',') {
         let Some((key, value)) = part.split_once('=') else {
@@ -846,9 +848,17 @@ fn parse_cross_region_peer(peer: &str) -> Result<CrossRegionPeerConfig, String> 
             "sync_url" => sync_url = Some(value.to_string()),
             "realm" => realm = Some(value.to_string()),
             "environment" | "env" => environment = Some(value.to_string()),
+            "expected_mtls_identity" | "mtls_identity" => {
+                expected_mtls_identity = Some(value.to_string());
+            }
+            "enabled" => {
+                enabled = value.parse::<bool>().map_err(|e| {
+                    format!("cross-region peer field 'enabled' must be a bool: {e}")
+                })?;
+            }
             other => {
                 return Err(format!(
-                    "unknown cross-region peer field '{other}', expected region_id, request_url, sync_url, realm, or environment"
+                    "unknown cross-region peer field '{other}', expected region_id, request_url, sync_url, realm, environment, expected_mtls_identity, or enabled"
                 ));
             }
         }
@@ -860,6 +870,8 @@ fn parse_cross_region_peer(peer: &str) -> Result<CrossRegionPeerConfig, String> 
         sync_url,
         realm,
         environment,
+        expected_mtls_identity,
+        enabled,
     })
 }
 
@@ -1782,7 +1794,7 @@ mod tests {
     #[test]
     fn cross_region_peer_cli_parser_accepts_expected_shape() {
         let peer = parse_cross_region_peer(
-            "region_id=us-chicago-1,request_url=https://request.example:8443,sync_url=https://sync.example:9443,realm=oc1,environment=prod",
+            "region_id=us-chicago-1,request_url=https://request.example:8443,sync_url=https://sync.example:9443,realm=oc1,environment=prod,expected_mtls_identity=spiffe://oraclecorp.com/oci/oc1/prod/region/us-chicago-1/service/smg-region-agent,enabled=false",
         )
         .expect("peer parses");
 
@@ -1794,5 +1806,12 @@ mod tests {
         assert_eq!(peer.sync_url.as_deref(), Some("https://sync.example:9443"));
         assert_eq!(peer.realm.as_deref(), Some("oc1"));
         assert_eq!(peer.environment.as_deref(), Some("prod"));
+        assert_eq!(
+            peer.expected_mtls_identity.as_deref(),
+            Some(
+                "spiffe://oraclecorp.com/oci/oc1/prod/region/us-chicago-1/service/smg-region-agent"
+            )
+        );
+        assert!(!peer.enabled);
     }
 }

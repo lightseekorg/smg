@@ -162,7 +162,7 @@ impl Default for CrossRegionSyncPlaneConfig {
 
 /// Configured peer Region Agent. Remote workers are intentionally not modeled
 /// here; request forwarding resolves only by peer region.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CrossRegionPeerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,6 +175,30 @@ pub struct CrossRegionPeerConfig {
     pub realm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_mtls_identity: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for CrossRegionPeerConfig {
+    /// Create a peer config with no endpoints and routing eligibility enabled.
+    fn default() -> Self {
+        Self {
+            region_id: None,
+            request_url: None,
+            sync_url: None,
+            realm: None,
+            environment: None,
+            expected_mtls_identity: None,
+            enabled: true,
+        }
+    }
+}
+
+/// Return true for peer config fields that default to enabled.
+fn default_true() -> bool {
+    true
 }
 
 /// mTLS file paths for cross-region request forwarding and signal sync.
@@ -923,6 +947,7 @@ mod tests {
                 sync_url: Some("https://smg-region-agent.us-chicago-1.internal:9443".to_string()),
                 realm: Some("oc1".to_string()),
                 environment: Some("prod".to_string()),
+                ..CrossRegionPeerConfig::default()
             }],
             mtls: CrossRegionMtlsConfig {
                 ca_cert_path: Some("/etc/smg/certs/ca.crt".to_string()),
@@ -1017,6 +1042,7 @@ mod tests {
             Some("us-ashburn-1")
         );
         assert_eq!(parsed.cross_region.peers.len(), 1);
+        assert!(parsed.cross_region.peers[0].enabled);
         parsed.validate().expect("valid cross-region config");
     }
 

@@ -354,20 +354,45 @@ impl ConfigValidator {
                 Self::validate_required_string(&sync_url_field, peer.sync_url.as_deref())?;
             Self::validate_cross_region_peer_url(&sync_url_field, sync_url)?;
 
-            Self::validate_required_string(
+            let realm = Self::validate_required_string(
                 &format!("cross_region.peers[{idx}].realm"),
                 peer.realm.as_deref(),
             )?;
-            Self::validate_required_string(
+            let environment = Self::validate_required_string(
                 &format!("cross_region.peers[{idx}].environment"),
                 peer.environment.as_deref(),
             )?;
+
+            if let Some(expected_mtls_identity) = peer.expected_mtls_identity.as_deref() {
+                let identity_field = format!("cross_region.peers[{idx}].expected_mtls_identity");
+                Self::validate_required_string(&identity_field, Some(expected_mtls_identity))?;
+                let expected_identity =
+                    Self::expected_cross_region_peer_identity(region_id, realm, environment);
+                if expected_mtls_identity != expected_identity {
+                    return Err(ConfigError::InvalidValue {
+                        field: identity_field,
+                        value: expected_mtls_identity.to_string(),
+                        reason: format!("must be {expected_identity}"),
+                    });
+                }
+            }
         }
 
         Ok(())
     }
 
-    /// Validate that a peer endpoint is an HTTPS URL with host and explicit port.
+    /// Derive the SPIFFE-style Region Agent identity for a configured peer.
+    fn expected_cross_region_peer_identity(
+        region_id: &str,
+        realm: &str,
+        environment: &str,
+    ) -> String {
+        format!(
+            "spiffe://oraclecorp.com/oci/{realm}/{environment}/region/{region_id}/service/smg-region-agent"
+        )
+    }
+
+    /// Validate that a peer endpoint is an HTTPS Region Agent base URL.
     fn validate_cross_region_peer_url(field: &str, value: &str) -> ConfigResult<()> {
         let parsed = ::url::Url::parse(value).map_err(|e| ConfigError::InvalidValue {
             field: field.to_string(),
@@ -383,11 +408,20 @@ impl ConfigValidator {
             });
         }
 
-        if parsed.host_str().is_none() {
+        let Some(host) = parsed.host_str() else {
             return Err(ConfigError::InvalidValue {
                 field: field.to_string(),
                 value: value.to_string(),
                 reason: "URL must have a valid host".to_string(),
+            });
+        };
+
+        if Self::is_cross_region_worker_like_host(host) {
+            return Err(ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: value.to_string(),
+                reason: "URL must identify a Region Agent endpoint, not a worker endpoint"
+                    .to_string(),
             });
         }
 
@@ -399,7 +433,26 @@ impl ConfigValidator {
             });
         }
 
+        if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(ConfigError::InvalidValue {
+                field: field.to_string(),
+                value: value.to_string(),
+                reason: "URL must be a Region Agent endpoint base URL".to_string(),
+            });
+        }
+
         Ok(())
+    }
+
+    /// Return true when a peer URL hostname appears to identify a model worker.
+    fn is_cross_region_worker_like_host(host: &str) -> bool {
+        let service_label = host.split('.').next().unwrap_or(host);
+        service_label
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|label| {
+                let label = label.to_ascii_lowercase();
+                label.starts_with("worker") || label.ends_with("worker")
+            })
     }
 
     /// Return a configured string value or a field-specific error when it is missing/blank.
@@ -1092,6 +1145,7 @@ mod tests {
                 sync_url: Some("https://smg-region-agent.us-chicago-1.internal:9443".to_string()),
                 realm: Some("oc1".to_string()),
                 environment: Some("prod".to_string()),
+                ..CrossRegionPeerConfig::default()
             }],
             mtls: CrossRegionMtlsConfig {
                 ca_cert_path: Some("/etc/smg/certs/ca.crt".to_string()),
@@ -1184,6 +1238,50 @@ mod tests {
 
         let error = ConfigValidator::validate(&config).expect_err("non-https peer URL");
         assert!(format!("{error}").contains("https://"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_rejects_peer_url_with_path() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].request_url =
+            Some("https://smg-region-agent.us-chicago-1.internal:18443/v1/chat".to_string());
+
+        let error = ConfigValidator::validate(&config).expect_err("peer URL path should fail");
+        assert!(format!("{error}").contains("endpoint base URL"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_rejects_worker_peer_url_host() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].request_url =
+            Some("https://remote-worker.us-chicago-1.internal:18443".to_string());
+
+        let error = ConfigValidator::validate(&config).expect_err("worker peer URL should fail");
+        assert!(format!("{error}").contains("not a worker endpoint"));
+    }
+
+    #[test]
+    fn test_validate_cross_region_accepts_worker_named_namespace() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].request_url =
+            Some("https://smg-region-agent.smg-worker.svc.cluster.local:18443".to_string());
+        config.cross_region.peers[0].sync_url =
+            Some("https://smg-region-agent.smg-worker.svc.cluster.local:19443".to_string());
+
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cross_region_rejects_mismatched_peer_mtls_identity() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.peers[0].expected_mtls_identity = Some(
+            "spiffe://oraclecorp.com/oci/oc1/prod/region/us-ashburn-1/service/smg-region-agent"
+                .to_string(),
+        );
+
+        let error =
+            ConfigValidator::validate(&config).expect_err("mismatched peer identity should fail");
+        assert!(format!("{error}").contains("expected_mtls_identity"));
     }
 
     #[test]

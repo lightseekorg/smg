@@ -236,9 +236,9 @@ impl CrossRegionError {
             Self::InvalidHeader { .. } | Self::InvalidProfile { .. } => StatusCode::BAD_REQUEST,
             Self::InvalidConfig { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::PeerNotFound { .. } | Self::InvalidPeer { .. } => StatusCode::BAD_GATEWAY,
-            Self::InvalidForwardingTarget { .. } | Self::NoCandidate { .. } => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::PeerDisabled { .. }
+            | Self::InvalidForwardingTarget { .. }
+            | Self::NoCandidate { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }

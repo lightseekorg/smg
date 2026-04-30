@@ -161,6 +161,7 @@ mod tests {
                 sync_url: Some("https://smg-region-agent.us-chicago-1.internal:9443".to_string()),
                 realm: Some("oc1".to_string()),
                 environment: Some("prod".to_string()),
+                ..CrossRegionPeerConfig::default()
             }],
             mtls: CrossRegionMtlsConfig {
                 ca_cert_path: Some("/etc/smg/certs/ca.crt".to_string()),
@@ -188,6 +189,20 @@ mod tests {
 
         assert_eq!(context.config.region_id, "us-ashburn-1");
         assert!(context.peers.contains_region("us-chicago-1"));
+        assert!(context.peers.is_enabled("us-chicago-1"));
+    }
+
+    #[test]
+    fn disabled_peer_builds_but_is_not_routing_eligible() {
+        let mut config = valid_config();
+        config.peers[0].enabled = false;
+        let context = CrossRegionContext::from_router_config(&config)
+            .expect("enabled config should convert")
+            .expect("context should be present");
+
+        assert!(context.peers.contains_region("us-chicago-1"));
+        assert!(!context.peers.is_enabled("us-chicago-1"));
+        assert!(context.peers.request_target("us-chicago-1").is_err());
     }
 
     #[test]

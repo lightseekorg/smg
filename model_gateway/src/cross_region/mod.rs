@@ -24,7 +24,7 @@ pub use config::{
     CrossRegionContext, CrossRegionMtlsRuntimeConfig, CrossRegionRuntimeConfig,
     RequestPlaneRuntimeConfig, SyncPlaneRuntimeConfig,
 };
-pub use forwarding::{CrossRegionForwarder, ForwardingRequest};
+pub use forwarding::{CrossRegionForwarder, ExistingSmgPath, ForwardingRequest, ForwardingTarget};
 pub use headers::{
     CrossRegionCommonHeaders, CrossRegionHeaders, RequestMode, SettledRequestContext,
     SettledRouteMetadata, UnresolvedRequestContext,
@@ -58,6 +58,9 @@ pub enum CrossRegionError {
 
     #[error("region peer '{region_id}' is not configured")]
     PeerNotFound { region_id: String },
+
+    #[error("region peer '{region_id}' is disabled")]
+    PeerDisabled { region_id: String },
 
     #[error("region peer '{region_id}' is invalid: {reason}")]
     InvalidPeer { region_id: String, reason: String },
