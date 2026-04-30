@@ -129,12 +129,19 @@ class FakeAsyncLLM:
     # tests that need dynamic yields (e.g. cancel mid-stream).
     generate_fn: Callable[[Any], Any] | None = None
 
+    # Default load-fixture: single DP rank, 1 running request, no waiting,
+    # 100 used pages out of (max_total_num_tokens / page_size). Tests can
+    # override ``load_outputs`` directly to assert proto-mapping semantics.
+    load_outputs: list[Any] = field(default_factory=list)
+    max_total_num_tokens: int = 8192
+
     server_args: Any = field(
         default_factory=lambda: SimpleNamespace(
             model_path="fake-model",
             tokenizer_path="fake-model",
             served_model_name="fake-model",
             preferred_sampling_params=None,
+            page_size=16,
         )
     )
     model_config: Any = field(
@@ -157,6 +164,11 @@ class FakeAsyncLLM:
     def abort_request(self, rid: str) -> None:
         self.aborted_rids.append(rid)
         self.rid_to_state.pop(rid, None)
+
+    async def get_load(self):
+        # Mirror SchedulerControlClient.get_load — returns the configured
+        # ``load_outputs`` so tests can drive proto-mapping assertions.
+        return list(self.load_outputs)
 
     async def generate_request(self, obj):
         # Record the request so tests can assert on what was forwarded.
@@ -803,12 +815,73 @@ class TestGetServerInfo:
 
 class TestGetLoads:
     @pytest.mark.asyncio
-    async def test_stub_returns_empty(
+    async def test_no_dp_ranks_returns_empty(
         self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
     ):
+        # Bridge returns an empty list (e.g. before scheduler boots) — proto
+        # comes back with 0 ranks but still validly populated for the router.
+        fake_engine.load_outputs = []
         resp = await servicer.GetLoads(tokenspeed_scheduler_pb2.GetLoadsRequest(), _make_context())
         assert resp.dp_rank_count == 0
         assert resp.version == "tokenspeed"
+        assert list(resp.loads) == []
+        assert resp.aggregate.total_running_reqs == 0
+        assert resp.aggregate.total_waiting_reqs == 0
+
+    @pytest.mark.asyncio
+    async def test_maps_load_output_fields(
+        self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer
+    ):
+        # 2 DP ranks. rank 0 has 3 reqs (2 running, 1 waiting) and 100 pages
+        # used; rank 1 has 1 reqs (1 running, 0 waiting) and 200 pages used.
+        # page_size=16 (from fake_engine.server_args), max_total_num_tokens=100000
+        # (from the servicer fixture's scheduler_info).
+        fake_engine.load_outputs = [
+            SimpleNamespace(dp_rank=0, num_reqs=3, num_waiting_reqs=1, num_pages=100),
+            SimpleNamespace(dp_rank=1, num_reqs=1, num_waiting_reqs=0, num_pages=200),
+        ]
+        resp = await servicer.GetLoads(tokenspeed_scheduler_pb2.GetLoadsRequest(), _make_context())
+        assert resp.dp_rank_count == 2
+        assert len(resp.loads) == 2
+        # rank 0
+        l0 = resp.loads[0]
+        assert l0.dp_rank == 0
+        assert l0.num_running_reqs == 2  # num_reqs - num_waiting_reqs
+        assert l0.num_waiting_reqs == 1
+        assert l0.num_total_reqs == 3
+        assert l0.num_used_tokens == 100 * 16  # pages * page_size
+        assert l0.max_total_num_tokens == 100000
+        assert l0.token_usage == pytest.approx(100 * 16 / 100000)
+        # rank 1
+        l1 = resp.loads[1]
+        assert l1.dp_rank == 1
+        assert l1.num_running_reqs == 1
+        assert l1.num_used_tokens == 200 * 16
+        # aggregate
+        assert resp.aggregate.total_running_reqs == 3
+        assert resp.aggregate.total_waiting_reqs == 1
+        assert resp.aggregate.total_reqs == 4
+        assert resp.aggregate.avg_token_usage == pytest.approx(
+            (100 * 16 / 100000 + 200 * 16 / 100000) / 2
+        )
+
+    @pytest.mark.asyncio
+    async def test_scheduler_timeout_aborts_with_deadline_exceeded(
+        self, fake_engine: FakeAsyncLLM, servicer: TokenSpeedSchedulerServicer, monkeypatch
+    ):
+        # If the scheduler subprocess never replies, the bridge call hangs.
+        # The servicer wraps it in ``asyncio.wait_for`` and aborts with
+        # DEADLINE_EXCEEDED rather than blocking the gRPC call indefinitely.
+        async def _hang():
+            await asyncio.sleep(60)
+            return []
+
+        fake_engine.get_load = _hang  # type: ignore[method-assign]
+        monkeypatch.setattr(_servicer_module, "HEALTH_CHECK_TIMEOUT", 0.05)
+        ctx = _make_context()
+        with pytest.raises(_FakeAbortError) as exc:
+            await servicer.GetLoads(tokenspeed_scheduler_pb2.GetLoadsRequest(), ctx)
+        assert exc.value.code == grpc.StatusCode.DEADLINE_EXCEEDED
 
 
 # ---------------------------------------------------------------------------

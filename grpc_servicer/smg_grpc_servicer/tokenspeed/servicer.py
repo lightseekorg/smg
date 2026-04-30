@@ -439,21 +439,89 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         )
 
     # ------------------------------------------------------------------
-    # GetLoads (unary) — minimal parity stub
+    # GetLoads (unary) — bridges to TokenSpeed's scheduler-side load metrics
     # ------------------------------------------------------------------
 
     async def GetLoads(
         self,
         _request: tokenspeed_scheduler_pb2.GetLoadsRequest,
-        _context: grpc.aio.ServicerContext,
+        context: grpc.aio.ServicerContext,
     ) -> tokenspeed_scheduler_pb2.GetLoadsResponse:
-        # TokenSpeed doesn't yet expose a get-loads communicator; return an
-        # empty response that still round-trips through the SGLang client's
-        # load-metrics aggregator without breaking downstream label extraction.
+        """Return per-DP-rank scheduler load by RPC-ing the scheduler subprocess.
+
+        ``AsyncLLM`` inherits ``SchedulerControlClient.get_load`` which sends
+        ``GetLoadReqInput`` over the engine_core_client zmq channel and awaits
+        a ``List[GetLoadReqOutput]`` reply (one per DP rank). Each reply carries
+        the live counts the scheduler computes in ``event_loop._get_load``:
+        ``num_reqs`` (running + waiting), ``num_waiting_reqs``, and
+        ``num_pages`` (KV pages currently in use). We map those to the
+        ``SchedulerLoad`` proto plus a coarse aggregate so the router-side
+        consumer matches what it gets from SGLang.
+        """
+        try:
+            load_outputs = await asyncio.wait_for(
+                self.async_llm.get_load(), timeout=HEALTH_CHECK_TIMEOUT
+            )
+        except TimeoutError:
+            await context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"tokenspeed scheduler did not respond to GetLoad within {HEALTH_CHECK_TIMEOUT}s",
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.exception("GetLoads failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+            return
+
+        page_size = int(getattr(self.async_llm.server_args, "page_size", 1) or 1)
+        # ``max_total_num_tokens`` lives on the scheduler-side ``scheduler_info``
+        # dict that ``launch_engine`` plumbed through at boot — not directly on
+        # AsyncLLM. Fall back to ``server_args.max_total_num_tokens`` (used in
+        # tests' SimpleNamespace stubs).
+        max_total_num_tokens = int(
+            (self.scheduler_info.get("max_total_num_tokens") if self.scheduler_info else None)
+            or getattr(self.async_llm.server_args, "max_total_num_tokens", 0)
+            or 0
+        )
+
+        scheduler_loads: list[tokenspeed_scheduler_pb2.SchedulerLoad] = []
+        total_running = 0
+        total_waiting = 0
+        token_usages: list[float] = []
+        for lo in load_outputs:
+            num_running = max(0, int(lo.num_reqs) - int(lo.num_waiting_reqs))
+            num_used_tokens = int(lo.num_pages) * page_size
+            token_usage = (
+                num_used_tokens / max_total_num_tokens if max_total_num_tokens > 0 else 0.0
+            )
+            scheduler_loads.append(
+                tokenspeed_scheduler_pb2.SchedulerLoad(
+                    dp_rank=int(lo.dp_rank),
+                    num_running_reqs=num_running,
+                    num_waiting_reqs=int(lo.num_waiting_reqs),
+                    num_total_reqs=int(lo.num_reqs),
+                    num_used_tokens=num_used_tokens,
+                    max_total_num_tokens=max_total_num_tokens,
+                    token_usage=token_usage,
+                )
+            )
+            total_running += num_running
+            total_waiting += int(lo.num_waiting_reqs)
+            token_usages.append(token_usage)
+
+        aggregate = tokenspeed_scheduler_pb2.AggregateMetrics(
+            total_running_reqs=total_running,
+            total_waiting_reqs=total_waiting,
+            total_reqs=total_running + total_waiting,
+            avg_token_usage=(sum(token_usages) / len(token_usages)) if token_usages else 0.0,
+        )
+
         return tokenspeed_scheduler_pb2.GetLoadsResponse(
             timestamp=datetime.now(timezone.utc).isoformat(),
             version="tokenspeed",
-            dp_rank_count=0,
+            dp_rank_count=len(scheduler_loads),
+            loads=scheduler_loads,
+            aggregate=aggregate,
         )
 
     # ------------------------------------------------------------------
