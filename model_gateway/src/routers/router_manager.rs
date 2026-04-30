@@ -48,11 +48,8 @@ use crate::{
     config::RoutingMode,
     middleware::TenantRequestMeta,
     routers::{
-        common::{
-            header_utils::{
-                apply_provider_headers, extract_model_provider, extract_provider_endpoint,
-            },
-            skill_resolution::{resolve_messages_skill_manifest, resolve_responses_skill_manifest},
+        common::header_utils::{
+            apply_provider_headers, extract_model_provider, extract_provider_endpoint,
         },
         error as route_error,
         factory::{router_ids, RouterId},
