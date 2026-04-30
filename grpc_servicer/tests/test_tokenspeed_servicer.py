@@ -269,12 +269,16 @@ class TestFinishReasonToDict:
         d = {"type": "stop", "matched": "foo"}
         assert _finish_reason_to_dict(d) is d
 
-    def test_unknown_falls_back_to_stop(self):
-        # Any non-None non-dict non-BaseFinishReason value is coerced to a
-        # "stop" dict with its str() as the ``matched`` field — defensive
-        # behaviour so an unknown finish type never tears the stream down.
-        assert _finish_reason_to_dict("weird") == {"type": "stop", "matched": "weird"}
-        assert _finish_reason_to_dict(42) == {"type": "stop", "matched": "42"}
+    def test_unknown_raises_typeerror(self):
+        # Unknown shapes raise TypeError rather than coercing to a fake
+        # ``stop`` dict: silently flipping length/abort to stop and leaking
+        # repr() into the user-facing matched_stop_str field would corrupt
+        # the OpenAI ``finish_reason`` semantics. The Generate handler's
+        # ``except Exception`` turns the TypeError into INTERNAL.
+        with pytest.raises(TypeError, match="Unknown finish_reason shape"):
+            _finish_reason_to_dict("weird")
+        with pytest.raises(TypeError, match="Unknown finish_reason shape"):
+            _finish_reason_to_dict(42)
 
 
 class TestAbortStatusCode:
