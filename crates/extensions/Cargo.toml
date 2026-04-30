@@ -5,10 +5,16 @@ edition = "2021"
 description = "Generic extension trait and registry for SMG request lifecycle hooks"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["extensions", "interceptor", "gateway"]
+categories = ["web-programming", "network-programming"]
 
 [lib]
 name = "smg_extensions"
-path = "src/lib.rs"
 
 [dependencies]
 async-trait.workspace = true
