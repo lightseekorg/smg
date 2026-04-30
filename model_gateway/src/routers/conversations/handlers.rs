@@ -3,7 +3,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use axum::{
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -312,16 +312,28 @@ pub async fn create_conversation_items(
         conv_id,
         body,
         MemoryExecutionContext::default(),
+        smg_extensions::InterceptorRegistry::default(),
+        format!("req_{}", uuid::Uuid::now_v7()),
+        None,
+        HeaderMap::new(),
     )
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "items-only persist hook firing requires per-request metadata alongside storage handles"
+)]
 pub async fn create_conversation_items_with_headers(
     conversation_storage: &Arc<dyn ConversationStorage>,
     item_storage: &Arc<dyn ConversationItemStorage>,
     conv_id: &str,
     body: Value,
     memory_execution_context: MemoryExecutionContext,
+    interceptors: smg_extensions::InterceptorRegistry,
+    request_id: String,
+    tenant_id: Option<String>,
+    headers: HeaderMap,
 ) -> Response {
     let conversation_id = ConversationId::from(conv_id);
 
@@ -373,6 +385,42 @@ pub async fn create_conversation_items_with_headers(
     // Batch-link all items in a single operation
     if let Err(e) = item_storage.link_items(&conversation_id, &link_pairs).await {
         return internal_error(format!("Failed to link items to conversation: {e}"));
+    }
+
+    if !interceptors.is_empty() {
+        use smg_extensions::{AfterPersistCtx, RequestMetadata};
+
+        use crate::routers::common::turn_info::compute_turn_info;
+
+        let conv_id_ref = Some(&conversation_id);
+        let turn_info = compute_turn_info(item_storage.as_ref(), conv_id_ref, None).await;
+
+        let persisted_ids: Vec<ConversationItemId> =
+            link_pairs.iter().map(|(id, _)| id.clone()).collect();
+
+        let metadata = RequestMetadata::build_from(
+            request_id,
+            None,
+            tenant_id,
+            smg_data_connector::current_request_context(),
+        );
+
+        // The items-only path has no associated ResponsesRequest;
+        // construct a default placeholder so AfterPersistCtx satisfies its type.
+        let placeholder_request = openai_protocol::responses::ResponsesRequest::default();
+
+        let after_ctx = AfterPersistCtx::new(
+            &headers,
+            &placeholder_request,
+            None,
+            None,
+            conv_id_ref,
+            turn_info,
+            &persisted_ids[..],
+            &metadata,
+        );
+
+        interceptors.run_after_persist(&after_ctx).await;
     }
 
     let mut response = json!({

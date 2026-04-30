@@ -555,10 +555,14 @@ async fn v1_conversations_create_items(
     State(state): State<Arc<AppState>>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
     Json(body): Json<Value>,
 ) -> Response {
     let memory_execution_context =
         middleware::build_memory_execution_context(&state.context.router_config, &headers);
+
+    let request_id = format!("req_{}", uuid::Uuid::now_v7());
+    let tenant_id = Some(tenant_meta.tenant_key().as_str().to_string());
 
     conversations::create_conversation_items_with_headers(
         &state.context.conversation_storage,
@@ -566,6 +570,10 @@ async fn v1_conversations_create_items(
         &conversation_id,
         body,
         memory_execution_context,
+        state.context.interceptors.clone(),
+        request_id,
+        tenant_id,
+        headers,
     )
     .await
 }
