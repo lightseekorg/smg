@@ -163,6 +163,7 @@ def _wait_and_warmup(
 
     # TokenSpeed serves generative LLMs only (the proto has no Embed RPC), so
     # the warmup is always a 1-token generate.
+    warmup_ok = False
     try:
         warmup = tokenspeed_scheduler_pb2.GenerateRequest(
             request_id=f"WARMUP_{time.time()}",
@@ -186,10 +187,23 @@ def _wait_and_warmup(
             )
         else:
             logger.info("Warmup generation succeeded")
+            warmup_ok = True
     except Exception as e:  # noqa: BLE001
         logger.warning("TokenSpeed warmup failed: %s", e)
     finally:
         channel.close()
 
-    health_servicer.set_serving()
-    logger.info("TokenSpeed gRPC server is ready to serve")
+    # Only flip readiness to SERVING when warmup actually produced a
+    # complete frame. Reporting SERVING after a failed warmup would route
+    # production traffic to a worker whose model path is broken; staying
+    # NOT_SERVING lets the K8s readiness probe keep this pod out of
+    # rotation until the underlying issue is fixed (or the pod restarts).
+    if warmup_ok:
+        health_servicer.set_serving()
+        logger.info("TokenSpeed gRPC server is ready to serve")
+    else:
+        logger.error(
+            "TokenSpeed gRPC warmup did not produce a complete frame; "
+            "health stays NOT_SERVING. K8s readiness will keep this "
+            "worker out of rotation until manually restarted."
+        )
