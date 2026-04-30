@@ -137,6 +137,52 @@ pub(in crate::routers::openai) async fn route_responses(
         items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
     }
 
+    let interceptors = deps.responses_components.interceptors.clone();
+    if !interceptors.is_empty() {
+        use smg_extensions::{BeforeModelCtx, RequestMetadata};
+
+        use crate::routers::common::turn_info::compute_turn_info;
+
+        let conv_id_opt: Option<smg_data_connector::ConversationId> = body
+            .conversation
+            .as_ref()
+            .filter(|c| !c.is_empty())
+            .map(|c| smg_data_connector::ConversationId::from(c.as_id()));
+
+        let item_storage = deps.responses_components.conversation_item_storage.clone();
+        let incoming_input_value = to_value(&body.input).ok();
+        let turn_info = compute_turn_info(
+            item_storage.as_ref(),
+            conv_id_opt.as_ref(),
+            incoming_input_value.as_ref(),
+        )
+        .await;
+
+        let request_id = body
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+        let metadata = RequestMetadata::build_from(
+            request_id,
+            body.safety_identifier.clone(),
+            Some(tenant_meta.tenant_key().as_str().to_string()),
+            smg_data_connector::current_request_context(),
+        );
+
+        let empty_headers = HeaderMap::new();
+        let header_ref = headers.unwrap_or(&empty_headers);
+
+        let mut before_ctx = BeforeModelCtx::new(
+            header_ref,
+            &mut request_body,
+            conv_id_opt.as_ref(),
+            item_storage,
+            turn_info,
+            &metadata,
+        );
+        interceptors.run_before_model(&mut before_ctx).await;
+    }
+
     let mut payload = match to_value(&request_body) {
         Ok(v) => v,
         Err(e) => {
