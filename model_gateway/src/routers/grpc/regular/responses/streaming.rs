@@ -50,7 +50,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -90,6 +90,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             params.headers,
             params.model_id,
             ctx.components.clone(),
+            Some(params.tenant_request_meta),
         )
         .await;
 
@@ -575,6 +576,7 @@ async fn execute_tool_loop_streaming_internal(
                 params.headers.clone(),
                 params.model_id.clone(),
                 ctx.components.clone(),
+                Some(params.tenant_request_meta.clone()),
             )
             .await;
 
@@ -703,9 +705,20 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.name,
                     tool_call.arguments
                 );
-                // Parse arguments to Value
-                let arguments: Value =
-                    serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
+                // Parse arguments to Value, coercing scalar/array/null payloads
+                // to an empty object so hosted-tool override merge can actually
+                // apply. `apply_hosted_tool_overrides` is a no-op on non-objects;
+                // silently dropping caller-declared config would be surprising.
+                let mut arguments = match serde_json::from_str::<Value>(&tool_call.arguments) {
+                    Ok(Value::Object(map)) => Value::Object(map),
+                    _ => json!({}),
+                };
+                prepare_hosted_dispatch_args(
+                    &mut arguments,
+                    &response_format,
+                    original_request.tools.as_deref().unwrap_or(&[]),
+                    original_request.user.as_deref(),
+                );
 
                 // Execute the single tool via the normalized MCP execution API.
                 // This avoids custom serialization and manual re-transformation in streaming paths.

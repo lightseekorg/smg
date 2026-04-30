@@ -5,15 +5,44 @@ use std::{
     sync::Arc,
 };
 
-use openai_protocol::responses::{ResponseTool, ResponsesRequest};
+use openai_protocol::responses::{McpAllowedTools, ResponseTool, ResponsesRequest};
+use serde_json::{json, Value};
 use smg_mcp::{
-    BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
-    ResponseFormat,
+    apply_hosted_tool_overrides, extract_hosted_tool_overrides, BuiltinToolType, McpOrchestrator,
+    McpServerBinding, McpServerConfig, McpTransport, ResponseFormat,
 };
 use tracing::{debug, warn};
 
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
+
+/// Project the T11 `McpAllowedTools` union into the flat name list consumed by
+/// the router-side `McpServerInput` and `McpServerBinding` allowlist paths.
+///
+/// Mapping (documented on the calling sites):
+///   * `None` → `None` (no constraint; all tools exposed)
+///   * `Some(List(names))` → `Some(names)`
+///   * `Some(Filter { tool_names: Some(v), read_only: None })` → `Some(v)`
+///   * `Some(Filter { read_only: Some(_), .. })` → `Some(vec![])` —
+///     fail-closed whenever the caller specified a `read_only` restriction,
+///     regardless of `tool_names`. smg has no `readOnlyHint`-based filter
+///     implementation yet, so honoring only the `tool_names` half would
+///     silently broaden exposure past caller intent (e.g. `{read_only: true,
+///     tool_names: ["mutating_tool"]}` must NOT expose `mutating_tool`).
+///     Narrow to nothing so the downstream retain path exposes none.
+///   * `Some(Filter { tool_names: None, read_only: None })` → `None`
+pub(crate) fn project_allowed_tools(value: Option<&McpAllowedTools>) -> Option<Vec<String>> {
+    value.and_then(|at| match at {
+        McpAllowedTools::List(names) => Some(names.clone()),
+        McpAllowedTools::Filter(filter) => match (&filter.tool_names, &filter.read_only) {
+            // Any `read_only` restriction fails closed: readOnlyHint-based
+            // filtering is unimplemented, so we cannot safely project a subset.
+            (_, Some(_)) => Some(Vec::new()),
+            (Some(names), None) => Some(names.clone()),
+            (None, None) => None,
+        },
+    })
+}
 
 /// Protocol-agnostic MCP server descriptor for connection setup.
 ///
@@ -158,6 +187,7 @@ pub fn collect_builtin_routing(
         let builtin_type = match tool {
             ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
             ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
+            ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
             _ => continue,
         };
 
@@ -198,6 +228,7 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .filter_map(|t| match t {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
+            ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
             _ => None,
         })
         .collect()
@@ -277,7 +308,11 @@ pub async fn ensure_request_mcp_client(
                 url: mcp.server_url.clone(),
                 authorization: mcp.authorization.clone(),
                 headers: mcp.headers.clone().unwrap_or_default(),
-                allowed_tools: mcp.allowed_tools.clone(),
+                // T11: project the `allowed_tools` union (List | Filter) into
+                // the flat name list `McpServerInput` still expects. See
+                // [`project_allowed_tools`] for the mapping table and the
+                // rationale for the `read_only`-only fail-closed case.
+                allowed_tools: project_allowed_tools(mcp.allowed_tools.as_ref()),
             }),
             _ => None,
         })
@@ -288,6 +323,89 @@ pub async fn ensure_request_mcp_client(
     ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
 }
 
+/// Forward the caller's `user` identifier into hosted-tool dispatch arguments.
+///
+/// OpenAI's Responses API takes a top-level `user` field for end-user
+/// attribution. We mirror that into the MCP dispatch payload for hosted
+/// tools (image_generation, web_search_preview, web_search, code_interpreter,
+/// file_search) so a downstream MCP server can attribute usage and enforce
+/// per-user quotas.
+///
+/// Scope is hosted-tools only — `ResponseFormat::Passthrough` (plain MCP
+/// function tools) is a no-op because plain tool schemas are caller-defined
+/// and may not expect a `user` key. Surprising those servers with an
+/// unsolicited field is worse than missing the feature.
+///
+/// Behavior:
+/// - No-op if `response_format` is `Passthrough` (non-hosted).
+/// - No-op if `user` is `None` or an empty string.
+/// - No-op if `arguments` is not a JSON object.
+/// - No-op if `arguments` already contains a `user` key — model-supplied
+///   values win over the request-level identifier.
+/// - Otherwise inserts `arguments["user"] = json!(user)`.
+pub(crate) fn inject_user_into_hosted_args(
+    arguments: &mut Value,
+    response_format: &ResponseFormat,
+    user: Option<&str>,
+) {
+    if response_format.to_builtin_tool_type().is_none() {
+        return;
+    }
+    let Some(user_value) = user.filter(|u| !u.is_empty()) else {
+        return;
+    };
+    let Value::Object(args_map) = arguments else {
+        return;
+    };
+    // Preserve a real model-supplied identifier, but treat an explicit
+    // null (or absent key) as "no value" — when the synthesized function
+    // tool exposes `user` as a parameter the model dutifully emits
+    // `{"user": null}` even though the caller provided no value, and that
+    // null should not block the request-level forwarding.
+    if let Some(existing) = args_map.get("user") {
+        if !existing.is_null() {
+            debug!(
+                "Hosted-tool dispatch args already include a non-null 'user'; \
+                 preserving model-supplied value over request-level identifier"
+            );
+            return;
+        }
+    }
+    args_map.insert("user".to_string(), json!(user_value));
+}
+
+/// Prepare an MCP dispatch payload for a hosted-tool call.
+///
+/// One call collapses the two per-dispatch mutations every router used to
+/// repeat:
+/// 1. Merge caller-declared hosted-tool overrides from `request_tools` into
+///    `arguments` (e.g. an `image_generation` request's `size`/`quality`
+///    pinning the model's tool-call args).
+/// 2. Forward the request-level `user` identifier into `arguments` for
+///    hosted tools so a downstream MCP server can attribute usage.
+///
+/// Both steps are no-ops when `response_format` is `Passthrough` (plain MCP
+/// function tools); they are also no-ops on individual missing inputs
+/// (no overrides, no `user`, non-object args, pre-existing `user`).
+///
+/// Routers should call this in place of the inline override + injection
+/// pair. Keeping it here (in `routers/common/mcp_utils.rs`) avoids leaking
+/// gateway-side concerns into `crates/mcp` while still giving every router
+/// a single chokepoint.
+pub(crate) fn prepare_hosted_dispatch_args(
+    arguments: &mut Value,
+    response_format: &ResponseFormat,
+    request_tools: &[ResponseTool],
+    request_user: Option<&str>,
+) {
+    if let Some(kind) = response_format.to_builtin_tool_type() {
+        if let Some(overrides) = extract_hosted_tool_overrides(request_tools, kind) {
+            apply_hosted_tool_overrides(arguments, &overrides);
+        }
+    }
+    inject_user_into_hosted_args(arguments, response_format, request_user);
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
@@ -295,7 +413,8 @@ mod tests {
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, McpTool, ResponseTool, WebSearchPreviewTool,
+            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseTool,
+            WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -397,6 +516,8 @@ mod tests {
             server_description: None,
             require_approval: None,
             allowed_tools: None,
+            connector_id: None,
+            defer_loading: None,
         })];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
@@ -525,6 +646,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_collect_builtin_routing_image_generation() {
+        // Image generation is wired through the same hosted-tool MCP plumbing
+        // as web_search / code_interpreter / file_search. This test proves
+        // BuiltinToolType::ImageGeneration → ResponseFormat::ImageGenerationCall
+        // so per-router wiring can rely on the infrastructure.
+        let mut image_gen_tools = HashMap::new();
+        image_gen_tools.insert(
+            "generate_image".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::ImageGenerationCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "image-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9997/image".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(image_gen_tools),
+                builtin_type: Some(BuiltinToolType::ImageGeneration),
+                builtin_tool_name: Some("generate_image".to_string()),
+                internal: false,
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+
+        let tools = vec![ResponseTool::ImageGeneration(ImageGenerationTool::default())];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::ImageGeneration);
+        assert_eq!(routing[0].server_name, "image-server");
+        assert_eq!(routing[0].tool_name, "generate_image");
+        assert_eq!(
+            routing[0].response_format,
+            ResponseFormat::ImageGenerationCall
+        );
+    }
+
     // =========================================================================
     // ensure_request_mcp_client tests
     // =========================================================================
@@ -614,5 +788,161 @@ mod tests {
         let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].label, "search-server");
+    }
+
+    // ---- T11 projection ---------------------------------------------------
+
+    use openai_protocol::responses::McpToolFilter;
+
+    #[test]
+    fn test_project_allowed_tools_none() {
+        assert_eq!(project_allowed_tools(None), None);
+    }
+
+    #[test]
+    fn test_project_allowed_tools_list_variant() {
+        let value = McpAllowedTools::List(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            project_allowed_tools(Some(&value)),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_project_allowed_tools_filter_with_tool_names() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: None,
+            tool_names: Some(vec!["x".to_string()]),
+        });
+        assert_eq!(
+            project_allowed_tools(Some(&value)),
+            Some(vec!["x".to_string()])
+        );
+    }
+
+    /// `Filter { read_only: Some(true) }` with no `tool_names` must project
+    /// to `Some(vec![])` (fail-closed) so downstream does not expose the full
+    /// tool surface when the caller explicitly asked to restrict. See
+    /// [`project_allowed_tools`] rationale.
+    #[test]
+    fn test_project_allowed_tools_filter_read_only_only_is_fail_closed() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: Some(true),
+            tool_names: None,
+        });
+        assert_eq!(project_allowed_tools(Some(&value)), Some(Vec::new()));
+    }
+
+    /// `Filter { read_only: None, tool_names: None }` — both sub-fields
+    /// absent — is indistinguishable from an absent allowlist and projects
+    /// to `None` so the downstream retain path treats it as unconstrained.
+    #[test]
+    fn test_project_allowed_tools_filter_empty_is_unconstrained() {
+        let value = McpAllowedTools::Filter(McpToolFilter::default());
+        assert_eq!(project_allowed_tools(Some(&value)), None);
+    }
+
+    /// `Filter { read_only: Some(_), tool_names: Some(_) }` — both set — must
+    /// still fail-closed. Any `read_only` restriction disables the normal
+    /// name-list projection because `readOnlyHint`-based filtering is
+    /// unimplemented; honoring only the `tool_names` half would broaden
+    /// exposure past caller intent (e.g. `tool_names: ["mutating_tool"]` with
+    /// `read_only: true` must not expose `mutating_tool`).
+    #[test]
+    fn test_project_allowed_tools_filter_read_only_plus_names_is_fail_closed() {
+        let value = McpAllowedTools::Filter(McpToolFilter {
+            read_only: Some(true),
+            tool_names: Some(vec!["mutating_tool".to_string()]),
+        });
+        assert_eq!(project_allowed_tools(Some(&value)), Some(Vec::new()));
+    }
+
+    /// When the synthesized function tool exposes `user` as a parameter,
+    /// the model emits `{"user": null}` even though no value is supplied.
+    /// That null must not block request-level forwarding — the helper
+    /// treats absent and null as equivalent for injection purposes.
+    #[test]
+    fn inject_user_hosted_format_overwrites_model_supplied_null() {
+        let mut args = json!({"prompt": "a cat", "user": null});
+        inject_user_into_hosted_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("user-123"),
+        );
+        assert_eq!(args.get("user"), Some(&json!("user-123")));
+    }
+
+    #[test]
+    fn inject_user_hosted_format_inserts_user_into_clean_args() {
+        let mut args = json!({"prompt": "a cat"});
+        inject_user_into_hosted_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("user-123"),
+        );
+        assert_eq!(args.get("user"), Some(&json!("user-123")));
+        assert_eq!(args.get("prompt"), Some(&json!("a cat")));
+    }
+
+    #[test]
+    fn inject_user_hosted_format_preserves_existing_user_key() {
+        // Model-supplied `user` wins over the request-level identifier; the
+        // helper must not clobber it.
+        let mut args = json!({"prompt": "a cat", "user": "model-supplied"});
+        inject_user_into_hosted_args(
+            &mut args,
+            &ResponseFormat::ImageGenerationCall,
+            Some("request-level"),
+        );
+        assert_eq!(args.get("user"), Some(&json!("model-supplied")));
+    }
+
+    #[test]
+    fn inject_user_passthrough_format_is_noop() {
+        // Plain MCP function tools have caller-defined schemas; injecting
+        // `user` could surprise tools that don't expect that key.
+        let mut args = json!({"q": "weather"});
+        inject_user_into_hosted_args(&mut args, &ResponseFormat::Passthrough, Some("user-123"));
+        assert!(
+            !args.as_object().unwrap().contains_key("user"),
+            "passthrough format must not receive an injected user key"
+        );
+    }
+
+    #[test]
+    fn inject_user_empty_or_missing_user_is_noop() {
+        let mut args_none = json!({"prompt": "x"});
+        inject_user_into_hosted_args(&mut args_none, &ResponseFormat::WebSearchCall, None);
+        assert!(!args_none.as_object().unwrap().contains_key("user"));
+
+        let mut args_empty = json!({"prompt": "x"});
+        inject_user_into_hosted_args(&mut args_empty, &ResponseFormat::WebSearchCall, Some(""));
+        assert!(!args_empty.as_object().unwrap().contains_key("user"));
+    }
+
+    #[test]
+    fn inject_user_non_object_args_is_noop() {
+        let mut args = json!("not-an-object");
+        inject_user_into_hosted_args(&mut args, &ResponseFormat::FileSearchCall, Some("u1"));
+        assert_eq!(args, json!("not-an-object"));
+    }
+
+    #[test]
+    fn inject_user_covers_every_hosted_format() {
+        // All four hosted formats should accept the injection identically.
+        for format in [
+            ResponseFormat::ImageGenerationCall,
+            ResponseFormat::WebSearchCall,
+            ResponseFormat::CodeInterpreterCall,
+            ResponseFormat::FileSearchCall,
+        ] {
+            let mut args = json!({});
+            inject_user_into_hosted_args(&mut args, &format, Some("user-xyz"));
+            assert_eq!(
+                args.get("user"),
+                Some(&json!("user-xyz")),
+                "expected user injection for format {format:?}"
+            );
+        }
     }
 }

@@ -18,6 +18,7 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
+    middleware::TenantRequestMeta,
     routers::{
         common::{
             header_utils, mcp_utils,
@@ -90,6 +91,7 @@ impl RouterTrait for AnthropicRouter {
     async fn route_messages(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
@@ -165,6 +167,7 @@ impl RouterTrait for AnthropicRouter {
             request,
             headers: headers_owned,
             model_id: model_id.to_string(),
+            tenant_request_meta: tenant_meta.clone(),
             mcp_servers,
             worker: selected_worker,
         };

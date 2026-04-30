@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     body::Body,
     extract::Request,
@@ -10,6 +12,51 @@ use tracing::debug;
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
 static HEADER_MCP: HeaderName = HeaderName::from_static("x-smg-mcp");
+
+/// Parsed and normalized memory-related request headers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryHeaderView {
+    /// Normalized LTM policy value consumed by memory execution context.
+    pub policy: Option<String>,
+    pub subject_id: Option<String>,
+    pub embedding_model: Option<String>,
+    pub extraction_model: Option<String>,
+}
+
+impl MemoryHeaderView {
+    /// Extract memory request settings from `x-conversation-memory-config`.
+    ///
+    /// `long_term_memory.enabled` is the top-level gate:
+    /// - `false`: LTM policy/settings are treated as unset.
+    /// - `true`: policy is read from `long_term_memory.policy` and defaults to
+    ///   `none` when omitted to preserve privacy by default.
+    pub fn from_http_headers(headers: &HeaderMap) -> Self {
+        let Some(config) = extract_conversation_memory_config(Some(headers)) else {
+            return Self::default();
+        };
+        let ltm_enabled = config.long_term_memory.enabled;
+        let policy = if ltm_enabled {
+            config
+                .long_term_memory
+                .policy
+                .or_else(|| Some("none".to_string()))
+        } else {
+            None
+        };
+        Self {
+            policy,
+            subject_id: ltm_enabled
+                .then_some(config.long_term_memory.subject_id)
+                .flatten(),
+            embedding_model: ltm_enabled
+                .then_some(config.long_term_memory.embedding_model_id)
+                .flatten(),
+            extraction_model: ltm_enabled
+                .then_some(config.long_term_memory.extraction_model_id)
+                .flatten(),
+        }
+    }
+}
 
 fn extract_header_value<'a>(headers: Option<&'a HeaderMap>, name: &HeaderName) -> Option<&'a str> {
     headers
@@ -238,6 +285,36 @@ pub fn extract_auth_header(
         .or_else(|| worker_api_key.and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok()))
 }
 
+/// Extract the subset of request headers that SMG is allowed to preserve for
+/// internal execution paths such as MCP tool calls.
+pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    let Some(headers) = headers else {
+        return HashMap::new();
+    };
+
+    let mut forwarded = HashMap::new();
+
+    for (name, value) in headers {
+        if !should_forward_request_header(name.as_str()) {
+            continue;
+        }
+
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+
+        forwarded
+            .entry(name.as_str().to_string())
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.to_string());
+    }
+
+    forwarded
+}
+
 #[inline]
 pub fn should_forward_request_header(name: &str) -> bool {
     const REQUEST_ID_PREFIX: &str = "x-request-id-";
@@ -271,6 +348,7 @@ pub(crate) struct ConversationMemoryConfig {
 pub(crate) struct LongTermMemoryConfig {
     #[serde(default)]
     pub enabled: bool,
+    pub policy: Option<String>,
     pub subject_id: Option<String>,
     pub embedding_model_id: Option<String>,
     pub extraction_model_id: Option<String>,
@@ -302,6 +380,7 @@ pub(crate) fn extract_conversation_memory_config(
 
     match serde_json::from_str::<ConversationMemoryConfig>(raw) {
         Ok(mut cfg) => {
+            cfg.long_term_memory.policy = normalize_optional_string(cfg.long_term_memory.policy);
             cfg.long_term_memory.subject_id =
                 normalize_optional_string(cfg.long_term_memory.subject_id);
             cfg.long_term_memory.embedding_model_id =
@@ -405,6 +484,37 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_forwardable_request_headers_filters_to_allowlist() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc".parse().unwrap());
+        headers.insert("x-request-id", "req-123".parse().unwrap());
+        headers.insert("x-custom-header", "blocked".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        assert_eq!(
+            forwarded.get("authorization"),
+            Some(&"Bearer abc".to_string())
+        );
+        assert_eq!(forwarded.get("x-request-id"), Some(&"req-123".to_string()));
+        assert!(!forwarded.contains_key("x-custom-header"));
+    }
+
+    #[test]
+    fn test_extract_forwardable_request_headers_preserves_repeated_values() {
+        let mut headers = HeaderMap::new();
+        headers.append("tracestate", "vendor1=value1".parse().unwrap());
+        headers.append("tracestate", "vendor2=value2".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        assert_eq!(
+            forwarded.get("tracestate"),
+            Some(&"vendor1=value1, vendor2=value2".to_string())
+        );
+    }
+
+    #[test]
     fn test_extract_auth_header_falls_back_with_non_auth_headers_present() {
         let mut headers = HeaderMap::new();
         headers.insert("openai-project", "project-123".parse().unwrap());
@@ -425,11 +535,61 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_header_view_defaults_when_header_missing() {
+        let headers = HeaderMap::new();
+        let view = MemoryHeaderView::from_http_headers(&headers);
+
+        assert_eq!(view.policy, None);
+        assert_eq!(view.subject_id, None);
+        assert_eq!(view.embedding_model, None);
+        assert_eq!(view.extraction_model, None);
+    }
+
+    #[test]
+    fn test_memory_header_view_defaults_when_ltm_disabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-conversation-memory-config",
+            r#"{"long_term_memory":{"enabled":false,"policy":"store","subject_id":"s1","embedding_model_id":"e1","extraction_model_id":"x1"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-1"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let view = MemoryHeaderView::from_http_headers(&headers);
+
+        assert_eq!(view.policy, None);
+        assert_eq!(view.subject_id, None);
+        assert_eq!(view.embedding_model, None);
+        assert_eq!(view.extraction_model, None);
+    }
+
+    #[test]
+    fn test_memory_header_view_uses_ltm_fields_from_conversation_config() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-conversation-memory-config",
+            r#"{"long_term_memory":{"enabled":true,"policy":" store_only ","subject_id":" subject_1 ","embedding_model_id":" text-embedding-3-small ","extraction_model_id":" gpt-4.1-mini "}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let view = MemoryHeaderView::from_http_headers(&headers);
+
+        assert_eq!(view.policy.as_deref(), Some("store_only"));
+        assert_eq!(view.subject_id.as_deref(), Some("subject_1"));
+        assert_eq!(
+            view.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(view.extraction_model.as_deref(), Some("gpt-4.1-mini"));
+    }
+
+    #[test]
     fn extract_conversation_memory_config_with_valid_json_populates_all_fields() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-conversation-memory-config",
-            r#"{"long_term_memory":{"enabled":true,"subject_id":"sub-1","embedding_model_id":"emb-model","extraction_model_id":"ext-model"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-model"}}"#
+            r#"{"long_term_memory":{"enabled":true,"policy":"recall_only","subject_id":"sub-1","embedding_model_id":"emb-model","extraction_model_id":"ext-model"},"short_term_memory":{"enabled":true,"condenser_model_id":"cond-model"}}"#
                 .parse()
                 .unwrap(),
         );
@@ -438,6 +598,7 @@ mod tests {
             .expect("valid JSON must parse to Some");
 
         assert!(cfg.long_term_memory.enabled);
+        assert_eq!(cfg.long_term_memory.policy.as_deref(), Some("recall_only"));
         assert_eq!(cfg.long_term_memory.subject_id.as_deref(), Some("sub-1"));
         assert_eq!(
             cfg.long_term_memory.embedding_model_id.as_deref(),

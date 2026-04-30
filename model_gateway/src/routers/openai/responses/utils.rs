@@ -97,9 +97,14 @@ pub(super) fn patch_response_with_request_metadata(
         }
     }
 
-    // Attach conversation id for client response
-    if let Some(conv_id) = &original_body.conversation {
-        obj.insert("conversation".to_string(), json!({ "id": conv_id }));
+    // Attach conversation id for client response. Unwrap via `as_id()` so we
+    // emit a flat `{ "id": "conv_..." }` object regardless of whether the
+    // original request used the string or object variant of `ConversationRef`.
+    if let Some(conv_ref) = &original_body.conversation {
+        obj.insert(
+            "conversation".to_string(),
+            json!({ "id": conv_ref.as_id() }),
+        );
     }
 }
 
@@ -172,9 +177,14 @@ pub(super) fn rewrite_streaming_block(
         }
     }
 
-    // Attach conversation id
-    if let Some(conv_id) = &original_body.conversation {
-        response_obj.insert("conversation".to_string(), json!({ "id": conv_id }));
+    // Attach conversation id. Unwrap via `as_id()` so the SSE payload emits a
+    // flat `{ "id": "conv_..." }` even when the original request used the
+    // object form of `ConversationRef`.
+    if let Some(conv_ref) = &original_body.conversation {
+        response_obj.insert(
+            "conversation".to_string(),
+            json!({ "id": conv_ref.as_id() }),
+        );
         changed = true;
     }
 
@@ -209,8 +219,9 @@ pub(super) fn insert_optional_value<T: Serialize>(
 
 /// Convert a single ResponseTool back to its original JSON representation.
 ///
-/// Handles MCP tools (with server metadata), web_search_preview, and code_interpreter.
-/// Returns None for function tools and other types that don't need restoration.
+/// Handles MCP tools (with server metadata), web_search, web_search_preview,
+/// file_search, and code_interpreter. Returns None for function tools and other
+/// types that don't need restoration.
 pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
     match tool {
         ResponseTool::Mcp(mcp) => {
@@ -224,18 +235,36 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
                 mcp.server_description.as_ref(),
             );
             insert_optional_value(&mut m, "require_approval", mcp.require_approval.as_ref());
-            if let Some(allowed) = &mcp.allowed_tools {
-                m.insert(
-                    "allowed_tools".to_string(),
-                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                );
-            }
+            // T11: `allowed_tools` is now an untagged union (`List(Vec<String>)`
+            // or `Filter { read_only?, tool_names? }`). Delegate to serde so both
+            // wire shapes serialize identically to the input payload.
+            insert_optional_value(&mut m, "allowed_tools", mcp.allowed_tools.as_ref());
+            // T11: surface the new `connector_id` and `defer_loading` fields so
+            // the echoed tools[] payload round-trips losslessly for clients that
+            // rely on connector-based MCP setups (server_url XOR connector_id)
+            // or the deferred-loading hint.
+            insert_optional_value(&mut m, "connector_id", mcp.connector_id.as_ref());
+            insert_optional_value(&mut m, "defer_loading", mcp.defer_loading.as_ref());
             Some(Value::Object(m))
         }
         ResponseTool::WebSearchPreview(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::WebSearch(_) => serde_json::to_value(tool).ok(),
         ResponseTool::CodeInterpreter(_) => serde_json::to_value(tool).ok(),
         ResponseTool::FileSearch(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::ImageGeneration(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Computer | ResponseTool::ComputerUsePreview(_) => {
+            serde_json::to_value(tool).ok()
+        }
+        ResponseTool::Custom(_) => serde_json::to_value(tool).ok(),
+        // Namespace groups Function/Custom elements; serialize through serde so
+        // the full {type, name, description, tools} payload round-trips back
+        // to the client unchanged (T9).
+        ResponseTool::Namespace(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Shell(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::ApplyPatch => serde_json::to_value(tool).ok(),
         ResponseTool::Function(_) => None,
+        // T5 schema-only: forced-cascade arm, no behavior.
+        ResponseTool::LocalShell => serde_json::to_value(tool).ok(),
     }
 }
 
@@ -386,7 +415,7 @@ fn function_tool_name(tool: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use openai_protocol::{
-        common::Function,
+        common::{ConversationRef, Function},
         responses::{FunctionTool, McpTool, ResponseInput, ResponseTool, ResponsesRequest},
     };
     use serde_json::json;
@@ -395,7 +424,9 @@ mod tests {
         McpToolSession, McpTransport, Tool, ToolEntry,
     };
 
-    use super::restore_original_tools;
+    use super::{
+        patch_response_with_request_metadata, restore_original_tools, rewrite_streaming_block,
+    };
 
     fn test_tool(name: &str) -> Tool {
         let mut schema = serde_json::Map::new();
@@ -1072,7 +1103,11 @@ mod tests {
                     server_label: "internal-label".to_string(),
                     server_description: None,
                     require_approval: None,
-                    allowed_tools: Some(vec!["internal_search".to_string()]),
+                    allowed_tools: Some(openai_protocol::responses::McpAllowedTools::List(vec![
+                        "internal_search".to_string(),
+                    ])),
+                    connector_id: None,
+                    defer_loading: None,
                 }),
             ]),
             ..Default::default()
@@ -1228,6 +1263,83 @@ mod tests {
                     "content": [{"type": "output_text", "text": "visible"}]
                 }
             ])
+        );
+    }
+
+    /// Regression: when the client sends `conversation` as an object
+    /// (`ConversationRef::Object { id }`), the non-streaming response patcher
+    /// must emit a flat `{ "conversation": { "id": "conv_..." } }`. Before the
+    /// `as_id()` fix, the old code interpolated the whole `ConversationRef`,
+    /// serializing the `Object` variant as `{"id": "conv_..."}` and producing
+    /// a nested `{"conversation": {"id": {"id": "conv_..."}}}`.
+    #[test]
+    fn patch_response_flattens_object_conversation_ref() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            conversation: Some(ConversationRef::Object {
+                id: "conv_abc".to_string(),
+            }),
+            ..Default::default()
+        };
+        let mut response = json!({});
+        patch_response_with_request_metadata(&mut response, &original_body, None);
+
+        assert_eq!(
+            response.get("conversation"),
+            Some(&json!({ "id": "conv_abc" })),
+            "object-form conversation must emit flat {{id}}, not nested {{id:{{id}}}}"
+        );
+        // Negative guard: the inner value must be a string, not an object.
+        let inner = response
+            .get("conversation")
+            .and_then(|v| v.get("id"))
+            .expect("conversation.id present");
+        assert!(
+            inner.is_string(),
+            "conversation.id must be a plain string, got {inner:?}"
+        );
+    }
+
+    /// Regression: same invariant for the streaming SSE rewriter.
+    #[test]
+    fn rewrite_streaming_block_flattens_object_conversation_ref() {
+        let original_body = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hello".to_string()),
+            conversation: Some(ConversationRef::Object {
+                id: "conv_xyz".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        // Minimal response.created SSE block with a `response` object to patch.
+        let block = "event: response.created\n\
+                     data: {\"type\":\"response.created\",\"response\":{}}\n";
+
+        let rewritten =
+            rewrite_streaming_block(block, &original_body, None).expect("block rewritten");
+
+        // Extract the `data:` line payload and re-parse it.
+        let data_line = rewritten
+            .lines()
+            .find(|l| l.starts_with("data: "))
+            .expect("data line");
+        let payload: serde_json::Value =
+            serde_json::from_str(data_line.trim_start_matches("data: ")).expect("json");
+        let conv = payload
+            .get("response")
+            .and_then(|r| r.get("conversation"))
+            .expect("conversation attached");
+
+        assert_eq!(
+            conv,
+            &json!({ "id": "conv_xyz" }),
+            "streaming payload must flatten object-form conversation"
+        );
+        assert!(
+            conv.get("id").unwrap().is_string(),
+            "conversation.id must be a plain string, got {conv:?}"
         );
     }
 }

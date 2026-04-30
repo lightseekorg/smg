@@ -310,6 +310,18 @@ struct CliArgs {
     #[arg(long, num_args = 0.., help_heading = "Request Handling")]
     storage_context_headers: Vec<String>,
 
+    /// Trust an upstream-provided tenant header for canonical tenant resolution.
+    #[arg(long, default_value_t = false, help_heading = "Request Handling")]
+    trust_tenant_header: bool,
+
+    /// Header name to use when --trust-tenant-header is enabled.
+    #[arg(
+        long,
+        default_value = "x-smg-tenant-id",
+        help_heading = "Request Handling"
+    )]
+    tenant_header_name: String,
+
     /// Request timeout in seconds
     #[arg(long, default_value_t = 1800, help_heading = "Request Handling")]
     request_timeout_secs: u64,
@@ -1234,6 +1246,8 @@ impl CliArgs {
                 (!self.storage_context_headers.is_empty())
                     .then(|| Self::parse_selector(&self.storage_context_headers)),
             )
+            .trust_tenant_header(self.trust_tenant_header)
+            .tenant_header_name(&self.tenant_header_name)
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())

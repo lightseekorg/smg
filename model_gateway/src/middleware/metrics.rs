@@ -15,9 +15,12 @@ use std::{
 use axum::{extract::Request, response::Response};
 use tower::{Layer, Service};
 
-use crate::observability::{
-    inflight_tracker::InFlightRequestTracker,
-    metrics::{method_to_static_str, Metrics},
+use crate::{
+    observability::{
+        inflight_tracker::InFlightRequestTracker,
+        metrics::{method_to_static_str, Metrics},
+    },
+    routers::error::extract_error_code_from_response,
 };
 
 /// Tower Layer for HTTP metrics collection (SMG Layer 1 metrics)
@@ -86,6 +89,11 @@ where
             let response = result?;
 
             let duration = start.elapsed();
+            Metrics::record_http_response(
+                &path,
+                response.status().as_u16(),
+                extract_error_code_from_response(&response),
+            );
             Metrics::record_http_duration(method, &path, duration);
 
             Ok(response)

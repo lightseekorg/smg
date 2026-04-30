@@ -18,6 +18,13 @@ disallowed-methods = [
 # Cognitive complexity limit — keeps routing/scheduling logic reviewable
 cognitive-complexity-threshold = 25
 
+# Allow somewhat larger stack futures (default is 16384). Our builder chains
+# (AppContext::from_config et al.) naturally accumulate 17–19 KB of combined
+# state across their many `.await` points; forcing Box::pin on each would add
+# heap allocations to the cold startup path and obscure the builder shape.
+# Keep the ceiling low enough to still catch genuinely runaway futures.
+future-size-threshold = 20480
+
 # Type complexity — flag deeply nested generics common in async tower stacks
 type-complexity-threshold = 250
 

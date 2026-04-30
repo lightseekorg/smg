@@ -2,7 +2,8 @@
 
 use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
-    ResponseOutputItem, WebSearchAction, WebSearchCallStatus, WebSearchSource,
+    ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
+    WebSearchSource,
 };
 use tracing::warn;
 
@@ -53,6 +54,24 @@ pub fn extract_embedded_openai_responses(result: &serde_json::Value) -> Vec<serd
     openai_responses
 }
 
+/// Fields SMG pulls out of an MCP `image_generation` tool result before
+/// assembling the `image_generation_call` output item.
+///
+/// Using a named struct instead of a tuple keeps the extractor future-proof:
+/// adding another optional metadata field does not touch the extractor's
+/// signature or its call sites. All fields are `Option<String>` so they
+/// serialize as absent (not `null`) when the MCP server did not surface them.
+#[derive(Default)]
+struct ImageGenerationFields {
+    image_b64: Option<String>,
+    revised_prompt: Option<String>,
+    action: Option<String>,
+    background: Option<String>,
+    output_format: Option<String>,
+    quality: Option<String>,
+    size: Option<String>,
+}
+
 /// Transforms MCP CallToolResult to OpenAI Responses API output items.
 pub struct ResponseTransformer;
 
@@ -79,6 +98,9 @@ impl ResponseTransformer {
                 Self::to_code_interpreter_call(result, tool_call_id)
             }
             ResponseFormat::FileSearchCall => Self::to_file_search_call(result, tool_call_id),
+            ResponseFormat::ImageGenerationCall => {
+                Self::to_image_generation_call(result, tool_call_id)
+            }
         }
     }
 
@@ -179,6 +201,9 @@ impl ResponseTransformer {
                 queries,
                 sources,
             },
+            // Populated only when the caller asks for `web_search_call.results`
+            // via include[]; transformer leaves it unset so default omits the field.
+            results: None,
         }
     }
 
@@ -231,6 +256,146 @@ impl ResponseTransformer {
             },
             results: (!results.is_empty()).then_some(results),
         }
+    }
+
+    /// Transform MCP image generation results to OpenAI image_generation_call format.
+    ///
+    /// Extracts fields from the MCP `CallToolResult`:
+    /// - `result` / `image_base64` / `b64_json`: base64-encoded image bytes
+    /// - `revised_prompt`: optional rewritten prompt preserved for replay
+    /// - `action` / `background` / `output_format` / `quality` / `size`:
+    ///   OpenAI-side output metadata. Forwarded verbatim when the MCP server
+    ///   surfaces them so cloud passthrough does not drop them.
+    ///
+    /// Also probes embedded text blocks carrying `{"openai_response": {...}}`
+    /// payloads for the same fields, mirroring the pattern used by
+    /// `to_web_search_call`.
+    fn to_image_generation_call(
+        result: &serde_json::Value,
+        tool_call_id: &str,
+    ) -> ResponseOutputItem {
+        let fields = Self::extract_image_generation_fields(result);
+
+        ResponseOutputItem::ImageGenerationCall {
+            id: format!("ig_{tool_call_id}"),
+            action: fields.action,
+            background: fields.background,
+            output_format: fields.output_format,
+            quality: fields.quality,
+            // `result` is non-optional in the spec; fall back to an empty
+            // string when the MCP server returns no image data so the shape
+            // still matches `ResponseOutputItem::ImageGenerationCall`. Router
+            // wiring is responsible for surfacing an error status when
+            // `image_b64` is missing.
+            result: fields.image_b64.unwrap_or_default(),
+            revised_prompt: fields.revised_prompt,
+            size: fields.size,
+            status: ImageGenerationCallStatus::Completed,
+        }
+    }
+
+    /// Extract the image-generation fields SMG surfaces from an MCP result
+    /// payload. Returns a struct (not a tuple) so adding/removing fields
+    /// does not ripple through call sites.
+    fn extract_image_generation_fields(result: &serde_json::Value) -> ImageGenerationFields {
+        let mut fields = ImageGenerationFields::default();
+
+        // Merge helper: fills any still-unset output slot from an object.
+        // Using mutable accumulation (instead of early-returning on first
+        // match) prevents losing fields that an MCP server distributes
+        // across multiple text blocks — e.g. `revised_prompt` in one and
+        // `image_base64` in another. First occurrence wins for each slot.
+        let mut update_fields = |obj: &serde_json::Map<String, serde_json::Value>| {
+            if fields.image_b64.is_none() {
+                fields.image_b64 = obj
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| obj.get("image_base64").and_then(|v| v.as_str()))
+                    .or_else(|| obj.get("b64_json").and_then(|v| v.as_str()))
+                    .map(String::from);
+            }
+            if fields.revised_prompt.is_none() {
+                fields.revised_prompt = obj
+                    .get("revised_prompt")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            // Metadata passthrough: the five OpenAI-documented
+            // `image_generation_call` output-item metadata fields. Each is
+            // optional and independently extracted so an MCP server that
+            // surfaces only some of them (e.g. just `size`) is preserved.
+            if fields.action.is_none() {
+                fields.action = obj.get("action").and_then(|v| v.as_str()).map(String::from);
+            }
+            if fields.background.is_none() {
+                fields.background = obj
+                    .get("background")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            if fields.output_format.is_none() {
+                fields.output_format = obj
+                    .get("output_format")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            if fields.quality.is_none() {
+                fields.quality = obj
+                    .get("quality")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+            if fields.size.is_none() {
+                fields.size = obj.get("size").and_then(|v| v.as_str()).map(String::from);
+            }
+        };
+
+        // 1) Direct object fields: { result | image_base64 | b64_json, revised_prompt }
+        if let Some(obj) = result.as_object() {
+            update_fields(obj);
+        }
+
+        // 2) Array of MCP text blocks. An MCP server returning a JSON-shaped
+        //    tool result is serialized by `call_result_to_json` as an array
+        //    of text blocks (`[{"type":"text","text":"{...}"}, ...]`). Two
+        //    text-block shapes are accepted:
+        //
+        //    a) `{"openai_response": {"result": ..., "revised_prompt": ...}}`
+        //       (internal convention used by web_search_call and other
+        //       SMG-authored MCP servers).
+        //    b) Top-level fields: `{"result": ..., "revised_prompt": ...}`.
+        //       This is the natural shape produced by servers that return
+        //       a plain `dict` from their tool handler (e.g. FastMCP's
+        //       `@tool` decorator wrapping a `dict` return value — see
+        //       `e2e_test/infra/mock_mcp_server.py`). It also covers any
+        //       third-party MCP server that emits the OpenAI Images API
+        //       shape directly.
+        //
+        //    Both shapes are read so either style works interchangeably;
+        //    first occurrence wins for each slot (matches the accumulator
+        //    semantics in `update_fields`).
+        if let Some(text_blocks) = result.as_array() {
+            for item in text_blocks {
+                let Some(payload) = parse_text_block_payload(item) else {
+                    continue;
+                };
+                // First-occurrence-wins accumulation means the
+                // `openai_response`-wrapped shape keeps priority over the
+                // top-level shape when a single block carries both.
+                if let Some(inner) = payload
+                    .get("openai_response")
+                    .filter(|value| !value.is_null())
+                    .and_then(|value| value.as_object())
+                {
+                    update_fields(inner);
+                }
+                if let Some(obj) = payload.as_object() {
+                    update_fields(obj);
+                }
+            }
+        }
+
+        fields
     }
 
     /// Extract web sources from MCP result.
@@ -420,6 +585,27 @@ impl ResponseTransformer {
             score,
             attributes: None,
         })
+    }
+}
+
+/// Strip the base64 `result` payload from an `ImageGenerationCall` output
+/// item so stored multi-turn context does not balloon with large image bytes.
+///
+/// Per OpenAI spec the `result` field is required on the wire when the item
+/// is freshly emitted, but multi-turn replay/storage references the image by
+/// `id` only (see `ResponseInputOutputItem::ImageGenerationCall` where
+/// `result` is `Option<String>`). This helper clears the payload for storage
+/// while preserving `id`, `revised_prompt`, and `status`.
+///
+/// For any non-image item this is a no-op.
+pub fn compact_image_generation_output(item: &mut ResponseOutputItem) {
+    if let ResponseOutputItem::ImageGenerationCall { result, .. } = item {
+        // `result.clear()` zeros the length but keeps the heap buffer
+        // allocated — for base64 image bytes that can be several MB of
+        // wasted capacity per stored item, defeating the compaction goal.
+        // Replace with a fresh empty string to actually free the backing
+        // buffer.
+        *result = String::new();
     }
 }
 
@@ -692,9 +878,15 @@ mod tests {
         );
 
         match transformed {
-            ResponseOutputItem::WebSearchCall { id, status, action } => {
+            ResponseOutputItem::WebSearchCall {
+                id,
+                status,
+                action,
+                results,
+            } => {
                 assert_eq!(id, "ws_req-123");
                 assert_eq!(status, WebSearchCallStatus::Completed);
+                assert!(results.is_none());
                 match action {
                     WebSearchAction::Search {
                         query,
@@ -865,6 +1057,454 @@ mod tests {
                 assert_eq!(results[0].score, Some(0.95));
             }
             _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_direct_fields() {
+        let result = json!({
+            "result": "BASE64_IMAGE_BYTES",
+            "revised_prompt": "a serene mountain at sunrise"
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-1",
+            "server",
+            "image_generation",
+            r#"{"prompt":"mountain"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "ig_req-img-1");
+                assert_eq!(result, "BASE64_IMAGE_BYTES");
+                assert_eq!(
+                    revised_prompt,
+                    Some("a serene mountain at sunrise".to_string())
+                );
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_b64_json_alias() {
+        let result = json!({
+            "b64_json": "PNG_BASE64",
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-2",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "PNG_BASE64");
+                assert!(revised_prompt.is_none());
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_embedded_openai_response() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "result": "EMBEDDED_BYTES",
+                    "revised_prompt": "tweaked prompt"
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-3",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "EMBEDDED_BYTES");
+                assert_eq!(revised_prompt, Some("tweaked prompt".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_text_block_top_level_fields() {
+        // MCP servers authored against the FastMCP SDK (and any server that
+        // returns a plain `dict` from its tool handler) emit a single text
+        // block whose JSON body has `result` / `revised_prompt` at the TOP
+        // level — there is no `openai_response` wrapper. This shape is
+        // equally valid per the MCP spec. The extractor must read those
+        // top-level fields the same way it reads direct-object and
+        // embedded-openai_response payloads.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "result": "TOP_LEVEL_BYTES",
+                  "revised_prompt": "a happy cat",
+                  "status": "completed"
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-toplevel",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "TOP_LEVEL_BYTES");
+                assert_eq!(revised_prompt, Some("a happy cat".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_text_block_b64_json_alias() {
+        // Alias check: when a text-block payload uses `b64_json` (the OpenAI
+        // Images API field name) instead of `result`, the extractor must
+        // still pick it up.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{"b64_json": "ALIAS_BYTES"}"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-alias",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall { result, .. } => {
+                assert_eq!(result, "ALIAS_BYTES");
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_fields_distributed_across_blocks() {
+        // MCP servers may split revised_prompt and image bytes across
+        // different text blocks. The extractor must accumulate fields
+        // from all blocks rather than returning early on the first hit.
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "revised_prompt": "distributed prompt"
+                  }
+                }"#
+            },
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "result": "DISTRIBUTED_BYTES"
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-dist",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                result,
+                revised_prompt,
+                ..
+            } => {
+                assert_eq!(result, "DISTRIBUTED_BYTES");
+                assert_eq!(revised_prompt, Some("distributed prompt".to_string()));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_image_generation_transform_missing_image_data() {
+        // When the MCP server returns neither image nor prompt, the transformer
+        // still produces a well-formed ImageGenerationCall with an empty result.
+        // Per-router wiring owns surfacing an error status.
+        let result = json!({});
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-4",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "ig_req-img-4");
+                assert!(result.is_empty());
+                assert!(revised_prompt.is_none());
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    /// When the MCP tool result surfaces the OpenAI-side metadata
+    /// (`action`, `background`, `output_format`, `quality`, `size`) on the
+    /// direct object, the transformer forwards them verbatim onto the
+    /// `image_generation_call` output item so cloud-passthrough fidelity is
+    /// preserved and integration assertions can read them.
+    #[test]
+    fn test_image_generation_transform_forwards_metadata_direct_object() {
+        let result = json!({
+            "result": "BASE64_IMAGE_BYTES",
+            "revised_prompt": "a serene mountain at sunrise",
+            "action": "generate",
+            "background": "opaque",
+            "output_format": "png",
+            "quality": "high",
+            "size": "1024x1024",
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-meta",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                action,
+                background,
+                output_format,
+                quality,
+                result,
+                revised_prompt,
+                size,
+                status,
+            } => {
+                assert_eq!(id, "ig_req-img-meta");
+                assert_eq!(action.as_deref(), Some("generate"));
+                assert_eq!(background.as_deref(), Some("opaque"));
+                assert_eq!(output_format.as_deref(), Some("png"));
+                assert_eq!(quality.as_deref(), Some("high"));
+                assert_eq!(result, "BASE64_IMAGE_BYTES");
+                assert_eq!(
+                    revised_prompt.as_deref(),
+                    Some("a serene mountain at sunrise")
+                );
+                assert_eq!(size.as_deref(), Some("1024x1024"));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    /// Metadata forwarding also works from a top-level text-block payload
+    /// (the shape produced by FastMCP-style servers that return a plain
+    /// `dict`). The extractor must pick metadata out of that payload the
+    /// same way it already reads `result`/`revised_prompt`.
+    #[test]
+    fn test_image_generation_transform_forwards_metadata_from_text_block() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "result": "TOP_LEVEL_BYTES",
+                  "revised_prompt": "a happy cat",
+                  "action": "generate",
+                  "background": "transparent",
+                  "output_format": "webp",
+                  "quality": "medium",
+                  "size": "1536x1024",
+                  "status": "completed"
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-meta-textblock",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                action,
+                background,
+                output_format,
+                quality,
+                size,
+                ..
+            } => {
+                assert_eq!(action.as_deref(), Some("generate"));
+                assert_eq!(background.as_deref(), Some("transparent"));
+                assert_eq!(output_format.as_deref(), Some("webp"));
+                assert_eq!(quality.as_deref(), Some("medium"));
+                assert_eq!(size.as_deref(), Some("1536x1024"));
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    /// An MCP server that surfaces no metadata emits `None` for every
+    /// optional field — the transformer must not invent defaults. Guards
+    /// against an accidental `unwrap_or("")` that would pin an empty string
+    /// on the wire and round-trip as `""` instead of being skipped entirely.
+    #[test]
+    fn test_image_generation_transform_metadata_absent_when_not_surfaced() {
+        let result = json!({
+            "result": "BASE64_IMAGE_BYTES",
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::ImageGenerationCall,
+            "req-img-nometa",
+            "server",
+            "image_generation",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::ImageGenerationCall {
+                action,
+                background,
+                output_format,
+                quality,
+                size,
+                ..
+            } => {
+                assert!(action.is_none());
+                assert!(background.is_none());
+                assert!(output_format.is_none());
+                assert!(quality.is_none());
+                assert!(size.is_none());
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_compact_image_generation_output_strips_base64() {
+        let mut item = ResponseOutputItem::ImageGenerationCall {
+            id: "ig_abc".to_string(),
+            action: None,
+            background: None,
+            output_format: None,
+            quality: None,
+            result: "A_VERY_LONG_BASE64_STRING".to_string(),
+            revised_prompt: Some("mountain".to_string()),
+            size: None,
+            status: ImageGenerationCallStatus::Completed,
+        };
+
+        compact_image_generation_output(&mut item);
+
+        match item {
+            ResponseOutputItem::ImageGenerationCall {
+                id,
+                result,
+                revised_prompt,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "ig_abc");
+                assert!(result.is_empty());
+                assert_eq!(revised_prompt, Some("mountain".to_string()));
+                assert_eq!(status, ImageGenerationCallStatus::Completed);
+            }
+            _ => panic!("Expected ImageGenerationCall"),
+        }
+    }
+
+    #[test]
+    fn test_compact_image_generation_output_is_noop_for_other_items() {
+        let mut item = ResponseOutputItem::WebSearchCall {
+            id: "ws_xyz".to_string(),
+            status: WebSearchCallStatus::Completed,
+            action: WebSearchAction::Search {
+                query: Some("rust".to_string()),
+                queries: vec!["rust".to_string()],
+                sources: vec![],
+            },
+            results: None,
+        };
+
+        compact_image_generation_output(&mut item);
+
+        // WebSearchCall must be unchanged — no panic, id still present.
+        match item {
+            ResponseOutputItem::WebSearchCall { id, .. } => assert_eq!(id, "ws_xyz"),
+            _ => panic!("Expected WebSearchCall"),
         }
     }
 }

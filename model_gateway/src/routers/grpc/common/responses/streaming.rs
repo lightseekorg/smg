@@ -8,7 +8,8 @@ use openai_protocol::{
     common::{Usage, UsageInfo},
     event_types::{
         CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-        McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
+        ImageGenerationCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
+        WebSearchCallEvent,
     },
     responses::{
         ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -32,6 +33,7 @@ pub(crate) enum OutputItemType {
     WebSearchCall,
     CodeInterpreterCall,
     FileSearchCall,
+    ImageGenerationCall,
 }
 
 /// Status of an output item
@@ -116,38 +118,37 @@ impl ResponseStreamEventEmitter {
         self.original_request = Some(request);
     }
 
-    /// Update tool call output items with tool execution results
+    /// Update tool call output items with tool execution results.
     ///
-    /// After MCP tools are executed, this updates the stored output items
-    /// to include the output field from the tool results.
-    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
+    /// Replaces each matched item's stored payload with the authoritative
+    /// `ResponseOutputItem` produced by `ResponseTransformer::transform`
+    /// (carried on `ToolResult::output_item`). That transformer is the
+    /// single source of truth for per-tool shape — e.g. `mcp_call`
+    /// receives `output: string`, `web_search_call` receives
+    /// `{status, action, ...}`, and `image_generation_call` receives
+    /// `result: base64`. The streaming emitter's initial
+    /// `output_item.added` carries a partial stub (tool-call id + arguments);
+    /// this call overwrites that stub once the MCP result is in hand, so
+    /// `response.completed.response.output` sees the same item a
+    /// non-streaming response would emit.
+    ///
+    /// Matching is by the original `call_id` the stub stored, since that
+    /// is the only identifier common to every tool-call item type.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
-            // Find the output item with matching call_id
+            let Ok(item_value) = serde_json::to_value(&tool_result.output_item) else {
+                warn!(
+                    call_id = %tool_result.call_id,
+                    "Failed to serialize transformed tool output item; keeping streaming stub"
+                );
+                continue;
+            };
             for item_state in &mut self.output_items {
                 if let Some(ref mut item_data) = item_state.item_data {
-                    // Check if this is a tool call item with matching call_id
-                    let item_type = item_data.get("type").and_then(|t| t.as_str());
-                    let is_tool_call = matches!(
-                        item_type,
-                        Some("mcp_call")
-                            | Some("web_search_call")
-                            | Some("code_interpreter_call")
-                            | Some("file_search_call")
-                    );
-                    if is_tool_call
-                        && item_data.get("call_id").and_then(|c| c.as_str())
-                            == Some(&tool_result.call_id)
+                    if item_data.get("call_id").and_then(|c| c.as_str())
+                        == Some(&tool_result.call_id)
                     {
-                        // Add output field
-                        let output_str = serde_json::to_string(&tool_result.output)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        item_data["output"] = json!(output_str);
-
-                        // Update status based on success
-                        if tool_result.is_error {
-                            item_data["status"] = json!("failed");
-                        }
+                        *item_data = item_value;
                         break;
                     }
                 }
@@ -475,12 +476,18 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
+            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
             ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
         };
         self.emit_tool_event(event_type, output_index, item_id)
     }
 
-    /// Emit the searching/interpreting event for builtin tool calls (no-op for passthrough)
+    /// Emit the searching/interpreting/generating event for builtin tool calls (no-op for passthrough).
+    ///
+    /// For `image_generation_call` this emits the `generating` event. The
+    /// partial-image event is emitted separately via `emit_image_generation_partial_image`
+    /// because it carries additional payload (the partial b64 bytes) and is
+    /// optional per the `partial_images` request field.
     pub fn emit_tool_call_searching(
         &mut self,
         output_index: usize,
@@ -491,9 +498,44 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
             ResponseFormat::Passthrough => return None,
         };
         Some(self.emit_tool_event(event_type, output_index, item_id))
+    }
+
+    /// Emit a `response.image_generation_call.partial_image` event.
+    ///
+    /// Returns `None` when `response_format` is anything other than
+    /// [`ResponseFormat::ImageGenerationCall`], mirroring how
+    /// `emit_tool_call_searching` gates on format. The payload carries the
+    /// base64-encoded partial image bytes plus a 0-based partial image index.
+    ///
+    /// Per-router wiring is responsible for deciding when to call this and
+    /// how to source the partial-image bytes.
+    #[expect(
+        dead_code,
+        reason = "partial_image emission is wired by per-router integrations"
+    )]
+    pub fn emit_image_generation_partial_image(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        response_format: &ResponseFormat,
+        partial_image_index: u32,
+        partial_image_b64: &str,
+    ) -> Option<serde_json::Value> {
+        if !matches!(response_format, ResponseFormat::ImageGenerationCall) {
+            return None;
+        }
+        Some(json!({
+            "type": ImageGenerationCallEvent::PARTIAL_IMAGE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "partial_image_index": partial_image_index,
+            "partial_image_b64": partial_image_b64
+        }))
     }
 
     /// Emit the appropriate completed event based on response format
@@ -507,6 +549,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
+            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
             ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -522,6 +565,7 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::WebSearchCall) => "web_search_call",
             Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
             Some(ResponseFormat::FileSearchCall) => "file_search_call",
+            Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
             Some(ResponseFormat::Passthrough) => "mcp_call",
             None => "function_call",
         }
@@ -533,6 +577,7 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
             Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
             Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
+            Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
             Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
             None => OutputItemType::FunctionCall,
         }
@@ -626,6 +671,7 @@ impl ResponseStreamEventEmitter {
             OutputItemType::WebSearchCall => "ws",
             OutputItemType::CodeInterpreterCall => "ci",
             OutputItemType::FileSearchCall => "fs",
+            OutputItemType::ImageGenerationCall => "ig",
         };
 
         let id = Self::generate_item_id(id_prefix);

@@ -20,11 +20,13 @@ use tracing::{debug, error, warn};
 
 use super::{
     common::{
-        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages, McpCallTracking,
+        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages,
+        strip_image_generation_from_request_tools, McpCallTracking,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
 use crate::{
+    middleware::TenantRequestMeta,
     observability::metrics::Metrics,
     routers::{
         common::mcp_utils::DEFAULT_MAX_ITERATIONS,
@@ -52,6 +54,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    tenant_request_meta: TenantRequestMeta,
 ) -> Result<ResponsesResponse, Response> {
     // Clone request for persistence
     let original_request = request.clone();
@@ -64,10 +67,16 @@ pub(crate) async fn serve_harmony_responses(
         ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
     let response = if has_mcp_tools {
-        execute_with_mcp_loop(ctx, current_request, mcp_servers).await?
+        execute_with_mcp_loop(
+            ctx,
+            current_request,
+            tenant_request_meta.clone(),
+            mcp_servers,
+        )
+        .await?
     } else {
         // No MCP tools - execute pipeline once (may have function tools or no tools)
-        execute_without_mcp_loop(ctx, current_request).await?
+        execute_without_mcp_loop(ctx, current_request, tenant_request_meta).await?
     };
 
     // Persist response to storage if store=true
@@ -90,6 +99,7 @@ pub(crate) async fn serve_harmony_responses(
 async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
+    tenant_request_meta: TenantRequestMeta,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
@@ -125,6 +135,13 @@ async fn execute_with_mcp_loop(
         );
     }
 
+    // Once the MCP loop has taken ownership of image_generation
+    // dispatch, drop the hosted-tool descriptor so the harmony builder
+    // advertises only the MCP-exposed function-tool name (which
+    // `has_exposed_tool` actually recognizes for dispatch). See the
+    // helper doc comment in `common.rs` for the full rationale.
+    strip_image_generation_from_request_tools(&mut current_request, &session);
+
     loop {
         iteration_count += 1;
 
@@ -153,7 +170,7 @@ async fn execute_with_mcp_loop(
         // Execute through full pipeline
         let iteration_result = ctx
             .pipeline
-            .execute_harmony_responses(&current_request, ctx)
+            .execute_harmony_responses(&current_request, ctx, Some(tenant_request_meta.clone()))
             .await?;
 
         match iteration_result {
@@ -240,7 +257,11 @@ async fn execute_with_mcp_loop(
                     return Ok(response);
                 }
 
-                // Execute MCP tools (if any)
+                // Execute MCP tools (if any). Caller-declared hosted-tool overrides
+                // live on `original_tools` (pre-MCP-injection), so we thread those
+                // into dispatch — `execute_mcp_tools` merges per-kind. The
+                // request-level `user` identifier is also forwarded into
+                // hosted-tool dispatch args.
                 let mcp_results = if mcp_tool_calls.is_empty() {
                     Vec::new()
                 } else {
@@ -249,6 +270,8 @@ async fn execute_with_mcp_loop(
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
+                        original_tools.as_deref().unwrap_or(&[]),
+                        current_request.user.as_deref(),
                     )
                     .await?
                 };
@@ -340,13 +363,14 @@ async fn execute_with_mcp_loop(
 async fn execute_without_mcp_loop(
     ctx: &ResponsesContext,
     current_request: ResponsesRequest,
+    tenant_request_meta: TenantRequestMeta,
 ) -> Result<ResponsesResponse, Response> {
     debug!("Executing Harmony Responses without MCP loop");
 
     // Execute pipeline once
     let iteration_result = ctx
         .pipeline
-        .execute_harmony_responses(&current_request, ctx)
+        .execute_harmony_responses(&current_request, ctx, Some(tenant_request_meta))
         .await?;
 
     match iteration_result {

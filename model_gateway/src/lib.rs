@@ -1,11 +1,14 @@
 pub mod app_context;
 pub mod config;
+pub mod memory;
+pub mod mesh;
 pub mod middleware;
 pub mod observability;
 pub mod policies;
 pub mod routers;
 pub mod server;
 pub mod service_discovery;
+pub mod tenant;
 pub mod version;
 pub mod wasm;
 pub mod worker;

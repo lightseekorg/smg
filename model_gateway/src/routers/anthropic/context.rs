@@ -9,7 +9,10 @@ use axum::http::HeaderMap;
 use openai_protocol::messages::CreateMessageRequest;
 use smg_mcp::{McpOrchestrator, McpServerBinding};
 
-use crate::worker::{Worker, WorkerRegistry};
+use crate::{
+    middleware::TenantRequestMeta,
+    worker::{Worker, WorkerRegistry},
+};
 
 /// Shared context passed to all Anthropic handler functions.
 #[derive(Clone)]
@@ -25,6 +28,12 @@ pub(crate) struct RequestContext {
     pub request: CreateMessageRequest,
     pub headers: Option<HeaderMap>,
     pub model_id: String,
+    /// Explicit tenant identity resolved once at the HTTP boundary.
+    #[expect(
+        dead_code,
+        reason = "tenant-scoped Anthropic consumers land after the shared serving-path plumbing"
+    )]
+    pub tenant_request_meta: TenantRequestMeta,
     /// Connected MCP server keys, present when the request includes `mcp_toolset` tools.
     pub mcp_servers: Option<Vec<McpServerBinding>>,
     /// Worker selected once in `route_messages`, reused for all iterations.

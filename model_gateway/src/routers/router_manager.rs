@@ -34,15 +34,23 @@ use openai_protocol::{
     rerank::RerankRequest,
     responses::ResponsesRequest,
     transcription::TranscriptionRequest,
+    UNKNOWN_MODEL_ID,
 };
 use serde_json::Value;
+use smg_skills::{
+    resolve_messages_skill_manifest, resolve_responses_skill_manifest,
+    validate_messages_reserved_skill_tool_names, validate_responses_reserved_skill_tool_names,
+    SkillService,
+};
 use tracing::{debug, info, warn};
 
 use crate::{
     app_context::AppContext,
     config::RoutingMode,
+    middleware::TenantRequestMeta,
     routers::{
         common::header_utils::apply_provider_headers,
+        error as route_error,
         factory::{router_ids, RouterId},
         AudioFile, RouterFactory, RouterTrait,
     },
@@ -57,6 +65,7 @@ pub struct RouterManager {
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
     routers_snapshot: ArcSwap<Vec<Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
+    skill_service: Option<Arc<SkillService>>,
     enable_igw: bool,
 }
 
@@ -69,6 +78,7 @@ impl RouterManager {
             routers: Arc::new(DashMap::new()),
             routers_snapshot: ArcSwap::from_pointee(Vec::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
+            skill_service: None,
             enable_igw: false, // Will be set properly in from_config
         }
     }
@@ -100,6 +110,7 @@ impl RouterManager {
             app_context.client.clone(),
         );
         manager.enable_igw = config.router_config.enable_igw;
+        manager.skill_service.clone_from(&app_context.skill_service);
         manager
             .gateway_api_key
             .clone_from(&config.router_config.api_key);
@@ -235,6 +246,10 @@ impl RouterManager {
         } else {
             None
         }
+    }
+
+    fn requires_explicit_generate_model(&self, model_id: &str) -> bool {
+        self.enable_igw && (model_id.trim().is_empty() || model_id == UNKNOWN_MODEL_ID)
     }
 
     pub fn select_router_for_request(
@@ -510,13 +525,23 @@ impl RouterTrait for RouterManager {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
+        if self.requires_explicit_generate_model(model_id) {
+            return route_error::bad_request(
+                "missing_model",
+                "/generate requests must include a model when IGW routing is enabled",
+            );
+        }
+
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_generate(headers, body, model_id).await
+            router
+                .route_generate(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -529,13 +554,16 @@ impl RouterTrait for RouterManager {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_chat(headers, body, model_id).await
+            router
+                .route_chat(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -548,13 +576,16 @@ impl RouterTrait for RouterManager {
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_completion(headers, body, model_id).await
+            router
+                .route_completion(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -567,13 +598,34 @@ impl RouterTrait for RouterManager {
     async fn route_messages(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        if let Err(error) = validate_messages_reserved_skill_tool_names(body.tools.as_deref()) {
+            return route_error::reserved_skill_tool_name(error);
+        }
 
+        let router = self.select_router_for_request(headers, Some(model_id));
         if let Some(router) = router {
-            router.route_messages(headers, body, model_id).await
+            let skill_manifest = match resolve_messages_skill_manifest(
+                self.skill_service.as_deref(),
+                tenant_meta.tenant_key().as_str(),
+                body,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(error) => return route_error::skill_resolution_error(error),
+            };
+            let tenant_meta = if skill_manifest.is_empty() {
+                tenant_meta.clone()
+            } else {
+                tenant_meta.clone().with_extension(skill_manifest)
+            };
+            router
+                .route_messages(headers, &tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -586,13 +638,34 @@ impl RouterTrait for RouterManager {
     async fn route_responses(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        if let Err(error) = validate_responses_reserved_skill_tool_names(body.tools.as_deref()) {
+            return route_error::reserved_skill_tool_name(error);
+        }
 
+        let router = self.select_router_for_request(headers, Some(model_id));
         if let Some(router) = router {
-            router.route_responses(headers, body, model_id).await
+            let skill_manifest = match resolve_responses_skill_manifest(
+                self.skill_service.as_deref(),
+                tenant_meta.tenant_key().as_str(),
+                body,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(error) => return route_error::skill_resolution_error(error),
+            };
+            let tenant_meta = if skill_manifest.is_empty() {
+                tenant_meta.clone()
+            } else {
+                tenant_meta.clone().with_extension(skill_manifest)
+            };
+            router
+                .route_responses(headers, &tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -605,6 +678,7 @@ impl RouterTrait for RouterManager {
     async fn route_interactions(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &InteractionsRequest,
         model_id: Option<&str>,
     ) -> Response {
@@ -613,7 +687,7 @@ impl RouterTrait for RouterManager {
 
         if let Some(router) = router {
             router
-                .route_interactions(headers, body, selected_model)
+                .route_interactions(headers, tenant_meta, body, selected_model)
                 .await
         } else {
             (
@@ -640,13 +714,16 @@ impl RouterTrait for RouterManager {
     async fn route_embeddings(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_embeddings(headers, body, model_id).await
+            router
+                .route_embeddings(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -659,13 +736,16 @@ impl RouterTrait for RouterManager {
     async fn route_classify(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_classify(headers, body, model_id).await
+            router
+                .route_classify(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -678,6 +758,7 @@ impl RouterTrait for RouterManager {
     async fn route_audio_transcriptions(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &TranscriptionRequest,
         audio: AudioFile,
         model_id: &str,
@@ -686,7 +767,7 @@ impl RouterTrait for RouterManager {
 
         if let Some(router) = router {
             router
-                .route_audio_transcriptions(headers, body, audio, model_id)
+                .route_audio_transcriptions(headers, tenant_meta, body, audio, model_id)
                 .await
         } else {
             (
@@ -700,13 +781,16 @@ impl RouterTrait for RouterManager {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
-            router.route_rerank(headers, body, model_id).await
+            router
+                .route_rerank(headers, tenant_meta, body, model_id)
+                .await
         } else {
             (
                 StatusCode::NOT_FOUND,
@@ -814,5 +898,90 @@ impl std::fmt::Debug for RouterManager {
             .field("workers_count", &self.worker_registry.get_all().len())
             .field("default_router", &*default_router)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::{
+        middleware::{RouteRequestMeta, TenantKey},
+        routers::factory::router_ids,
+        worker::WorkerRegistry,
+    };
+
+    #[derive(Debug)]
+    struct StubRouter;
+
+    #[async_trait]
+    impl RouterTrait for StubRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn route_generate(
+            &self,
+            _headers: Option<&HeaderMap>,
+            _tenant_meta: &TenantRequestMeta,
+            _body: &GenerateRequest,
+            _model_id: &str,
+        ) -> Response {
+            (StatusCode::OK, "routed").into_response()
+        }
+
+        fn router_type(&self) -> &'static str {
+            "stub"
+        }
+    }
+
+    fn test_manager(enable_igw: bool) -> Arc<RouterManager> {
+        let mut manager =
+            RouterManager::new(Arc::new(WorkerRegistry::new()), reqwest::Client::new());
+        manager.enable_igw = enable_igw;
+        let manager = Arc::new(manager);
+        manager.register_router(router_ids::HTTP_REGULAR, Arc::new(StubRouter));
+        manager
+    }
+
+    fn test_tenant_meta() -> TenantRequestMeta {
+        RouteRequestMeta::new(TenantKey::from("test-tenant"))
+    }
+
+    fn generate_request_without_model() -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({ "text": "hello" })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn igw_generate_rejects_default_unknown_model() {
+        let manager = test_manager(true);
+        let request = generate_request_without_model();
+
+        assert_eq!(request.model, UNKNOWN_MODEL_ID);
+
+        let response = manager
+            .route_generate(None, &test_tenant_meta(), &request, &request.model)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            route_error::extract_error_code_from_response(&response),
+            "missing_model"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_router_generate_keeps_default_unknown_model_behavior() {
+        let manager = test_manager(false);
+        let request = generate_request_without_model();
+
+        assert_eq!(request.model, UNKNOWN_MODEL_ID);
+
+        let response = manager
+            .route_generate(None, &test_tenant_meta(), &request, &request.model)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

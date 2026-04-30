@@ -11,6 +11,7 @@ dependencies = [
   "grpcio-health-checking",
   "httpx",
   "jinja2",
+  "mcp>=1.0",
   "numpy",
   "openai",
   "pandas",
@@ -19,6 +20,7 @@ dependencies = [
   "pytest-rerunfailures",
   "requests",
   "tqdm",
+  "uvicorn>=0.30",
   "websockets",
 ]
 

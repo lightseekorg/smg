@@ -44,6 +44,30 @@ use crate::{
     },
 };
 
+/// Whether a tool call of this `ResponseFormat` streams its arguments via
+/// `mcp_call.arguments.delta` / `function_call.arguments.delta` events.
+///
+/// Hosted built-in tools (`web_search_call`, `code_interpreter_call`,
+/// `file_search_call`, `image_generation_call`) instead surface their
+/// progress through structured events emitted by the shared
+/// [`ResponseStreamEventEmitter`] helpers (`emit_tool_call_in_progress`,
+/// `emit_tool_call_searching`, `emit_tool_call_completed` — plus
+/// `emit_image_generation_partial_image` for the image_generation
+/// partial-image frame). Those builtins therefore skip argument
+/// streaming here.
+///
+/// `None` (plain function tools) and `Some(Passthrough)` (MCP `mcp_call`)
+/// are the only formats that stream arguments through this router.
+fn streams_arguments(response_format: Option<&ResponseFormat>) -> bool {
+    match response_format {
+        None | Some(ResponseFormat::Passthrough) => true,
+        Some(ResponseFormat::WebSearchCall)
+        | Some(ResponseFormat::CodeInterpreterCall)
+        | Some(ResponseFormat::FileSearchCall)
+        | Some(ResponseFormat::ImageGenerationCall) => false,
+    }
+}
+
 /// Processor for streaming Harmony responses
 ///
 /// Returns an SSE stream that parses Harmony tokens incrementally and
@@ -720,11 +744,14 @@ impl HarmonyStreamingProcessor {
                                     }
                                 }
 
-                                // Emit initial arguments delta for mcp_call only (skip for builtin tools)
-                                if matches!(
-                                    response_format,
-                                    Some(ResponseFormat::Passthrough) | None
-                                ) {
+                                // Emit initial arguments delta for mcp_call / function_call
+                                // only. Hosted built-in tools (web_search_call,
+                                // code_interpreter_call, file_search_call,
+                                // image_generation_call) surface progress via
+                                // the structured `*.in_progress` /
+                                // `*.searching` / `*.generating` events emitted
+                                // above instead of streaming their arguments.
+                                if streams_arguments(response_format.as_ref()) {
                                     let event = match &response_format {
                                         Some(_) => emitter.emit_mcp_call_arguments_delta(
                                             output_index,
@@ -744,11 +771,14 @@ impl HarmonyStreamingProcessor {
                                 if let Some((output_index, item_id, response_format)) =
                                     tool_call_tracking.get(&call_index)
                                 {
-                                    // Skip arguments streaming for builtin tools (only mcp_call streams arguments)
-                                    if !matches!(
-                                        response_format,
-                                        Some(ResponseFormat::Passthrough) | None
-                                    ) {
+                                    // Only mcp_call / function_call stream
+                                    // arguments; hosted built-in tools
+                                    // (web_search_call, code_interpreter_call,
+                                    // file_search_call, image_generation_call)
+                                    // skip argument deltas — their progress
+                                    // rides on the structured events emitted
+                                    // around MCP dispatch.
+                                    if !streams_arguments(response_format.as_ref()) {
                                         continue;
                                     }
 
@@ -808,11 +838,13 @@ impl HarmonyStreamingProcessor {
                                 let args_str =
                                     tool_call.function.arguments.as_deref().unwrap_or("");
 
-                                // Emit arguments done (skip for builtin tools)
-                                if matches!(
-                                    response_format,
-                                    Some(ResponseFormat::Passthrough) | None
-                                ) {
+                                // Emit arguments.done for mcp_call /
+                                // function_call only. Hosted built-in tools
+                                // (web_search_call, code_interpreter_call,
+                                // file_search_call, image_generation_call)
+                                // close out through the `*.completed`
+                                // structured event emitted below.
+                                if streams_arguments(response_format.as_ref()) {
                                     let event = match response_format {
                                         Some(_) => emitter.emit_mcp_call_arguments_done(
                                             *output_index,
@@ -944,8 +976,12 @@ impl HarmonyStreamingProcessor {
                         let tool_name = &tool_call.function.name;
                         let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
 
-                        // Emit arguments done (skip for builtin tools)
-                        if matches!(response_format, Some(ResponseFormat::Passthrough) | None) {
+                        // Emit arguments.done for mcp_call / function_call
+                        // only. Hosted built-in tools (web_search_call,
+                        // code_interpreter_call, file_search_call,
+                        // image_generation_call) close out through the
+                        // `*.completed` structured event emitted below.
+                        if streams_arguments(response_format.as_ref()) {
                             let event = match response_format {
                                 Some(_) => emitter.emit_mcp_call_arguments_done(
                                     *output_index,
@@ -1058,5 +1094,78 @@ impl HarmonyStreamingProcessor {
 impl Default for HarmonyStreamingProcessor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compile-time exhaustiveness anchor.
+    ///
+    /// This helper exists solely to force every [`ResponseFormat`] variant
+    /// to flow through a non-wildcard `match`. If a new variant is added to
+    /// [`ResponseFormat`] without being classified, this function fails to
+    /// compile — which in turn breaks `streams_arguments_explicit_variants`
+    /// below, since both helpers iterate the same variant set.
+    ///
+    /// Intentionally *does not* call [`streams_arguments`] — this mirrors
+    /// the production classifier so a drift between the two is a separate
+    /// failure (runtime assertion miss) from a missing variant (compile
+    /// error here).
+    fn expected_streams_arguments(format: &ResponseFormat) -> bool {
+        match format {
+            ResponseFormat::Passthrough => true,
+            ResponseFormat::WebSearchCall
+            | ResponseFormat::CodeInterpreterCall
+            | ResponseFormat::FileSearchCall
+            | ResponseFormat::ImageGenerationCall => false,
+        }
+    }
+
+    // Locks the `streams_arguments` classification so the Harmony router
+    // keeps treating hosted built-in tools — including `image_generation`
+    // — as structured-event emitters rather than argument streamers.
+    //
+    // Every `ResponseFormat` variant is named explicitly (no `_` arm, no
+    // iteration over a hand-maintained array), so adding a new variant
+    // fails to compile in `expected_streams_arguments` above AND in every
+    // explicit `let ... = ResponseFormat::X;` binding here — which in
+    // turn ensures the production `streams_arguments` classifier must
+    // also be updated to compile.
+    #[test]
+    fn streams_arguments_explicit_variants() {
+        // `None` (plain function tool) streams arguments.
+        assert!(streams_arguments(None), "function_call should stream args");
+
+        // `Some(Passthrough)` (mcp_call) streams arguments.
+        let passthrough = ResponseFormat::Passthrough;
+        assert!(
+            streams_arguments(Some(&passthrough)),
+            "mcp_call (Passthrough) should stream args",
+        );
+        assert!(expected_streams_arguments(&passthrough));
+
+        // Hosted built-ins do *not* stream arguments — they surface
+        // progress via structured `*.in_progress` / `*.searching` /
+        // `*.generating` / `*.completed` events from the shared emitter.
+        let web_search = ResponseFormat::WebSearchCall;
+        assert!(!streams_arguments(Some(&web_search)));
+        assert!(!expected_streams_arguments(&web_search));
+
+        let code_interpreter = ResponseFormat::CodeInterpreterCall;
+        assert!(!streams_arguments(Some(&code_interpreter)));
+        assert!(!expected_streams_arguments(&code_interpreter));
+
+        let file_search = ResponseFormat::FileSearchCall;
+        assert!(!streams_arguments(Some(&file_search)));
+        assert!(!expected_streams_arguments(&file_search));
+
+        let image_generation = ResponseFormat::ImageGenerationCall;
+        assert!(
+            !streams_arguments(Some(&image_generation)),
+            "image_generation_call must ride the structured-event path",
+        );
+        assert!(!expected_streams_arguments(&image_generation));
     }
 }

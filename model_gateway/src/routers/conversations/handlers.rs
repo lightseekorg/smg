@@ -15,7 +15,7 @@ use smg_data_connector::{
 };
 use tracing::info;
 
-use crate::routers::common::persistence_utils::item_to_json;
+use crate::{memory::MemoryExecutionContext, routers::common::persistence_utils::item_to_json};
 
 // ============================================================================
 // Constants
@@ -306,6 +306,23 @@ pub async fn create_conversation_items(
     conv_id: &str,
     body: Value,
 ) -> Response {
+    create_conversation_items_with_headers(
+        conversation_storage,
+        item_storage,
+        conv_id,
+        body,
+        MemoryExecutionContext::default(),
+    )
+    .await
+}
+
+pub async fn create_conversation_items_with_headers(
+    conversation_storage: &Arc<dyn ConversationStorage>,
+    item_storage: &Arc<dyn ConversationItemStorage>,
+    conv_id: &str,
+    body: Value,
+    memory_execution_context: MemoryExecutionContext,
+) -> Response {
     let conversation_id = ConversationId::from(conv_id);
 
     if let Err(response) = ensure_conversation_exists(conversation_storage, &conversation_id).await
@@ -331,7 +348,15 @@ pub async fn create_conversation_items(
     let added_at = Utc::now();
 
     for item_val in items_array {
-        match process_item(item_storage, &conversation_id, item_val, added_at).await {
+        match process_item(
+            item_storage,
+            &conversation_id,
+            item_val,
+            added_at,
+            &memory_execution_context,
+        )
+        .await
+        {
             Ok((item_json, item_id, warning)) => {
                 if seen_ids.insert(item_id.0.clone()) {
                     link_pairs.push((item_id, added_at));
@@ -367,7 +392,6 @@ pub async fn create_conversation_items(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-/// Process a single item for creation/linking
 /// Process a single item for creation. Returns (json, item_id, warning).
 /// Linking is deferred to the caller for batch operation.
 async fn process_item(
@@ -375,6 +399,8 @@ async fn process_item(
     conversation_id: &ConversationId,
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
+    // TODO(memory): wire into ingestion flow; see issue #1149.
+    _memory_execution_context: &MemoryExecutionContext,
 ) -> Result<(Value, ConversationItemId, Option<String>), Response> {
     let item_type = item_val
         .get("type")

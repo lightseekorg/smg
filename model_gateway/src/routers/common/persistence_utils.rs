@@ -32,7 +32,11 @@ pub const ITEM_TYPE_FIELDS: &[(&str, &[&str])] = &[
             "error",
         ],
     ),
-    ("mcp_list_tools", &["tools", "server_label"]),
+    // T11: `error` is optional per spec (openai-responses-api-spec.md §McpListTools
+    // L253-255) and symmetric with `mcp_call.error` above; keep it in the
+    // persistence whitelist so failed list-tools items round-trip through
+    // conversation storage without losing the failure reason.
+    ("mcp_list_tools", &["tools", "server_label", "error"]),
     ("function_call", &["call_id", "name", "arguments", "output"]),
     ("function_call_output", &["call_id", "output"]),
 ];
@@ -180,9 +184,12 @@ pub fn build_stored_response(
     stored.model = get_string(response_json, "model").or_else(|| Some(original_body.model.clone()));
 
     stored.safety_identifier.clone_from(&original_body.user);
-    stored
-        .conversation_id
-        .clone_from(&original_body.conversation);
+    // `StoredResponse.conversation_id` is `Option<String>`; flatten the
+    // request's `Option<ConversationRef>` union down to its underlying id.
+    stored.conversation_id = original_body
+        .conversation
+        .as_ref()
+        .map(|c| c.as_id().to_string());
 
     stored.previous_response_id = get_string(response_json, "previous_response_id")
         .map(|s| ResponseId::from(s.as_str()))
@@ -436,8 +443,8 @@ async fn persist_conversation_items_inner(
         .map_err(|e| format!("Failed to store response: {e}"))?;
 
     // Check if conversation is provided and validate it exists
-    let conv_id_opt = if let Some(id) = &original_body.conversation {
-        let conv_id = ConversationId::from(id.as_str());
+    let conv_id_opt = if let Some(conv_ref) = &original_body.conversation {
+        let conv_id = ConversationId::from(conv_ref.as_id());
         match conversation_storage.get_conversation(&conv_id).await {
             Ok(Some(_)) => Some(conv_id),
             Ok(None) => {

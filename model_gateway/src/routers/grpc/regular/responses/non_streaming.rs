@@ -24,7 +24,7 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::DEFAULT_MAX_ITERATIONS,
+        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
@@ -104,6 +104,7 @@ pub(super) async fn execute_without_mcp(
             params.headers,
             params.model_id,
             ctx.components.clone(),
+            Some(params.tenant_request_meta),
         )
         .await?; // Preserve the Response error as-is
 
@@ -190,6 +191,7 @@ pub(super) async fn execute_tool_loop(
                 params.headers.clone(),
                 params.model_id.clone(),
                 ctx.components.clone(),
+                Some(params.tenant_request_meta.clone()),
             )
             .await?;
 
@@ -333,13 +335,33 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Convert tool calls to execution inputs
+            // Convert tool calls to execution inputs, merging caller-declared
+            // hosted-tool config from `original_request.tools` into dispatch args.
+            // Non-object model payloads coerce to `{}` so the merge actually
+            // applies instead of silently dropping the caller's config. The
+            // request-level `user` is also forwarded into hosted-tool args.
+            let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
+            let request_user = original_request.user.as_deref();
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
-                .map(|tc| ToolExecutionInput {
-                    call_id: tc.call_id,
-                    tool_name: tc.name,
-                    arguments: serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({})),
+                .map(|tc| {
+                    let mut arguments =
+                        match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                            Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+                            _ => json!({}),
+                        };
+                    let response_format = session.tool_response_format(&tc.name);
+                    prepare_hosted_dispatch_args(
+                        &mut arguments,
+                        &response_format,
+                        request_tools,
+                        request_user,
+                    );
+                    ToolExecutionInput {
+                        call_id: tc.call_id,
+                        tool_name: tc.name,
+                        arguments,
+                    }
                 })
                 .collect();
 

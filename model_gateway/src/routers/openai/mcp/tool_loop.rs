@@ -14,8 +14,8 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
-        OutputItemEvent, WebSearchCallEvent,
+        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
+        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
     responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
@@ -31,7 +31,10 @@ use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::{header_utils::ApiProvider, mcp_utils::DEFAULT_MAX_ITERATIONS},
+        common::{
+            header_utils::ApiProvider,
+            mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+        },
         error,
     },
 };
@@ -148,8 +151,23 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
     }))
 }
 
-/// Execute detected tool calls and send completion events to client
+/// Execute detected tool calls and send completion events to client.
+///
+/// `request_tools` carries the caller-declared `tools` list from the original
+/// request so per-kind hosted-tool overrides can be merged into dispatch args
+/// before [`McpToolSession::execute_tool`].
+///
+/// `request_user` is the request-level `user` identifier (OpenAI Responses API
+/// `user` field), forwarded into hosted-tool dispatch args so the MCP server
+/// can attribute usage. Plain MCP function tools (Passthrough format) are
+/// not affected.
+///
 /// Returns false if client disconnected during execution
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Streaming tool dispatch threads channel + state + per-request inputs \
+              (tools, user) directly to the loop without an intermediate context struct."
+)]
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
     session: &McpToolSession<'_>,
@@ -157,6 +175,8 @@ pub(crate) async fn execute_streaming_tool_calls(
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
     model_id: &str,
+    request_tools: &[ResponseTool],
+    request_user: Option<&str>,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -181,7 +201,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
-        let arguments: Value = match serde_json::from_str(args_str) {
+        let mut arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
                 let err_str = format!("Failed to parse tool arguments: {e}");
@@ -226,7 +246,26 @@ pub(crate) async fn execute_streaming_tool_calls(
             return false;
         }
 
-        debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
+        // Coerce non-object payloads to `{}` before merging overrides — the
+        // merge is a no-op on scalars/arrays and we don't want to silently
+        // drop caller-declared hosted-tool config.
+        if !matches!(arguments, Value::Object(_)) {
+            arguments = json!({});
+        }
+        // Merge caller-declared hosted-tool configuration (e.g. `size`, `quality`
+        // on image_generation) into dispatch args, then forward the request-
+        // level `user` so a downstream MCP server can attribute per-user usage.
+        // Both steps are no-ops for plain MCP function tools.
+        prepare_hosted_dispatch_args(
+            &mut arguments,
+            &response_format,
+            request_tools,
+            request_user,
+        );
+
+        // Log the effective (post-merge) args so the log reflects what the
+        // MCP server actually receives, not the pre-merge string from the model.
+        debug!("Calling MCP tool '{}' with args: {}", call.name, arguments);
         let tool_output = session
             .execute_tool(ToolExecutionInput {
                 call_id: call.call_id.clone(),
@@ -466,6 +505,12 @@ fn send_tool_call_intermediate_event(
         ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
         ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
         ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+        // `generating` is the intermediate event for image_generation_call, on
+        // par with `searching` for web/file search and `interpreting` for code.
+        // `partial_image` events are emitted inline by the underlying tool when
+        // it streams preview chunks; the tool_loop path only emits the coarse
+        // in_progress → generating → completed sequence.
+        ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 
@@ -486,7 +531,8 @@ fn send_tool_call_intermediate_event(
 }
 
 /// Send tool call completion events after tool execution.
-/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
+/// Handles mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// and image_generation_call items.
 /// Returns false if client disconnected.
 fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -508,6 +554,7 @@ fn send_tool_call_completion_events(
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
         ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
         ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
+        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::COMPLETED,
         _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
     };
 
@@ -553,6 +600,10 @@ fn stable_streaming_tool_item_id(
         ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
         ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
         ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
+        // `ig_` prefix mirrors the shared transformer's output item id
+        // (`to_image_generation_call`) and the 2-letter convention used by
+        // the other hosted tool formats.
+        ResponseFormat::ImageGenerationCall => normalize_tool_item_id_with_prefix(source_id, "ig_"),
     }
 }
 
@@ -573,7 +624,8 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
         ResponseFormat::Passthrough => item_id.to_string(),
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
-        | ResponseFormat::FileSearchCall => item_id
+        | ResponseFormat::FileSearchCall
+        | ResponseFormat::ImageGenerationCall => item_id
             .strip_prefix("fc_")
             .or_else(|| item_id.strip_prefix("call_"))
             .unwrap_or(item_id)
@@ -840,7 +892,7 @@ pub(crate) async fn execute_tool_loop(
                     original_body,
                 );
             }
-            let arguments: Value = match serde_json::from_str(&call.arguments) {
+            let mut arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
@@ -877,9 +929,33 @@ pub(crate) async fn execute_tool_loop(
                 }
             };
 
+            // Coerce non-object payloads to `{}` before merging overrides —
+            // the merge is a no-op on scalars/arrays and we don't want to
+            // silently drop caller-declared hosted-tool config.
+            if !matches!(arguments, Value::Object(_)) {
+                arguments = json!({});
+            }
+            // Merge caller-declared hosted-tool configuration into dispatch args
+            // and forward the request-level `user` so a downstream MCP server
+            // can attribute per-user usage. Both steps are no-ops for plain
+            // MCP function tools (Passthrough format).
+            let response_format = session.tool_response_format(&call.name);
+            prepare_hosted_dispatch_args(
+                &mut arguments,
+                &response_format,
+                original_body.tools.as_deref().unwrap_or(&[]),
+                original_body.user.as_deref(),
+            );
+
+            // Serialize the post-merge args once so downstream logging + the
+            // approval payload show the effective (dispatched) payload rather
+            // than the pre-merge string the model emitted.
+            let effective_arguments =
+                serde_json::to_string(&arguments).unwrap_or_else(|_| call.arguments.clone());
+
             debug!(
                 "Calling MCP tool '{}' with args: {}",
-                call.name, call.arguments
+                call.name, effective_arguments
             );
             let tool_result = session
                 .execute_tool_result(ToolExecutionInput {
@@ -889,7 +965,6 @@ pub(crate) async fn execute_tool_loop(
                 })
                 .await;
 
-            let response_format = session.tool_response_format(&call.name);
             let server_label = session.resolve_tool_server_label(&call.name);
             let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
             let approval_request_id = approval_request_item_id_source(&call.item_id);
@@ -900,7 +975,7 @@ pub(crate) async fn execute_tool_loop(
                     let approval_item = build_mcp_approval_request_item(
                         &approval_request_id,
                         &pending.tool_name,
-                        &call.arguments,
+                        &effective_arguments,
                         &server_label,
                     );
                     return build_approval_response(
@@ -1127,7 +1202,8 @@ fn build_mcp_approval_request_item(
 /// Build a transformed output item using ResponseTransformer
 ///
 /// Converts the output using the tool's response_format to the correctly-typed
-/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call).
+/// output item (mcp_call, web_search_call, code_interpreter_call, file_search_call,
+/// image_generation_call).
 /// Returns the result as a JSON Value for SSE event streaming.
 fn build_transformed_mcp_call_item(
     output: &Value,
@@ -1206,6 +1282,7 @@ mod tests {
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
         McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry,
     };
+    use tokio::sync::mpsc;
 
     use super::{
         build_transformed_mcp_call_item, extract_openai_response_output_items,
@@ -1514,5 +1591,288 @@ mod tests {
         let output = r#"[{"type":"text","text":"{\"openai_response\":null}"}]"#;
         let extracted = extract_openai_response_output_items(output);
         assert!(extracted.is_empty());
+    }
+
+    // ========================================================================
+    // Streaming emission ordering invariant.
+    //
+    // `send_tool_call_completion_events` MUST emit
+    // `response.<tool>.completed` BEFORE `response.output_item.done` so the
+    // umbrella event terminates the item's sub-events per spec (see
+    // `.claude/_audit/openai-responses-api-spec.md` §streaming, events
+    // L1054-L1072).
+    // ========================================================================
+
+    fn drain_channel(
+        rx: &mut mpsc::UnboundedReceiver<Result<bytes::Bytes, std::io::Error>>,
+    ) -> Vec<String> {
+        let mut events = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            let bytes = chunk.expect("no io errors in unit-test channel");
+            events.push(String::from_utf8(bytes.to_vec()).expect("utf-8 sse block"));
+        }
+        events
+    }
+
+    fn event_type_from_sse_block(block: &str) -> String {
+        // SSE block shape: `event: <name>\ndata: {...}\n\n`. We parse only
+        // the leading `event: …` line to get the wire type without pulling
+        // serde_json into this tiny assertion helper.
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("event: ") {
+                return rest.trim().to_string();
+            }
+        }
+        block.to_string()
+    }
+
+    #[test]
+    fn image_generation_completion_events_fire_before_output_item_done() {
+        // Gap B lock test: after the tool executes, the completion
+        // emitter must push `response.image_generation_call.completed`
+        // onto the wire BEFORE `response.output_item.done`. If a future
+        // refactor reverses the order this asserts and fails loudly.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_img".to_string(),
+            name: "image_generation".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_img".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "image_generation_call",
+            "id": "ig_img",
+            "status": "completed",
+            "result": "BASE64",
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::ImageGenerationCall,
+            &mut sequence_number,
+        );
+        assert!(ok, "send_tool_call_completion_events should not disconnect");
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.image_generation_call.completed")
+            .expect("response.image_generation_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("response.output_item.done must be emitted");
+
+        assert!(
+            completed_idx < done_idx,
+            "`response.image_generation_call.completed` (index {completed_idx}) must come \
+             before `response.output_item.done` (index {done_idx}); full sequence: {types:?}"
+        );
+    }
+
+    #[test]
+    fn web_search_completion_events_fire_before_output_item_done() {
+        // Same ordering contract for the pre-existing web_search_call path,
+        // so the invariant applies uniformly across every hosted-tool
+        // ResponseFormat we emit.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_ws".to_string(),
+            name: "web_search".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_ws".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "web_search_call",
+            "id": "ws_ws",
+            "status": "completed",
+            "action": {"type": "search"}
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::WebSearchCall,
+            &mut sequence_number,
+        );
+        assert!(ok);
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.web_search_call.completed")
+            .expect("web_search_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("output_item.done must be emitted");
+        assert!(completed_idx < done_idx);
+    }
+
+    #[test]
+    fn code_interpreter_completion_events_fire_before_output_item_done() {
+        // The suppression gate in `tool_handler.rs` drops the upstream
+        // umbrella `output_item.done` for every tool-call item type. This
+        // test locks the downstream half of the contract for
+        // `code_interpreter_call` — the tool loop's completion emitter
+        // must push `response.code_interpreter_call.completed` BEFORE
+        // `response.output_item.done` so the gate's suppression lines up
+        // with a correctly-ordered wire sequence.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_ci".to_string(),
+            name: "code_interpreter".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_ci".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "code_interpreter_call",
+            "id": "ci_ci",
+            "status": "completed",
+            "code": "print('hi')",
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::CodeInterpreterCall,
+            &mut sequence_number,
+        );
+        assert!(ok);
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.code_interpreter_call.completed")
+            .expect("code_interpreter_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("output_item.done must be emitted");
+        assert!(
+            completed_idx < done_idx,
+            "`response.code_interpreter_call.completed` (index {completed_idx}) must come \
+             before `response.output_item.done` (index {done_idx}); full sequence: {types:?}"
+        );
+
+        // No duplicate `output_item.done` — the tool loop emits exactly
+        // one umbrella (the upstream copy is dropped by the suppression
+        // gate in `tool_handler.rs`).
+        let done_count = types
+            .iter()
+            .filter(|t| *t == "response.output_item.done")
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "exactly one `output_item.done` expected, got {done_count}: {types:?}"
+        );
+    }
+
+    #[test]
+    fn file_search_completion_events_fire_before_output_item_done() {
+        // Lock the ordering contract for the hosted `file_search_call`
+        // format so the gate's suppression covers every tool-call item
+        // type listed in `TOOL_CALL_ITEM_TYPES`.
+        let call = super::FunctionCallInProgress {
+            call_id: "call_fs".to_string(),
+            name: "file_search".to_string(),
+            arguments_buffer: "{}".to_string(),
+            item_id: Some("fc_fs".to_string()),
+            output_index: 0,
+            last_obfuscation: None,
+            assigned_output_index: Some(0),
+        };
+
+        let tool_call_item = json!({
+            "type": "file_search_call",
+            "id": "fs_fs",
+            "status": "completed",
+            "queries": ["needle"],
+        });
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sequence_number: u64 = 0;
+
+        let ok = super::send_tool_call_completion_events(
+            &tx,
+            &call,
+            &tool_call_item,
+            &ResponseFormat::FileSearchCall,
+            &mut sequence_number,
+        );
+        assert!(ok);
+        drop(tx);
+
+        let events = drain_channel(&mut rx);
+        let types: Vec<String> = events
+            .iter()
+            .map(|b| event_type_from_sse_block(b))
+            .collect();
+
+        let completed_idx = types
+            .iter()
+            .position(|t| t == "response.file_search_call.completed")
+            .expect("file_search_call.completed must be emitted");
+        let done_idx = types
+            .iter()
+            .position(|t| t == "response.output_item.done")
+            .expect("output_item.done must be emitted");
+        assert!(
+            completed_idx < done_idx,
+            "`response.file_search_call.completed` (index {completed_idx}) must come \
+             before `response.output_item.done` (index {done_idx}); full sequence: {types:?}"
+        );
+
+        // No duplicate `output_item.done` — the tool loop emits exactly
+        // one umbrella (the upstream copy is dropped by the suppression
+        // gate in `tool_handler.rs`).
+        let done_count = types
+            .iter()
+            .filter(|t| *t == "response.output_item.done")
+            .count();
+        assert_eq!(
+            done_count, 1,
+            "exactly one `output_item.done` expected, got {done_count}: {types:?}"
+        );
     }
 }

@@ -18,9 +18,19 @@ pub enum SkillsStoreError {
 pub type SkillsStoreResult<T> = Result<T, SkillsStoreError>;
 
 /// Persistence contract for skill metadata rows and immutable version rows.
+///
+/// The combined write methods are part of the contract intentionally: CRUD
+/// callers must not publish a skill projection separately from the version row
+/// that makes the projection resolvable.
 #[async_trait]
 pub trait SkillMetadataStore: Send + Sync + 'static {
     async fn put_skill(&self, record: SkillRecord) -> SkillsStoreResult<()>;
+
+    async fn put_skill_with_initial_version(
+        &self,
+        skill: SkillRecord,
+        version: SkillVersionRecord,
+    ) -> SkillsStoreResult<()>;
 
     async fn get_skill(
         &self,
@@ -33,6 +43,12 @@ pub trait SkillMetadataStore: Send + Sync + 'static {
     async fn delete_skill(&self, tenant_id: &str, skill_id: &str) -> SkillsStoreResult<bool>;
 
     async fn put_skill_version(&self, record: SkillVersionRecord) -> SkillsStoreResult<()>;
+
+    async fn put_skill_version_and_update_skill(
+        &self,
+        version: SkillVersionRecord,
+        skill: SkillRecord,
+    ) -> SkillsStoreResult<()>;
 
     async fn get_skill_version(
         &self,

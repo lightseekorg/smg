@@ -13,6 +13,8 @@ use axum::{
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::tenant::DataPlaneCaller;
+
 #[derive(Clone)]
 pub struct AuthConfig {
     /// Precomputed SHA-256 hash of the API key, used for constant-time comparison
@@ -32,25 +34,31 @@ impl AuthConfig {
 /// Only active when router has an API key configured.
 pub async fn auth_middleware(
     State(auth_config): State<AuthConfig>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     if let Some(expected_hash) = &auth_config.api_key_hash {
-        let token = request
+        let token_hash = request
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "));
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(|token| {
+                let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+                digest
+            });
 
-        let authorized = token.is_some_and(|t| {
-            Sha256::digest(t.as_bytes())
-                .as_slice()
-                .ct_eq(expected_hash)
-                .unwrap_u8()
-                == 1
-        });
+        let authorized = token_hash
+            .as_ref()
+            .is_some_and(|digest| digest.ct_eq(expected_hash).unwrap_u8() == 1);
         if !authorized {
             return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        if let Some(token_hash) = token_hash {
+            request
+                .extensions_mut()
+                .insert(DataPlaneCaller::authenticated_from_sha256(token_hash));
         }
     }
 

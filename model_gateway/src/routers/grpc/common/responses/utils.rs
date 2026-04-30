@@ -25,11 +25,11 @@ use crate::{
     worker::WorkerRegistry,
 };
 
-/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
+/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared.
 ///
-/// Checks if request declares MCP tools or builtin tool types (web_search_preview,
-/// code_interpreter), and if so, validates that the MCP clients can be created
-/// and connected.
+/// Checks if the request declares MCP tools or builtin tool types
+/// (`web_search_preview`, `code_interpreter`, `image_generation`) and,
+/// if so, validates that the MCP clients can be created and connected.
 ///
 /// Returns Ok((has_mcp_tools, mcp_servers)) on success.
 pub(crate) async fn ensure_mcp_connection(
@@ -41,13 +41,24 @@ pub(crate) async fn ensure_mcp_connection(
         .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
         .unwrap_or(false);
 
-    // Check for builtin tools that MAY have MCP routing configured
+    // Check for builtin tools that MAY have MCP routing configured.
+    //
+    // `ImageGeneration` is included here because gpt-oss via the
+    // harmony pipeline, and Qwen/Llama via the regular pipeline, both
+    // dispatch hosted `image_generation` calls through the same MCP
+    // routing path — the only difference is how the tool is advertised in
+    // the prompt. Without this arm, the short-circuit below would return
+    // `(false, Vec::new())`, the MCP loop would never be entered, and the
+    // registered `image_generation` MCP server would receive zero
+    // dispatches.
     let has_builtin_tools = tools
         .map(|t| {
             t.iter().any(|tool| {
                 matches!(
                     tool,
-                    ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
+                    ResponseTool::WebSearchPreview(_)
+                        | ResponseTool::CodeInterpreter(_)
+                        | ResponseTool::ImageGeneration(_)
                 )
             })
         })
@@ -59,6 +70,8 @@ pub(crate) async fn ensure_mcp_connection(
     }
 
     if let Some(tools) = tools {
+        // TODO: Thread real request headers through the gRPC responses path if/when
+        // gRPC MCP flows need the same forwarded-header preservation contract.
         match ensure_request_mcp_client(mcp_orchestrator, tools).await {
             Some(mcp_servers) => {
                 return Ok((true, mcp_servers));

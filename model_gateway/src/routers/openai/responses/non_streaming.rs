@@ -14,7 +14,8 @@ use tracing::warn;
 use super::utils::{patch_response_with_request_metadata, restore_original_tools};
 use crate::routers::{
     common::{
-        header_utils::ApiProvider, mcp_utils::ensure_request_mcp_client,
+        header_utils::{extract_forwardable_request_headers, ApiProvider},
+        mcp_utils::ensure_request_mcp_client,
         persistence_utils::persist_conversation_items,
     },
     error,
@@ -75,7 +76,13 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
-        let mut session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
+        let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
+        let mut session = McpToolSession::new_with_headers(
+            mcp_orchestrator,
+            mcp_servers,
+            &session_request_id,
+            forwarded_headers,
+        );
         if let Some(tools) = original_body.tools.as_deref() {
             session.configure_response_tools_approval(tools);
         }

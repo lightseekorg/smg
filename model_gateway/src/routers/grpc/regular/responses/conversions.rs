@@ -143,11 +143,55 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         });
                     }
                     ResponseInputOutputItem::McpApprovalResponse { .. }
-                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                    | ResponseInputOutputItem::McpApprovalRequest { .. }
+                    | ResponseInputOutputItem::ComputerCall { .. }
+                    | ResponseInputOutputItem::ComputerCallOutput { .. }
+                    | ResponseInputOutputItem::McpCall { .. }
+                    | ResponseInputOutputItem::McpListTools { .. } => {
                         warn!(
                             function = "responses_to_chat",
                             "Approval item reached chat conversion"
                         );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "image_generation_call input item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::Compaction { .. }
+                    | ResponseInputOutputItem::ItemReference { .. } => {
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::CustomToolCall { .. }
+                    | ResponseInputOutputItem::CustomToolCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Custom tool item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::ShellCall { .. }
+                    | ResponseInputOutputItem::ShellCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Shell tool item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    ResponseInputOutputItem::ApplyPatchCall { .. }
+                    | ResponseInputOutputItem::ApplyPatchCallOutput { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "apply_patch item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
+                    }
+                    // T5 schema-only: forced-cascade arm, no behavior.
+                    ResponseInputOutputItem::LocalShellCall { .. }
+                    | ResponseInputOutputItem::LocalShellCallOutput { .. } => {
                         return Err("Unsupported input item type".to_string());
                     }
                 }
@@ -199,7 +243,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
         top_p: req.top_p,
         skip_special_tokens: true,
         tools,
-        tool_choice: req.tool_choice.clone(),
+        tool_choice: req.tool_choice.as_ref().map(|tc| tc.to_chat_tool_choice()),
         response_format: map_text_to_response_format(req.text.as_ref()),
         ..Default::default()
     })
@@ -505,5 +549,33 @@ mod tests {
         let chat_req = responses_to_chat(&req).unwrap();
         assert!(!chat_req.stream);
         assert!(chat_req.stream_options.is_none());
+    }
+
+    #[test]
+    fn test_image_generation_call_input_rejected() {
+        // Regression: `image_generation_call` items are server-produced
+        // output (populated via the shared MCP transformer) and must not
+        // be round-tripped back into the chat conversion as input.
+        // The regular gRPC path — used by non-Harmony text LLMs that only do
+        // function calling — rejects this variant with the same contract as
+        // sibling hosted-tool items (Computer/Shell/Custom/ApplyPatch).
+        let req = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::ImageGenerationCall {
+                id: "ig_test".to_string(),
+                action: None,
+                background: None,
+                output_format: None,
+                quality: None,
+                result: Some("base64data".to_string()),
+                revised_prompt: Some("a cat".to_string()),
+                size: None,
+                status: None,
+            }]),
+            ..Default::default()
+        };
+
+        let result = responses_to_chat(&req);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Unsupported input item type");
     }
 }

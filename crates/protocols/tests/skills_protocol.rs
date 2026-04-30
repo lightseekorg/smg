@@ -3,7 +3,8 @@ use openai_protocol::{
     responses::{CodeInterpreterTool, ResponseTool},
     skills::{
         MessagesSkillRef, OpaqueOpenAIObject, ResponsesSkillEntry, ResponsesSkillRef,
-        SkillVersionRef,
+        SkillMutationResponse, SkillPatchRequest, SkillVersionPatchRequest, SkillVersionRef,
+        SkillsErrorEnvelope,
     },
 };
 use schemars::schema_for;
@@ -215,6 +216,86 @@ fn responses_code_interpreter_legacy_container_round_trips() {
 
     let tool: ResponseTool = serde_json::from_value(raw.clone()).unwrap();
     assert_eq!(serde_json::to_value(&tool).unwrap(), raw);
+}
+
+#[test]
+fn skill_mutation_response_round_trips() {
+    let raw = json!({
+        "skill": {
+            "id": "skill_01jw4v0w53k9mz4bzr0t7k8a9n",
+            "name": "acme:map",
+            "short_description": "Map it",
+            "description": "Map the repo",
+            "source": "custom",
+            "latest_version": "1759178010641129",
+            "default_version": "1759178010641129",
+            "has_code_files": true,
+            "created_at": "2026-03-16T00:00:00Z",
+            "updated_at": "2026-03-16T00:00:00Z"
+        },
+        "version": {
+            "skill_id": "skill_01jw4v0w53k9mz4bzr0t7k8a9n",
+            "version": "1759178010641129",
+            "version_number": 1,
+            "name": "acme:map",
+            "short_description": "Map it",
+            "description": "Map the repo",
+            "deprecated": false,
+            "files": [{"path": "SKILL.md", "size_bytes": 123}],
+            "created_at": "2026-03-16T00:00:00Z"
+        },
+        "warnings": [{"kind": "SidecarFileIgnored", "path": "agents/openai.yaml", "message": "ignored"}]
+    });
+
+    let parsed: SkillMutationResponse = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+}
+
+#[test]
+fn skill_patch_request_round_trips() {
+    let raw = json!({
+        "default_version": 2
+    });
+
+    let parsed: SkillPatchRequest = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(parsed.default_version, SkillVersionRef::Integer(2));
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+}
+
+#[test]
+fn skill_version_patch_request_round_trips() {
+    let raw = json!({
+        "deprecated": true
+    });
+
+    let parsed: SkillVersionPatchRequest = serde_json::from_value(raw.clone()).unwrap();
+    assert!(parsed.deprecated);
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+}
+
+#[test]
+fn skill_patch_request_rejects_unknown_fields() {
+    let raw = r#"{"default_version":2,"extra":true}"#;
+    assert!(serde_json::from_str::<SkillPatchRequest>(raw).is_err());
+}
+
+#[test]
+fn skill_version_patch_request_rejects_unknown_fields() {
+    let raw = r#"{"deprecated":true,"extra":"nope"}"#;
+    assert!(serde_json::from_str::<SkillVersionPatchRequest>(raw).is_err());
+}
+
+#[test]
+fn skills_error_envelope_round_trips() {
+    let raw = json!({
+        "error": {
+            "code": "missing_target_tenant",
+            "message": "target tenant id is required"
+        }
+    });
+
+    let parsed: SkillsErrorEnvelope = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
 }
 
 #[test]

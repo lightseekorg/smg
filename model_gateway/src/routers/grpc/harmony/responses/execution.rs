@@ -1,13 +1,19 @@
 //! MCP tool execution logic for Harmony Responses
 
 use axum::response::Response;
-use openai_protocol::{common::ToolCall, responses::ResponseTool};
+use openai_protocol::{
+    common::ToolCall,
+    responses::{ResponseOutputItem, ResponseTool},
+};
 use serde_json::{from_str, json, Value};
 use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
-use crate::observability::metrics::{metrics_labels, Metrics};
+use crate::{
+    observability::metrics::{metrics_labels, Metrics},
+    routers::common::mcp_utils::prepare_hosted_dispatch_args,
+};
 
 /// Tool execution result
 ///
@@ -22,6 +28,15 @@ pub(crate) struct ToolResult {
 
     /// Whether this is an error result
     pub is_error: bool,
+
+    /// Correctly-typed output item for the Responses API, produced by
+    /// `ResponseTransformer::transform` (via
+    /// `ToolExecutionOutput::to_response_item`). Carries the per-tool
+    /// shape — e.g. `McpCall { output }`, `WebSearchCall { .. }`,
+    /// `ImageGenerationCall { result }` — so downstream code can
+    /// serialize the authoritative item rather than re-deriving fields
+    /// from `output`.
+    pub output_item: ResponseOutputItem,
 }
 
 /// Execute MCP tools and collect results
@@ -30,28 +45,53 @@ pub(crate) struct ToolResult {
 /// Tool execution errors are returned as error results to the model
 /// (allows model to handle gracefully).
 ///
+/// `request_user` is the request-level `user` identifier (OpenAI Responses
+/// API `user` field), forwarded into hosted-tool dispatch args so the MCP
+/// server can attribute usage. Plain MCP function tools (Passthrough format)
+/// are not affected.
+///
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
     session: &McpToolSession<'_>,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
+    request_tools: &[ResponseTool],
+    request_user: Option<&str>,
 ) -> Result<Vec<ToolResult>, Response> {
-    // Convert tool calls to execution inputs
+    // Convert tool calls to execution inputs, merging caller-declared
+    // hosted-tool configuration from `request_tools` into dispatch args.
+    // For non-hosted-tool calls (Passthrough format), no override lookup runs.
+    // Non-object model payloads coerce to `{}` so the override merge actually
+    // applies rather than silently dropping the caller's declared config.
     let inputs: Vec<ToolExecutionInput> = tool_calls
         .iter()
         .map(|tc| {
             let args_str = tc.function.arguments.as_deref().unwrap_or("{}");
-            let args: Value = from_str(args_str).unwrap_or_else(|e| {
-                error!(
-                    function = "execute_mcp_tools",
-                    tool_name = %tc.function.name,
-                    call_id = %tc.id,
-                    error = %e,
-                    "Failed to parse tool arguments JSON, using empty object"
-                );
-                json!({})
-            });
+            let mut args: Value = match from_str::<Value>(args_str) {
+                Ok(Value::Object(map)) => Value::Object(map),
+                Ok(_) => {
+                    debug!(
+                        function = "execute_mcp_tools",
+                        tool_name = %tc.function.name,
+                        call_id = %tc.id,
+                        "Tool arguments parsed to non-object JSON; coercing to empty object"
+                    );
+                    json!({})
+                }
+                Err(e) => {
+                    error!(
+                        function = "execute_mcp_tools",
+                        tool_name = %tc.function.name,
+                        call_id = %tc.id,
+                        error = %e,
+                        "Failed to parse tool arguments JSON, using empty object"
+                    );
+                    json!({})
+                }
+            };
+            let response_format = session.tool_response_format(&tc.function.name);
+            prepare_hosted_dispatch_args(&mut args, &response_format, request_tools, request_user);
             ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
@@ -93,6 +133,7 @@ pub(super) async fn execute_mcp_tools(
             ToolResult {
                 call_id: output.call_id,
                 output: output.output,
+                output_item,
                 is_error: output.is_error,
             }
         })

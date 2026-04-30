@@ -9,7 +9,9 @@
 use std::collections::{HashMap, HashSet};
 
 use futures::stream::{self, StreamExt};
-use openai_protocol::responses::{RequireApproval, RequireApprovalMode, ResponseTool};
+use openai_protocol::responses::{
+    McpAllowedTools, RequireApproval, RequireApprovalMode, ResponseTool,
+};
 
 use super::{
     config::BuiltinToolType,
@@ -76,6 +78,7 @@ pub struct McpToolSession<'a> {
     orchestrator: &'a McpOrchestrator,
     request_id: String,
     tenant_ctx: TenantContext,
+    forwarded_headers: HashMap<String, String>,
     /// All MCP servers in this session (including builtin).
     all_mcp_servers: Vec<McpServerBinding>,
     /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
@@ -100,6 +103,17 @@ impl<'a> McpToolSession<'a> {
         orchestrator: &'a McpOrchestrator,
         mcp_servers: Vec<McpServerBinding>,
         request_id: impl Into<String>,
+    ) -> Self {
+        Self::new_with_headers(orchestrator, mcp_servers, request_id, HashMap::new())
+    }
+
+    /// Create a new session with forwarded request headers preserved in the
+    /// request context for downstream execution paths.
+    pub fn new_with_headers(
+        orchestrator: &'a McpOrchestrator,
+        mcp_servers: Vec<McpServerBinding>,
+        request_id: impl Into<String>,
+        forwarded_headers: HashMap<String, String>,
     ) -> Self {
         let request_id = request_id.into();
         let tenant_ctx = TenantContext::default();
@@ -173,6 +187,7 @@ impl<'a> McpToolSession<'a> {
             orchestrator,
             request_id,
             tenant_ctx,
+            forwarded_headers,
             all_mcp_servers: mcp_servers,
             mcp_servers: visible_mcp_servers,
             mcp_tools,
@@ -341,7 +356,30 @@ impl<'a> McpToolSession<'a> {
                 continue;
             }
 
-            let allowed_tool_names = mcp_tool.allowed_tools.as_ref();
+            // T11: the legacy `allowed_tools: Vec<String>` wire shape is now
+            // `McpAllowedTools` (untagged union of `List(Vec<String>)` or
+            // `Filter(McpToolFilter { read_only?, tool_names? })`). Project
+            // union variants back into the flat name-list scoping used here:
+            //   * `None`, or `Filter { None, None }` → no name constraint
+            //     (all bindings for this server inherit the explicit approval
+            //     mode).
+            //   * `List(names)` / `Filter { tool_names: Some(v), .. }` →
+            //     constrain by explicit names.
+            //   * `Filter { tool_names: None, read_only: Some(_) }` → `None`.
+            //     `readOnlyHint`-based filtering is unimplemented, but the
+            //     safe-default direction for *approval scoping* is the
+            //     opposite of exposure: narrowing to an empty name list here
+            //     would drop the caller's explicit approval mode for all
+            //     bindings (they'd fall back to `PolicyOnly`, which is
+            //     auto-approve-by-policy — LESS restrictive). Returning
+            //     `None` applies the requested approval mode to every
+            //     binding on the server, matching the "over-gate is safer
+            //     than under-gate" contract for approval prompts.
+            let allowed_tool_names: Option<&[String]> =
+                mcp_tool.allowed_tools.as_ref().and_then(|at| match at {
+                    McpAllowedTools::List(names) => Some(names.as_slice()),
+                    McpAllowedTools::Filter(filter) => filter.tool_names.as_deref(),
+                });
             for binding in self.exposed_name_map.values_mut() {
                 if binding.server_label != mcp_tool.server_label {
                     continue;
@@ -558,8 +596,18 @@ impl<'a> McpToolSession<'a> {
             ResponseOutputItem::WebSearchCall { .. }
             | ResponseOutputItem::CodeInterpreterCall { .. }
             | ResponseOutputItem::FileSearchCall { .. }
+            | ResponseOutputItem::ImageGenerationCall { .. }
+            | ResponseOutputItem::ComputerCall { .. }
+            | ResponseOutputItem::ComputerCallOutput { .. }
+            | ResponseOutputItem::ShellCall { .. }
+            | ResponseOutputItem::ShellCallOutput { .. }
+            | ResponseOutputItem::ApplyPatchCall { .. }
+            | ResponseOutputItem::ApplyPatchCallOutput { .. }
             | ResponseOutputItem::Message { .. }
-            | ResponseOutputItem::Reasoning { .. } => true,
+            | ResponseOutputItem::Reasoning { .. }
+            | ResponseOutputItem::Compaction { .. }
+            | ResponseOutputItem::LocalShellCall { .. }
+            | ResponseOutputItem::LocalShellCallOutput { .. } => true,
         }
     }
 
@@ -836,10 +884,11 @@ impl<'a> McpToolSession<'a> {
     }
 
     fn request_ctx_for(&self, approval_mode: ApprovalMode) -> McpRequestContext<'a> {
-        self.orchestrator.create_request_context(
+        self.orchestrator.create_request_context_with_headers(
             self.request_id.clone(),
             self.tenant_ctx.clone(),
             approval_mode,
+            self.forwarded_headers.clone(),
         )
     }
 }
@@ -1004,6 +1053,8 @@ mod tests {
                 server_description: None,
                 require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
                 allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
             },
         )]);
 
@@ -1724,5 +1775,29 @@ mod tests {
         assert!(session.has_exposed_tool("deepwiki_read"));
         let listed_server2 = session.list_tools_for_server("server2");
         assert_eq!(listed_server2.len(), 2);
+    }
+
+    #[test]
+    fn test_session_preserves_forwarded_headers_in_request_context() {
+        let orchestrator = McpOrchestrator::new_test();
+        let session = McpToolSession::new_with_headers(
+            &orchestrator,
+            vec![],
+            "test-request",
+            HashMap::from([
+                ("openai-project".to_string(), "project-123".to_string()),
+                ("opc-request-id".to_string(), "req-123".to_string()),
+            ]),
+        );
+        let request_ctx = session.request_ctx_for(ApprovalMode::PolicyOnly);
+
+        assert_eq!(
+            request_ctx.forwarded_headers.get("openai-project"),
+            Some(&"project-123".to_string())
+        );
+        assert_eq!(
+            request_ctx.forwarded_headers.get("opc-request-id"),
+            Some(&"req-123".to_string())
+        );
     }
 }

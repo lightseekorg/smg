@@ -408,6 +408,12 @@ migrations are detected, startup **fails with the exact SQL statements**
 needed so you can review and apply them manually. Set `auto_migrate: true`
 to opt in to automatic migration.
 
+Normal SQL history backend startup currently enforces only the **core history**
+migrations for conversations, conversation items, and responses. Optional
+subsystem schema (for example skills metadata or background-mode queue tables)
+must be managed by the subsystem that actually uses those tables rather than
+being forced on every history-backed deployment.
+
 On startup:
 1. Tables are created if they don't exist (`CREATE TABLE` / `CREATE TABLE IF NOT EXISTS`)
 2. The `_schema_versions` tracking table is created
@@ -415,12 +421,13 @@ On startup:
    - If `auto_migrate: true` → migrations are applied automatically
    - If `auto_migrate: false` (default) → startup fails with actionable SQL if migrations are pending
 
-Current migrations:
+Current core history migrations:
 
 | Version | Description |
 |---------|-------------|
 | 1 | Add `safety_identifier` column to responses |
 | 2 | Remove legacy `user_id` column from responses |
+| 3 | Drop redundant `output`, `metadata`, `instructions`, `tool_calls` columns from responses |
 
 #### Controlling migrations
 

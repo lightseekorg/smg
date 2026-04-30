@@ -5,7 +5,8 @@
 //! Structure:
 //! 1. MemoryConversationStorage
 //! 2. MemoryConversationItemStorage
-//! 3. MemoryResponseStorage
+//! 3. MemoryConversationMemoryWriter
+//! 4. MemoryResponseStorage
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -274,7 +275,38 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
 }
 
 // ============================================================================
-// PART 3: MemoryResponseStorage
+// PART 3: MemoryConversationMemoryWriter
+// ============================================================================
+
+/// In-memory conversation memory writer used only by `HistoryBackend::Memory`.
+#[derive(Default, Clone)]
+pub struct MemoryConversationMemoryWriter {
+    inner: Arc<RwLock<HashMap<ConversationMemoryId, NewConversationMemory>>>,
+}
+
+impl MemoryConversationMemoryWriter {
+    /// Create a new in-memory conversation memory writer.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationMemoryWriter for MemoryConversationMemoryWriter {
+    async fn create_memory(
+        &self,
+        input: NewConversationMemory,
+    ) -> ConversationMemoryResult<ConversationMemoryId> {
+        let id = ConversationMemoryId(format!("mem_{}", ulid::Ulid::new()));
+        self.inner.write().insert(id.clone(), input);
+        Ok(id)
+    }
+}
+
+// ============================================================================
+// PART 4: MemoryResponseStorage
 // ============================================================================
 
 /// Internal store structure holding both maps together
@@ -314,6 +346,41 @@ impl MemoryResponseStorage {
         let mut store = self.store.write();
         store.responses.clear();
         store.identifier_index.clear();
+    }
+
+    /// Sync upsert used by `MemoryBackgroundRepository` to mirror background
+    /// writes atomically with its own state transitions.
+    ///
+    /// Goes through the same lock as the async `store_response`; callers that
+    /// want hook interception must use the async `ResponseStorage` path.
+    pub(crate) fn upsert_response_sync(&self, mut response: StoredResponse) {
+        if response.id.0.is_empty() {
+            response.id = ResponseId::new();
+        }
+        let response_id = response.id.clone();
+        let mut store = self.store.write();
+        if let Some(ref safety_identifier) = response.safety_identifier {
+            let ids = store
+                .identifier_index
+                .entry(safety_identifier.clone())
+                .or_default();
+            if !ids.contains(&response_id) {
+                ids.push(response_id.clone());
+            }
+        }
+        store.responses.insert(response_id, response);
+    }
+
+    /// Sync delete; see [`Self::upsert_response_sync`].
+    pub(crate) fn delete_response_sync(&self, response_id: &ResponseId) {
+        let mut store = self.store.write();
+        if let Some(response) = store.responses.remove(response_id) {
+            if let Some(ref safety_identifier) = response.safety_identifier {
+                if let Some(user_responses) = store.identifier_index.get_mut(safety_identifier) {
+                    user_responses.retain(|id| id != response_id);
+                }
+            }
+        }
     }
 }
 
@@ -588,6 +655,34 @@ mod tests {
             .unwrap();
         assert!(!asc_after.is_empty());
         assert_eq!(asc_after[0].id, i3.id);
+    }
+
+    #[tokio::test]
+    async fn test_memory_conversation_memory_writer_happy_path() {
+        let writer = MemoryConversationMemoryWriter::new();
+        let input = NewConversationMemory {
+            conversation_id: ConversationId::from("conv_mem_test"),
+            conversation_version: Some(1),
+            response_id: None,
+            memory_type: ConversationMemoryType::Ltm,
+            status: ConversationMemoryStatus::Ready,
+            attempt: 1,
+            owner_id: Some("owner_1".to_string()),
+            next_run_at: Utc::now(),
+            lease_until: None,
+            content: Some("memory content".to_string()),
+            memory_config: Some("{\"k\":\"v\"}".to_string()),
+            scope_id: Some("scope_1".to_string()),
+            error_msg: None,
+        };
+
+        let id = writer.create_memory(input.clone()).await.unwrap();
+        let _typed_id: ConversationMemoryId = id.clone();
+        assert!(id.0.starts_with("mem_"));
+
+        let store = writer.inner.read();
+        let stored = store.get(&id.clone()).expect("memory should be present");
+        assert_eq!(stored, &input);
     }
 
     // ========================================================================

@@ -21,9 +21,12 @@ use smg_data_connector::{
 use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
-use crate::routers::{
-    common::persistence_utils::split_stored_message_content, error,
-    grpc::common::responses::ResponsesContext,
+use crate::{
+    middleware::TenantRequestMeta,
+    routers::{
+        common::persistence_utils::split_stored_message_content, error,
+        grpc::common::responses::ResponsesContext,
+    },
 };
 
 // ============================================================================
@@ -45,6 +48,7 @@ pub(super) struct ResponsesCallContext {
     pub headers: Option<http::HeaderMap>,
     pub model_id: String,
     pub response_id: Option<String>,
+    pub tenant_request_meta: TenantRequestMeta,
 }
 
 impl ToolLoopState {
@@ -231,8 +235,9 @@ pub(super) async fn load_conversation_history(
     }
 
     // Handle conversation by loading conversation history
-    if let Some(ref conv_id_str) = request.conversation {
-        let conv_id = ConversationId::from(conv_id_str.as_str());
+    if let Some(ref conv_ref) = request.conversation {
+        let conv_id_str = conv_ref.as_id();
+        let conv_id = ConversationId::from(conv_id_str);
 
         // Check if conversation exists - return error if not found
         let conversation = ctx

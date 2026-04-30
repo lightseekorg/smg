@@ -6,6 +6,7 @@
 pub mod cohere;
 pub mod deepseek;
 pub mod deepseek31;
+pub mod deepseek_dsml;
 pub mod glm4_moe;
 pub mod json;
 pub mod kimik2;
@@ -25,6 +26,7 @@ pub mod helpers;
 pub use cohere::CohereParser;
 pub use deepseek::DeepSeekParser;
 pub use deepseek31::DeepSeek31Parser;
+pub use deepseek_dsml::DeepSeekDsmlParser;
 pub use glm4_moe::Glm4MoeParser;
 pub use json::JsonParser;
 pub use kimik2::KimiK2Parser;

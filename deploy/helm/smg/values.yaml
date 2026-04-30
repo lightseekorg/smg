@@ -39,6 +39,7 @@ router:
   # -- Kubernetes service discovery (auto-discover worker pods by label)
   serviceDiscovery:
     enabled: false
+    clusterWide: false     # set true to watch all namespaces (requires ClusterRole/ClusterRoleBinding)
     namespace: ""          # defaults to release namespace
     selector: ""           # e.g. "app=sglang-worker"
     port: 80

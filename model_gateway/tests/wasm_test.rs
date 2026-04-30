@@ -34,6 +34,7 @@ use smg::{
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
+    NoOpConversationMemoryWriter,
 };
 use tempfile::TempDir;
 use tokio::fs;
@@ -59,6 +60,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let response_storage = Arc::new(MemoryResponseStorage::new());
     let conversation_storage = Arc::new(MemoryConversationStorage::new());
     let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
+    let conversation_memory_writer = Arc::new(NoOpConversationMemoryWriter::new());
 
     // Initialize the worker monitor with the same interval the
     // production builder uses so tests exercise the real polling
@@ -89,6 +91,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .response_storage(response_storage)
             .conversation_storage(conversation_storage)
             .conversation_item_storage(conversation_item_storage)
+            .conversation_memory_writer(conversation_memory_writer)
             .worker_monitor(worker_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
@@ -197,6 +200,10 @@ async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir)
 
     let request_id_headers = vec!["x-request-id".to_string(), "x-correlation-id".to_string()];
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper assumes router config is already validated"
+    )]
     let app = build_app(
         app_state,
         smg::middleware::AuthConfig::new(None),
@@ -204,7 +211,8 @@ async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir)
         256 * 1024 * 1024,
         request_id_headers,
         vec![], // cors_allowed_origins
-    );
+    )
+    .expect("valid tenant resolution config");
 
     (app, app_context, temp_dir)
 }

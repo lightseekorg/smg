@@ -51,9 +51,11 @@ pub(crate) async fn route_responses(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     headers: Option<http::HeaderMap>,
+    tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
-    // 1. Reject background mode (no longer supported)
+    // BGM-PR-04 replaces this with delegation to routers/common/background/
+    // when ctx.app_context.background_repository is Some.
     let is_background = request.background.unwrap_or(false);
     if is_background {
         return error::bad_request(
@@ -69,6 +71,7 @@ pub(crate) async fn route_responses(
             headers,
             model_id,
             response_id: None,
+            tenant_request_meta,
         };
         route_responses_streaming(ctx, request, params).await
     } else {
@@ -76,6 +79,7 @@ pub(crate) async fn route_responses(
             headers,
             model_id,
             response_id: Some(format!("resp_{}", Uuid::now_v7())),
+            tenant_request_meta,
         };
         route_responses_sync(ctx, request, params).await
     }

@@ -1,3 +1,5 @@
+use axum::http::HeaderName;
+
 use super::*;
 
 /// Configuration validator
@@ -9,7 +11,7 @@ impl ConfigValidator {
         Self::validate_policy(&config.policy)?;
         Self::validate_server_settings(config)?;
         Self::validate_storage_context_headers(config)?;
-
+        Self::validate_tenant_resolution(config)?;
         if let Some(discovery) = &config.discovery {
             Self::validate_discovery(discovery, &config.mode)?;
         }
@@ -42,7 +44,45 @@ impl ConfigValidator {
 
         Self::validate_tokenizer_cache(&config.tokenizer_cache)?;
         Self::validate_skills(config)?;
+        Self::validate_background(&config.background)?;
 
+        Ok(())
+    }
+
+    fn validate_background(bg: &BackgroundConfig) -> ConfigResult<()> {
+        let zero_checks = [
+            (
+                "background.worker_concurrency",
+                u64::from(bg.worker_concurrency),
+            ),
+            ("background.max_queue_depth", u64::from(bg.max_queue_depth)),
+            ("background.lease_duration_secs", bg.lease_duration_secs),
+            ("background.max_retries", u64::from(bg.max_retries)),
+            ("background.retry_base_delay_secs", bg.retry_base_delay_secs),
+            ("background.retry_max_delay_secs", bg.retry_max_delay_secs),
+            ("background.sweep_interval_secs", bg.sweep_interval_secs),
+            ("background.poll_interval_ms", bg.poll_interval_ms),
+            ("background.stream_retention_secs", bg.stream_retention_secs),
+        ];
+        for (field, value) in zero_checks {
+            if value == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: field.to_string(),
+                    value: value.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+        }
+        if bg.retry_base_delay_secs > bg.retry_max_delay_secs {
+            return Err(ConfigError::InvalidValue {
+                field: "background.retry_base_delay_secs".to_string(),
+                value: bg.retry_base_delay_secs.to_string(),
+                reason: format!(
+                    "Must be <= retry_max_delay_secs ({})",
+                    bg.retry_max_delay_secs
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -83,6 +123,7 @@ impl ConfigValidator {
                 reason: "Must be > 0".to_string(),
             });
         }
+        validate_mebibyte_limit("skills.max_upload_size_mb", skills.max_upload_size_mb)?;
 
         if skills.max_file_size_mb == 0 {
             return Err(ConfigError::InvalidValue {
@@ -91,6 +132,7 @@ impl ConfigValidator {
                 reason: "Must be > 0".to_string(),
             });
         }
+        validate_mebibyte_limit("skills.max_file_size_mb", skills.max_file_size_mb)?;
 
         if skills.max_file_size_mb > skills.max_upload_size_mb {
             return Err(ConfigError::InvalidValue {
@@ -167,6 +209,23 @@ impl ConfigValidator {
                 });
             }
         }
+
+        Ok(())
+    }
+
+    fn validate_tenant_resolution(config: &RouterConfig) -> ConfigResult<()> {
+        let header_name = config.tenant_resolution.tenant_header_name.trim();
+        if header_name.is_empty() {
+            return Err(ConfigError::ValidationFailed {
+                reason: "tenant_resolution.tenant_header_name must not be empty".to_string(),
+            });
+        }
+
+        HeaderName::try_from(header_name).map_err(|e| ConfigError::ValidationFailed {
+            reason: format!(
+                "tenant_resolution.tenant_header_name must be a valid HTTP header name: {e}"
+            ),
+        })?;
 
         Ok(())
     }
@@ -808,6 +867,20 @@ impl ConfigValidator {
         }
         Ok(())
     }
+}
+
+fn validate_mebibyte_limit(field: &str, value_mb: usize) -> ConfigResult<()> {
+    const MEBIBYTE: usize = 1024 * 1024;
+
+    if value_mb.checked_mul(MEBIBYTE).is_none() {
+        return Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: value_mb.to_string(),
+            reason: "Must fit into usize bytes".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

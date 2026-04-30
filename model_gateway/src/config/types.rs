@@ -8,7 +8,74 @@ pub use smg_data_connector::{
 };
 
 use super::{validation::ConfigValidator, ConfigResult, SkillsConfig};
-use crate::worker::ConnectionMode;
+use crate::{tenant::DEFAULT_TENANT_HEADER_NAME, worker::ConnectionMode};
+
+/// Runtime feature flags for memory behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryRuntimeConfig {
+    /// Master switch for memory features.
+    pub enabled: bool,
+}
+
+/// Background-mode tuning knobs. Availability is gated by backend capability
+/// (whether the active `history_backend` provides a
+/// `BackgroundResponseRepository`), not by a flag here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    pub worker_concurrency: u32,
+    pub max_queue_depth: u32,
+    pub lease_duration_secs: u64,
+    pub max_retries: u32,
+    pub retry_base_delay_secs: u64,
+    pub retry_max_delay_secs: u64,
+    pub sweep_interval_secs: u64,
+    pub poll_interval_ms: u64,
+    pub stream_retention_secs: u64,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            worker_concurrency: 16,
+            max_queue_depth: 10_000,
+            lease_duration_secs: 60,
+            max_retries: 3,
+            retry_base_delay_secs: 2,
+            retry_max_delay_secs: 60,
+            sweep_interval_secs: 30,
+            poll_interval_ms: 500,
+            stream_retention_secs: 15 * 60,
+        }
+    }
+}
+
+impl BackgroundConfig {
+    pub fn lease_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.lease_duration_secs)
+    }
+
+    pub fn retry_base_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.retry_base_delay_secs)
+    }
+
+    pub fn retry_max_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.retry_max_delay_secs)
+    }
+
+    pub fn sweep_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.sweep_interval_secs)
+    }
+
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.poll_interval_ms)
+    }
+
+    pub fn stream_retention(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.stream_retention_secs)
+    }
+}
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +104,12 @@ pub struct RouterConfig {
     pub request_id_headers: Option<Vec<String>>,
     #[serde(default)]
     pub storage_context_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub memory_runtime: MemoryRuntimeConfig,
+    #[serde(default)]
+    pub background: BackgroundConfig,
+    #[serde(default)]
+    pub tenant_resolution: TenantResolutionConfig,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
     pub queue_size: usize,
@@ -109,6 +182,22 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TenantResolutionConfig {
+    pub trust_tenant_header: bool,
+    pub tenant_header_name: String,
+}
+
+impl Default for TenantResolutionConfig {
+    fn default() -> Self {
+        Self {
+            trust_tenant_header: false,
+            tenant_header_name: DEFAULT_TENANT_HEADER_NAME.to_string(),
+        }
+    }
 }
 
 /// Tokenizer cache configuration
@@ -554,6 +643,9 @@ impl Default for RouterConfig {
             log_level: None,
             request_id_headers: None,
             storage_context_headers: HashMap::new(),
+            memory_runtime: MemoryRuntimeConfig::default(),
+            background: BackgroundConfig::default(),
+            tenant_resolution: TenantResolutionConfig::default(),
             max_concurrent_requests: -1,
             queue_size: 100,
             queue_timeout_secs: 60,
@@ -682,8 +774,89 @@ mod tests {
         assert!(config.trace_config.is_none());
         assert!(config.log_dir.is_none());
         assert!(config.log_level.is_none());
+        assert!(!config.tenant_resolution.trust_tenant_header);
+        assert_eq!(
+            config.tenant_resolution.tenant_header_name,
+            DEFAULT_TENANT_HEADER_NAME
+        );
         assert!(!config.skills_enabled);
         assert!(config.skills.is_none());
+    }
+
+    #[test]
+    fn test_background_config_defaults_match_design() {
+        let bg = BackgroundConfig::default();
+        assert_eq!(bg.worker_concurrency, 16);
+        assert_eq!(bg.max_queue_depth, 10_000);
+        assert_eq!(bg.lease_duration_secs, 60);
+        assert_eq!(bg.max_retries, 3);
+        assert_eq!(bg.retry_base_delay_secs, 2);
+        assert_eq!(bg.retry_max_delay_secs, 60);
+        assert_eq!(bg.sweep_interval_secs, 30);
+        assert_eq!(bg.poll_interval_ms, 500);
+        assert_eq!(bg.stream_retention_secs, 15 * 60);
+    }
+
+    #[test]
+    fn test_background_config_accessors_convert_units() {
+        let bg = BackgroundConfig::default();
+        assert_eq!(bg.lease_duration(), std::time::Duration::from_secs(60));
+        assert_eq!(bg.poll_interval(), std::time::Duration::from_millis(500));
+        assert_eq!(bg.stream_retention(), std::time::Duration::from_secs(900));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_background_fields() {
+        type BgMutator = fn(&mut BackgroundConfig);
+        let cases: &[(&str, BgMutator)] = &[
+            ("worker_concurrency", |b| b.worker_concurrency = 0),
+            ("max_queue_depth", |b| b.max_queue_depth = 0),
+            ("lease_duration_secs", |b| b.lease_duration_secs = 0),
+            ("max_retries", |b| b.max_retries = 0),
+            ("retry_base_delay_secs", |b| b.retry_base_delay_secs = 0),
+            ("retry_max_delay_secs", |b| b.retry_max_delay_secs = 0),
+            ("sweep_interval_secs", |b| b.sweep_interval_secs = 0),
+            ("poll_interval_ms", |b| b.poll_interval_ms = 0),
+            ("stream_retention_secs", |b| b.stream_retention_secs = 0),
+        ];
+        for (field, mutate) in cases {
+            let mut cfg = RouterConfig::default();
+            mutate(&mut cfg.background);
+            let err = cfg.validate().expect_err(field);
+            assert!(
+                format!("{err:?}").contains(field),
+                "{field} validation must fail with field in error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_retry_base_exceeding_max() {
+        let mut cfg = RouterConfig::default();
+        cfg.background.retry_base_delay_secs = 30;
+        cfg.background.retry_max_delay_secs = 10;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_background_config_yaml_round_trip_with_custom_values() {
+        let yaml = r"
+worker_concurrency: 32
+max_queue_depth: 5000
+lease_duration_secs: 120
+max_retries: 5
+retry_base_delay_secs: 4
+retry_max_delay_secs: 300
+sweep_interval_secs: 10
+poll_interval_ms: 250
+stream_retention_secs: 3600
+";
+        let bg: BackgroundConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(bg.worker_concurrency, 32);
+        assert_eq!(bg.max_queue_depth, 5000);
+        assert_eq!(bg.lease_duration(), std::time::Duration::from_secs(120));
+        assert_eq!(bg.retry_max_delay(), std::time::Duration::from_secs(300));
+        assert_eq!(bg.poll_interval(), std::time::Duration::from_millis(250));
     }
 
     #[test]
@@ -782,6 +955,11 @@ mod tests {
 
         assert!(deserialized.skills_enabled);
         assert!(deserialized.skills.is_none());
+        assert!(!deserialized.tenant_resolution.trust_tenant_header);
+        assert_eq!(
+            deserialized.tenant_resolution.tenant_header_name,
+            DEFAULT_TENANT_HEADER_NAME
+        );
     }
 
     #[test]

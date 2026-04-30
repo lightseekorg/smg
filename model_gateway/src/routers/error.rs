@@ -7,6 +7,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
+use smg_skills::{ReservedSkillToolNameError, SkillResolutionError, SkillServiceError};
+use tracing::error;
 
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
@@ -100,6 +102,48 @@ pub fn model_not_found(model: &str) -> Response {
         "model_not_found",
         format!("No worker available for model '{model}'"),
     )
+}
+
+pub fn reserved_skill_tool_name(error: ReservedSkillToolNameError) -> Response {
+    bad_request(
+        "reserved_tool_name",
+        format!(
+            "Tool name '{}' is reserved for SMG skill tools",
+            error.tool_name()
+        ),
+    )
+}
+
+pub fn skill_resolution_error(error: SkillResolutionError) -> Response {
+    match error {
+        SkillResolutionError::SkillsNotEnabled => bad_request(
+            "skills_not_enabled",
+            "SMG skills are not enabled for this gateway",
+        ),
+        SkillResolutionError::Service(SkillServiceError::SkillNotFound { .. }) => {
+            bad_request("skill_not_found", "Referenced SMG skill was not found")
+        }
+        SkillResolutionError::Service(
+            SkillServiceError::SkillVersionNotFound { .. }
+            | SkillServiceError::MissingDefaultVersion { .. },
+        ) => bad_request(
+            "skill_version_not_found",
+            "Referenced SMG skill version was not found",
+        ),
+        SkillResolutionError::Service(
+            SkillServiceError::MissingTenantId | SkillServiceError::MissingSkillId,
+        ) => bad_request(
+            "invalid_skill_reference",
+            "Skill reference is missing a required field",
+        ),
+        SkillResolutionError::Service(_) => {
+            error!(error = %error, "failed to resolve request skills");
+            internal_error(
+                "skills_resolution_failed",
+                "Failed to resolve request skills",
+            )
+        }
+    }
 }
 
 pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {
