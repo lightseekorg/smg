@@ -39,6 +39,7 @@ dev = [
     "requests>=2.25.0",
     "ruff",
     "pytest>=7.0.0",
+    "huggingface_hub",
 ]
 
 [project.scripts]
