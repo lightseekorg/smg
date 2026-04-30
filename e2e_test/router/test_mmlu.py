@@ -23,7 +23,7 @@ from infra import run_eval
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

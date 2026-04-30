@@ -219,7 +219,7 @@ class TestIGWMultiWorker:
 
 
 @pytest.mark.e2e
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "tokenspeed")
 @pytest.mark.gpu(1)
 class TestDisableHealthCheck:
     """Tests for --disable-health-check CLI option."""

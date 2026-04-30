@@ -708,7 +708,7 @@ class TestOpenAIServerFunctionCalling:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
@@ -1488,7 +1488,7 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
@@ -1509,14 +1509,20 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
-@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
+@pytest.mark.model("Qwen/Qwen3-4B-Instruct-2507")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
 class TestToolChoiceQwen(_TestToolChoiceBase):
-    """Tests for tool_choice functionality with Qwen model."""
+    """Tests for tool_choice functionality with Qwen model.
+
+    Uses Qwen3-4B-Instruct (non-thinking variant) — same
+    `<tool_call>\\n{...}\\n</tool_call>` format as Qwen 2.5, so the gateway's
+    ``qwen`` parser applies, while the Qwen3 family is in TokenSpeed's model
+    registry.
+    """
 
     # No flaky tests for Qwen
     FLAKY_TESTS: set[str] = set()
@@ -1578,9 +1584,9 @@ WEATHER_TOOL = {
 }
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
-@pytest.mark.gpu(2)
-@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
+@pytest.mark.gpu(1)
+@pytest.mark.model("Qwen/Qwen3-4B-Instruct-2507")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
