@@ -24,6 +24,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -329,10 +330,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         logger.info("Abort request %s", rid)
         state_map = self.async_llm.rid_to_state
 
-        # Any rid starting with ``{request_id}-n`` is a per-choice child we
-        # minted in _build_generate_req; catch the single-rid case too.
-        child_prefix = f"{rid}-n"
-        targets = [r for r in state_map if r == rid or r.startswith(child_prefix)]
+        # Match exactly the per-choice children we minted in
+        # _build_generate_req — ``{rid}-n0``, ``{rid}-n1``, ... A loose
+        # ``startswith(f"{rid}-n")`` would mistakenly cancel an unrelated
+        # user-supplied rid like ``{rid}-name`` from a different caller.
+        child_pattern = re.compile(rf"^{re.escape(rid)}-n\d+$")
+        targets = [r for r in state_map if r == rid or child_pattern.match(r)]
 
         try:
             for r in targets:
