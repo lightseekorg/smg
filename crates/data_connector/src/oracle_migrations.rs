@@ -487,11 +487,7 @@ fn oracle_v12_up(schema: &SchemaConfig) -> Vec<String> {
 
     if !sl.is_skipped("link_id") {
         let link_id_col = sl.col("link_id").to_uppercase();
-        let cid_col = sl.col("conversation_id").to_uppercase();
         let seq = oracle_qualified_name(schema, "CONV_ITEM_LINK_ID_SEQ");
-        // Fixed short index name keeps emitted identifier under Oracle's
-        // 30-char limit even with a long custom table name.
-        let idx = oracle_qualified_name(schema, "IDX_CONV_LINK_ID");
 
         // ORA-00955 = "name is already used by an existing object".
         // ORDER (vs NOORDER) makes the sequence strictly monotonic in request
@@ -507,10 +503,12 @@ fn oracle_v12_up(schema: &SchemaConfig) -> Vec<String> {
             "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE {sl_table} ADD ({link_id_col} NUMBER)'; \
              EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF; END;"
         ));
-        stmts.push(format!(
-            "BEGIN EXECUTE IMMEDIATE 'CREATE UNIQUE INDEX {idx} ON {sl_table} ({cid_col}, {link_id_col})'; \
-             EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
-        ));
+        // The UNIQUE INDEX on (conversation_id, link_id) is intentionally NOT
+        // created here. Creating it while LINK_ID is universally NULL caused
+        // every link_item INSERT past the first per-conversation to fail in
+        // e2e (only the first input message survived). It will be added in
+        // PR 3 immediately after backfilling LINK_ID with sequence values
+        // and promoting the column to NOT NULL.
     }
 
     stmts
@@ -756,7 +754,7 @@ mod tests {
             ..Default::default()
         };
         let stmts = oracle_v12_up(&schema);
-        assert_eq!(stmts.len(), 4, "got: {stmts:?}");
+        assert_eq!(stmts.len(), 3, "got: {stmts:?}");
         assert!(stmts[0].contains("ADD (ITEM_JSON CLOB") && stmts[0].contains("IS JSON"));
         assert!(stmts[1].contains("CREATE SEQUENCE OWNER.CONV_ITEM_LINK_ID_SEQ"));
         // Leading space distinguishes ORDER from NOORDER. Required for
@@ -767,8 +765,6 @@ mod tests {
             stmts[1]
         );
         assert!(stmts[2].contains("ADD (LINK_ID NUMBER)"));
-        assert!(stmts[3].contains("UNIQUE INDEX OWNER.IDX_CONV_LINK_ID"));
-        assert!(stmts[3].contains("(CONVERSATION_ID, LINK_ID)"));
     }
 
     #[test]
