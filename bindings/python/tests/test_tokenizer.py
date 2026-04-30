@@ -102,3 +102,18 @@ def test_apply_chat_template_basic(hf_tokenizer_path):
     # The template must have added a generation prompt suffix (e.g. "<|im_start|>assistant\n" for Qwen).
     # Check it ends with something non-empty after the user message.
     assert "user" not in prompt.split("assistant")[-1].lower() or "assistant" in prompt
+
+
+@pytest.mark.unit
+def test_apply_chat_template_with_tools(hf_tokenizer_path):
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    fixture = json.loads((FIXTURES / "messages_with_tools.json").read_text())
+
+    prompt_no_tools = tok.apply_chat_template(fixture["messages"])
+    prompt_with_tools = tok.apply_chat_template(fixture["messages"], tools=fixture["tools"])
+
+    # When tools are passed, the rendered prompt should differ from the no-tools version
+    # (the chat template injects tool descriptions). For tokenizers that ignore tools,
+    # this assertion would need adjustment - Qwen2.5-Instruct does honor tools.
+    assert prompt_with_tools != prompt_no_tools
+    assert "get_weather" in prompt_with_tools

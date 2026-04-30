@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {"role": "system", "content": "You can call tools when helpful."},
+    {"role": "user", "content": "What is the weather in Paris?"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "City name"}
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ]
+}
