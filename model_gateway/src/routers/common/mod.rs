@@ -22,6 +22,7 @@
 //!   before forwarding to provider-specific routers.
 
 pub mod background;
+pub mod grpc_headers;
 pub mod header_utils;
 pub mod mcp_utils;
 pub mod persistence_utils;
