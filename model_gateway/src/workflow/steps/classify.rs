@@ -25,7 +25,7 @@ use crate::{
 const CLASSIFY_PROBE_TIMEOUT_SECS: u64 = 2;
 
 /// Known local backend `owned_by` values returned by `/v1/models`.
-const LOCAL_OWNED_BY: &[&str] = &["sglang", "vllm", "trtllm", "tokenspeed"];
+const LOCAL_OWNED_BY: &[&str] = &["sglang", "vllm", "trtllm"];
 
 /// Fetch `/v1/models` and check the `owned_by` field of the first model.
 /// Returns `Some("sglang")`, `Some("vllm")`, etc. if recognized as a local

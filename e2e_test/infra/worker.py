@@ -273,7 +273,9 @@ class Worker:
 
         Launches the SMG-hosted TokenSpeed gRPC server
         (``smg_grpc_servicer.tokenspeed``) which wraps TokenSpeed's AsyncLLM
-        behind the SGLang proto. Auto-detected as SGLang by the Rust router.
+        behind the dedicated ``tokenspeed.grpc.scheduler`` service.
+        Auto-detected as TokenSpeed by the Rust router via its native
+        service-name handshake.
         """
         cmd = [
             "python3",

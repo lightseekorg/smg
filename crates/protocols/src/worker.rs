@@ -197,12 +197,13 @@ pub enum RuntimeType {
     Trtllm,
     /// MLX runtime (Apple Silicon).
     Mlx,
-    /// TokenSpeed runtime. Speaks the SGLang scheduler proto on the wire,
-    /// which is why the gRPC client dispatch routes this variant through
-    /// `SglangSchedulerClient`; the distinct enum value exists so metrics,
-    /// logs, and any future runtime-specific behavior (e.g. PD support
-    /// once TokenSpeed gains it) can tell TokenSpeed workers apart from
-    /// real SGLang workers.
+    /// TokenSpeed runtime. Speaks the dedicated
+    /// `tokenspeed.grpc.scheduler.TokenSpeedScheduler` service on the
+    /// wire (see `crates/grpc_client/proto/tokenspeed_scheduler.proto`);
+    /// the gRPC client dispatch routes this variant through
+    /// `TokenSpeedSchedulerClient`, which translates the SGLang-shaped
+    /// request/response types the router operates on to TokenSpeed's
+    /// slimmer wire format at the boundary.
     TokenSpeed,
     /// External OpenAI-compatible API (not local inference).
     External,

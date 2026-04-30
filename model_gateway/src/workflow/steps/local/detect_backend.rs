@@ -1,12 +1,13 @@
 //! Backend runtime detection step.
 //!
-//! Detects the runtime type (sglang, vllm, trtllm, mlx, tokenspeed) for both HTTP
-//! and gRPC workers.
-//! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
+//! Detects the runtime type for local workers.
+//! - HTTP: detects sglang/vllm via `/v1/models` (owned_by field), falls back
+//!   to unique endpoints. TokenSpeed has no HTTP frontend in this repo and is
+//!   gRPC-only.
 //! - gRPC: tries tokenspeed → sglang → vllm → trtllm → mlx health checks
 //!   sequentially. TokenSpeed speaks its own ``tokenspeed.grpc.scheduler``
 //!   service (see `proto/tokenspeed_scheduler.proto`), so the health handshake
-//!   natively identifies the worker — no SGLang-proto fallback hack needed.
+//!   natively identifies the worker.
 
 use std::time::Duration;
 
@@ -113,7 +114,6 @@ async fn detect_via_models_endpoint(
     match first_model.owned_by.as_deref() {
         Some("sglang") => Ok("sglang".to_string()),
         Some("vllm") => Ok("vllm".to_string()),
-        Some("tokenspeed") => Ok("tokenspeed".to_string()),
         other => Err(format!("Unrecognized owned_by value: {other:?}")),
     }
 }
