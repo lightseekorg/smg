@@ -83,6 +83,8 @@ pub struct AppContext {
     pub webrtc_bind_addr: Option<std::net::IpAddr>,
     /// STUN server for ICE candidate gathering (`None` = `stun.l.google.com:19302`).
     pub webrtc_stun_server: Option<String>,
+    /// Registry of Responses-API interceptors (empty by default).
+    pub interceptors: smg_extensions::InterceptorRegistry,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -117,6 +119,7 @@ pub struct AppContextBuilder {
     kv_event_monitor: Option<Arc<KvEventMonitor>>,
     webrtc_bind_addr: Option<std::net::IpAddr>,
     webrtc_stun_server: Option<String>,
+    interceptors: Option<smg_extensions::InterceptorRegistry>,
 }
 
 impl AppContext {
@@ -172,6 +175,7 @@ impl AppContextBuilder {
             kv_event_monitor: None,
             webrtc_bind_addr: None,
             webrtc_stun_server: None,
+            interceptors: None,
         }
     }
 
@@ -304,6 +308,16 @@ impl AppContextBuilder {
         self
     }
 
+    /// Inject the Responses-API interceptor registry. Defaults to an empty
+    /// registry when not provided.
+    pub fn interceptors(
+        mut self,
+        interceptors: smg_extensions::InterceptorRegistry,
+    ) -> Self {
+        self.interceptors = Some(interceptors);
+        self
+    }
+
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
@@ -404,6 +418,7 @@ impl AppContextBuilder {
             realtime_registry: Arc::new(RealtimeRegistry::new()),
             webrtc_bind_addr: self.webrtc_bind_addr,
             webrtc_stun_server: self.webrtc_stun_server,
+            interceptors: self.interceptors.unwrap_or_default(),
         })
     }
 
