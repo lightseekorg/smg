@@ -759,6 +759,13 @@ mod tests {
         assert_eq!(stmts.len(), 4, "got: {stmts:?}");
         assert!(stmts[0].contains("ADD (ITEM_JSON CLOB") && stmts[0].contains("IS JSON"));
         assert!(stmts[1].contains("CREATE SEQUENCE OWNER.CONV_ITEM_LINK_ID_SEQ"));
+        // Leading space distinguishes ORDER from NOORDER. Required for
+        // strictly monotonic NEXTVAL on RAC / multi-instance deployments.
+        assert!(
+            stmts[1].contains(" ORDER"),
+            "sequence must use ORDER for RAC determinism: {}",
+            stmts[1]
+        );
         assert!(stmts[2].contains("ADD (LINK_ID NUMBER)"));
         assert!(stmts[3].contains("UNIQUE INDEX OWNER.IDX_CONV_LINK_ID"));
         assert!(stmts[3].contains("(CONVERSATION_ID, LINK_ID)"));
