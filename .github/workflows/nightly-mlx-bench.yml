@@ -7,13 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id. CI default is the 1B-QAT variant: small enough for macos-latest's ~5GB Metal budget AND a QAT MLX checkpoint (vllm-metal's Metal path only picks up QAT-format checkpoints; the non-QAT 4-bit variants silently fall back to CPU/fp32 on this runner). Override via workflow_dispatch on beefier runners."
+        description: "Model id. CI default is Gemma 4 E2B (~3.2 GB). Override on a beefier runner if needed."
         required: false
-        default: "mlx-community/gemma-3-1b-it-qat-4bit"
+        default: "mlx-community/gemma-4-e2b-it-4bit"
       phases:
-        description: "Phases to run (space-separated subset of 'mlx grpc vllm')"
+        description: "Phases to run (space-separated subset of 'mlx grpc vllm'). vllm is local-only — vllm-metal's Metal backend doesn't run reliably on macos-latest GitHub runners. Set this to 'mlx grpc vllm' on a self-hosted Apple Silicon runner."
         required: false
-        default: "mlx grpc vllm"
+        default: "mlx grpc"
       concurrencies:
         description: "Space-separated concurrencies"
         required: false
@@ -48,38 +48,28 @@ concurrency:
 
 jobs:
   bench:
-    name: MLX three-way (mlx-lm vs SMG+gRPC vs vllm-metal)
+    name: MLX two-way (mlx-lm vs SMG+gRPC; vllm-metal local-only)
     runs-on: macos-latest
-    # 4 concurrencies × 2 scenarios × 3 backends × 5 min ≈ 2 h, plus build,
-    # model download, and vllm-metal install. Cap at 4 h for safety.
+    # 4 concurrencies × 2 scenarios × 2 backends × 5 min ≈ 1.4 h, plus
+    # build and model download. Cap at 4 h for safety.
     timeout-minutes: 240
     env:
-      # Model default is gemma-3-1b-it-qat-4bit (~0.7 GB on disk) for
-      # two reasons specific to the macos-latest runner:
-      #
-      # 1. Size. The runner exposes ~5 GB of Metal memory total; with
-      #    vllm-metal's ~1.7 GB runtime overhead, a 4B-class model
-      #    (3 GB) leaves a NEGATIVE KV-cache budget. Lowering
-      #    `--gpu-memory-utilization` makes that worse, not better
-      #    (the flag *gates* how much Metal vllm-metal can use). Only a
-      #    sub-1 GB model fits with real KV headroom.
-      #
-      # 2. QAT format. vllm-metal's Metal path only recognizes
-      #    quantization-aware-training checkpoints (`*-qat-4bit` on
-      #    mlx-community); regular 4-bit MLX checkpoints silently
-      #    fall back to a PyTorch CPU/fp32 path that needs ~6 GB and
-      #    OOMs at startup on this runner.
-      #
-      # All three backends bench the SAME model, so the relative
-      # router/streaming comparison stays meaningful at 1B. For
-      # production-shaped 4B+ numbers, run `local_three_way` via
-      # benchmarks/mlx_grpc_vs_http/run.sh on a real Mac, or override
-      # MODEL via workflow_dispatch on a beefier runner.
-      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-1b-it-qat-4bit' }}
-      # PR runs use a reduced matrix so the smoke test finishes in
-      # reasonable time. Scheduled / dispatched runs use the full matrix.
+      # Model default is Gemma 4 E2B Q4 (~3.2 GB on disk). Day-0 mlx-lm
+      # support; mlx-community publishes the MLX 4-bit variant. E2B has
+      # 5.1B total params with 2.3B "effective" via per-layer embeddings
+      # — fits comfortably in the macos-latest runner's 7 GB RAM with
+      # plenty of headroom for KV cache and the bench harness.
+      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-4-e2b-it-4bit' }}
+      # CI default is two-way (mlx + grpc). vllm-metal is dropped from
+      # the default because the macos-latest VM doesn't reliably expose
+      # Metal GPU access — vllm-metal silently falls back to a PyTorch
+      # CPU/fp32 path that OOMs at startup on the 7 GB runner. To run
+      # the three-way comparison, use `local_three_way` via
+      # benchmarks/mlx_grpc_vs_http/run.sh on real Apple Silicon
+      # hardware (≥16 GB unified RAM), or trigger via workflow_dispatch
+      # on a self-hosted M-series runner with PHASES=mlx grpc vllm.
       PHASES: >-
-        ${{ github.event.inputs.phases || 'mlx grpc vllm' }}
+        ${{ github.event.inputs.phases || 'mlx grpc' }}
       CONCURRENCIES: >-
         ${{ github.event.inputs.concurrencies
         || (github.event_name == 'pull_request' && '1 4'
@@ -178,17 +168,21 @@ jobs:
             exit 1
           fi
 
-      - name: Install vllm-metal (best effort)
-        # vllm-metal isn't on PyPI (no public macos wheels for plain vllm),
-        # so we install it via the project's official install script. The
-        # script hard-codes $HOME/.venv-vllm-metal as the install target
-        # when run via `curl | bash` — VLLM_VENV (above) matches that. If
-        # install fails, the vllm phase will skip itself.
+      - name: Install vllm-metal (best effort, only when vllm phase is requested)
+        # Only fires if someone explicitly opted into the vllm phase via
+        # workflow_dispatch (PHASES contains 'vllm'). The default CI run
+        # is two-way (mlx + grpc) on the macos-latest runner because the
+        # VM doesn't reliably expose Metal GPU access — vllm-metal
+        # silently falls back to a PyTorch CPU/fp32 path that OOMs at
+        # startup on 7 GB. Real Apple Silicon hardware (≥16 GB) is needed
+        # for the three-way comparison; use `local_three_way` (run.sh)
+        # locally, or trigger via workflow_dispatch with an override on
+        # a self-hosted M-series runner.
+        if: contains(env.PHASES, 'vllm')
         continue-on-error: true
         run: |
           curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh | bash \
             || echo "vllm-metal install failed — vllm phase will be skipped"
-          # Confirm what we got so subsequent steps are easier to debug.
           if [ -x "$VLLM_VENV/bin/vllm" ]; then
             echo "vllm-metal installed at $VLLM_VENV"
             "$VLLM_VENV/bin/vllm" --help | head -3 || true

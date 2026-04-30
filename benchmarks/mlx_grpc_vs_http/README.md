@@ -120,20 +120,20 @@ python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) 
 - **vllm-metal optional**: if `$VLLM_VENV` doesn't exist, the vllm phase
   is skipped with a log message rather than failing the whole run.
 
-## CI vs local model defaults
+## CI vs local defaults
 
-| Environment | `MODEL` default | Why |
-|---|---|---|
-| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx-community/gemma-3-1b-it-qat-4bit` (~0.7 GB) | `macos-latest` runners expose ~5 GB Metal memory total. A 4 B-class model (3 GB) plus vllm-metal's ~1.7 GB overhead leaves a negative KV-cache budget — lowering `--gpu-memory-utilization` makes that worse, not better, since the flag gates how much Metal vllm-metal can use. **QAT format also matters**: vllm-metal's Metal path only picks up `*-qat-4bit` checkpoints; regular 4-bit MLX checkpoints silently fall back to a PyTorch CPU/fp32 path that needs ~6 GB and OOMs at startup. |
-| Local Mac (`run.sh`) | `mlx-community/gemma-3-4b-it-qat-4bit` (~3 GB) | M-series Pro/Max with 16+ GB unified memory has plenty of headroom; the larger model produces more representative absolute throughput / latency numbers. |
+| Environment | `PHASES` default | `MODEL` default | Why |
+|---|---|---|---|
+| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx grpc` (two-way) | `mlx-community/gemma-4-e2b-it-4bit` (~3.2 GB) | Gemma 4 E2B Q4 is the smallest production-quality MLX checkpoint with day-0 mlx-lm support. Fits the macos-latest runner's 7 GB RAM with headroom for KV cache and the bench harness. |
+| Local Mac (`run.sh`) | `mlx grpc vllm` (three-way) | `mlx-community/gemma-3-4b-it-qat-4bit` (~3 GB) | M-series Pro/Max with 16+ GB unified memory runs the full three-way comparison — vllm-metal's Metal backend works on real Apple Silicon hardware. |
 
-The bench compares all three backends on the *same* model — switching
-to the 1 B variant for CI keeps the **relative** router/streaming
-comparison meaningful (TTFT shape, RPS scaling with concurrency, TPOT
-correctness). For production-shaped *absolute* numbers at 4 B or
-larger, use the local `run.sh` defaults or override `MODEL` via
-`workflow_dispatch` on a runner with more RAM (e.g. self-hosted M-Pro,
-or `macos-latest-xlarge` with 14 GB).
+**Why vllm-metal isn't in the CI default**: vllm-metal needs direct
+Metal GPU access. The `macos-latest` GitHub runner is a VM that
+doesn't reliably expose Apple GPU passthrough — vllm-metal silently
+falls back to a PyTorch CPU/fp32 path that allocates ~6 GB and OOMs
+at startup on the 7 GB runner. To run the three-way comparison,
+either run `local_three_way` on real Apple Silicon, or override
+`PHASES` via `workflow_dispatch` on a self-hosted M-series runner.
 
 ## CI
 
