@@ -3,11 +3,23 @@
 Tests the SMG router → gRPC → MLX worker pipeline using mlx-lm's
 BatchGenerator. The MLX backend only supports gRPC mode.
 
-Run locally with:
-    E2E_RUNTIME=mlx pytest e2e_test/chat_completions/test_mlx_backend.py -v
+These tests live in `e2e_test/mlx/` rather than under the API-surface
+dirs (`chat_completions/`, etc.) because:
 
-CI runs on macos-14 (Apple Silicon) with the smallest Qwen3 model (~400 MB).
-See .github/workflows/pr-test-mlx.yml.
+1. The fixtures require a different runner (Apple Silicon macOS) and
+   a different model (`mlx-community/Qwen3-0.6B-4bit`) than the
+   sglang/vllm/trtllm tests, so they don't slot cleanly into the
+   `@pytest.mark.engine("sglang", "vllm", "trtllm")` parameterization
+   the other API-surface files use.
+2. They are scoped to one backend (mlx), not one API behavior. The
+   existing precedents for concern-scoped sibling dirs are
+   `e2e_test/router/` and `e2e_test/bindings_go/`.
+
+Run locally with:
+    E2E_RUNTIME=mlx pytest e2e_test/mlx/test_mlx_backend.py -v
+
+CI runs on macos-latest (Apple Silicon) with the smallest Qwen3 model
+(~400 MB). See `.github/workflows/pr-test-mlx.yml`.
 """
 
 from __future__ import annotations

@@ -9,7 +9,7 @@ on:
       - "crates/grpc_client/python/**"
       - "grpc_servicer/smg_grpc_servicer/mlx/**"
       - "grpc_servicer/pyproject.toml"
-      - "e2e_test/chat_completions/test_mlx_backend.py"
+      - "e2e_test/mlx/test_mlx_backend.py"
       - "e2e_test/infra/model_specs.py"
       - "e2e_test/infra/worker.py"
       - "e2e_test/infra/constants.py"
@@ -23,7 +23,7 @@ on:
       - "crates/grpc_client/python/**"
       - "grpc_servicer/smg_grpc_servicer/mlx/**"
       - "grpc_servicer/pyproject.toml"
-      - "e2e_test/chat_completions/test_mlx_backend.py"
+      - "e2e_test/mlx/test_mlx_backend.py"
       - "e2e_test/infra/model_specs.py"
       - "e2e_test/infra/worker.py"
       - "e2e_test/infra/constants.py"
@@ -113,7 +113,7 @@ jobs:
           SHOW_ROUTER_LOGS: "1"
           E2E_LOG_DIR: e2e-logs
         run: |
-          pytest e2e_test/chat_completions/test_mlx_backend.py \
+          pytest e2e_test/mlx/test_mlx_backend.py \
             -s -vv \
             --reruns 1 --reruns-delay 5
 
