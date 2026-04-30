@@ -36,12 +36,12 @@ sglang = ["sglang>=0.5.10"]
 # without this floor, installing [mlx] against an older proto build would
 # crash at import time when smg_grpc_servicer.mlx.server runs.
 mlx = ["smg-grpc-proto>=0.4.7", "mlx>=0.22.0", "mlx-lm>=0.22.0"]
-tokenspeed = [
-    # TokenSpeed is installed out-of-tree (usually as an editable ``pip install -e``
-    # against the sibling checkout). We don't hard-pin a PyPI version here so the
-    # extra can be used in dev containers that mount the repo directly.
-    "uvloop>=0.19.0",
-]
+# Note: there is intentionally no ``tokenspeed`` extra. TokenSpeed is not
+# published to PyPI; it is installed out-of-tree from the lightseekorg
+# checkout via ``scripts/ci_install_tokenspeed.sh`` (CI) or a manual
+# ``pip install -e ./tokenspeed/python`` (local dev). An extra named
+# ``tokenspeed`` would imply ``pip install smg-grpc-servicer[tokenspeed]``
+# yields a working tokenspeed setup; it does not.
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

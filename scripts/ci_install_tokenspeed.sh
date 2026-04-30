@@ -21,14 +21,17 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Pin to a tested TokenSpeed ref so CI is reproducible. Bump explicitly when
-# we want a newer runtime; keeping it pinned avoids surprise breakage when
-# TokenSpeed main moves ahead of what our gRPC servicer was verified against.
+# Pin to a tested TokenSpeed SHA so CI is reproducible. Floating against
+# ``main`` has bitten us before (lightseekorg/tokenspeed renamed server_args,
+# the gRPC servicer broke until we caught up). Bump this explicitly when we
+# want a newer runtime, ideally via a scheduled bump-and-CI routine rather
+# than ad hoc.
 #
-# ``main`` includes lightseekorg/tokenspeed#357 (dense ``LlamaForCausalLM``
-# registration) so the e2e ``test_function_calling`` suite can run
-# meta-llama/Llama-3.2-1B-Instruct against the tokenspeed engine.
-TOKENSPEED_REF="${TOKENSPEED_REF:-main}"
+# This SHA is from lightseekorg/tokenspeed main; it includes dense
+# ``LlamaForCausalLM`` registration plus the Qwen3 / gpt-oss arches the
+# e2e suite (``test_function_calling``, ``test_openai_server`` etc.) runs
+# against.
+TOKENSPEED_REF="${TOKENSPEED_REF:-199068a42805ba4ba7e574232879b6e3cdab53e8}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
@@ -93,9 +96,15 @@ export CPATH="${CUDA_HOME}/include${CPATH:+:$CPATH}"
 export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
+# ``git clone --branch`` only accepts branch/tag names, not SHAs, so we
+# init+fetch+checkout instead. Works for both SHAs and refs.
 if [ ! -d "$TOKENSPEED_DIR" ]; then
     echo "Cloning TokenSpeed ${TOKENSPEED_REF} from ${TOKENSPEED_REPO}..."
-    git clone --depth 1 --branch "$TOKENSPEED_REF" "$TOKENSPEED_REPO" "$TOKENSPEED_DIR"
+    git init -q "$TOKENSPEED_DIR"
+    (cd "$TOKENSPEED_DIR" \
+        && git remote add origin "$TOKENSPEED_REPO" \
+        && git fetch --depth 1 origin "$TOKENSPEED_REF" \
+        && git checkout FETCH_HEAD)
 else
     echo "TokenSpeed clone exists at $TOKENSPEED_DIR, reusing"
     (cd "$TOKENSPEED_DIR" && git fetch --depth 1 origin "$TOKENSPEED_REF" && git checkout "$TOKENSPEED_REF")
