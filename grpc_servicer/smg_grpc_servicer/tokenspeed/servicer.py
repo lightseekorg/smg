@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """TokenSpeed gRPC servicer.
 
 Implements the ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` gRPC service
@@ -173,7 +172,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 reason_dict = _finish_reason_to_dict(meta.get("finish_reason"))
                 is_finished = reason_dict is not None
 
-                if is_finished and reason_dict.get("type") == "abort":
+                if reason_dict is not None and reason_dict.get("type") == "abort":
                     code = _abort_status_code(reason_dict)
                     await context.abort(code, reason_dict.get("message") or "aborted")
                     return

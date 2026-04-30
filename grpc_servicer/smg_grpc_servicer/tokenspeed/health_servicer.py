@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
+from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
 
 if TYPE_CHECKING:
     from tokenspeed.runtime.engine.async_llm import AsyncLLM
@@ -30,6 +31,13 @@ logger = logging.getLogger(__name__)
 # Seconds of scheduler silence — with pending requests — before we report
 # NOT_SERVING. Matches the SGLang equivalent so oncall dashboards are aligned.
 STUCK_SCHEDULER_THRESHOLD_SEC = 30.0
+
+# Source the advertised service name from the proto descriptor so a future
+# ``package`` or ``service`` rename in tokenspeed_scheduler.proto stays in
+# sync without a hand-edited string here.
+TOKENSPEED_SCHEDULER_SERVICE_NAME = tokenspeed_scheduler_pb2.DESCRIPTOR.services_by_name[
+    "TokenSpeedScheduler"
+].full_name
 
 
 class TokenSpeedHealthServicer(health_pb2_grpc.HealthServicer):
@@ -46,7 +54,7 @@ class TokenSpeedHealthServicer(health_pb2_grpc.HealthServicer):
     """
 
     OVERALL_SERVER = ""
-    TOKENSPEED_SERVICE = "tokenspeed.grpc.scheduler.TokenSpeedScheduler"
+    TOKENSPEED_SERVICE = TOKENSPEED_SCHEDULER_SERVICE_NAME
 
     def __init__(self, async_llm: AsyncLLM, scheduler_info: dict):
         self.async_llm = async_llm
