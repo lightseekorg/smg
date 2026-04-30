@@ -124,7 +124,7 @@ python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) 
 
 | Environment | `MODEL` default | Why |
 |---|---|---|
-| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx-community/gemma-3-1b-it-4bit` (~0.6 GB) | `macos-latest` runners expose only ~5 GB Metal memory. A 4 B-class model (3 GB) plus vllm-metal's ~1.7 GB overhead leaves a negative KV-cache budget, so the vllm phase OOMs at startup. The 1 B variant fits comfortably and lets all three backends run in CI. |
+| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx-community/gemma-3-1b-it-qat-4bit` (~0.7 GB) | `macos-latest` runners expose ~5 GB Metal memory total. A 4 B-class model (3 GB) plus vllm-metal's ~1.7 GB overhead leaves a negative KV-cache budget — lowering `--gpu-memory-utilization` makes that worse, not better, since the flag gates how much Metal vllm-metal can use. **QAT format also matters**: vllm-metal's Metal path only picks up `*-qat-4bit` checkpoints; regular 4-bit MLX checkpoints silently fall back to a PyTorch CPU/fp32 path that needs ~6 GB and OOMs at startup. |
 | Local Mac (`run.sh`) | `mlx-community/gemma-3-4b-it-qat-4bit` (~3 GB) | M-series Pro/Max with 16+ GB unified memory has plenty of headroom; the larger model produces more representative absolute throughput / latency numbers. |
 
 The bench compares all three backends on the *same* model — switching
