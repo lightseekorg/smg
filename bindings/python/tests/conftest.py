@@ -19,6 +19,9 @@ def hf_tokenizer_path(tmp_path_factory) -> str:
 
     Uses Qwen/Qwen2.5-0.5B-Instruct (~1MB tokenizer files; supports chat template + tools).
     Returns a path that `smg.Tokenizer.from_file` can accept.
+
+    Skips the test gracefully if huggingface_hub is unavailable or the network
+    is unreachable so the unit-test suite stays hermetic in offline CI.
     """
     try:
         from huggingface_hub import snapshot_download
@@ -26,8 +29,11 @@ def hf_tokenizer_path(tmp_path_factory) -> str:
         pytest.skip("huggingface_hub not installed; required for tokenizer tests")
 
     target = tmp_path_factory.mktemp("hf_tokenizer")
-    return snapshot_download(
-        repo_id="Qwen/Qwen2.5-0.5B-Instruct",
-        local_dir=str(target),
-        allow_patterns=["tokenizer*", "special_tokens_map.json", "vocab.json", "merges.txt"],
-    )
+    try:
+        return snapshot_download(
+            repo_id="Qwen/Qwen2.5-0.5B-Instruct",
+            local_dir=str(target),
+            allow_patterns=["tokenizer*", "special_tokens_map.json", "vocab.json", "merges.txt"],
+        )
+    except Exception as e:
+        pytest.skip(f"could not download tokenizer fixture (offline CI?): {e}")

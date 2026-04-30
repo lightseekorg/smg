@@ -130,6 +130,6 @@ Diff tests in `tests/diff_tokenspeed/` validate that `smg.Tokenizer` produces eq
 
 ````bash
 pip install -e /path/to/tokenspeed
-cd bindings/python
+cd smg/bindings/python
 python -m pytest tests/diff_tokenspeed/ -v
 ````

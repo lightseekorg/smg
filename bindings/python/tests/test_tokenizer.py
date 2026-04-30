@@ -26,8 +26,8 @@ def test_from_file_constructs_tokenizer(hf_tokenizer_path):
 
 @pytest.mark.unit
 def test_from_file_rejects_invalid_path():
-    """from_file should raise on input that's neither a valid path nor a real HF repo."""
-    with pytest.raises((ValueError, RuntimeError)) as exc:
+    """from_file should raise ValueError on input that's neither a valid path nor a real HF repo."""
+    with pytest.raises(ValueError) as exc:
         smg.Tokenizer.from_file("/this/path/does/not/exist/tokenizer.json")
     msg = str(exc.value).lower()
     # Either path-not-found OR HF Hub repo-not-found / 404 messages should match.

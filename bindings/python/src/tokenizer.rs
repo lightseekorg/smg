@@ -38,10 +38,12 @@ impl PyTokenizer {
     /// `RuntimeError` on tokenizer operation failures.
     #[staticmethod]
     #[pyo3(signature = (path))]
-    fn from_file(path: &str) -> PyResult<Self> {
-        let inner = llm_tokenizer::create_tokenizer(path).map_err(|e| {
-            PyValueError::new_err(format!("failed to load tokenizer from {path}: {e}"))
-        })?;
+    fn from_file(py: Python<'_>, path: &str) -> PyResult<Self> {
+        let inner = py
+            .detach(|| llm_tokenizer::create_tokenizer(path))
+            .map_err(|e| {
+                PyValueError::new_err(format!("failed to load tokenizer from {path}: {e}"))
+            })?;
         Ok(PyTokenizer { inner })
     }
 
@@ -50,10 +52,9 @@ impl PyTokenizer {
     /// `add_special_tokens` controls whether the tokenizer's BOS/EOS tokens are
     /// included; defaults to true to match the HuggingFace `__call__` default.
     #[pyo3(signature = (text, add_special_tokens = true))]
-    fn encode(&self, text: &str, add_special_tokens: bool) -> PyResult<Vec<u32>> {
-        let encoding = self
-            .inner
-            .encode(text, add_special_tokens)
+    fn encode(&self, py: Python<'_>, text: &str, add_special_tokens: bool) -> PyResult<Vec<u32>> {
+        let encoding = py
+            .detach(|| self.inner.encode(text, add_special_tokens))
             .map_err(|e| PyRuntimeError::new_err(format!("encode failed: {e}")))?;
         Ok(encoding.token_ids().to_vec())
     }
@@ -63,12 +64,16 @@ impl PyTokenizer {
     /// `skip_special_tokens` controls whether BOS/EOS tokens are stripped from
     /// the output; defaults to true.
     #[pyo3(signature = (token_ids, skip_special_tokens = true))]
-    fn decode(&self, token_ids: Vec<u32>, skip_special_tokens: bool) -> PyResult<String> {
+    fn decode(
+        &self,
+        py: Python<'_>,
+        token_ids: Vec<u32>,
+        skip_special_tokens: bool,
+    ) -> PyResult<String> {
         if token_ids.is_empty() {
             return Ok(String::new());
         }
-        self.inner
-            .decode(&token_ids, skip_special_tokens)
+        py.detach(|| self.inner.decode(&token_ids, skip_special_tokens))
             .map_err(|e| PyRuntimeError::new_err(format!("decode failed: {e}")))
     }
 
@@ -76,17 +81,24 @@ impl PyTokenizer {
     ///
     /// `messages` is a list of dicts (e.g. `[{"role": "user", "content": "..."}]`).
     /// `tools`, when provided, is a list of OpenAI-style tool dicts that the
-    /// chat template can render into the prompt.
+    /// chat template can render into the prompt. When `None` (the default),
+    /// `tools` is left **undefined** in the template context so guards like
+    /// `{% if tools is defined %}` work correctly.
     ///
     /// `add_generation_prompt` defaults to true (matches HuggingFace and
     /// SGLang/vLLM convention for serving).
+    ///
+    /// The tokenizer's special tokens (`bos_token`, `eos_token`, etc.) are
+    /// always injected so templates that reference them render correctly.
     #[pyo3(signature = (messages, tools = None, add_generation_prompt = true))]
     fn apply_chat_template(
         &self,
+        py: Python<'_>,
         messages: &Bound<'_, PyAny>,
         tools: Option<&Bound<'_, PyAny>>,
         add_generation_prompt: bool,
     ) -> PyResult<String> {
+        // py_to_json must run with the GIL held.
         let messages_value = py_to_json(messages)?;
         let messages_vec: Vec<Value> = match messages_value {
             Value::Array(arr) => arr,
@@ -97,28 +109,28 @@ impl PyTokenizer {
             }
         };
 
-        let tools_vec: Vec<Value> = match tools {
-            None => Vec::new(),
+        let tools_vec: Option<Vec<Value>> = match tools {
+            None => None,
             Some(t) => match py_to_json(t)? {
-                Value::Array(arr) => arr,
+                Value::Array(arr) => Some(arr),
                 _ => {
                     return Err(PyValueError::new_err("tools must be a list of tool dicts"));
                 }
             },
         };
-        let empty_docs: [Value; 0] = [];
 
-        let params = ChatTemplateParams {
-            add_generation_prompt,
-            tools: Some(&tools_vec),
-            documents: Some(&empty_docs),
-            template_kwargs: None,
-            ..Default::default()
-        };
-
-        self.inner
-            .apply_chat_template(&messages_vec, params)
-            .map_err(|e| PyRuntimeError::new_err(format!("apply_chat_template failed: {e}")))
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || {
+            let params = ChatTemplateParams {
+                add_generation_prompt,
+                tools: tools_vec.as_deref(),
+                documents: None,
+                template_kwargs: None,
+                special_tokens: Some(inner.get_special_tokens()),
+            };
+            inner.apply_chat_template(&messages_vec, params)
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("apply_chat_template failed: {e}")))
     }
 
     fn __repr__(&self) -> String {
