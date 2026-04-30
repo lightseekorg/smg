@@ -174,6 +174,7 @@ nav:
       - Extensibility:
           - WASM Plugins: concepts/extensibility/wasm-plugins.md
           - Model Context Protocol: concepts/extensibility/mcp.md
+          - Interceptors: concepts/extensibility/interceptors.md
       - Reliability:
           - Circuit Breakers: concepts/reliability/circuit-breakers.md
           - Rate Limiting: concepts/reliability/rate-limiting.md

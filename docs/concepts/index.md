@@ -123,6 +123,7 @@ Extend SMG with custom logic and external tools:
 
 - [WASM Plugins](extensibility/wasm-plugins.md) — Dynamic middleware with WebAssembly
 - [Model Context Protocol](extensibility/mcp.md) — External tool integration via MCP
+- [Interceptors](extensibility/interceptors.md) — Vendor-neutral lifecycle hooks for the Responses pipeline
 
 ### Reliability
 
