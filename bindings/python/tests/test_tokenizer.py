@@ -55,3 +55,29 @@ def test_encode_empty_string_succeeds(hf_tokenizer_path):
     tok = smg.Tokenizer.from_file(hf_tokenizer_path)
     ids = tok.encode("", add_special_tokens=False)
     assert isinstance(ids, list)
+
+
+@pytest.mark.unit
+def test_decode_round_trips(hf_tokenizer_path):
+    """encode followed by decode should recover the original text (modulo whitespace/specials)."""
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    text = "hello world, this is a test."
+    ids = tok.encode(text, add_special_tokens=False)
+    out = tok.decode(ids, skip_special_tokens=True)
+    assert out.strip() == text.strip()
+
+
+@pytest.mark.unit
+def test_decode_empty_list_returns_empty_string(hf_tokenizer_path):
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    assert tok.decode([], skip_special_tokens=True) == ""
+
+
+@pytest.mark.unit
+def test_decode_skip_special_tokens_flag(hf_tokenizer_path):
+    """skip_special_tokens=False should produce output at least as long as True."""
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    ids = tok.encode("hi", add_special_tokens=True)
+    kept = tok.decode(ids, skip_special_tokens=False)
+    skipped = tok.decode(ids, skip_special_tokens=True)
+    assert len(kept) >= len(skipped)

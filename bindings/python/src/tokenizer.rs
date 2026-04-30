@@ -55,6 +55,20 @@ impl PyTokenizer {
         Ok(encoding.token_ids().to_vec())
     }
 
+    /// Decode a list of token IDs to text.
+    ///
+    /// `skip_special_tokens` controls whether BOS/EOS tokens are stripped from
+    /// the output; defaults to true.
+    #[pyo3(signature = (token_ids, skip_special_tokens = true))]
+    fn decode(&self, token_ids: Vec<u32>, skip_special_tokens: bool) -> PyResult<String> {
+        if token_ids.is_empty() {
+            return Ok(String::new());
+        }
+        self.inner
+            .decode(&token_ids, skip_special_tokens)
+            .map_err(|e| PyRuntimeError::new_err(format!("decode failed: {e}")))
+    }
+
     fn __repr__(&self) -> String {
         format!("Tokenizer(vocab_size={})", self.inner.vocab_size())
     }
