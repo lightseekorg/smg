@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id (CI default is the 1B variant so vllm-metal fits the macos-latest 5GB Metal budget; pass a 4B for a fuller workload via workflow_dispatch on a beefier runner)"
+        description: "Model id. CI default is the 1B-QAT variant: small enough for macos-latest's ~5GB Metal budget AND a QAT MLX checkpoint (vllm-metal's Metal path only picks up QAT-format checkpoints; the non-QAT 4-bit variants silently fall back to CPU/fp32 on this runner). Override via workflow_dispatch on beefier runners."
         required: false
-        default: "mlx-community/gemma-3-1b-it-4bit"
+        default: "mlx-community/gemma-3-1b-it-qat-4bit"
       phases:
         description: "Phases to run (space-separated subset of 'mlx grpc vllm')"
         required: false
@@ -54,14 +54,28 @@ jobs:
     # model download, and vllm-metal install. Cap at 4 h for safety.
     timeout-minutes: 240
     env:
-      # Model default is gemma-3-1b-it-4bit (~0.6 GB) so vllm-metal fits
-      # the macos-latest runner's ~5 GB Metal budget alongside KV cache.
-      # The bench compares all three backends on the *same* model; a 1B
-      # is plenty for relative router/streaming overhead numbers. For
+      # Model default is gemma-3-1b-it-qat-4bit (~0.7 GB on disk) for
+      # two reasons specific to the macos-latest runner:
+      #
+      # 1. Size. The runner exposes ~5 GB of Metal memory total; with
+      #    vllm-metal's ~1.7 GB runtime overhead, a 4B-class model
+      #    (3 GB) leaves a NEGATIVE KV-cache budget. Lowering
+      #    `--gpu-memory-utilization` makes that worse, not better
+      #    (the flag *gates* how much Metal vllm-metal can use). Only a
+      #    sub-1 GB model fits with real KV headroom.
+      #
+      # 2. QAT format. vllm-metal's Metal path only recognizes
+      #    quantization-aware-training checkpoints (`*-qat-4bit` on
+      #    mlx-community); regular 4-bit MLX checkpoints silently
+      #    fall back to a PyTorch CPU/fp32 path that needs ~6 GB and
+      #    OOMs at startup on this runner.
+      #
+      # All three backends bench the SAME model, so the relative
+      # router/streaming comparison stays meaningful at 1B. For
       # production-shaped 4B+ numbers, run `local_three_way` via
       # benchmarks/mlx_grpc_vs_http/run.sh on a real Mac, or override
       # MODEL via workflow_dispatch on a beefier runner.
-      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-1b-it-4bit' }}
+      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-1b-it-qat-4bit' }}
       # PR runs use a reduced matrix so the smoke test finishes in
       # reasonable time. Scheduled / dispatched runs use the full matrix.
       PHASES: >-
