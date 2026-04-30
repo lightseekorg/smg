@@ -42,6 +42,16 @@ on:
 
 jobs:
   run:
+    # TokenSpeed lanes need ``TOKENSPEED_GITHUB_TOKEN`` to clone the
+    # private lightseekorg/tokenspeed repo, but GitHub does not pass
+    # secrets to workflows triggered by forked-PR events. Skip the
+    # tokenspeed engine on fork PRs so the job is reported as ``skipped``
+    # rather than failing inside ``setup-tokenspeed`` with a 404. Same-
+    # repo PRs and pushes still run normally.
+    if: >-
+      inputs.engine != 'tokenspeed'
+      || github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout }}
     permissions:
