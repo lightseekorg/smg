@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id"
+        description: "Model id (CI default is the 1B variant so vllm-metal fits the macos-latest 5GB Metal budget; pass a 4B for a fuller workload via workflow_dispatch on a beefier runner)"
         required: false
-        default: "mlx-community/gemma-3-4b-it-qat-4bit"
+        default: "mlx-community/gemma-3-1b-it-4bit"
       phases:
         description: "Phases to run (space-separated subset of 'mlx grpc vllm')"
         required: false
@@ -54,7 +54,14 @@ jobs:
     # model download, and vllm-metal install. Cap at 4 h for safety.
     timeout-minutes: 240
     env:
-      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
+      # Model default is gemma-3-1b-it-4bit (~0.6 GB) so vllm-metal fits
+      # the macos-latest runner's ~5 GB Metal budget alongside KV cache.
+      # The bench compares all three backends on the *same* model; a 1B
+      # is plenty for relative router/streaming overhead numbers. For
+      # production-shaped 4B+ numbers, run `local_three_way` via
+      # benchmarks/mlx_grpc_vs_http/run.sh on a real Mac, or override
+      # MODEL via workflow_dispatch on a beefier runner.
+      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-1b-it-4bit' }}
       # PR runs use a reduced matrix so the smoke test finishes in
       # reasonable time. Scheduled / dispatched runs use the full matrix.
       PHASES: >-
@@ -118,21 +125,36 @@ jobs:
 
       - name: Patch genai-bench streaming chunk size
         # genai-bench's openai_user.py calls
-        # `response.iter_lines(chunk_size=None)`, which under the hood
-        # does `urllib3.HTTPResponse.read(amt=None)` — that reads to EOF
-        # before yielding anything when the response has no Content-Length
-        # and no `Transfer-Encoding: chunked` (which is exactly what
-        # mlx-lm.server emits — it uses Python's `BaseHTTPRequestHandler`
-        # default of HTTP/1.0). Result: every per-token chunk arrives at
-        # the bench client at once at end-of-stream, which collapses
-        # measured TPOT to ~0 and inflates TTFT to e2e latency.
-        # Wire-level probes confirm mlx-lm DOES stream tokens at ~18ms
-        # intervals; the buffering is purely client-side. Switching the
-        # call to `chunk_size=1` makes urllib3 yield per OS read, which
-        # restores correct TTFT and TPOT measurements. This patch is
-        # safe for the smg → mlx-grpc and vllm-metal phases too — both
-        # use HTTP/1.1 with chunked encoding, where chunk_size has no
-        # observable effect on the read pattern.
+        # `response.iter_lines(chunk_size=None)`. Under the hood that
+        # becomes `urllib3.HTTPResponse.read(amt=None)`, whose framing
+        # rule is "read to EOF" when the response has neither
+        # Content-Length nor Transfer-Encoding: chunked. The bug class
+        # is "no length-delimiting framing on the response" — HTTP/1.0
+        # is just one way to land in it. mlx-lm.server hits exactly
+        # this case: it uses stdlib BaseHTTPRequestHandler, which
+        # defaults to HTTP/1.0 and emits no chunked encoding, so the
+        # streaming path closes the socket at end-of-message. Result:
+        # every SSE frame the server flushed during generation arrives
+        # at the bench client in one batch at stream close — TTFT
+        # inflates to e2e latency and TPOT collapses to ~0. Wire-level
+        # captures confirm the server *is* writing per-token at ~18 ms;
+        # the buffering is entirely client-side in urllib3's read loop.
+        #
+        # Fix: pass chunk_size=1. The name is misleading — urllib3's
+        # read(amt=N) returns whatever is currently buffered up to N
+        # bytes (it does not wait for N), so chunk_size=1 effectively
+        # means "yield per recv()", which on loopback aligns with each
+        # per-token flush. Any small positive value works identically;
+        # 1 just makes the intent obvious.
+        #
+        # No-op for the smg → mlx-grpc and vllm-metal phases: both
+        # serve HTTP/1.1 with Transfer-Encoding: chunked. urllib3
+        # decodes chunk boundaries from the wire before the buffer the
+        # iterator reads from, so chunk_size has no observable effect
+        # on read granularity there.
+        #
+        # Tested against urllib3 2.x (read(amt=N) semantics have been
+        # stable across 1.x and 2.x).
         run: |
           target=$(python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) + '/user/openai_user.py')")
           echo "Patching $target"
