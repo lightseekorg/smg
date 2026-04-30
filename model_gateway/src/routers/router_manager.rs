@@ -34,6 +34,7 @@ use openai_protocol::{
     rerank::RerankRequest,
     responses::ResponsesRequest,
     transcription::TranscriptionRequest,
+    UNKNOWN_MODEL_ID,
 };
 use serde_json::Value;
 use smg_skills::{
@@ -245,6 +246,10 @@ impl RouterManager {
         } else {
             None
         }
+    }
+
+    fn requires_explicit_generate_model(&self, model_id: &str) -> bool {
+        self.enable_igw && (model_id.trim().is_empty() || model_id == UNKNOWN_MODEL_ID)
     }
 
     pub fn select_router_for_request(
@@ -524,6 +529,13 @@ impl RouterTrait for RouterManager {
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
+        if self.requires_explicit_generate_model(model_id) {
+            return route_error::bad_request(
+                "missing_model",
+                "/generate requests must include a model when IGW routing is enabled",
+            );
+        }
+
         let router = self.select_router_for_request(headers, Some(model_id));
 
         if let Some(router) = router {
@@ -886,5 +898,90 @@ impl std::fmt::Debug for RouterManager {
             .field("workers_count", &self.worker_registry.get_all().len())
             .field("default_router", &*default_router)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::{
+        middleware::{RouteRequestMeta, TenantKey},
+        routers::factory::router_ids,
+        worker::WorkerRegistry,
+    };
+
+    #[derive(Debug)]
+    struct StubRouter;
+
+    #[async_trait]
+    impl RouterTrait for StubRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn route_generate(
+            &self,
+            _headers: Option<&HeaderMap>,
+            _tenant_meta: &TenantRequestMeta,
+            _body: &GenerateRequest,
+            _model_id: &str,
+        ) -> Response {
+            (StatusCode::OK, "routed").into_response()
+        }
+
+        fn router_type(&self) -> &'static str {
+            "stub"
+        }
+    }
+
+    fn test_manager(enable_igw: bool) -> Arc<RouterManager> {
+        let mut manager =
+            RouterManager::new(Arc::new(WorkerRegistry::new()), reqwest::Client::new());
+        manager.enable_igw = enable_igw;
+        let manager = Arc::new(manager);
+        manager.register_router(router_ids::HTTP_REGULAR, Arc::new(StubRouter));
+        manager
+    }
+
+    fn test_tenant_meta() -> TenantRequestMeta {
+        RouteRequestMeta::new(TenantKey::from("test-tenant"))
+    }
+
+    fn generate_request_without_model() -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({ "text": "hello" })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn igw_generate_rejects_default_unknown_model() {
+        let manager = test_manager(true);
+        let request = generate_request_without_model();
+
+        assert_eq!(request.model, UNKNOWN_MODEL_ID);
+
+        let response = manager
+            .route_generate(None, &test_tenant_meta(), &request, &request.model)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            route_error::extract_error_code_from_response(&response),
+            "missing_model"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_router_generate_keeps_default_unknown_model_behavior() {
+        let manager = test_manager(false);
+        let request = generate_request_without_model();
+
+        assert_eq!(request.model, UNKNOWN_MODEL_ID);
+
+        let response = manager
+            .route_generate(None, &test_tenant_meta(), &request, &request.model)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
