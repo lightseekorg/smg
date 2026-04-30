@@ -1029,6 +1029,16 @@ impl WorkerLoadResponse {
     }
 }
 
+/// Source that produced a worker load entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerLoadInfoSource {
+    /// The entry describes a worker owned by the local SMG.
+    LocalWorker,
+    /// The entry describes a remote SMG peer carrying advisory worker state.
+    RemoteSmg,
+}
+
 /// Individual worker load information
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkerLoadInfo {
@@ -1038,6 +1048,61 @@ pub struct WorkerLoadInfo {
     pub load: isize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<WorkerLoadResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorkerStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<WorkerLoadInfoSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_workers: Option<Vec<WorkerLoadInfo>>,
+}
+
+#[cfg(feature = "axum")]
+/// Convert worker load information to the legacy `/get_loads` response shape.
+fn worker_load_info_to_response_value(info: &WorkerLoadInfo) -> Value {
+    let mut entry = json!({"worker": &info.worker, "load": info.load});
+    if let Some(ref details) = info.details {
+        entry["details"] = json!(details);
+    }
+    if let Some(ref region_id) = info.region_id {
+        entry["region_id"] = json!(region_id);
+    }
+    if let Some(ref worker_id) = info.worker_id {
+        entry["worker_id"] = json!(worker_id);
+    }
+    if let Some(ref model_id) = info.model_id {
+        entry["model_id"] = json!(model_id);
+    }
+    if let Some(ref status) = info.status {
+        entry["status"] = json!(status);
+    }
+    if let Some(generated_at_ms) = info.generated_at_ms {
+        entry["generated_at_ms"] = json!(generated_at_ms);
+    }
+    if let Some(version) = info.version {
+        entry["version"] = json!(version);
+    }
+    if let Some(ref source) = info.source {
+        entry["source"] = json!(source);
+    }
+    if let Some(ref remote_workers) = info.remote_workers {
+        entry["remote_workers"] = Value::Array(
+            remote_workers
+                .iter()
+                .map(worker_load_info_to_response_value)
+                .collect(),
+        );
+    }
+    entry
 }
 
 #[cfg(feature = "axum")]
@@ -1076,13 +1141,7 @@ impl IntoResponse for WorkerLoadsResult {
         let loads: Vec<Value> = self
             .loads
             .iter()
-            .map(|info| {
-                let mut entry = json!({"worker": &info.worker, "load": info.load});
-                if let Some(ref details) = info.details {
-                    entry["details"] = json!(details);
-                }
-                entry
-            })
+            .map(worker_load_info_to_response_value)
             .collect();
         Json(json!({"workers": loads})).into_response()
     }

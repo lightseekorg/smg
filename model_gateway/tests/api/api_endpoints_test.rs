@@ -1461,8 +1461,21 @@ mod cache_tests {
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert!(body_json.is_object());
-        // The exact structure depends on the implementation
-        // but should contain worker load information
+        let workers = body_json["workers"].as_array().unwrap();
+        assert_eq!(workers.len(), 2);
+        for worker in workers {
+            let worker = worker.as_object().unwrap();
+            assert!(worker.contains_key("worker"));
+            assert!(worker.contains_key("load"));
+            assert!(!worker.contains_key("region_id"));
+            assert!(!worker.contains_key("worker_id"));
+            assert!(!worker.contains_key("model_id"));
+            assert!(!worker.contains_key("status"));
+            assert!(!worker.contains_key("generated_at_ms"));
+            assert!(!worker.contains_key("version"));
+            assert!(!worker.contains_key("source"));
+            assert!(!worker.contains_key("remote_workers"));
+        }
 
         ctx.shutdown().await;
     }

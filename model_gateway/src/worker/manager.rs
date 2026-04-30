@@ -781,6 +781,14 @@ impl WorkerManager {
                         worker_type,
                         load,
                         details,
+                        region_id: None,
+                        worker_id: None,
+                        model_id: None,
+                        status: None,
+                        generated_at_ms: None,
+                        version: None,
+                        source: None,
+                        remote_workers: None,
                     }
                 }
             })
