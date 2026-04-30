@@ -92,3 +92,34 @@ pip install dist/smg-*.whl
 cd smg/bindings/python
 pytest tests/
 ```
+
+## Tokenizer
+
+```python
+from smg import Tokenizer
+
+# Local file path or HuggingFace model id
+tok = Tokenizer.from_file("Qwen/Qwen2.5-0.5B-Instruct")
+
+ids = tok.encode("hello world")
+text = tok.decode(ids)
+
+prompt = tok.apply_chat_template(
+    [
+        {"role": "user", "content": "What is 2 + 2?"},
+    ],
+    tools=[
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ],
+    add_generation_prompt=True,
+)
+```
+
+`Tokenizer` mirrors the Go SDK's `sgl_tokenizer_*` FFI surface (`bindings/golang/src/tokenizer.rs`). Errors are raised as `ValueError` (invalid arguments) or `RuntimeError` (tokenizer failures).
