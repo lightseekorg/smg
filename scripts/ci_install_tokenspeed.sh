@@ -28,10 +28,11 @@ fi
 # than ad hoc.
 #
 # This SHA is from lightseekorg/tokenspeed main; it includes dense
-# ``LlamaForCausalLM`` registration plus the Qwen3 / gpt-oss arches the
-# e2e suite (``test_function_calling``, ``test_openai_server`` etc.) runs
-# against.
-TOKENSPEED_REF="${TOKENSPEED_REF:-199068a42805ba4ba7e574232879b6e3cdab53e8}"
+# ``LlamaForCausalLM`` registration, the Qwen3 / gpt-oss arches the e2e
+# suite (``test_function_calling``, ``test_openai_server`` etc.) runs
+# against, and lightseekorg/tokenspeed#598 (defensive ``pad_token_id``
+# read in ``Qwen3MoeModel.__init__`` so ``Qwen/Qwen3-30B-A3B`` loads).
+TOKENSPEED_REF="${TOKENSPEED_REF:-fd080fc7816a260118c493f061ab4a89d3033137}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
