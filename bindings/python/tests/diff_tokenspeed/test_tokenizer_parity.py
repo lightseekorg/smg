@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 import smg
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "tokenizer"
@@ -22,9 +21,7 @@ def test_apply_chat_template_matches_tokenspeed(hf_tokenizer_path):
     messages = json.loads((FIXTURES / "messages_basic.json").read_text())
 
     smg_prompt = smg_tok.apply_chat_template(messages, add_generation_prompt=True)
-    ts_prompt = ts_tok.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=False
-    )
+    ts_prompt = ts_tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
     assert smg_prompt == ts_prompt, (
         f"Chat-template output diverges between smg and tokenspeed:\n"

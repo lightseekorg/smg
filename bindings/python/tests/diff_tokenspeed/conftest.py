@@ -7,6 +7,7 @@ import pytest
 
 try:
     import tokenspeed  # noqa: F401
+
     HAS_TOKENSPEED = True
 except ImportError:
     HAS_TOKENSPEED = False
