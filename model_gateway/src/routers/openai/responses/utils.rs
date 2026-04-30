@@ -87,6 +87,19 @@ pub(super) fn patch_response_with_request_metadata(
         is_missing_or_empty(o.get("model"))
     });
 
+    // Preserve commonly asserted generation knobs on final response payload.
+    if let Some(max_output_tokens) = original_body.max_output_tokens {
+        obj.entry("max_output_tokens".to_string())
+            .or_insert(Value::Number(max_output_tokens.into()));
+    }
+    if let Some(temperature) = original_body.temperature {
+        obj.entry("temperature".to_string())
+            .or_insert(json!(temperature));
+    }
+    if let Some(top_p) = original_body.top_p {
+        obj.entry("top_p".to_string()).or_insert(json!(top_p));
+    }
+
     // Set safety_identifier if null (but key exists)
     if let Some(user) = &original_body.user {
         if obj

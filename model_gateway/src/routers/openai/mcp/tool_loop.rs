@@ -834,7 +834,15 @@ pub(crate) async fn execute_tool_loop(
     let auth_header = api_provider.extract_auth_header(headers, worker_api_key);
 
     loop {
-        let mut request_builder = client.post(url).json(&current_payload);
+        let mut outbound_payload = current_payload.clone();
+        if let Some(provider) = provider_hook {
+            provider
+                .transform_request(&mut outbound_payload, Endpoint::Responses)
+                .map_err(|e| format!("provider transform request: {e}"))?;
+        }
+
+        let mut request_builder = client.post(url).json(&outbound_payload);
+
         request_builder = api_provider.apply_headers(request_builder, auth_header.as_ref());
         if let Some(provider) = provider_hook {
             request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
