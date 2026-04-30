@@ -430,9 +430,29 @@ impl AppContextBuilder {
         webrtc_bind_addr: Option<std::net::IpAddr>,
         webrtc_stun_server: Option<String>,
     ) -> Result<Self, String> {
+        use smg_extensions::InterceptorRegistry;
+
         // Fail fast before storage initialization to avoid side effects
         // (e.g., migrations) for invalid memory_runtime/backend combinations.
         validate_memory_writer_configuration(&router_config)?;
+
+        // Build the Responses-API interceptor registry from the configured
+        // extensions. An empty `extensions:` list yields an empty registry,
+        // which is the no-op default.
+        let mut registry_builder = InterceptorRegistry::builder();
+        for spec in &router_config.extensions.items {
+            match spec.kind.as_str() {
+                // Future extensions register here. Example (PR 2):
+                //   #[cfg(feature = "memory")]
+                //   "smg-conversation-memory-oracle" => {
+                //       registry_builder.register(smg_conversation_memory_oracle::build(&spec.config)?);
+                //   }
+                unknown => {
+                    tracing::warn!(kind = unknown, "unknown extension kind; ignoring");
+                }
+            }
+        }
+        let interceptors = registry_builder.build();
 
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
@@ -454,6 +474,7 @@ impl AppContextBuilder {
             .with_kv_event_monitor(&router_config)
             .webrtc_bind_addr(webrtc_bind_addr)
             .webrtc_stun_server(webrtc_stun_server)
+            .interceptors(interceptors)
             .router_config(router_config))
     }
 
