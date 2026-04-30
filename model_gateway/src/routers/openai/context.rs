@@ -111,6 +111,15 @@ impl ComponentRefs {
             ComponentRefs::Responses(r) => Some(&r.conversation_memory_writer),
         }
     }
+
+    /// Access the Responses-API interceptor registry. Returns `None` for
+    /// non-responses contexts (chat).
+    pub fn interceptors(&self) -> Option<&smg_extensions::InterceptorRegistry> {
+        match self {
+            ComponentRefs::Shared(_) => None,
+            ComponentRefs::Responses(r) => Some(&r.interceptors),
+        }
+    }
 }
 
 #[derive(Default)]

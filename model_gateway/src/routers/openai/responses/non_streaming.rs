@@ -3,7 +3,7 @@
 //! This module handles non-streaming Responses API requests with MCP tool support.
 
 use axum::{
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -169,7 +169,13 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         ctx.components.conversation_item_storage(),
         ctx.components.response_storage(),
     ) {
-        if let Err(err) = persist_conversation_items(
+        let item_storage_for_hook = item_storage.clone();
+        let interceptors = ctx
+            .components
+            .interceptors()
+            .cloned()
+            .unwrap_or_default();
+        let persist_result = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
             resp_storage.clone(),
@@ -177,9 +183,69 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             original_body,
             ctx.storage_request_context.clone(),
         )
-        .await
-        {
-            warn!("Failed to persist conversation items: {}", err);
+        .await;
+        match persist_result {
+            Ok(()) => {
+                if !interceptors.is_empty() {
+                    use smg_extensions::{AfterPersistCtx, RequestMetadata};
+
+                    use crate::routers::common::turn_info::compute_turn_info;
+
+                    let conv_id_opt: Option<smg_data_connector::ConversationId> = original_body
+                        .conversation
+                        .as_ref()
+                        .filter(|c| !c.is_empty())
+                        .map(|c| smg_data_connector::ConversationId::from(c.as_id()));
+
+                    let response_id_owned: Option<smg_data_connector::ResponseId> = response_json
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(smg_data_connector::ResponseId::from);
+
+                    let incoming_input_value =
+                        serde_json::to_value(&original_body.input).ok();
+                    let turn_info = compute_turn_info(
+                        item_storage_for_hook.as_ref(),
+                        conv_id_opt.as_ref(),
+                        incoming_input_value.as_ref(),
+                    )
+                    .await;
+
+                    let request_id = original_body
+                        .request_id
+                        .clone()
+                        .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+                    let tenant_id = ctx
+                        .tenant_request_meta
+                        .as_ref()
+                        .map(|m| m.tenant_key().as_str().to_string());
+                    let metadata = RequestMetadata::build_from(
+                        request_id,
+                        original_body.safety_identifier.clone(),
+                        tenant_id,
+                        ctx.storage_request_context.clone(),
+                    );
+
+                    let empty_headers = HeaderMap::new();
+                    let header_ref = ctx.headers().unwrap_or(&empty_headers);
+
+                    let persisted_ids: &[smg_data_connector::ConversationItemId] = &[];
+                    let after_ctx = AfterPersistCtx::new(
+                        header_ref,
+                        original_body,
+                        Some(&response_json),
+                        response_id_owned.as_ref(),
+                        conv_id_opt.as_ref(),
+                        turn_info,
+                        persisted_ids,
+                        &metadata,
+                    );
+                    interceptors.run_after_persist(&after_ctx).await;
+                }
+            }
+            Err(err) => {
+                warn!("Failed to persist conversation items: {}", err);
+            }
         }
     } else {
         warn!("Storage not configured, skipping conversation persistence");
