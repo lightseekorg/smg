@@ -117,3 +117,18 @@ def test_apply_chat_template_with_tools(hf_tokenizer_path):
     # this assertion would need adjustment - Qwen2.5-Instruct does honor tools.
     assert prompt_with_tools != prompt_no_tools
     assert "get_weather" in prompt_with_tools
+
+
+@pytest.mark.unit
+def test_apply_chat_template_without_generation_prompt(hf_tokenizer_path):
+    """add_generation_prompt=False should NOT append the assistant turn header."""
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    messages = json.loads((FIXTURES / "messages_basic.json").read_text())
+
+    with_prompt = tok.apply_chat_template(messages, add_generation_prompt=True)
+    without_prompt = tok.apply_chat_template(messages, add_generation_prompt=False)
+
+    # The "with generation prompt" version should be at least as long as without.
+    assert len(with_prompt) >= len(without_prompt)
+    # And the additional content should not be present in the without version.
+    assert with_prompt != without_prompt
