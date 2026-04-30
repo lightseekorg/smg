@@ -123,7 +123,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
             content: new_item.content,
             status: new_item.status,
             created_at,
-            item_json: new_item.item_json,
+            item_json: None,
         };
         self.inner.write().items.insert(id, item.clone());
         Ok(item)

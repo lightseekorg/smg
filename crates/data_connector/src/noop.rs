@@ -88,7 +88,7 @@ impl ConversationItemStorage for NoOpConversationItemStorage {
             content: item.content,
             status: item.status,
             created_at: Utc::now(),
-            item_json: item.item_json,
+            item_json: None,
         })
     }
 
