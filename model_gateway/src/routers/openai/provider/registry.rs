@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    AnthropicProvider, GeminiProvider, OpenAIProvider, Provider, SGLangProvider, XAIProvider,
+    AnthropicProvider, GoogleProvider, OpenAIProvider, Provider, SGLangProvider, XAIProvider,
 };
 use crate::worker::ProviderType;
 
@@ -30,7 +30,7 @@ impl ProviderRegistry {
         );
         providers.insert(
             ProviderType::Gemini,
-            Arc::new(GeminiProvider) as Arc<dyn Provider>,
+            Arc::new(GoogleProvider) as Arc<dyn Provider>,
         );
         providers.insert(
             ProviderType::Anthropic,

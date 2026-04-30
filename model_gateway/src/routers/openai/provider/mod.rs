@@ -1,7 +1,7 @@
 //! Provider abstractions for vendor-specific API transformations.
 
 mod anthropic;
-mod gemini;
+mod google;
 mod openai;
 mod provider_trait;
 mod registry;
@@ -12,7 +12,7 @@ mod types;
 mod xai;
 
 pub use anthropic::AnthropicProvider;
-pub use gemini::GeminiProvider;
+pub(crate) use google::GoogleProvider;
 pub use openai::OpenAIProvider;
 pub use provider_trait::Provider;
 pub use registry::ProviderRegistry;
