@@ -1,5 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+.proto-build.lock
 *.py[cod]
 *$py.class
 
