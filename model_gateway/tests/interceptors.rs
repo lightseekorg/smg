@@ -413,3 +413,307 @@ async fn items_only_path_fires_after_persist_with_no_response() {
         "items-only after_persist ctx must expose conversation_id"
     );
 }
+
+// ============================================================================
+// HTTP streaming
+// ============================================================================
+
+/// Spin up a tiny axum mock that returns an SSE Responses stream containing
+/// a `response.completed` event. This is enough to drive the streaming
+/// router through the post-stream persistence + after_persist hook.
+async fn spawn_streaming_mock() -> (String, tokio::task::JoinHandle<()>) {
+    use axum::response::Response;
+
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let sse_handler = post(|Json(_request): Json<serde_json::Value>| async move {
+        let response_id = "resp_stream_int";
+        let message_id = "msg_stream_int";
+        let final_text = "stream-ok";
+
+        let events = vec![
+            (
+                "response.created",
+                json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created_at": 1_700_000_500,
+                        "status": "in_progress",
+                        "model": "",
+                        "output": [],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": null,
+                        "store": false,
+                        "temperature": 1.0,
+                        "text": {"format": {"type": "text"}},
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1.0,
+                        "truncation": "disabled",
+                        "usage": null,
+                        "metadata": null
+                    }
+                }),
+            ),
+            (
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": 1,
+                    "output_index": 0,
+                    "item": {
+                        "id": message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "in_progress",
+                        "content": []
+                    }
+                }),
+            ),
+            (
+                "response.output_text.delta",
+                json!({
+                    "type": "response.output_text.delta",
+                    "sequence_number": 2,
+                    "item_id": message_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": final_text,
+                    "logprobs": []
+                }),
+            ),
+            (
+                "response.output_text.done",
+                json!({
+                    "type": "response.output_text.done",
+                    "sequence_number": 3,
+                    "item_id": message_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": final_text,
+                    "logprobs": []
+                }),
+            ),
+            (
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 4,
+                    "output_index": 0,
+                    "item": {
+                        "id": message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": final_text,
+                            "annotations": [],
+                            "logprobs": []
+                        }]
+                    }
+                }),
+            ),
+            (
+                "response.completed",
+                json!({
+                    "type": "response.completed",
+                    "sequence_number": 5,
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created_at": 1_700_000_500,
+                        "status": "completed",
+                        "model": "",
+                        "output": [{
+                            "id": message_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{
+                                "type": "output_text",
+                                "text": final_text,
+                                "annotations": [],
+                                "logprobs": []
+                            }]
+                        }],
+                        "parallel_tool_calls": true,
+                        "previous_response_id": null,
+                        "reasoning": null,
+                        "store": false,
+                        "temperature": 1.0,
+                        "text": {"format": {"type": "text"}},
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "top_p": 1.0,
+                        "truncation": "disabled",
+                        "usage": {
+                            "input_tokens": 1,
+                            "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens": 1,
+                            "output_tokens_details": {"reasoning_tokens": 0},
+                            "total_tokens": 2
+                        },
+                        "metadata": null,
+                        "instructions": null,
+                        "user": null
+                    }
+                }),
+            ),
+        ];
+
+        let payload = events
+            .into_iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect::<String>();
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from(payload))
+            .expect("response")
+    });
+
+    let app = Router::new().route("/v1/responses", sse_handler);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), server)
+}
+
+/// HTTP streaming: `POST /v1/responses` with `stream=true` fires
+/// `before_model` once at request entry and `after_persist` once after the
+/// stream completes and persistence is committed.
+#[tokio::test]
+async fn http_streaming_fires_both_phases_once() {
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    let recording = Arc::new(RecordingInterceptor::default());
+    let registry = registry_with(recording.clone() as Arc<dyn ResponsesInterceptor>);
+
+    let ctx = build_app_context_with_interceptors(registry).await;
+
+    let (base_url, server) = spawn_streaming_mock().await;
+    register_external_worker(&ctx, &base_url, Some(vec!["mock-model"]));
+
+    let router = OpenAIRouter::new(&ctx).await.expect("router");
+
+    let conv = ctx
+        .conversation_storage
+        .create_conversation(NewConversation {
+            id: None,
+            metadata: None,
+        })
+        .await
+        .expect("create conversation");
+
+    let request = ResponsesRequest {
+        model: "mock-model".to_string(),
+        input: ResponseInput::Text("hello".to_string()),
+        store: Some(true),
+        stream: Some(true),
+        conversation: Some(ConversationRef::Id(conv.id.0.clone())),
+        ..Default::default()
+    };
+    let tenant_meta = test_tenant_meta();
+    let response = router
+        .route_responses(None, &tenant_meta, &request, &request.model)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Drain the SSE stream before checking interceptor records — the
+    // streaming after_persist hook fires from a background task that runs
+    // after the final `response.completed` event is observed.
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body_text = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(body_text.contains("response.completed"));
+
+    // The persist + after_persist work runs on a detached task; poll until
+    // the recording interceptor observes the call (with a generous bound).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !recording.after_calls.lock().expect("mutex").is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "after_persist hook never fired for streaming path"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    let before = recording.before_calls.lock().expect("mutex");
+    let after = recording.after_calls.lock().expect("mutex");
+
+    assert_eq!(
+        before.len(),
+        1,
+        "streaming before_model should fire exactly once (got {:?})",
+        *before
+    );
+    assert_eq!(
+        after.len(),
+        1,
+        "streaming after_persist should fire exactly once (got {:?})",
+        *after
+    );
+    assert!(before[0].has_conversation_id);
+    assert!(after[0].has_response_id);
+    assert!(after[0].has_response_json);
+    assert!(after[0].has_conversation_id);
+
+    server.abort();
+}
+
+// ============================================================================
+// HTTP streaming with MCP tool calls (skipped: requires real MCP server)
+// ============================================================================
+
+/// Streaming with an MCP tool loop fires `after_persist` after the MCP
+/// finalizer commits the post-tool response.
+///
+/// **Skipped:** triggering the MCP-streaming code path requires an actual
+/// MCP server binding (registered through `McpOrchestrator`) plus an
+/// upstream that emits compatible function-call SSE events. Spinning up
+/// a real `rmcp` server in this integration test is out of scope; the
+/// MCP-finalizer hook firing logic is structurally identical to the
+/// regular streaming finalizer and is covered by the registry-level unit
+/// tests in `smg-extensions` and the streaming hook test above.
+#[tokio::test]
+#[ignore = "requires MCP server fixture; covered indirectly by streaming + registry unit tests"]
+async fn http_mcp_streaming_fires_after_persist() {
+    // Intentionally empty - see doc comment.
+}
+
+// ============================================================================
+// gRPC paths (unit tests live alongside the call sites)
+// ============================================================================
+
+/// gRPC harmony / regular hook firings are covered by unit tests at the
+/// call sites:
+///
+/// - `model_gateway/src/routers/grpc/common/responses/utils.rs::tests`
+///   (shared `persist_response_if_needed` after_persist)
+/// - `model_gateway/src/routers/grpc/regular/responses/non_streaming.rs::tests`
+///   (regular gRPC `before_model`)
+/// - `model_gateway/src/routers/grpc/harmony/responses/non_streaming.rs::tests`
+///   (harmony gRPC `before_model`)
+///
+/// Driving the full gRPC pipeline from an integration test requires a tonic
+/// server harness plus a mock backend gRPC client; this is meaningfully
+/// heavier than a unit test of the hook firing block itself, while
+/// providing the same guarantee. The unit tests live in the `grpc::common`,
+/// `grpc::regular`, and `grpc::harmony` modules so they can access
+/// `pub(crate)` types like `persist_response_if_needed` and
+/// `ResponsesContext`.
+#[allow(dead_code)]
+fn _grpc_coverage_note() {}

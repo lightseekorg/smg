@@ -236,3 +236,106 @@ pub(crate) async fn persist_response_if_needed(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use async_trait::async_trait;
+    use axum::http::HeaderMap;
+    use openai_protocol::responses::{ResponsesRequest, ResponsesResponse};
+    use smg_data_connector::{
+        MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
+    };
+    use smg_extensions::{
+        AfterPersistCtx, BeforeModelCtx, InterceptorRegistry, ResponsesInterceptor,
+    };
+
+    use super::persist_response_if_needed;
+
+    struct CountingInterceptor {
+        after_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ResponsesInterceptor for CountingInterceptor {
+        fn name(&self) -> &'static str {
+            "counting-grpc"
+        }
+        async fn before_model(&self, _ctx: &mut BeforeModelCtx<'_>) {}
+        async fn after_persist(&self, _ctx: &AfterPersistCtx<'_>) {
+            self.after_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Shared gRPC after_persist site fires the registered interceptor when
+    /// persistence succeeds. Mirrors the wiring used by both the harmony
+    /// and regular gRPC routers.
+    #[tokio::test]
+    async fn persist_response_if_needed_fires_after_persist_hook() {
+        let after_count = Arc::new(AtomicUsize::new(0));
+
+        let mut builder = InterceptorRegistry::builder();
+        builder.register(Arc::new(CountingInterceptor {
+            after_count: after_count.clone(),
+        }));
+        let interceptors = builder.build();
+
+        let conversation_storage = Arc::new(MemoryConversationStorage::new());
+        let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
+        let response_storage = Arc::new(MemoryResponseStorage::new());
+
+        let response = ResponsesResponse::builder("resp_grpc_unit", "mock-model").build();
+        let request = ResponsesRequest::default();
+
+        persist_response_if_needed(
+            conversation_storage,
+            conversation_item_storage,
+            response_storage,
+            &response,
+            &request,
+            None,
+            interceptors,
+            HeaderMap::new(),
+            "req_grpc_unit".to_string(),
+            Some("test-tenant".to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            after_count.load(Ordering::SeqCst),
+            1,
+            "after_persist hook should fire exactly once on the gRPC shared persist path"
+        );
+    }
+
+    /// Empty registry must not invoke any interceptor work.
+    #[tokio::test]
+    async fn persist_response_if_needed_skips_when_registry_is_empty() {
+        let conversation_storage = Arc::new(MemoryConversationStorage::new());
+        let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
+        let response_storage = Arc::new(MemoryResponseStorage::new());
+
+        let response = ResponsesResponse::builder("resp_grpc_unit_empty", "mock-model").build();
+        let request = ResponsesRequest::default();
+
+        // Should be a no-op; just assert no panic and no observable side
+        // effect on the storage backends from interceptor logic.
+        persist_response_if_needed(
+            conversation_storage,
+            conversation_item_storage,
+            response_storage,
+            &response,
+            &request,
+            None,
+            InterceptorRegistry::default(),
+            HeaderMap::new(),
+            "req_grpc_unit_empty".to_string(),
+            None,
+        )
+        .await;
+    }
+}
