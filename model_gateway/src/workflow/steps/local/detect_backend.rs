@@ -4,10 +4,12 @@
 //! - HTTP: detects sglang/vllm via `/v1/models` (owned_by field), falls back
 //!   to unique endpoints. TokenSpeed has no HTTP frontend in this repo and is
 //!   gRPC-only.
-//! - gRPC: tries tokenspeed → sglang → vllm → trtllm → mlx health checks
-//!   sequentially. TokenSpeed speaks its own ``tokenspeed.grpc.scheduler``
-//!   service (see `proto/tokenspeed_scheduler.proto`), so the health handshake
-//!   natively identifies the worker.
+//! - gRPC: tries each backend's health endpoint sequentially, ordered by
+//!   expected frequency (sglang → vllm → trtllm → tokenspeed → mlx). Each
+//!   backend speaks its own gRPC service (e.g. TokenSpeed uses
+//!   `tokenspeed.grpc.scheduler`, see `proto/tokenspeed_scheduler.proto`),
+//!   so the order is a latency optimisation only — correctness does not
+//!   depend on it.
 
 use std::time::Duration;
 
@@ -48,12 +50,11 @@ async fn detect_grpc_backend(
         }
     }
 
-    // Try each runtime sequentially. TokenSpeed comes before SGLang because
-    // it has its own ``tokenspeed.grpc.scheduler`` service — a real SGLang
-    // worker never answers that handshake, so testing it first unambiguously
-    // distinguishes the two backends without SGLang ever being probed
-    // against a TokenSpeed worker (and vice versa).
-    for runtime in &["tokenspeed", "sglang", "vllm", "trtllm", "mlx"] {
+    // Try each runtime sequentially, ordered by expected frequency so the
+    // common case finishes after one probe. Each backend speaks its own
+    // gRPC service, so order is purely a latency optimisation, not a
+    // correctness condition.
+    for runtime in &["sglang", "vllm", "trtllm", "tokenspeed", "mlx"] {
         if Some(*runtime) == runtime_hint {
             continue;
         }
@@ -66,7 +67,7 @@ async fn detect_grpc_backend(
     }
 
     Err(format!(
-        "gRPC backend detection failed for {url} (tried tokenspeed, sglang, vllm, trtllm, mlx)"
+        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, tokenspeed, mlx)"
     ))
 }
 
