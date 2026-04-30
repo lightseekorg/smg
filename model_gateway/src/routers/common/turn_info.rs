@@ -22,11 +22,11 @@ pub async fn compute_turn_info(
     incoming_input: Option<&Value>,
 ) -> ConversationTurnInfo {
     let Some(conv_id) = conversation_id else {
-        let mut info = ConversationTurnInfo::default();
-        info.user_turns = count_user_turns_in_input(incoming_input);
-        info.total_items = count_total_items_in_input(incoming_input);
-        info.raw_stored_item_count = None;
-        return info;
+        return ConversationTurnInfo::new(
+            count_user_turns_in_input(incoming_input),
+            count_total_items_in_input(incoming_input),
+            None,
+        );
     };
 
     let params = ListParams {
@@ -53,11 +53,7 @@ pub async fn compute_turn_info(
     user_turns += count_user_turns_in_input(incoming_input);
     total_items += count_total_items_in_input(incoming_input);
 
-    let mut info = ConversationTurnInfo::default();
-    info.user_turns = user_turns;
-    info.total_items = total_items;
-    info.raw_stored_item_count = Some(raw_stored);
-    info
+    ConversationTurnInfo::new(user_turns, total_items, Some(raw_stored))
 }
 
 fn count_user_turns_in_input(input: Option<&Value>) -> u32 {

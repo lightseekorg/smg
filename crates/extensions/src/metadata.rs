@@ -9,6 +9,20 @@ pub struct ConversationTurnInfo {
     pub raw_stored_item_count: Option<u32>,
 }
 
+impl ConversationTurnInfo {
+    pub fn new(
+        user_turns: u32,
+        total_items: u32,
+        raw_stored_item_count: Option<u32>,
+    ) -> Self {
+        Self {
+            user_turns,
+            total_items,
+            raw_stored_item_count,
+        }
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct RequestMetadata {
@@ -57,6 +71,14 @@ mod tests {
         };
         let ConversationTurnInfo { user_turns, .. } = info;
         assert_eq!(user_turns, 4);
+    }
+
+    #[test]
+    fn turn_info_new_constructs_correctly() {
+        let info = ConversationTurnInfo::new(3, 7, Some(5));
+        assert_eq!(info.user_turns, 3);
+        assert_eq!(info.total_items, 7);
+        assert_eq!(info.raw_stored_item_count, Some(5));
     }
 
     #[test]

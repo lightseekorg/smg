@@ -30,3 +30,47 @@ pub struct AfterPersistCtx<'a> {
     pub persisted_item_ids: &'a [ConversationItemId],
     pub request_metadata: &'a RequestMetadata,
 }
+
+impl<'a> BeforeModelCtx<'a> {
+    pub fn new(
+        headers: &'a HeaderMap,
+        request: &'a mut ResponsesRequest,
+        conversation_id: Option<&'a ConversationId>,
+        history: Arc<dyn ConversationItemStorage>,
+        turn_info: ConversationTurnInfo,
+        request_metadata: &'a RequestMetadata,
+    ) -> Self {
+        Self {
+            headers,
+            request,
+            conversation_id,
+            history,
+            turn_info,
+            request_metadata,
+        }
+    }
+}
+
+impl<'a> AfterPersistCtx<'a> {
+    pub fn new(
+        headers: &'a HeaderMap,
+        request: &'a ResponsesRequest,
+        response_json: Option<&'a Value>,
+        response_id: Option<&'a ResponseId>,
+        conversation_id: Option<&'a ConversationId>,
+        turn_info: ConversationTurnInfo,
+        persisted_item_ids: &'a [ConversationItemId],
+        request_metadata: &'a RequestMetadata,
+    ) -> Self {
+        Self {
+            headers,
+            request,
+            response_json,
+            response_id,
+            conversation_id,
+            turn_info,
+            persisted_item_ids,
+            request_metadata,
+        }
+    }
+}
