@@ -52,6 +52,9 @@ pub(super) async fn route_responses_internal(
     let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
 
+    let headers_for_hook = params.headers.clone();
+    let tenant_id = Some(params.tenant_request_meta.tenant_key().as_str().to_string());
+
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
 
@@ -62,6 +65,11 @@ pub(super) async fn route_responses_internal(
         execute_without_mcp(ctx, &modified_request, &request, params).await?
     };
 
+    let request_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+
     // 5. Persist response to storage if store=true
     persist_response_if_needed(
         ctx.conversation_storage.clone(),
@@ -70,6 +78,10 @@ pub(super) async fn route_responses_internal(
         &responses_response,
         &request,
         ctx.request_context.clone(),
+        ctx.interceptors.clone(),
+        headers_for_hook.unwrap_or_default(),
+        request_id,
+        tenant_id,
     )
     .await;
 

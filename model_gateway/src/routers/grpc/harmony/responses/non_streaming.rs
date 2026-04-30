@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use axum::response::Response;
+use axum::{http::HeaderMap, response::Response};
 use openai_protocol::{
     common::{ToolCall, Usage},
     responses::{
@@ -54,6 +54,7 @@ use crate::{
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
+    headers: Option<HeaderMap>,
     tenant_request_meta: TenantRequestMeta,
 ) -> Result<ResponsesResponse, Response> {
     // Clone request for persistence
@@ -76,8 +77,14 @@ pub(crate) async fn serve_harmony_responses(
         .await?
     } else {
         // No MCP tools - execute pipeline once (may have function tools or no tools)
-        execute_without_mcp_loop(ctx, current_request, tenant_request_meta).await?
+        execute_without_mcp_loop(ctx, current_request, tenant_request_meta.clone()).await?
     };
+
+    let request_id = original_request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+    let tenant_id = Some(tenant_request_meta.tenant_key().as_str().to_string());
 
     // Persist response to storage if store=true
     persist_response_if_needed(
@@ -87,6 +94,10 @@ pub(crate) async fn serve_harmony_responses(
         &response,
         &original_request,
         ctx.request_context.clone(),
+        ctx.interceptors.clone(),
+        headers.unwrap_or_default(),
+        request_id,
+        tenant_id,
     )
     .await;
 

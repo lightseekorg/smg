@@ -82,6 +82,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 ) -> Response {
     debug!("Converting chat SSE stream to responses SSE format");
 
+    let headers_for_hook = params.headers.clone();
+    let tenant_id_for_hook =
+        Some(params.tenant_request_meta.tenant_key().as_str().to_string());
+
     // Get chat streaming response
     let chat_response = ctx
         .pipeline
@@ -106,6 +110,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
     let request_context = ctx.request_context.clone();
+    let interceptors_for_hook = ctx.interceptors.clone();
 
     #[expect(
         clippy::disallowed_methods,
@@ -119,6 +124,9 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
             conversation_storage,
             conversation_item_storage,
             request_context,
+            interceptors_for_hook,
+            headers_for_hook.unwrap_or_default(),
+            tenant_id_for_hook,
             tx.clone(),
         )
         .await
@@ -136,6 +144,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 }
 
 /// Process chat SSE stream and transform to responses format
+#[expect(
+    clippy::too_many_arguments,
+    reason = "interceptor hook firing requires per-request metadata threaded through stream finalizer"
+)]
 async fn process_and_transform_sse_stream(
     body: Body,
     original_request: ResponsesRequest,
@@ -143,6 +155,9 @@ async fn process_and_transform_sse_stream(
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
     request_context: Option<StorageRequestContext>,
+    interceptors: smg_extensions::InterceptorRegistry,
+    headers: http::HeaderMap,
+    tenant_id: Option<String>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     // Create accumulator for final response
@@ -230,6 +245,10 @@ async fn process_and_transform_sse_stream(
 
     // Finalize and persist accumulated response
     let final_response = accumulator.finalize();
+    let request_id = original_request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("req_{}", Uuid::now_v7()));
     persist_response_if_needed(
         conversation_storage,
         conversation_item_storage,
@@ -237,6 +256,10 @@ async fn process_and_transform_sse_stream(
         &final_response,
         &original_request,
         request_context,
+        interceptors,
+        headers,
+        request_id,
+        tenant_id,
     )
     .await;
 

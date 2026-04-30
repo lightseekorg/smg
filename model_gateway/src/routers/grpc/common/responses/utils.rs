@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::response::Response;
+use axum::{http::HeaderMap, response::Response};
 use openai_protocol::{
     common::Tool,
     responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
@@ -150,6 +150,10 @@ pub(crate) fn extract_tools_from_response_tools(
 ///
 /// Common helper function to avoid duplication across sync and streaming paths
 /// in both harmony and regular responses implementations.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "interceptor hook firing requires per-request metadata alongside storage handles"
+)]
 pub(crate) async fn persist_response_if_needed(
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
@@ -157,25 +161,78 @@ pub(crate) async fn persist_response_if_needed(
     response: &ResponsesResponse,
     original_request: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
+    interceptors: smg_extensions::InterceptorRegistry,
+    headers: HeaderMap,
+    request_id: String,
+    tenant_id: Option<String>,
 ) {
     if !original_request.store.unwrap_or(true) {
         return;
     }
 
     if let Ok(response_json) = to_value(response) {
-        if let Err(e) = persist_conversation_items(
+        let item_storage_for_hook = conversation_item_storage.clone();
+        let persist_result = persist_conversation_items(
             conversation_storage,
             conversation_item_storage,
             response_storage,
             &response_json,
             original_request,
-            request_context,
+            request_context.clone(),
         )
-        .await
-        {
-            warn!("Failed to persist response: {}", e);
-        } else {
-            debug!("Persisted response: {}", response.id);
+        .await;
+        match persist_result {
+            Ok(()) => {
+                debug!("Persisted response: {}", response.id);
+                if !interceptors.is_empty() {
+                    use smg_extensions::{AfterPersistCtx, RequestMetadata};
+
+                    use crate::routers::common::turn_info::compute_turn_info;
+
+                    let conv_id_opt: Option<smg_data_connector::ConversationId> =
+                        original_request
+                            .conversation
+                            .as_ref()
+                            .filter(|c| !c.is_empty())
+                            .map(|c| smg_data_connector::ConversationId::from(c.as_id()));
+
+                    let response_id_owned: Option<smg_data_connector::ResponseId> = response_json
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(smg_data_connector::ResponseId::from);
+
+                    let incoming_input_value = to_value(&original_request.input).ok();
+                    let turn_info = compute_turn_info(
+                        item_storage_for_hook.as_ref(),
+                        conv_id_opt.as_ref(),
+                        incoming_input_value.as_ref(),
+                    )
+                    .await;
+
+                    let metadata = RequestMetadata::build_from(
+                        request_id,
+                        original_request.safety_identifier.clone(),
+                        tenant_id,
+                        request_context,
+                    );
+
+                    let persisted_ids: &[smg_data_connector::ConversationItemId] = &[];
+                    let after_ctx = AfterPersistCtx::new(
+                        &headers,
+                        original_request,
+                        Some(&response_json),
+                        response_id_owned.as_ref(),
+                        conv_id_opt.as_ref(),
+                        turn_info,
+                        persisted_ids,
+                        &metadata,
+                    );
+                    interceptors.run_after_persist(&after_ctx).await;
+                }
+            }
+            Err(e) => {
+                warn!("Failed to persist response: {}", e);
+            }
         }
     }
 }
