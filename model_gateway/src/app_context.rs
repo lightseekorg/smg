@@ -439,7 +439,8 @@ impl AppContextBuilder {
         // Build the Responses-API interceptor registry from the configured
         // extensions. An empty `extensions:` list yields an empty registry,
         // which is the no-op default.
-        let mut registry_builder = InterceptorRegistry::builder();
+        // PR 2 will rebind this as `mut` and call `.register(...)` on it.
+        let registry_builder = InterceptorRegistry::builder();
         for spec in &router_config.extensions.items {
             match spec.kind.as_str() {
                 // Future extensions register here. Example (PR 2):
