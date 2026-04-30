@@ -561,6 +561,11 @@ jobs:
             timeout: 20
           - engine: trtllm
             timeout: 30
+          # Picks up TestChatCompletionGptOss (gpt-oss-20b, ``@pytest.mark.gpu(2)``)
+          # on the tokenspeed engine; the 1-GPU job collected the test class but
+          # pytest skipped it at collection because the runner only had 1 GPU.
+          - engine: tokenspeed
+            timeout: 60
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
