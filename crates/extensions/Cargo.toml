@@ -1,0 +1,26 @@
+[package]
+name = "smg-extensions"
+version = "0.1.0"
+edition = "2021"
+description = "Generic extension trait and registry for SMG request lifecycle hooks"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+
+[lib]
+name = "smg_extensions"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+futures.workspace = true
+serde_json.workspace = true
+smg-data-connector.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
