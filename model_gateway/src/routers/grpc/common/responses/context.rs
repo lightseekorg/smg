@@ -36,6 +36,9 @@ pub(crate) struct ResponsesContext {
     /// Conversation memory writer (can be NoOp depending on backend)
     pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
 
+    /// Registry of Responses-API interceptors (empty by default).
+    pub interceptors: smg_extensions::InterceptorRegistry,
+
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
 
@@ -56,6 +59,7 @@ impl ResponsesContext {
         conversation_storage: Arc<dyn ConversationStorage>,
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
         conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
+        interceptors: smg_extensions::InterceptorRegistry,
         mcp_orchestrator: Arc<McpOrchestrator>,
         request_context: Option<StorageRequestContext>,
     ) -> Self {
@@ -66,6 +70,7 @@ impl ResponsesContext {
             conversation_storage,
             conversation_item_storage,
             conversation_memory_writer,
+            interceptors,
             mcp_orchestrator,
             request_context,
         }
