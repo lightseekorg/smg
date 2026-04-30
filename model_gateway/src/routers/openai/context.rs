@@ -280,6 +280,12 @@ pub struct OwnedStreamingContext {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
     pub storage: StorageHandles,
+    /// Snapshot of the Responses interceptor registry (cheap-clonable).
+    pub interceptors: smg_extensions::InterceptorRegistry,
+    /// Tenant identity captured from the request boundary (if any).
+    pub tenant_request_meta: Option<TenantRequestMeta>,
+    /// Request-scoped headers captured at the HTTP boundary.
+    pub headers: Option<HeaderMap>,
 }
 
 impl RequestContext {
@@ -310,6 +316,13 @@ impl RequestContext {
             .conversation_memory_writer()
             .ok_or("Conversation memory writer required")?
             .clone();
+        let interceptors = self
+            .components
+            .interceptors()
+            .cloned()
+            .unwrap_or_default();
+        let tenant_request_meta = self.tenant_request_meta.clone();
+        let headers = self.input.headers.clone();
 
         Ok(OwnedStreamingContext {
             url: payload_state.url,
@@ -325,6 +338,9 @@ impl RequestContext {
                 request_context: self.storage_request_context,
                 memory_execution_context: self.memory_execution_context,
             },
+            interceptors,
+            tenant_request_meta,
+            headers,
         })
     }
 }

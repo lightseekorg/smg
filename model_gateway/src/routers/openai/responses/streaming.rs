@@ -563,6 +563,9 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
+    let interceptors = req.interceptors;
+    let tenant_request_meta = req.tenant_request_meta;
+    let request_headers = req.headers;
 
     #[expect(
         clippy::disallowed_methods,
@@ -631,7 +634,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                 );
 
                 // Always persist conversation items and response (even without conversation)
-                if let Err(err) = persist_conversation_items(
+                let persist_result = persist_conversation_items(
                     storage.conversation.clone(),
                     storage.conversation_item.clone(),
                     storage.response.clone(),
@@ -639,9 +642,68 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     &original_request,
                     storage.request_context.clone(),
                 )
-                .await
-                {
-                    warn!("Failed to persist conversation items (stream): {}", err);
+                .await;
+                match persist_result {
+                    Ok(()) => {
+                        if !interceptors.is_empty() {
+                            use smg_extensions::{AfterPersistCtx, RequestMetadata};
+
+                            use crate::routers::common::turn_info::compute_turn_info;
+
+                            let conv_id_opt: Option<smg_data_connector::ConversationId> =
+                                original_request
+                                    .conversation
+                                    .as_ref()
+                                    .filter(|c| !c.is_empty())
+                                    .map(|c| {
+                                        smg_data_connector::ConversationId::from(c.as_id())
+                                    });
+                            let response_id_owned: Option<smg_data_connector::ResponseId> =
+                                response_json
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(smg_data_connector::ResponseId::from);
+                            let incoming_input_value =
+                                serde_json::to_value(&original_request.input).ok();
+                            let turn_info = compute_turn_info(
+                                storage.conversation_item.as_ref(),
+                                conv_id_opt.as_ref(),
+                                incoming_input_value.as_ref(),
+                            )
+                            .await;
+                            let request_id = original_request
+                                .request_id
+                                .clone()
+                                .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+                            let tenant_id = tenant_request_meta
+                                .as_ref()
+                                .map(|m| m.tenant_key().as_str().to_string());
+                            let metadata = RequestMetadata::build_from(
+                                request_id,
+                                original_request.safety_identifier.clone(),
+                                tenant_id,
+                                storage.request_context.clone(),
+                            );
+                            let empty_headers = HeaderMap::new();
+                            let header_ref =
+                                request_headers.as_ref().unwrap_or(&empty_headers);
+                            let persisted_ids: &[smg_data_connector::ConversationItemId] = &[];
+                            let after_ctx = AfterPersistCtx::new(
+                                header_ref,
+                                &original_request,
+                                Some(&response_json),
+                                response_id_owned.as_ref(),
+                                conv_id_opt.as_ref(),
+                                turn_info,
+                                persisted_ids,
+                                &metadata,
+                            );
+                            interceptors.run_after_persist(&after_ctx).await;
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Failed to persist conversation items (stream): {}", err);
+                    }
                 }
             } else if let Some(error_payload) = encountered_error {
                 warn!("Upstream streaming error payload: {}", error_payload);
