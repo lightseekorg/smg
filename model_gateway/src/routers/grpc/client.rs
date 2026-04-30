@@ -316,9 +316,18 @@ impl GrpcClient {
             Self::Mlx(client) => client.get_tokenizer().await,
             // TokenSpeed dropped the GetTokenizer RPC from its wire — it
             // serves text-only LLMs and the Python servicer constructs its
-            // own HF tokenizer locally; the router doesn't need to fetch it.
+            // own HF tokenizer locally; the router doesn't need to fetch
+            // it. Returning ``tonic::Status::unimplemented`` (rather than a
+            // plain string error) lets the fallback in
+            // ``tokenizer_registration::fetch_tokenizer_from_worker``
+            // recognise this via its existing
+            // ``downcast_ref::<tonic::Status>`` + ``Code::Unimplemented``
+            // check and silently skip TokenSpeed workers instead of
+            // logging them as `get_tokenizer failed` warnings.
             Self::TokenSpeed(_) => {
-                return Err("TokenSpeed backend does not support GetTokenizer RPC".into());
+                return Err(Box::new(tonic::Status::unimplemented(
+                    "TokenSpeed backend does not support GetTokenizer RPC",
+                )));
             }
         }?;
 
