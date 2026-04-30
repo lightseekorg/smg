@@ -37,7 +37,7 @@ use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
 
 use crate::{
-    sglang_scheduler::{proto as sglang, AbortDispatcher, SglangSchedulerClient},
+    sglang_scheduler::{proto as sglang, SglangSchedulerClient},
     BoxedTraceInjector, NoopTraceInjector,
 };
 
@@ -46,6 +46,13 @@ pub mod tokenspeed_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
     tonic::include_proto!("tokenspeed.grpc.scheduler");
 }
+
+/// Fire-and-forget abort sender used by [`AbortOnDropStream`]. The closure
+/// captures the TokenSpeed client that owns the stream so ``Drop`` can
+/// dispatch the abort RPC over the same connection without ``Drop`` itself
+/// being async. Local to this module — SGLang's equivalent stream type
+/// holds its own client field directly and doesn't need this indirection.
+type AbortDispatcher = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Auto-aborting wrapper around the TokenSpeed generate stream.
 ///

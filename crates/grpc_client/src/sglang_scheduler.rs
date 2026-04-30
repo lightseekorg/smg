@@ -32,13 +32,6 @@ pub mod proto {
 // The generated module structure depends on the package name in the .proto file
 // package sglang.grpc.scheduler; generates a nested module structure
 
-/// Fire-and-forget abort sender used by [`AbortOnDropStream`]. The closure
-/// captures whichever scheduler client (SGLang / TokenSpeed / future) created
-/// the stream, so a single generic wrapper can serve both engines without
-/// being parameterised over the client type. The closure is expected to
-/// spawn its own async task and return immediately — ``Drop`` is sync.
-pub type AbortDispatcher = Arc<dyn Fn(String) + Send + Sync>;
-
 /// A smart wrapper around Streaming<GenerateResponse> that automatically
 /// sends abort when dropped (e.g., due to client disconnection or early termination).
 ///
@@ -47,27 +40,22 @@ pub type AbortDispatcher = Arc<dyn Fn(String) + Send + Sync>;
 pub struct AbortOnDropStream {
     inner: Streaming<proto::GenerateResponse>,
     request_id: String,
-    abort_dispatcher: AbortDispatcher,
+    client: SglangSchedulerClient,
     aborted: Arc<AtomicBool>,
 }
 
 impl AbortOnDropStream {
-    /// Create a new auto-aborting stream wrapper.
-    ///
-    /// ``abort_dispatcher`` is invoked from ``Drop`` with the request id when
-    /// the stream is dropped without a prior ``mark_completed`` call. It must
-    /// handle its own async dispatch (e.g. ``tokio::spawn``) since ``Drop``
-    /// cannot ``await``.
+    /// Create a new auto-aborting stream wrapper
     pub fn new(
         stream: Streaming<proto::GenerateResponse>,
         request_id: String,
-        abort_dispatcher: AbortDispatcher,
+        client: SglangSchedulerClient,
     ) -> Self {
         debug!("Created AbortOnDropStream for request {}", request_id);
         Self {
             inner: stream,
             request_id,
-            abort_dispatcher,
+            client,
             aborted: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -95,27 +83,22 @@ impl Drop for AbortOnDropStream {
         {
             return;
         }
-        debug!(
-            "Stream dropped without completion for request {}, sending abort",
-            self.request_id
-        );
-        (self.abort_dispatcher)(self.request_id.clone());
-    }
-}
 
-/// Build the default abort dispatcher for [`SglangSchedulerClient`]. Spawned
-/// task calls ``abort_request`` on the original client (so the abort RPC goes
-/// over the same SGLang service the generate call used). TokenSpeed has an
-/// analogous helper in ``tokenspeed_scheduler.rs``.
-fn sglang_abort_dispatcher(client: SglangSchedulerClient) -> AbortDispatcher {
-    Arc::new(move |request_id: String| {
-        let client = client.clone();
-        let request_id_for_log = request_id.clone();
+        let client = self.client.clone();
+        let request_id = self.request_id.clone();
+
+        // Spawn a background task to send abort (since Drop is sync but abort_request is async)
         #[expect(
             clippy::disallowed_methods,
             reason = "fire-and-forget abort on Drop is intentional"
         )]
         tokio::spawn(async move {
+            debug!(
+                "Stream dropped without completion for request {}, sending abort",
+                request_id
+            );
+            // Clone request_id for the error message since abort_request takes ownership
+            let request_id_for_log = request_id.clone();
             if let Err(e) = client
                 .abort_request(request_id, "Stream dropped".to_string())
                 .await
@@ -126,7 +109,7 @@ fn sglang_abort_dispatcher(client: SglangSchedulerClient) -> AbortDispatcher {
                 );
             }
         });
-    })
+    }
 }
 
 // Implement Stream trait to make AbortOnDropStream work like the original Streaming
@@ -217,7 +200,7 @@ impl SglangSchedulerClient {
         Ok(AbortOnDropStream::new(
             response.into_inner(),
             request_id,
-            sglang_abort_dispatcher(self.clone()),
+            self.clone(),
         ))
     }
 
