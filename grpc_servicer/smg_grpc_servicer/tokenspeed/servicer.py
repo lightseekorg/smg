@@ -330,10 +330,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         logger.info("Abort request %s", rid)
         state_map = self.async_llm.rid_to_state
 
-        # Match exactly the per-choice children we minted in
-        # _build_generate_req — ``{rid}-n0``, ``{rid}-n1``, ... A loose
-        # ``startswith(f"{rid}-n")`` would mistakenly cancel an unrelated
-        # user-supplied rid like ``{rid}-name`` from a different caller.
+        # Anchored regex avoids matching unrelated rids like "{rid}-name".
         child_pattern = re.compile(rf"^{re.escape(rid)}-n\d+$")
         targets = [r for r in state_map if r == rid or child_pattern.match(r)]
 

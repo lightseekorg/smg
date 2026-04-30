@@ -1,15 +1,4 @@
-"""Standalone TokenSpeed gRPC server.
-
-Mirrors ``smg_grpc_servicer.sglang.server.serve_grpc``:
-
-1. Launch TokenSpeed's scheduler subprocess(es) + AsyncLLM via
-   :func:`smg_grpc_servicer.tokenspeed.scheduler_launcher.launch_engine`.
-2. Start a ``grpc.aio`` server that advertises the
-   ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` service so the SMG
-   router's ``DetectBackendStep`` identifies the worker natively.
-3. Warm the worker up with a tiny generation request, flip the health
-   servicer to SERVING, and await SIGTERM/SIGINT for graceful shutdown.
-"""
+"""Standalone TokenSpeed gRPC server — mirrors ``smg_grpc_servicer.sglang.server``."""
 
 from __future__ import annotations
 
@@ -193,11 +182,8 @@ def _wait_and_warmup(
     finally:
         channel.close()
 
-    # Only flip readiness to SERVING when warmup actually produced a
-    # complete frame. Reporting SERVING after a failed warmup would route
-    # production traffic to a worker whose model path is broken; staying
-    # NOT_SERVING lets the K8s readiness probe keep this pod out of
-    # rotation until the underlying issue is fixed (or the pod restarts).
+    # NOT_SERVING keeps the pod out of K8s readiness rotation when warmup
+    # never produced a Complete frame.
     if warmup_ok:
         health_servicer.set_serving()
         logger.info("TokenSpeed gRPC server is ready to serve")
