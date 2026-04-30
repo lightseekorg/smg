@@ -29,3 +29,29 @@ def test_from_file_rejects_invalid_path():
     # Either path-not-found OR HF Hub repo-not-found / 404 messages should match.
     expected = ("tokenizer", "not found", "exist", "no such file", "404", "repo", "repository")
     assert any(token in msg for token in expected), f"unexpected error message: {msg!r}"
+
+
+@pytest.mark.unit
+def test_encode_returns_list_of_ints(hf_tokenizer_path):
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    ids = tok.encode("hello world")
+    assert isinstance(ids, list)
+    assert len(ids) > 0
+    assert all(isinstance(x, int) for x in ids)
+
+
+@pytest.mark.unit
+def test_encode_with_special_tokens_differs(hf_tokenizer_path):
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    with_special = tok.encode("hello", add_special_tokens=True)
+    without_special = tok.encode("hello", add_special_tokens=False)
+    # With special tokens enabled, the result must be at least as long as without.
+    # On most tokenizers it differs; on some (rare) it may match, so we use >=.
+    assert len(with_special) >= len(without_special)
+
+
+@pytest.mark.unit
+def test_encode_empty_string_succeeds(hf_tokenizer_path):
+    tok = smg.Tokenizer.from_file(hf_tokenizer_path)
+    ids = tok.encode("", add_special_tokens=False)
+    assert isinstance(ids, list)

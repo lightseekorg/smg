@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use llm_tokenizer::traits::Tokenizer as TokenizerTrait;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 /// Python-facing tokenizer handle.
@@ -40,6 +40,19 @@ impl PyTokenizer {
             PyValueError::new_err(format!("failed to load tokenizer from {path}: {e}"))
         })?;
         Ok(PyTokenizer { inner })
+    }
+
+    /// Encode `text` to a list of token IDs.
+    ///
+    /// `add_special_tokens` controls whether the tokenizer's BOS/EOS tokens are
+    /// included; defaults to true to match the HuggingFace `__call__` default.
+    #[pyo3(signature = (text, add_special_tokens = true))]
+    fn encode(&self, text: &str, add_special_tokens: bool) -> PyResult<Vec<u32>> {
+        let encoding = self
+            .inner
+            .encode(text, add_special_tokens)
+            .map_err(|e| PyRuntimeError::new_err(format!("encode failed: {e}")))?;
+        Ok(encoding.token_ids().to_vec())
     }
 
     fn __repr__(&self) -> String {
