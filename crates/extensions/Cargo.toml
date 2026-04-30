@@ -21,6 +21,7 @@ async-trait.workspace = true
 axum.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 futures.workspace = true
+openai-protocol.workspace = true
 serde_json.workspace = true
 smg-data-connector.workspace = true
 tracing.workspace = true
