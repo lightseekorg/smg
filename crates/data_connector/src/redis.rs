@@ -402,7 +402,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
             role,
             content,
             status,
-            item_json,
+            item_json: _,
         } = item;
         let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
@@ -416,7 +416,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
             content,
             status,
             created_at,
-            item_json,
+            item_json: None,
         };
 
         let si = &self.store.schema.conversation_items;

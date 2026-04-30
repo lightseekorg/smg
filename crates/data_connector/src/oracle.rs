@@ -689,7 +689,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             role,
             content,
             status,
-            item_json,
+            item_json: _,
         } = item;
         let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
@@ -764,7 +764,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             content,
             status,
             created_at,
-            item_json,
+            item_json: None,
         })
     }
 
