@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
-use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    responses::{ResponseInput, ResponsesRequest},
+};
 use serde_json::Value;
 use smg_data_connector::{
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
@@ -11,7 +14,7 @@ use smg_data_connector::{
 };
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
-use super::provider::Provider;
+use super::{provider::Provider, responses::approval_continuation::ApprovalContinuation};
 use crate::{
     config::RouterConfig, memory::MemoryExecutionContext, middleware,
     middleware::TenantRequestMeta, worker::Worker,
@@ -115,7 +118,7 @@ impl ComponentRefs {
 pub struct ProcessingState {
     pub worker: Option<WorkerSelection>,
     pub payload: Option<PayloadState>,
-    pub responses_payload: Option<ResponsesPayloadState>,
+    pub(crate) responses_payload: Option<ResponsesPayloadState>,
 }
 
 pub struct WorkerSelection {
@@ -128,10 +131,11 @@ pub struct PayloadState {
     pub url: String,
 }
 
-#[derive(Default)]
-pub struct ResponsesPayloadState {
-    pub previous_response_id: Option<String>,
-    pub existing_mcp_list_tools_labels: Vec<String>,
+pub(crate) struct ResponsesPayloadState {
+    pub(crate) previous_response_id: Option<String>,
+    pub(crate) existing_mcp_list_tools_labels: Vec<String>,
+    pub(crate) approval_continuation: Option<ApprovalContinuation>,
+    pub(crate) upstream_input: ResponseInput,
 }
 
 impl RequestContext {
@@ -247,7 +251,7 @@ impl RequestContext {
         self.state.payload.take()
     }
 
-    pub fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
+    pub(crate) fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
         self.state.responses_payload.take()
     }
 }
@@ -274,7 +278,9 @@ pub struct OwnedStreamingContext {
 impl RequestContext {
     pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
         let payload_state = self.take_payload().ok_or("Payload not prepared")?;
-        let responses_payload_state = self.take_responses_payload().unwrap_or_default();
+        let responses_payload_state = self
+            .take_responses_payload()
+            .ok_or("Responses payload not prepared")?;
         let original_body = self
             .responses_request()
             .ok_or("Expected responses request")?

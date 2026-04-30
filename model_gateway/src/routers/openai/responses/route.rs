@@ -19,6 +19,7 @@ use super::{
         provider::ProviderRegistry,
         router::resolve_provider,
     },
+    approval_continuation::prepare_responses_input,
     handle_non_streaming_response, handle_streaming_response,
 };
 use crate::{
@@ -136,6 +137,25 @@ pub(in crate::routers::openai) async fn route_responses(
     if let ResponseInput::Items(ref mut items) = request_body.input {
         items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
     }
+    let prepared_input = match prepare_responses_input(
+        &request_body.input,
+        &loaded_history.pending_mcp_approval_requests,
+        streaming,
+    ) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model,
+                metrics_labels::ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_VALIDATION,
+            );
+            return error::bad_request("invalid_mcp_approval_response", e);
+        }
+    };
+    request_body.input = prepared_input.upstream_input;
 
     let mut payload = match to_value(&request_body) {
         Ok(v) => v,
@@ -154,6 +174,7 @@ pub(in crate::routers::openai) async fn route_responses(
             );
         }
     };
+    let upstream_input = request_body.input.clone();
 
     let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
     if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
@@ -189,6 +210,8 @@ pub(in crate::routers::openai) async fn route_responses(
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
         existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
+        approval_continuation: prepared_input.approval_continuation,
+        upstream_input,
     });
 
     let response = if ctx.is_streaming() {

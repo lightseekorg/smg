@@ -16,8 +16,8 @@ use openai_protocol::responses::{
 use super::{
     config::BuiltinToolType,
     orchestrator::{
-        McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
-        ToolExecutionResult,
+        McpOrchestrator, McpRequestContext, ResolvedToolExecutionMode, ToolExecutionInput,
+        ToolExecutionOutput, ToolExecutionResult,
     },
     UNKNOWN_SERVER_KEY,
 };
@@ -266,24 +266,26 @@ impl<'a> McpToolSession<'a> {
         self.execute_tool_result(input).await.into_output()
     }
 
-    /// Execute a single tool while preserving pending approval state.
-    pub async fn execute_tool_result(&self, input: ToolExecutionInput) -> ToolExecutionResult {
+    async fn execute_tool_result_with_mode(
+        &self,
+        input: ToolExecutionInput,
+        execution_mode: ResolvedToolExecutionMode<'_>,
+    ) -> ToolExecutionResult {
         let invoked_name = input.tool_name.clone();
 
         if let Some(binding) = self.exposed_name_map.get(&invoked_name) {
             let resolved_tool_name = binding.resolved_tool_name.clone();
-            let request_ctx = self.request_ctx_for(binding.approval_mode);
             let mut result = self
                 .orchestrator
                 .execute_tool_resolved_result(
                     ToolExecutionInput {
                         call_id: input.call_id,
-                        tool_name: resolved_tool_name.clone(),
+                        tool_name: resolved_tool_name,
                         arguments: input.arguments,
                     },
                     &binding.server_key,
                     &binding.server_label,
-                    &request_ctx,
+                    execution_mode,
                 )
                 .await;
 
@@ -307,7 +309,7 @@ impl<'a> McpToolSession<'a> {
             let err = format!("Tool '{invoked_name}' is not in this session's exposed tool map");
             ToolExecutionResult::Executed(ToolExecutionOutput {
                 call_id: input.call_id,
-                tool_name: invoked_name.clone(),
+                tool_name: invoked_name,
                 server_key: UNKNOWN_SERVER_KEY.to_string(),
                 server_label: fallback_label,
                 arguments_str: input.arguments.to_string(),
@@ -318,6 +320,31 @@ impl<'a> McpToolSession<'a> {
                 duration: std::time::Duration::default(),
             })
         }
+    }
+
+    /// Execute a single tool while preserving pending approval state.
+    pub async fn execute_tool_result(&self, input: ToolExecutionInput) -> ToolExecutionResult {
+        let approval_mode = self
+            .exposed_name_map
+            .get(&input.tool_name)
+            .map(|binding| binding.approval_mode)
+            .unwrap_or(ApprovalMode::PolicyOnly);
+        let request_ctx = self.request_ctx_for(approval_mode);
+        self.execute_tool_result_with_mode(
+            input,
+            ResolvedToolExecutionMode::RespectApproval(&request_ctx),
+        )
+        .await
+    }
+
+    /// Execute a previously-approved tool without re-entering approval flow.
+    ///
+    /// INVARIANT: callers must only use this after resolving a persisted,
+    /// still-pending approval request against the current request's tool set.
+    pub async fn execute_approved_tool(&self, input: ToolExecutionInput) -> ToolExecutionOutput {
+        self.execute_tool_result_with_mode(input, ResolvedToolExecutionMode::BypassApproval)
+            .await
+            .into_output()
     }
 
     /// Resolve the user-facing server label for a tool.

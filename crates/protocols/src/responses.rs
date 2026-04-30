@@ -3333,16 +3333,44 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
 
     // 5. Validate input items structure
     if let ResponseInput::Items(items) = &request.input {
-        // Check for at least one valid input message
-        let has_valid_input = items.iter().any(|item| {
+        let has_empty_mcp_approval_response_id = items.iter().any(|item| {
             matches!(
                 item,
-                ResponseInputOutputItem::Message { .. }
-                    | ResponseInputOutputItem::SimpleInputMessage { .. }
+                ResponseInputOutputItem::McpApprovalResponse {
+                    approval_request_id,
+                    ..
+                } if approval_request_id.is_empty()
             )
         });
+        if has_empty_mcp_approval_response_id {
+            let mut e = ValidationError::new("invalid_mcp_approval_response");
+            e.message = Some("mcp_approval_response.approval_request_id must be non-empty".into());
+            return Err(e);
+        }
 
-        if !has_valid_input {
+        let mcp_approval_response_count = items
+            .iter()
+            .filter(|item| matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. }))
+            .count();
+        if mcp_approval_response_count > 1 {
+            let mut e = ValidationError::new("multiple_mcp_approval_responses_unsupported");
+            e.message = Some("Only one mcp_approval_response item is supported per request".into());
+            return Err(e);
+        }
+
+        let is_approval_only_continuation = !request.stream.unwrap_or(false)
+            && request
+                .previous_response_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+            && matches!(
+                items.as_slice(),
+                [ResponseInputOutputItem::McpApprovalResponse { .. }]
+            );
+
+        let has_valid_input = items_contain_message(items);
+
+        if !(has_valid_input || is_approval_only_continuation) {
             let mut e = ValidationError::new("input_missing_user_message");
             e.message = Some("Input items must contain at least one message".into());
             return Err(e);
@@ -3354,6 +3382,16 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
     // but this is here for completeness and future-proofing
 
     Ok(())
+}
+
+fn items_contain_message(items: &[ResponseInputOutputItem]) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            ResponseInputOutputItem::Message { .. }
+                | ResponseInputOutputItem::SimpleInputMessage { .. }
+        )
+    })
 }
 
 // ============================================================================
@@ -3743,7 +3781,33 @@ impl ResponsesResponse {
     }
 }
 
+/// Re-prefix an MCP item id (`mcp_*` or `mcpr_*`) with `prefix`.
+/// If the id has neither prefix it is appended verbatim after `prefix`.
+pub fn mcp_item_id_to_prefixed_id(item_id: &str, prefix: &str) -> String {
+    item_id
+        .strip_prefix("mcp_")
+        .or_else(|| item_id.strip_prefix("mcpr_"))
+        .map(|stripped| format!("{prefix}{stripped}"))
+        .unwrap_or_else(|| format!("{prefix}{item_id}"))
+}
+
+/// Convert an `mcpr_*` approval-request id to its matching `call_*` id.
+pub fn approval_request_id_to_call_id(approval_request_id: &str) -> String {
+    mcp_item_id_to_prefixed_id(approval_request_id, "call_")
+}
+
 impl ResponseInputOutputItem {
+    /// Build a `user` message item from a single text string.
+    pub fn new_user_text(text: String) -> Self {
+        Self::Message {
+            id: generate_id("msg"),
+            role: "user".to_string(),
+            content: vec![ResponseContentPart::InputText { text }],
+            status: Some("completed".to_string()),
+            phase: None,
+        }
+    }
+
     /// Create a new reasoning input/output item.
     ///
     /// `encrypted_content` defaults to `None`; use
@@ -3881,5 +3945,171 @@ impl ResponseReasoningContent {
     /// Create a new reasoning text content
     pub fn new_reasoning_text(text: String) -> Self {
         Self::ReasoningText { text }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_previous_response_continuation_allows_approval_response_without_message() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+                id: None,
+                approval_request_id: "mcpr_123".to_string(),
+                approve: true,
+                reason: None,
+            }]),
+            previous_response_id: Some("resp_123".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_ok(),
+            "previous_response_id continuations should allow approval response input without a new message"
+        );
+    }
+
+    #[test]
+    fn test_input_items_without_message_still_fail_without_previous_response_id() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+                id: None,
+                approval_request_id: "mcpr_123".to_string(),
+                approve: true,
+                reason: None,
+            }]),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_err(),
+            "non-continuation requests should still require at least one message"
+        );
+    }
+
+    #[test]
+    fn test_previous_response_continuation_still_requires_actual_continuation_input() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::Reasoning {
+                id: "rs_123".to_string(),
+                summary: vec![],
+                content: vec![],
+                encrypted_content: None,
+                status: None,
+            }]),
+            previous_response_id: Some("resp_123".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_err(),
+            "previous_response_id without a message should still require a continuation input item"
+        );
+    }
+
+    #[test]
+    fn test_previous_response_continuation_does_not_allow_function_call_output_without_message() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::FunctionCallOutput {
+                id: None,
+                call_id: "call_123".to_string(),
+                output: "ok".to_string(),
+                status: Some("completed".to_string()),
+            }]),
+            previous_response_id: Some("resp_123".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_err(),
+            "function_call_output-only previous_response_id requests should remain invalid in non-streaming approval scope"
+        );
+    }
+
+    #[test]
+    fn test_streaming_previous_response_continuation_does_not_allow_approval_only_input() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+                id: None,
+                approval_request_id: "mcpr_123".to_string(),
+                approve: true,
+                reason: None,
+            }]),
+            previous_response_id: Some("resp_123".to_string()),
+            stream: Some(true),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_err(),
+            "streaming approval-only continuation should remain invalid until streaming continuation support exists"
+        );
+    }
+
+    #[test]
+    fn test_previous_response_continuation_allows_denied_approval_without_message() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+                id: None,
+                approval_request_id: "mcpr_123".to_string(),
+                approve: false,
+                reason: Some("no".to_string()),
+            }]),
+            previous_response_id: Some("resp_123".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_ok(),
+            "protocol validation should allow approval-only previous_response_id continuations regardless of approve value"
+        );
+    }
+
+    #[test]
+    fn test_multiple_mcp_approval_responses_are_rejected() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![
+                ResponseInputOutputItem::McpApprovalResponse {
+                    id: None,
+                    approval_request_id: "mcpr_123".to_string(),
+                    approve: true,
+                    reason: None,
+                },
+                ResponseInputOutputItem::McpApprovalResponse {
+                    id: None,
+                    approval_request_id: "mcpr_456".to_string(),
+                    approve: true,
+                    reason: None,
+                },
+            ]),
+            previous_response_id: Some("resp_123".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_err(),
+            "multiple mcp_approval_response items should be rejected until multi-approval continuation is supported"
+        );
+    }
+
+    #[test]
+    fn test_mcp_approval_response_requires_non_empty_approval_request_id() {
+        let request = ResponsesRequest {
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::McpApprovalResponse {
+                id: None,
+                approval_request_id: String::new(),
+                approve: true,
+                reason: None,
+            }]),
+            previous_response_id: Some("resp_123".to_string()),
+            ..Default::default()
+        };
+
+        assert!(
+            request.validate().is_err(),
+            "mcp_approval_response should require a non-empty approval_request_id"
+        );
     }
 }

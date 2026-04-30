@@ -254,6 +254,14 @@ pub enum ToolExecutionResult {
     PendingApproval(PendingToolExecution),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ResolvedToolExecutionMode<'a> {
+    RespectApproval(&'a McpRequestContext<'a>),
+    // INVARIANT: only use this for a stored approval request that has already
+    // been validated as still pending and still bound to the current request.
+    BypassApproval,
+}
+
 /// Pending approval from resolved tool execution.
 #[derive(Debug, Clone)]
 pub struct PendingToolExecution {
@@ -999,18 +1007,23 @@ impl McpOrchestrator {
         server_label: &str,
         request_ctx: &McpRequestContext<'_>,
     ) -> ToolExecutionOutput {
-        self.execute_tool_resolved_result(input, server_key, server_label, request_ctx)
-            .await
-            .into_output()
+        self.execute_tool_resolved_result(
+            input,
+            server_key,
+            server_label,
+            ResolvedToolExecutionMode::RespectApproval(request_ctx),
+        )
+        .await
+        .into_output()
     }
 
     /// Execute a single resolved tool while preserving pending approval state.
-    pub async fn execute_tool_resolved_result(
+    pub(crate) async fn execute_tool_resolved_result(
         &self,
         input: ToolExecutionInput,
         server_key: &str,
         server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
+        execution_mode: ResolvedToolExecutionMode<'_>,
     ) -> ToolExecutionResult {
         let start = Instant::now();
         let arguments_str = input.arguments.to_string();
@@ -1020,7 +1033,7 @@ impl McpOrchestrator {
 
         match entry {
             Some(entry) => match self
-                .execute_tool_entry_result(&entry, qualified, input.arguments, request_ctx)
+                .execute_tool_entry_result(&entry, qualified, input.arguments, execution_mode)
                 .await
             {
                 ToolExecutionResult::Executed(mut output) => {
@@ -1066,7 +1079,7 @@ impl McpOrchestrator {
         entry: &ToolEntry,
         qualified: QualifiedToolName,
         arguments: Value,
-        request_ctx: &McpRequestContext<'_>,
+        execution_mode: ResolvedToolExecutionMode<'_>,
     ) -> ToolExecutionResult {
         self.active_executions.fetch_add(1, Ordering::SeqCst);
         let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
@@ -1076,10 +1089,20 @@ impl McpOrchestrator {
         let call_start_time = Instant::now();
         let response_format = entry.response_format.clone();
 
-        let result = match self
-            .execute_tool_with_approval_raw_internal(entry, arguments, request_ctx)
-            .await
-        {
+        let execution_result = match execution_mode {
+            ResolvedToolExecutionMode::RespectApproval(request_ctx) => {
+                self.execute_tool_with_approval_raw_internal(entry, arguments, request_ctx)
+                    .await
+            }
+            // INVARIANT: callers only reach this branch after validating that
+            // the approval request came from persisted history and is safe to resume.
+            ResolvedToolExecutionMode::BypassApproval => self
+                .execute_tool_with_reconnect(entry, arguments)
+                .await
+                .map(ApprovalExecutionResult::Success),
+        };
+
+        let result = match execution_result {
             Ok(ApprovalExecutionResult::Success(raw_result)) => {
                 ToolExecutionResult::Executed(ToolExecutionOutput {
                     call_id: String::new(),
