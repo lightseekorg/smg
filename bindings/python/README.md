@@ -123,3 +123,13 @@ prompt = tok.apply_chat_template(
 ```
 
 `Tokenizer` mirrors the Go SDK's `sgl_tokenizer_*` FFI surface (`bindings/golang/src/tokenizer.rs`). Errors are raised as `ValueError` (invalid arguments) or `RuntimeError` (tokenizer failures).
+
+### Parity tests vs tokenspeed
+
+Diff tests in `tests/diff_tokenspeed/` validate that `smg.Tokenizer` produces equivalent output to tokenspeed's `get_tokenizer()`. They are skipped by default. To run them:
+
+````bash
+pip install -e /path/to/tokenspeed
+cd bindings/python
+python -m pytest tests/diff_tokenspeed/ -v
+````
