@@ -48,10 +48,55 @@ pub(crate) async fn serve_harmony_responses_stream(
     tenant_request_meta: TenantRequestMeta,
 ) -> Response {
     // Load previous conversation history if previous_response_id is set
-    let current_request = match load_previous_messages(ctx, request.clone()).await {
+    let mut current_request = match load_previous_messages(ctx, request.clone()).await {
         Ok(req) => req,
         Err(err_response) => return err_response,
     };
+
+    if !ctx.interceptors.is_empty() {
+        use smg_extensions::{BeforeModelCtx, RequestMetadata};
+
+        use crate::routers::common::turn_info::compute_turn_info;
+
+        let conv_id_opt: Option<smg_data_connector::ConversationId> = request
+            .conversation
+            .as_ref()
+            .filter(|c| !c.is_empty())
+            .map(|c| smg_data_connector::ConversationId::from(c.as_id()));
+
+        let item_storage = ctx.conversation_item_storage.clone();
+        let incoming_input_value = serde_json::to_value(&request.input).ok();
+        let turn_info = compute_turn_info(
+            item_storage.as_ref(),
+            conv_id_opt.as_ref(),
+            incoming_input_value.as_ref(),
+        )
+        .await;
+
+        let request_id = request
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("req_{}", Uuid::now_v7()));
+        let metadata = RequestMetadata::build_from(
+            request_id,
+            request.safety_identifier.clone(),
+            Some(tenant_request_meta.tenant_key().as_str().to_string()),
+            ctx.request_context.clone(),
+        );
+
+        let empty_headers = HeaderMap::new();
+        let header_ref = headers.as_ref().unwrap_or(&empty_headers);
+
+        let mut before_ctx = BeforeModelCtx::new(
+            header_ref,
+            &mut current_request,
+            conv_id_opt.as_ref(),
+            item_storage,
+            turn_info,
+            &metadata,
+        );
+        ctx.interceptors.run_before_model(&mut before_ctx).await;
+    }
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
