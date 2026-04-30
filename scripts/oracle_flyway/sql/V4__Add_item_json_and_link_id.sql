@@ -23,8 +23,3 @@ ALTER TABLE CONVERSATION_ITEMS ADD (ITEM_JSON CLOB CHECK (ITEM_JSON IS JSON));
 CREATE SEQUENCE CONV_ITEM_LINK_ID_SEQ START WITH 1 INCREMENT BY 1 NOCACHE ORDER;
 
 ALTER TABLE CONVERSATION_ITEM_LINKS ADD (LINK_ID NUMBER);
-
--- The UNIQUE INDEX on (CONVERSATION_ID, LINK_ID) lands in the next Flyway
--- script, paired with the LINK_ID backfill and a NOT NULL constraint, so the
--- index never exists while LINK_ID is still NULL. Creating it here would
--- cause every link_item INSERT past the first per-conversation to fail.
