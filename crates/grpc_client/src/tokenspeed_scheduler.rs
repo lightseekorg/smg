@@ -469,6 +469,7 @@ mod translate {
             ignore_eos: s.ignore_eos,
             skip_special_tokens: s.skip_special_tokens,
             spaces_between_special_tokens: s.spaces_between_special_tokens,
+            no_stop_trim: s.no_stop_trim,
             n: s.n,
             logit_bias: s.logit_bias,
             constraint: s.constraint.map(constraint),

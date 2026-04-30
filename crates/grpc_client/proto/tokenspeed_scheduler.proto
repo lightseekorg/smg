@@ -77,6 +77,14 @@ message SamplingParams {
     string structural_tag = 20;
   }
 
+  // When true, generation does not strip the trailing matched stop token
+  // from ``output_ids`` (matches SGLang's ``no_stop_trim``). Combined with
+  // ``skip_special_tokens=False`` it lets the gateway-side detokenizer
+  // render the EOS marker in the visible response — required for the
+  // ``test_no_stop_trim_with_skip_special_false`` e2e check and for any
+  // downstream logic that needs the raw stop token in the output stream.
+  bool no_stop_trim = 22;
+
   // Escape hatch for backend-specific knobs without bumping the proto.
   google.protobuf.Struct custom_params = 21;
 }

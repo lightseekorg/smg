@@ -151,6 +151,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         # handle both shapes below.
         expanded_rid = getattr(req_obj, "rid", None)
 
+        # When the client sets ``no_stop_trim``, the matched stop token must
+        # remain in the proto's ``output_ids`` so the gateway-side detokenizer
+        # can render it (relevant when ``skip_special_tokens=False`` is also
+        # set). Capture once and thread through the response builders.
+        no_stop_trim = bool(request.sampling_params.no_stop_trim)
+
         aborted = False
         try:
             async for output in self.async_llm.generate_request(req_obj):
@@ -165,7 +171,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                             await context.abort(code, item_reason.get("message") or "aborted")
                             return
                         ci = int(item.get("index", idx))
-                        yield self._complete_response(rid, item, item_reason, ci)
+                        yield self._complete_response(
+                            rid, item, item_reason, ci, no_stop_trim=no_stop_trim
+                        )
                     continue
 
                 meta = output.get("meta_info", {})
@@ -180,11 +188,17 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 choice_index = int(output.get("index", 0))
 
                 if request.stream:
-                    yield self._chunk_response(rid, output, reason_dict, choice_index)
+                    yield self._chunk_response(
+                        rid, output, reason_dict, choice_index, no_stop_trim=no_stop_trim
+                    )
                     if is_finished:
-                        yield self._complete_response(rid, output, reason_dict, choice_index)
+                        yield self._complete_response(
+                            rid, output, reason_dict, choice_index, no_stop_trim=no_stop_trim
+                        )
                 elif is_finished:
-                    yield self._complete_response(rid, output, reason_dict, choice_index)
+                    yield self._complete_response(
+                        rid, output, reason_dict, choice_index, no_stop_trim=no_stop_trim
+                    )
 
         except ValueError as e:
             logger.warning("Generate invalid request %s: %s", rid, e)
@@ -598,6 +612,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         out["skip_special_tokens"] = bool(params.skip_special_tokens)
         out["spaces_between_special_tokens"] = bool(params.spaces_between_special_tokens)
         out["ignore_eos"] = bool(params.ignore_eos)
+        # When set, tokenspeed's detokenizer keeps the matched stop token in
+        # the rendered text (see ``runtime/engine/detokenizer.py``); we also
+        # suppress the servicer-side ``output_ids`` strip in
+        # ``_generated_output_ids`` so the EOS reaches the gateway's
+        # detokenizer when ``skip_special_tokens=False``.
+        out["no_stop_trim"] = bool(params.no_stop_trim)
 
         # n (OpenAI-compat, passthrough)
         if params.n:
@@ -617,7 +637,13 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         return out
 
-    def _generated_output_ids(self, output: dict, reason_dict: dict | None) -> list[int]:
+    def _generated_output_ids(
+        self,
+        output: dict,
+        reason_dict: dict | None,
+        *,
+        no_stop_trim: bool = False,
+    ) -> list[int]:
         """Return just the newly-generated tokens from a TokenSpeed output dict.
 
         TokenSpeed's AsyncLLM has two quirks that the SGLang gRPC proto contract
@@ -652,7 +678,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             token_ids = raw[-completion:]
         else:
             token_ids = raw
-        if reason_dict and reason_dict.get("type") == "stop":
+        if not no_stop_trim and reason_dict and reason_dict.get("type") == "stop":
             matched = reason_dict.get("matched")
             if isinstance(matched, int) and token_ids and token_ids[-1] == matched:
                 token_ids = token_ids[:-1]
@@ -664,9 +690,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         output: dict,
         reason_dict: dict | None,
         choice_index: int = 0,
+        *,
+        no_stop_trim: bool = False,
     ) -> tokenspeed_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
-        token_ids = self._generated_output_ids(output, reason_dict)
+        token_ids = self._generated_output_ids(output, reason_dict, no_stop_trim=no_stop_trim)
         return tokenspeed_scheduler_pb2.GenerateResponse(
             request_id=rid,
             chunk=tokenspeed_scheduler_pb2.GenerateStreamChunk(
@@ -685,9 +713,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         output: dict,
         reason_dict: dict | None,
         choice_index: int = 0,
+        *,
+        no_stop_trim: bool = False,
     ) -> tokenspeed_scheduler_pb2.GenerateResponse:
         meta = output.get("meta_info", {})
-        token_ids = self._generated_output_ids(output, reason_dict)
+        token_ids = self._generated_output_ids(output, reason_dict, no_stop_trim=no_stop_trim)
 
         finish_reason = "stop"
         matched_kwargs: dict[str, Any] = {}
