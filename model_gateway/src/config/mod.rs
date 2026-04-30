@@ -1,8 +1,10 @@
 pub mod builder;
+pub mod extensions;
 pub mod types;
 pub(crate) mod validation;
 
 pub use builder::*;
+pub use extensions::{ExtensionConfigError, ExtensionSpec, ExtensionsConfig};
 pub use smg_skills::SkillsConfig;
 pub use types::*;
 

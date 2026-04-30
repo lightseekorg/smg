@@ -7,6 +7,7 @@ pub use smg_data_connector::{
     HistoryBackend, OracleConfig, PostgresConfig, RedisConfig, SchemaConfig,
 };
 
+use super::extensions::ExtensionsConfig;
 use super::{validation::ConfigValidator, ConfigResult, SkillsConfig};
 use crate::{tenant::DEFAULT_TENANT_HEADER_NAME, worker::ConnectionMode};
 
@@ -182,6 +183,8 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
+    #[serde(default)]
+    pub extensions: ExtensionsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -678,6 +681,7 @@ impl Default for RouterConfig {
             storage_hook_wasm_path: None,
             server_cert: None,
             server_key: None,
+            extensions: ExtensionsConfig::default(),
         }
     }
 }
