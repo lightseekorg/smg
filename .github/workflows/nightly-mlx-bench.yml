@@ -1,4 +1,4 @@
-name: Nightly MLX Three-Way Benchmark
+name: Nightly MLX Two-Way Benchmark
 
 on:
   schedule:
@@ -127,7 +127,11 @@ jobs:
         run: pip install -e "./grpc_servicer[mlx]"
 
       - name: Install mlx-lm CLI (for the direct-HTTP baseline)
-        run: pip install "mlx-lm>=0.22.0"
+        # Pinned to an exact version so nightly bench runs aren't
+        # influenced by upstream mlx-lm changes that would shift the
+        # baseline independently of any SMG-side changes. Bump
+        # deliberately in its own commit so trend breaks are explicit.
+        run: pip install "mlx-lm==0.31.3"
 
       - name: Install genai-bench (driver)
         # Bench driver — same CLI as the rest of the SMG nightly suite.
