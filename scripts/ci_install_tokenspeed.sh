@@ -30,9 +30,16 @@ fi
 # This SHA is from lightseekorg/tokenspeed main; it includes dense
 # ``LlamaForCausalLM`` registration, the Qwen3 / gpt-oss arches the e2e
 # suite (``test_function_calling``, ``test_openai_server`` etc.) runs
-# against, and lightseekorg/tokenspeed#598 (defensive ``pad_token_id``
-# read in ``Qwen3MoeModel.__init__`` so ``Qwen/Qwen3-30B-A3B`` loads).
-TOKENSPEED_REF="${TOKENSPEED_REF:-fd080fc7816a260118c493f061ab4a89d3033137}"
+# against, lightseekorg/tokenspeed#598 (defensive ``pad_token_id`` read
+# in ``Qwen3MoeModel.__init__`` so ``Qwen/Qwen3-30B-A3B`` loads),
+# lightseekorg/tokenspeed#578 (FSM absorbs late ``ExtendResultEvent``
+# after a request is terminalized — without this the scheduler crashes
+# under retract pressure on the nightly Qwen3-30B-A3B run), and
+# lightseekorg/tokenspeed#602 (release scheduler slot + cancel
+# non-stream handlers on client disconnect; eliminates the long stream
+# of ``state was deleted in AsyncLLM`` warnings that preceded the
+# crash).
+TOKENSPEED_REF="${TOKENSPEED_REF:-eabeb106a070825d5549fbc84ecd8e11651cf3fe}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
