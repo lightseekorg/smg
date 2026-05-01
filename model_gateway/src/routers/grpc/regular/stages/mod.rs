@@ -11,6 +11,7 @@ pub(crate) mod messages;
 pub(crate) mod preparation;
 pub(crate) mod request_building;
 pub(crate) mod response_processing;
+pub(crate) mod score;
 
 // Re-export chat+generate dispatcher stages used by new_regular() / new_pd()
 pub(crate) use preparation::ChatGeneratePreparationStage;

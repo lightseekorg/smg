@@ -28,7 +28,7 @@ use openai_protocol::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
     },
-    rerank::{RerankRequest, V1RerankReqInput},
+    rerank::{RerankRequest, ScoreRequest, V1RerankReqInput},
     responses::ResponsesRequest,
     skills::{
         SkillGetQuery, SkillPatchRequest, SkillVersionPatchRequest, SkillVersionsListQuery,
@@ -325,6 +325,17 @@ async fn v1_audio_transcriptions(
             audio,
             &request.model,
         )
+        .await
+}
+
+async fn v1_score(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<ScoreRequest>,
+) -> Response {
+    state
+        .router
+        .route_score(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -837,6 +848,8 @@ pub fn build_app(
         .route("/v1/messages", post(v1_messages))
         .route("/v1/interactions", post(v1_interactions))
         .route("/v1/classify", post(v1_classify))
+        // Score (vLLM /v1/score cross-encoder reranker)
+        .route("/v1/score", post(v1_score))
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))

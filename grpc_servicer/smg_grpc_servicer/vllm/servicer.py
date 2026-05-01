@@ -251,6 +251,110 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             logger.exception("Embed failed for request %s", request_id)
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
+    async def Score(
+        self,
+        request: vllm_engine_pb2.ScoreRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> vllm_engine_pb2.ScoreResponse:
+        """
+        Handle scoring/reranking requests for cross-encoders.
+
+        Args:
+            request: The ScoreRequest protobuf
+            context: gRPC context
+
+        Returns:
+            ScoreResponse protobuf
+        """
+        request_id = request.request_id
+        logger.info("Score request %s", request_id)
+
+        try:
+            # vLLM deprecated the "score" task (PR #37537); cross-encoder
+            # rerankers are now handled under "classify".
+            pooling_params = PoolingParams(task="classify")
+
+            # Cross-encoder models require text-pair tokenization (with [SEP])
+            # to produce meaningful scores. We tokenize with text_pair here,
+            # mirroring vLLM's CrossEncoderIOProcessor.get_score_prompt().
+            tokenizer = self.engine.renderer.get_tokenizer()
+
+            results = []
+            total_prompt_tokens = 0
+
+            for i, text_2_item in enumerate(request.text_2):
+                # Tokenize as a text pair so the model sees both texts
+                # with proper separator tokens (e.g. [CLS] text_1 [SEP] text_2 [SEP]).
+                encoded = tokenizer(
+                    text=request.text_1,
+                    text_pair=text_2_item,
+                )
+                prompt: TokensPrompt = {
+                    "prompt_token_ids": encoded["input_ids"],
+                }
+
+                # Pass token_type_ids via pooling_params if present
+                pair_pooling_params = pooling_params
+                if "token_type_ids" in encoded:
+                    pair_pooling_params = pooling_params.clone()
+                    pair_pooling_params.extra_kwargs = {
+                        "token_type_ids": encoded["token_type_ids"],
+                    }
+
+                final_output = None
+                # encode() covers both embedding and scoring models
+                async for output in self.engine.encode(
+                    prompt=prompt,
+                    pooling_params=pair_pooling_params,
+                    request_id=f"{request_id}_{i}",
+                ):
+                    final_output = output
+
+                if final_output is None or not final_output.finished:
+                    msg = f"Score request {request_id}_{i} did not produce a result"
+                    logger.warning(msg)
+                    await context.abort(grpc.StatusCode.INTERNAL, msg)
+
+                # The output data for score is a relevance score wrapped in a tensor.
+                # vLLM versions return different structures — normalize to scalar.
+                data = final_output.outputs.data
+                logger.info("Score data type=%s repr=%s", type(data).__name__, repr(data)[:200])
+                raw = data
+                if hasattr(raw, "detach"):
+                    raw = raw.detach().cpu()
+                if hasattr(raw, "numpy"):
+                    raw = raw.numpy()
+                if hasattr(raw, "tolist"):
+                    raw = raw.tolist()
+                while isinstance(raw, (list, tuple)) and len(raw) > 0:
+                    raw = raw[0]
+                score_value = float(raw)
+
+                results.append(
+                    vllm_engine_pb2.ScoreResult(
+                        index=i,
+                        score=float(score_value),
+                    )
+                )
+                total_prompt_tokens += len(final_output.prompt_token_ids)
+
+            return vllm_engine_pb2.ScoreResponse(
+                data=results,
+                prompt_tokens=total_prompt_tokens,
+                total_tokens=total_prompt_tokens,
+                request_id=request_id,
+                created=int(time.time()),
+            )
+
+        except grpc.aio.AbortError:
+            raise
+        except ValueError as e:
+            logger.warning("Score invalid request %s: %s", request_id, e)
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except Exception as e:
+            logger.exception("Score failed for request %s", request_id)
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
     async def HealthCheck(
         self,
         request: vllm_engine_pb2.HealthCheckRequest,

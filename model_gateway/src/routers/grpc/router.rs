@@ -8,7 +8,7 @@ use axum::{
 use openai_protocol::{
     chat::ChatCompletionRequest, classify::ClassifyRequest, completion::CompletionRequest,
     embedding::EmbeddingRequest, generate::GenerateRequest, messages::CreateMessageRequest,
-    responses::ResponsesRequest,
+    rerank::ScoreRequest, responses::ResponsesRequest,
 };
 use tracing::debug;
 
@@ -44,6 +44,8 @@ pub struct GrpcRouter {
     classify_pipeline: RequestPipeline,
     messages_pipeline: RequestPipeline,
     completion_pipeline: RequestPipeline,
+    /// HTTP-forward pipeline for vLLM /v1/score (cross-encoder reranker)
+    score_pipeline: RequestPipeline,
     shared_components: Arc<SharedComponents>,
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
@@ -130,6 +132,10 @@ impl GrpcRouter {
         let completion_pipeline =
             RequestPipeline::new_completion(worker_registry.clone(), _policy_registry.clone());
 
+        // Create Score pipeline (native gRPC for vLLM /v1/score)
+        let score_pipeline =
+            RequestPipeline::new_score(worker_registry.clone(), _policy_registry.clone());
+
         // Extract shared dependencies for responses contexts
         let mcp_orchestrator = ctx
             .mcp_orchestrator
@@ -166,6 +172,7 @@ impl GrpcRouter {
             classify_pipeline,
             messages_pipeline,
             completion_pipeline,
+            score_pipeline,
             shared_components,
             responses_context,
             harmony_responses_context,
@@ -525,6 +532,25 @@ impl GrpcRouter {
             )
             .await
     }
+
+    /// Main route_score implementation (HTTP forward for vLLM /v1/score)
+    async fn route_score_impl(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &ScoreRequest,
+        model_id: &str,
+    ) -> Response {
+        debug!("Processing score request for model: {}", model_id);
+
+        self.score_pipeline
+            .execute_score(
+                Arc::new(body.clone()),
+                headers.cloned(),
+                model_id.to_string(),
+                self.shared_components.clone(),
+            )
+            .await
+    }
 }
 
 impl std::fmt::Debug for GrpcRouter {
@@ -599,6 +625,15 @@ impl RouterTrait for GrpcRouter {
     ) -> Response {
         self.route_classify_impl(headers, tenant_meta, body, model_id)
             .await
+    }
+
+    async fn route_score(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &ScoreRequest,
+        model_id: &str,
+    ) -> Response {
+        self.route_score_impl(headers, body, model_id).await
     }
 
     async fn route_completion(

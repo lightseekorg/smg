@@ -142,7 +142,8 @@ impl PipelineStage for HarmonyResponseProcessingStage {
             | RequestType::Completion(_)
             | RequestType::Embedding(_)
             | RequestType::Classify(_)
-            | RequestType::Messages(_)) => {
+            | RequestType::Messages(_)
+            | RequestType::Score(_)) => {
                 error!(
                     function = "HarmonyResponseProcessingStage::execute",
                     request_type = %request_type,

@@ -15,7 +15,7 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
-    rerank::{RerankRequest, RerankResponse, RerankResult},
+    rerank::{RerankRequest, RerankResponse, RerankResult, ScoreRequest},
     responses::ResponsesRequest,
     transcription::{AudioFile, TranscriptionRequest},
 };
@@ -1216,6 +1216,19 @@ impl RouterTrait for Router {
         } else {
             response
         }
+    }
+
+    async fn route_score(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &ScoreRequest,
+        model_id: &str,
+    ) -> Response {
+        // The HTTP router forwards /v1/score directly to the worker.
+        // vLLM returns the ScoreResponse JSON directly, so no response
+        // transformation is needed — we pass it through verbatim.
+        self.route_typed_request(headers, body, "/v1/score", model_id)
+            .await
     }
 
     fn router_type(&self) -> &'static str {

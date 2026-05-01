@@ -21,7 +21,7 @@ use openai_protocol::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
     },
-    rerank::RerankRequest,
+    rerank::{RerankRequest, ScoreRequest},
     responses::ResponsesRequest,
     transcription::{AudioFile, TranscriptionRequest},
 };
@@ -206,6 +206,20 @@ pub trait RouterTrait: Send + Sync + Debug {
         _model_id: &str,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Rerank not implemented").into_response()
+    }
+
+    /// Route score requests (vLLM /v1/score cross-encoder reranker endpoint)
+    async fn route_score(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &ScoreRequest,
+        _model_id: &str,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Score endpoint not implemented for this router",
+        )
+            .into_response()
     }
 
     /// Route Anthropic Messages API requests (/v1/messages)
