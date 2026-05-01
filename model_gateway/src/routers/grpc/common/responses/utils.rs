@@ -4,103 +4,24 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use openai_protocol::{
-    common::Tool,
-    responses::{ResponseTool, ResponsesRequest, ResponsesResponse},
+    common::{ConversationRef, Tool, Usage},
+    responses::{ResponseStatus, ResponseTool, ResponsesRequest, ResponsesResponse},
 };
-use serde_json::to_value;
+use serde_json::{json, to_value};
 use smg_data_connector::{
     ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
     ResponseStorage,
 };
-use smg_mcp::{McpOrchestrator, McpServerBinding};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
+use super::agent_loop_sink::GrpcResponseStreamSink;
 use crate::{
     routers::{
-        common::{
-            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
-        },
+        common::{agent_loop::RenderMode, persistence_utils::persist_conversation_items},
         error,
     },
     worker::WorkerRegistry,
 };
-
-/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared.
-///
-/// Checks if the request declares MCP tools or builtin tool types
-/// (`web_search_preview`, `code_interpreter`, `image_generation`) and,
-/// if so, validates that the MCP clients can be created and connected.
-///
-/// Returns Ok((has_mcp_tools, mcp_servers)) on success.
-pub(crate) async fn ensure_mcp_connection(
-    mcp_orchestrator: &Arc<McpOrchestrator>,
-    tools: Option<&[ResponseTool]>,
-) -> Result<(bool, Vec<McpServerBinding>), Response> {
-    // Check for explicit MCP tools (must error if connection fails)
-    let has_explicit_mcp_tools = tools
-        .map(|t| t.iter().any(|tool| matches!(tool, ResponseTool::Mcp(_))))
-        .unwrap_or(false);
-
-    // Check for builtin tools that MAY have MCP routing configured.
-    //
-    // `ImageGeneration` is included here because gpt-oss via the
-    // harmony pipeline, and Qwen/Llama via the regular pipeline, both
-    // dispatch hosted `image_generation` calls through the same MCP
-    // routing path — the only difference is how the tool is advertised in
-    // the prompt. Without this arm, the short-circuit below would return
-    // `(false, Vec::new())`, the MCP loop would never be entered, and the
-    // registered `image_generation` MCP server would receive zero
-    // dispatches.
-    let has_builtin_tools = tools
-        .map(|t| {
-            t.iter().any(|tool| {
-                matches!(
-                    tool,
-                    ResponseTool::WebSearchPreview(_)
-                        | ResponseTool::CodeInterpreter(_)
-                        | ResponseTool::ImageGeneration(_)
-                )
-            })
-        })
-        .unwrap_or(false);
-
-    // Only process if we have MCP or builtin tools
-    if !has_explicit_mcp_tools && !has_builtin_tools {
-        return Ok((false, Vec::new()));
-    }
-
-    if let Some(tools) = tools {
-        // TODO: Thread real request headers through the gRPC responses path if/when
-        // gRPC MCP flows need the same forwarded-header preservation contract.
-        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
-            Some(mcp_servers) => {
-                return Ok((true, mcp_servers));
-            }
-            None => {
-                // No MCP servers available
-                if has_explicit_mcp_tools {
-                    // Explicit MCP tools MUST have working connections
-                    error!(
-                        function = "ensure_mcp_connection",
-                        "Failed to connect to MCP servers"
-                    );
-                    return Err(error::failed_dependency(
-                        "connect_mcp_server_failed",
-                        "Failed to connect to MCP servers. Check server_url and authorization.",
-                    ));
-                }
-                // Builtin tools without MCP routing - pass through to model
-                debug!(
-                    function = "ensure_mcp_connection",
-                    "No MCP routing configured for builtin tools, passing through to model"
-                );
-                return Ok((false, Vec::new()));
-            }
-        }
-    }
-
-    Ok((false, Vec::new()))
-}
 
 /// Validate that workers are available for the requested model
 pub(crate) fn validate_worker_availability(
@@ -178,4 +99,52 @@ pub(crate) async fn persist_response_if_needed(
             debug!("Persisted response: {}", response.id);
         }
     }
+}
+
+pub(crate) struct StreamingPersistHandles {
+    pub(crate) conversation_storage: Arc<dyn ConversationStorage>,
+    pub(crate) conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    pub(crate) response_storage: Arc<dyn ResponseStorage>,
+    pub(crate) request_context: Option<StorageRequestContext>,
+}
+
+/// Finalize the SSE accumulator into the response record used for persistence.
+///
+/// Streaming paths emit wire events incrementally, so final persistence must
+/// reuse the sink emitter's accumulated item ids/order rather than rebuilding
+/// from loop primitives. The request metadata patch mirrors the non-streaming
+/// builder contract.
+pub(crate) async fn finalize_streamed_response_for_persist(
+    sink: &mut GrpcResponseStreamSink,
+    usage_for_persist: Option<Usage>,
+    mode: &RenderMode,
+    original_request: &ResponsesRequest,
+    handles: StreamingPersistHandles,
+) {
+    let mut final_response = sink.emitter.finalize(usage_for_persist);
+    final_response
+        .previous_response_id
+        .clone_from(&original_request.previous_response_id);
+    final_response.conversation =
+        original_request
+            .conversation
+            .as_ref()
+            .map(|c| ConversationRef::Object {
+                id: c.as_id().to_string(),
+            });
+    final_response.store = original_request.store.unwrap_or(true);
+    if let RenderMode::Incomplete { reason, .. } = mode {
+        final_response.status = ResponseStatus::Incomplete;
+        final_response.incomplete_details = Some(json!({ "reason": reason }));
+    }
+
+    persist_response_if_needed(
+        handles.conversation_storage,
+        handles.conversation_item_storage,
+        handles.response_storage,
+        &final_response,
+        original_request,
+        handles.request_context,
+    )
+    .await;
 }

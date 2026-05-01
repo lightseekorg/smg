@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::config::{BuiltinToolType, ResponseFormatConfig};
 
-/// Format for transforming MCP responses to API-specific formats.
+/// Format for transforming MCP-side tool execution results to OpenAI
+/// Responses API output items. Strictly describes shapes the MCP crate
+/// itself produces; caller-declared function tools are *not* an MCP
+/// concern and live in the agent loop's `OutputFamily` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseFormat {

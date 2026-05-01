@@ -1,180 +1,141 @@
-//! Non-streaming response handling for OpenAI-compatible responses
-//!
-//! This module handles non-streaming Responses API requests with MCP tool support.
+//! Non-streaming response handling for OpenAI-compatible responses.
 
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::Value;
-use smg_mcp::McpToolSession;
+use serde_json::to_value;
 use tracing::warn;
+use uuid::Uuid;
 
-use super::utils::{patch_response_with_request_metadata, restore_original_tools};
+use super::agent_loop_adapter::{OpenAiNonStreamingAdapter, OpenAiUpstreamHandle};
 use crate::routers::{
     common::{
-        header_utils::{extract_forwardable_request_headers, ApiProvider},
-        mcp_utils::ensure_request_mcp_client,
+        agent_loop::{run_agent_loop, AgentLoopContext, NoopSink},
+        header_utils::extract_forwardable_request_headers,
+        mcp_utils::ensure_mcp_connection,
         persistence_utils::persist_conversation_items,
+        responses_loop_setup::ResponsesLoopSetup,
     },
     error,
-    openai::{
-        context::{PayloadState, RequestContext, ResponsesPayloadState},
-        mcp::{execute_tool_loop, prepare_mcp_tools_as_functions, ToolLoopExecutionContext},
-    },
+    openai::context::{RequestContext, ResponsesPayloadState},
 };
 
-/// Handle a non-streaming responses request
+/// Handle a non-streaming responses request.
 pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response {
-    let payload_state = match ctx.state.payload.take() {
-        Some(ps) => ps,
+    let ResponsesPayloadState {
+        url,
+        existing_mcp_list_tools_labels,
+        current_request,
+        prepared,
+    } = match ctx.take_responses_payload() {
+        Some(state) => state,
         None => {
-            return error::internal_error("internal_error", "Payload not prepared");
+            return error::internal_error("internal_error", "Responses payload not prepared");
         }
     };
 
-    let PayloadState {
-        json: mut payload,
-        url,
-    } = payload_state;
-    let ResponsesPayloadState {
-        previous_response_id,
-        existing_mcp_list_tools_labels,
-    } = ctx.take_responses_payload().unwrap_or_default();
-
-    let original_body = match ctx.responses_request() {
-        Some(r) => r,
+    let original_request = match ctx.responses_request() {
+        Some(r) => r.clone(),
         None => {
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
-    let worker = match ctx.worker() {
-        Some(w) => w.clone(),
+    let (worker, provider) = match ctx.state.worker.as_ref() {
+        Some(selection) => (selection.worker.clone(), selection.provider.clone()),
         None => {
             return error::internal_error("internal_error", "Worker not selected");
         }
     };
     let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m,
+        Some(m) => m.clone(),
         None => {
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
 
-    // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
-    } else {
-        None
-    };
-
-    let mut response_json: Value;
-
-    if let Some(mcp_servers) = mcp_servers {
-        let session_request_id = original_body
-            .request_id
-            .clone()
-            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
-        let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
-        let mut session = McpToolSession::new_with_headers(
-            mcp_orchestrator,
-            mcp_servers,
-            &session_request_id,
-            forwarded_headers,
-        );
-        if let Some(tools) = original_body.tools.as_deref() {
-            session.configure_response_tools_approval(tools);
-        }
-        prepare_mcp_tools_as_functions(&mut payload, &session);
-
-        match execute_tool_loop(
-            ctx.components.client(),
-            &url,
-            ctx.headers(),
-            worker.api_key(),
-            payload,
-            ToolLoopExecutionContext {
-                original_body,
-                existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
-                session: &session,
-            },
-        )
-        .await
-        {
-            Ok(resp) => {
-                worker.record_outcome(200);
-                response_json = resp;
-            }
-            Err(err) => {
-                worker.record_outcome(502);
-                return error::internal_error("upstream_error", err);
-            }
-        }
-
-        restore_original_tools(&mut response_json, original_body, Some(&session));
-    } else {
-        let mut request_builder = ctx.components.client().post(&url).json(&payload);
-        let provider = ApiProvider::from_url(&url);
-        let auth_header = provider.extract_auth_header(ctx.headers(), worker.api_key());
-        request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
-
-        let response = match request_builder.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                worker.record_outcome(502);
-                tracing::error!(
-                    url = %url,
-                    error = %e,
-                    "Failed to forward request to OpenAI"
-                );
-                return error::bad_gateway(
-                    "upstream_error",
-                    format!("Failed to forward request to OpenAI: {e}"),
-                );
-            }
+    let (_, mcp_servers) =
+        match ensure_mcp_connection(&mcp_orchestrator, original_request.tools.as_deref()).await {
+            Ok(result) => result,
+            Err(response) => return response,
         };
 
-        let status = response.status();
-        worker.record_outcome(status.as_u16());
-
-        if !status.is_success() {
-            let status =
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let body = response.text().await.unwrap_or_default();
-            let body = error::sanitize_error_body(&body);
-            return (status, body).into_response();
-        }
-
-        response_json = match response.json::<Value>().await {
-            Ok(r) => r,
-            Err(e) => {
-                return error::internal_error(
-                    "parse_error",
-                    format!("Failed to parse upstream response: {e}"),
-                );
-            }
-        };
-
-        restore_original_tools(&mut response_json, original_body, None);
-    }
-    patch_response_with_request_metadata(
-        &mut response_json,
-        original_body,
-        previous_response_id.as_deref(),
+    let setup = ResponsesLoopSetup::new(
+        current_request,
+        prepared,
+        existing_mcp_list_tools_labels,
+        mcp_servers,
     );
+
+    let session_request_id = original_request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("resp_{}", Uuid::now_v7()));
+    let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
+    let session = setup.session_with_headers(
+        &mcp_orchestrator,
+        &session_request_id,
+        forwarded_headers,
+        &original_request,
+    );
+
+    let ResponsesLoopSetup {
+        current_request,
+        prepared,
+        state,
+        max_tool_calls,
+        ..
+    } = setup;
+
+    let loop_ctx = AgentLoopContext {
+        prepared: &prepared,
+        session: Some(&session),
+        original_request: &original_request,
+        max_tool_calls,
+    };
+    let adapter = OpenAiNonStreamingAdapter::new(
+        &current_request,
+        &original_request,
+        &session,
+        OpenAiUpstreamHandle {
+            client: ctx.components.client().clone(),
+            url,
+            headers: ctx.headers().cloned(),
+            api_key: worker.api_key().cloned(),
+            provider,
+        },
+    );
+
+    let response = match run_agent_loop(adapter, loop_ctx, state, NoopSink).await {
+        Ok(response) => response,
+        Err(err) => {
+            let response = err.into_response();
+            worker.record_outcome(response.status().as_u16());
+            return response;
+        }
+    };
 
     if let (Some(conv_storage), Some(item_storage), Some(resp_storage)) = (
         ctx.components.conversation_storage(),
         ctx.components.conversation_item_storage(),
         ctx.components.response_storage(),
     ) {
+        let response_json = match to_value(&response) {
+            Ok(value) => value,
+            Err(err) => {
+                return error::internal_error(
+                    "serialize_error",
+                    format!("Failed to serialize responses payload for persistence: {err}"),
+                );
+            }
+        };
         if let Err(err) = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
             resp_storage.clone(),
             &response_json,
-            original_body,
+            &original_request,
             ctx.storage_request_context.clone(),
         )
         .await
@@ -185,5 +146,6 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         warn!("Storage not configured, skipping conversation persistence");
     }
 
-    (StatusCode::OK, Json(response_json)).into_response()
+    worker.record_outcome(StatusCode::OK.as_u16());
+    (StatusCode::OK, Json(response)).into_response()
 }

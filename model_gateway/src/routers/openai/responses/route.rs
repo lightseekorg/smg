@@ -7,14 +7,13 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::{http::HeaderMap, response::Response};
-use openai_protocol::responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest};
-use serde_json::to_value;
+use openai_protocol::responses::ResponsesRequest;
 
 use super::{
     super::{
         context::{
-            ComponentRefs, PayloadState, RequestContext, ResponsesComponents,
-            ResponsesPayloadState, WorkerSelection,
+            ComponentRefs, RequestContext, ResponsesComponents, ResponsesPayloadState,
+            WorkerSelection,
         },
         provider::ProviderRegistry,
         router::resolve_provider,
@@ -24,14 +23,11 @@ use super::{
 use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    routers::{
-        common::{
-            header_utils::extract_conversation_memory_config,
-            worker_selection::{SelectWorkerRequest, WorkerSelector},
-        },
-        error,
+    routers::common::{
+        header_utils::extract_conversation_memory_config,
+        worker_selection::{SelectWorkerRequest, WorkerSelector},
     },
-    worker::{Endpoint, ProviderType, WorkerRegistry},
+    worker::{ProviderType, WorkerRegistry},
 };
 
 /// Shared context passed to responses routing functions.
@@ -88,85 +84,28 @@ pub(in crate::routers::openai) async fn route_responses(
         }
     };
 
-    // Validate mutual exclusivity of conversation and previous_response_id
-    // Treat empty strings as unset to match other metadata paths. The
-    // `conversation` field is a `Option<ConversationRef>` union (bare string
-    // or `{ id }` object); `ConversationRef::is_empty` covers both shapes.
-    let conversation = body.conversation.as_ref().filter(|c| !c.is_empty());
-    let has_previous_response = body
-        .previous_response_id
-        .as_ref()
-        .is_some_and(|s| !s.is_empty());
-    if conversation.is_some() && has_previous_response {
-        Metrics::record_router_error(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
-            model,
-            metrics_labels::ENDPOINT_RESPONSES,
-            metrics_labels::ERROR_VALIDATION,
-        );
-        return error::bad_request(
-            "invalid_request",
-            "Cannot specify both 'conversation' and 'previous_response_id'".to_string(),
-        );
-    }
-
     let mut request_body = body.clone();
     request_body.model = model_id.to_string();
-    request_body.conversation = None;
 
-    let loaded_history = match super::history::load_input_history(
-        deps.responses_components,
-        conversation.map(|c| c.as_id()),
-        &mut request_body,
-        model,
+    let prepared_history = match super::history::prepare_request_history(
+        deps.responses_components.as_ref(),
+        &request_body,
     )
     .await
     {
-        Ok(id) => id,
+        Ok(history) => history,
         Err(response) => return response,
     };
+
+    request_body = prepared_history.request;
 
     if let Some(memory_config) = extract_conversation_memory_config(headers) {
         super::history::inject_memory_context(&memory_config, &mut request_body);
     }
 
     request_body.store = Some(false);
-    if let ResponseInput::Items(ref mut items) = request_body.input {
-        items.retain(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }));
-    }
-
-    let mut payload = match to_value(&request_body) {
-        Ok(v) => v,
-        Err(e) => {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_VALIDATION,
-            );
-            return error::bad_request(
-                "invalid_request",
-                format!("Failed to serialize request: {e}"),
-            );
-        }
-    };
 
     let provider = resolve_provider(deps.provider_registry, worker.as_ref(), model);
-    if let Err(e) = provider.transform_request(&mut payload, Endpoint::Responses) {
-        Metrics::record_router_error(
-            metrics_labels::ROUTER_OPENAI,
-            metrics_labels::BACKEND_EXTERNAL,
-            metrics_labels::CONNECTION_HTTP,
-            model,
-            metrics_labels::ENDPOINT_RESPONSES,
-            metrics_labels::ERROR_VALIDATION,
-        );
-        return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
-    }
 
     let mut ctx = RequestContext::for_responses(
         Arc::new(body.clone()),
@@ -182,13 +121,14 @@ pub(in crate::routers::openai) async fn route_responses(
         provider: Arc::clone(&provider),
     });
 
-    ctx.state.payload = Some(PayloadState {
-        json: payload,
-        url: format!("{}/v1/responses", worker.url()),
-    });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
-        previous_response_id: loaded_history.previous_response_id,
-        existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
+        url: format!("{}/v1/responses", worker.url()),
+        existing_mcp_list_tools_labels: prepared_history
+            .existing_mcp_list_tools_labels
+            .into_iter()
+            .collect(),
+        current_request: request_body.clone(),
+        prepared: prepared_history.prepared,
     });
 
     let response = if ctx.is_streaming() {

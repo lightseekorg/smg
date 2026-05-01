@@ -654,19 +654,17 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        let has_function_output = payload
+        // Close the turn only when SMG just returned a tool result —
+        // i.e. the *last* input item is `function_call_output`.
+        // Anything else (user message, replayed history) drives a
+        // fresh function_call.
+        let has_prior_tool_context = payload
             .get("input")
             .and_then(|v| v.as_array())
-            .map(|items| {
-                items.iter().any(|item| {
-                    item.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t == "function_call_output")
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        let has_prior_tool_context = has_function_output;
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("type"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t == "function_call_output");
 
         if has_tools && !has_prior_tool_context {
             // First turn: emit streaming tool call events using OpenAI-style function_call ids
@@ -860,7 +858,8 @@ async fn responses_handler(
                             "id": msg_id.clone(),
                             "type": "message",
                             "role": "assistant",
-                            "content": []
+                            "content": [],
+                            "status": "in_progress"
                         }
                     })
                     .to_string(),
@@ -928,7 +927,8 @@ async fn responses_handler(
                             "content": [{
                                 "type": "output_text",
                                 "text": "Tool result consumed; here is the final answer."
-                            }]
+                            }],
+                            "status": "completed"
                         }
                     })
                     .to_string(),
@@ -970,12 +970,14 @@ async fn responses_handler(
                     "model": "mock-model",
                     "status": "in_progress",
                     "output": [{
+                        "id": format!("msg_{}", Uuid::now_v7().simple()),
                         "type": "message",
                         "role": "assistant",
                         "content": [{
                             "type": "output_text",
                             "text": "This is a mock responses streamed output."
-                        }]
+                        }],
+                        "status": "in_progress"
                     }]
                 });
                 Ok::<_, Infallible>(Event::default().data(chunk.to_string()))
@@ -1013,19 +1015,17 @@ async fn responses_handler(
                 })
             })
             .unwrap_or(false);
-        let has_function_output = payload
+        // Close the turn only when SMG just returned a tool result —
+        // i.e. the *last* input item is `function_call_output`.
+        // Anything else (user message, replayed history) drives a
+        // fresh function_call.
+        let has_prior_tool_context = payload
             .get("input")
             .and_then(|v| v.as_array())
-            .map(|items| {
-                items.iter().any(|item| {
-                    item.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t == "function_call_output")
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        let has_prior_tool_context = has_function_output;
+            .and_then(|items| items.last())
+            .and_then(|item| item.get("type"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t == "function_call_output");
 
         if has_tools && !has_prior_tool_context {
             let rid = format!("resp-{}", Uuid::now_v7());
@@ -1055,12 +1055,14 @@ async fn responses_handler(
                 "created_at": timestamp,
                 "model": "mock-model",
                 "output": [{
+                    "id": format!("msg_{}", Uuid::now_v7().simple()),
                     "type": "message",
                     "role": "assistant",
                     "content": [{
                         "type": "output_text",
                         "text": "Tool result consumed; here is the final answer."
-                    }]
+                    }],
+                    "status": "completed"
                 }],
                 "status": "completed",
                 "usage": {
@@ -1077,12 +1079,14 @@ async fn responses_handler(
                 "created_at": timestamp,
                 "model": "mock-model",
                 "output": [{
+                    "id": format!("msg_{}", Uuid::now_v7().simple()),
                     "type": "message",
                     "role": "assistant",
                     "content": [{
                         "type": "output_text",
                         "text": "This is a mock responses output."
-                    }]
+                    }],
+                    "status": "completed"
                 }],
                 "status": "completed",
                 "usage": {

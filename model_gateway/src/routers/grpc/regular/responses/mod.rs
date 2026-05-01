@@ -10,6 +10,8 @@
 //! - `common` - Shared helpers: ToolLoopState, tool preparation, MCP metadata builders
 //! - `conversions` - Request/response conversion between Responses and Chat formats
 
+mod agent_loop_adapter;
+mod agent_streaming_adapter;
 mod common;
 mod conversions;
 mod handlers;

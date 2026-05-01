@@ -18,12 +18,13 @@
 //! - `execution` - MCP tool execution logic
 //! - `common` - Shared helpers and state tracking
 
+pub(crate) mod agent_loop_adapter;
+pub(crate) mod agent_streaming_adapter;
 pub(crate) mod common;
 pub(crate) mod execution;
 pub(crate) mod non_streaming;
 pub(crate) mod streaming;
 
 // Re-export types accessed via harmony::responses::TypeName
-pub(crate) use execution::ToolResult;
 pub(crate) use non_streaming::serve_harmony_responses;
 pub(crate) use streaming::serve_harmony_responses_stream;

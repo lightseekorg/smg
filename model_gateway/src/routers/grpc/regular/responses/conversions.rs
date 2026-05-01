@@ -8,12 +8,12 @@
 //! without requiring Python backend changes.
 
 use openai_protocol::{
-    chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
-    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall, UsageInfo},
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    common::{FunctionCallResponse, JsonSchemaFormat, ResponseFormat, ToolCall},
     responses::{
-        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
-        ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig, TextFormat,
+        ResponseContentPart, ResponseInput, ResponseInputOutputItem,
+        ResponseReasoningContent::ReasoningText, ResponsesRequest, StringOrContentParts,
+        TextConfig, TextFormat,
     },
     UNKNOWN_MODEL_ID,
 };
@@ -142,22 +142,35 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             tool_call_id: call_id.clone(),
                         });
                     }
-                    ResponseInputOutputItem::McpApprovalResponse { .. }
+                    ResponseInputOutputItem::McpCall { .. }
+                    | ResponseInputOutputItem::McpListTools { .. }
                     | ResponseInputOutputItem::McpApprovalRequest { .. }
-                    | ResponseInputOutputItem::ComputerCall { .. }
-                    | ResponseInputOutputItem::ComputerCallOutput { .. }
-                    | ResponseInputOutputItem::McpCall { .. }
-                    | ResponseInputOutputItem::McpListTools { .. } => {
+                    | ResponseInputOutputItem::McpApprovalResponse { .. }
+                    | ResponseInputOutputItem::WebSearchCall { .. }
+                    | ResponseInputOutputItem::CodeInterpreterCall { .. }
+                    | ResponseInputOutputItem::FileSearchCall { .. }
+                    | ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                        // Hosted-tool item types are projected by the
+                        // shared `transcript_lower` pass before this
+                        // function runs (see
+                        // `routers/common/transcript_lower.rs`):
+                        // hosted calls → `function_call (+ output)` pair,
+                        // hosted-tool metadata (`mcp_list_tools`,
+                        // approvals) is dropped. Reaching this arm means
+                        // the lower pass was bypassed; treat it as a
+                        // programming error rather than papering over it
+                        // again.
                         warn!(
                             function = "responses_to_chat",
-                            "Approval item reached chat conversion"
+                            "Hosted-tool item reached chat conversion despite transcript_lower"
                         );
                         return Err("Unsupported input item type".to_string());
                     }
-                    ResponseInputOutputItem::ImageGenerationCall { .. } => {
+                    ResponseInputOutputItem::ComputerCall { .. }
+                    | ResponseInputOutputItem::ComputerCallOutput { .. } => {
                         warn!(
                             function = "responses_to_chat",
-                            "image_generation_call input item reached chat conversion"
+                            "computer_call item reached chat conversion"
                         );
                         return Err("Unsupported input item type".to_string());
                     }
@@ -205,7 +218,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
     }
 
     // 3. Extract function tools from ResponseTools.
-    // MCP tools are merged later by the tool loop (see tool_loop.rs:prepare_chat_tools_and_choice).
+    // MCP tools are merged by the regular agent-loop adapters after conversion.
     let function_tools = extract_tools_from_response_tools(req.tools.as_deref());
     let tools = if function_tools.is_empty() {
         None
@@ -319,108 +332,6 @@ fn map_text_to_response_format(text: Option<&TextConfig>) -> Option<ResponseForm
             },
         }),
     }
-}
-
-/// Convert a ChatCompletionResponse to ResponsesResponse
-///
-/// # Conversion Logic
-/// - `id` → `response_id_override` if provided, otherwise `chat_resp.id`
-/// - `model` → `model` (pass through)
-/// - `choices[0].message` → `output` array (convert to ResponseOutputItem::Message)
-/// - `choices[0].finish_reason` → determines `status` (stop/length → Completed)
-/// - `created` timestamp → `created_at`
-pub(crate) fn chat_to_responses(
-    chat_resp: &ChatCompletionResponse,
-    original_req: &ResponsesRequest,
-    response_id_override: Option<String>,
-) -> Result<ResponsesResponse, String> {
-    // Extract the first choice (responses API doesn't support n>1)
-    let choice = chat_resp
-        .choices
-        .first()
-        .ok_or_else(|| "Chat response contains no choices".to_string())?;
-
-    // Convert assistant message to output items
-    let mut output: Vec<ResponseOutputItem> = Vec::new();
-
-    // Convert message content to output item
-    if let Some(content) = &choice.message.content {
-        if !content.is_empty() {
-            output.push(ResponseOutputItem::Message {
-                id: format!("msg_{}", chat_resp.id),
-                role: "assistant".to_string(),
-                content: vec![ResponseContentPart::OutputText {
-                    text: content.clone(),
-                    annotations: vec![],
-                    logprobs: choice.logprobs.clone(),
-                }],
-                status: "completed".to_string(),
-                phase: None,
-            });
-        }
-    }
-
-    // Convert reasoning content if present (O1-style models)
-    if let Some(reasoning) = &choice.message.reasoning_content {
-        if !reasoning.is_empty() {
-            output.push(ResponseOutputItem::new_reasoning(
-                format!("reasoning_{}", chat_resp.id),
-                vec![],
-                vec![ReasoningText {
-                    text: reasoning.clone(),
-                }],
-                Some("completed".to_string()),
-            ));
-        }
-    }
-
-    // Convert tool calls if present
-    if let Some(tool_calls) = &choice.message.tool_calls {
-        for tool_call in tool_calls {
-            output.push(ResponseOutputItem::FunctionToolCall {
-                id: tool_call.id.clone(),
-                call_id: tool_call.id.clone(),
-                name: tool_call.function.name.clone(),
-                arguments: tool_call.function.arguments.clone().unwrap_or_default(),
-                output: None, // Tool hasn't been executed yet
-                status: "in_progress".to_string(),
-            });
-        }
-    }
-
-    // Determine response status based on finish_reason
-    let status = match choice.finish_reason.as_deref() {
-        Some("stop") | Some("length") => ResponseStatus::Completed,
-        Some("tool_calls") => ResponseStatus::InProgress, // Waiting for tool execution
-        Some("failed") | Some("error") => ResponseStatus::Failed,
-        _ => ResponseStatus::Completed, // Default to completed
-    };
-
-    // Convert usage from Usage to UsageInfo, then wrap in ResponsesUsage
-    let usage = chat_resp.usage.as_ref().map(|u| {
-        let usage_info = UsageInfo {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-            reasoning_tokens: u
-                .completion_tokens_details
-                .as_ref()
-                .and_then(|d| d.reasoning_tokens),
-            prompt_tokens_details: None, // Chat response doesn't have this
-        };
-        ResponsesUsage::Classic(usage_info)
-    });
-
-    // Generate response
-    let response_id = response_id_override.unwrap_or_else(|| chat_resp.id.clone());
-    Ok(ResponsesResponse::builder(&response_id, &chat_resp.model)
-        .copy_from_request(original_req)
-        .created_at(chat_resp.created as i64)
-        .status(status)
-        .output(output)
-        .maybe_text(original_req.text.clone())
-        .maybe_usage(usage)
-        .build())
 }
 
 #[cfg(test)]
@@ -552,30 +463,27 @@ mod tests {
     }
 
     #[test]
-    fn test_image_generation_call_input_rejected() {
-        // Regression: `image_generation_call` items are server-produced
-        // output (populated via the shared MCP transformer) and must not
-        // be round-tripped back into the chat conversion as input.
-        // The regular gRPC path — used by non-Harmony text LLMs that only do
-        // function calling — rejects this variant with the same contract as
-        // sibling hosted-tool items (Computer/Shell/Custom/ApplyPatch).
+    fn test_mcp_call_history_errors_when_lower_pass_skipped() {
+        // The shared `transcript_lower` pass is supposed to project
+        // hosted-tool items into core `function_call` (+ optional
+        // `function_call_output`) pairs before this conversion runs.
+        // Reaching `responses_to_chat` with a raw `McpCall` therefore
+        // means the lower pass was bypassed — we surface that as a
+        // hard error rather than silently re-projecting again here.
         let req = ResponsesRequest {
-            input: ResponseInput::Items(vec![ResponseInputOutputItem::ImageGenerationCall {
-                id: "ig_test".to_string(),
-                action: None,
-                background: None,
-                output_format: None,
-                quality: None,
-                result: Some("base64data".to_string()),
-                revised_prompt: Some("a cat".to_string()),
-                size: None,
+            input: ResponseInput::Items(vec![ResponseInputOutputItem::McpCall {
+                id: "mcp_abc".to_string(),
+                arguments: "{}".to_string(),
+                name: "search".to_string(),
+                server_label: "brave".to_string(),
+                approval_request_id: None,
+                error: None,
+                output: None,
                 status: None,
             }]),
             ..Default::default()
         };
-
-        let result = responses_to_chat(&req);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Unsupported input item type");
+        let err = responses_to_chat(&req).unwrap_err();
+        assert!(err.contains("Unsupported"));
     }
 }

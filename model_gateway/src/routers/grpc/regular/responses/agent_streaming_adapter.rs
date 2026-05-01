@@ -1,0 +1,388 @@
+//! Streaming flavor of the Regular Responses agent-loop adapter.
+//!
+//! Drives `pipeline.execute_chat` with `stream=true` per iteration,
+//! pumps the SSE body through `ResponseStreamEventEmitter::process_chunk`
+//! (which already maps every Chat-stream variant onto the Responses
+//! API event shapes), accumulates the per-iteration response so the
+//! driver can decide what comes next, and emits the
+//! `output_item.added` / `function_call_arguments.delta` /
+//! `function_call_arguments.done` triples for any
+//! caller-visible function tool calls before the loop exits.
+
+use std::{collections::HashMap, sync::Arc};
+
+use async_trait::async_trait;
+use axum::http;
+use bytes::Bytes;
+use futures_util::StreamExt;
+use openai_protocol::{
+    chat::{
+        ChatChoice, ChatCompletionMessage, ChatCompletionResponse, ChatCompletionStreamResponse,
+    },
+    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+};
+use serde_json::{json, Value};
+use smg_mcp::McpToolSession;
+
+use super::{common::append_assistant_prefix_to_transcript, conversions};
+use crate::{
+    middleware::TenantRequestMeta,
+    routers::{
+        common::agent_loop::{
+            build_responses_iteration_request, AgentLoopAdapter, AgentLoopContext, AgentLoopError,
+            AgentLoopState, IterationRequestFlavor, LoopModelTurn, LoopToolCall, RenderMode,
+        },
+        grpc::common::responses::{
+            finalize_streamed_response_for_persist, GrpcResponseStreamSink, ResponsesContext,
+            StreamingPersistHandles,
+        },
+    },
+};
+
+#[derive(Clone)]
+pub(crate) struct RegularStreamingUpstreamHandle {
+    pub headers: Option<http::HeaderMap>,
+    pub model_id: String,
+    pub tenant_request_meta: TenantRequestMeta,
+}
+
+pub(crate) struct RegularStreamingAdapter<'a> {
+    ctx: &'a ResponsesContext,
+    upstream: RegularStreamingUpstreamHandle,
+    mcp_chat_tools: Vec<openai_protocol::common::Tool>,
+}
+
+impl<'a> RegularStreamingAdapter<'a> {
+    pub(crate) fn new(
+        ctx: &'a ResponsesContext,
+        upstream: RegularStreamingUpstreamHandle,
+        session: &McpToolSession<'_>,
+    ) -> Self {
+        let mcp_chat_tools = session.build_chat_function_tools();
+        Self {
+            ctx,
+            upstream,
+            mcp_chat_tools,
+        }
+    }
+}
+
+fn usage_to_stream_json(usage: &Usage) -> Value {
+    let mut obj = json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    });
+    if let Some(reasoning) = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.reasoning_tokens)
+    {
+        obj["output_tokens_details"] = json!({ "reasoning_tokens": reasoning });
+    }
+    obj
+}
+
+#[async_trait]
+impl<'a> AgentLoopAdapter<GrpcResponseStreamSink> for RegularStreamingAdapter<'a> {
+    type FinalResponse = ();
+
+    async fn call_upstream(
+        &mut self,
+        ctx: &AgentLoopContext<'_>,
+        state: &mut AgentLoopState,
+        sink: &mut GrpcResponseStreamSink,
+    ) -> Result<(), AgentLoopError> {
+        let request = build_responses_iteration_request(
+            ctx.original_request,
+            state,
+            IterationRequestFlavor::RegularChat { stream: Some(true) },
+        );
+        let mut chat_request = conversions::responses_to_chat(&request).map_err(|e| {
+            AgentLoopError::InvalidRequest(format!("Failed to convert request: {e}"))
+        })?;
+
+        let mut all_tools = chat_request.tools.take().unwrap_or_default();
+        if !state.tool_budget_exhausted {
+            all_tools.extend(self.mcp_chat_tools.iter().cloned());
+        }
+        chat_request.tools = (!all_tools.is_empty()).then_some(all_tools);
+        chat_request.tool_choice = if state.tool_budget_exhausted {
+            None
+        } else if state.iteration <= 1 {
+            chat_request
+                .tool_choice
+                .take()
+                .or(Some(ToolChoice::Value(ToolChoiceValue::Auto)))
+        } else {
+            Some(ToolChoice::Value(ToolChoiceValue::Auto))
+        };
+
+        let chat_response = self
+            .ctx
+            .pipeline
+            .execute_chat(
+                Arc::new(chat_request),
+                self.upstream.headers.clone(),
+                self.upstream.model_id.clone(),
+                self.ctx.components.clone(),
+                Some(self.upstream.tenant_request_meta.clone()),
+            )
+            .await;
+
+        let body = chat_response.into_body();
+        let accumulated = consume_and_accumulate_stream(body, sink).await?;
+
+        // Push raw fc identities to the loop's classification queue.
+        // Wire emission already happened progressively inside
+        // `sink.process_chat_chunk` as chat-stream chunks arrived;
+        // the driver classifies gateway vs caller-fc + approval
+        // gating from this list.
+        state.pending_tool_calls = accumulated
+            .choices
+            .first()
+            .and_then(|c| c.message.tool_calls.as_ref())
+            .map(|calls| {
+                calls
+                    .iter()
+                    .map(|tc| LoopToolCall {
+                        call_id: tc.id.clone(),
+                        item_id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: tc
+                            .function
+                            .arguments
+                            .clone()
+                            .unwrap_or_else(|| "{}".to_string()),
+                        approval_request_id: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let first_choice = accumulated.choices.first();
+        let message_text = first_choice.and_then(|c| c.message.content.clone());
+        let reasoning_text = first_choice.and_then(|c| c.message.reasoning_content.clone());
+        if !state.pending_tool_calls.is_empty() {
+            append_assistant_prefix_to_transcript(
+                state,
+                &accumulated.id,
+                reasoning_text.as_deref(),
+                message_text.as_deref(),
+            );
+        }
+        state.latest_turn = Some(LoopModelTurn {
+            message_text: message_text.filter(|s| !s.is_empty()),
+            reasoning_text: reasoning_text.filter(|s| !s.is_empty()),
+            usage: accumulated.usage.as_ref().map(|u| Usage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+                prompt_tokens_details: None,
+                completion_tokens_details: u.completion_tokens_details.clone(),
+            }),
+            request_id: Some(accumulated.id.clone()),
+        });
+        Ok(())
+    }
+
+    async fn render_final(
+        self,
+        ctx: &AgentLoopContext<'_>,
+        state: AgentLoopState,
+        mode: RenderMode,
+        sink: &mut GrpcResponseStreamSink,
+    ) -> Result<(), AgentLoopError> {
+        // Stage usage so the sink's `ResponseFinished` /
+        // `ResponseIncomplete` emit attaches it to the final
+        // terminal SSE event. The loop driver fires that event after
+        // this method returns. Carry `reasoning_tokens` so the stored
+        // record matches the SSE-side `usage_json` below.
+        let usage_for_persist = state
+            .latest_turn
+            .as_ref()
+            .and_then(|turn| turn.usage.clone());
+        let usage_json = usage_for_persist.as_ref().map(usage_to_stream_json);
+        sink.set_final_usage(usage_json);
+
+        finalize_streamed_response_for_persist(
+            sink,
+            usage_for_persist,
+            &mode,
+            ctx.original_request,
+            StreamingPersistHandles {
+                conversation_storage: self.ctx.conversation_storage.clone(),
+                conversation_item_storage: self.ctx.conversation_item_storage.clone(),
+                response_storage: self.ctx.response_storage.clone(),
+                request_context: self.ctx.request_context.clone(),
+            },
+        )
+        .await;
+        Ok(())
+    }
+}
+
+/// Pump the chat-stream body through the existing
+/// `ResponseStreamEventEmitter::process_chunk` so the per-chunk SSE
+/// translation stays a single seam, and accumulate a
+/// `ChatCompletionResponse` so the loop driver can consult it for tool
+/// calls.
+async fn consume_and_accumulate_stream(
+    body: axum::body::Body,
+    sink: &mut GrpcResponseStreamSink,
+) -> Result<ChatCompletionResponse, AgentLoopError> {
+    let mut accumulator = ChatStreamAccumulator::new();
+    let mut stream = body.into_data_stream();
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result
+            .map_err(|e| AgentLoopError::Upstream(format!("Stream read error: {e}")))?;
+        let event_str = String::from_utf8_lossy(&chunk);
+        let event = event_str.trim();
+        if event == "data: [DONE]" {
+            break;
+        }
+        if let Some(json_str) = event.strip_prefix("data: ") {
+            let json_str = json_str.trim();
+            if let Ok(chat_chunk) = serde_json::from_str::<ChatCompletionStreamResponse>(json_str) {
+                accumulator.process_chunk(&chat_chunk);
+                // Sink owns chat-stream → wire-event translation,
+                // including progressive tool_call args.delta dispatch
+                // (driven by per-chunk `tool_calls` deltas + a
+                // `LoopEvent::ToolCall*` sequence per call_index).
+                sink.process_chat_chunk(&chat_chunk);
+            } else {
+                // Pass non-chunk events through verbatim so error
+                // events still reach the client.
+                let _ = sink.tx.send(Ok(Bytes::from(format!("{event}\n\n"))));
+            }
+        }
+    }
+    Ok(accumulator.finalize())
+}
+
+/// Lightweight chat-stream accumulator: enough state to detect tool
+/// calls and surface a final `ChatCompletionResponse` shape.
+struct ChatStreamAccumulator {
+    id: String,
+    model: String,
+    created: u64,
+    content_buffer: String,
+    reasoning_buffer: String,
+    tool_calls: Vec<ToolCall>,
+    tool_indexes: HashMap<u32, usize>,
+    finish_reason: Option<String>,
+    usage: Option<Usage>,
+}
+
+impl ChatStreamAccumulator {
+    fn new() -> Self {
+        Self {
+            id: String::new(),
+            model: String::new(),
+            created: 0,
+            content_buffer: String::new(),
+            reasoning_buffer: String::new(),
+            tool_calls: Vec::new(),
+            tool_indexes: HashMap::new(),
+            finish_reason: None,
+            usage: None,
+        }
+    }
+
+    fn process_chunk(&mut self, chunk: &ChatCompletionStreamResponse) {
+        if self.id.is_empty() {
+            self.id.clone_from(&chunk.id);
+            self.model.clone_from(&chunk.model);
+            self.created = chunk.created;
+        }
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(c) = &choice.delta.content {
+                self.content_buffer.push_str(c);
+            }
+            if let Some(r) = &choice.delta.reasoning_content {
+                self.reasoning_buffer.push_str(r);
+            }
+            if let Some(deltas) = &choice.delta.tool_calls {
+                for delta in deltas {
+                    let idx_into_calls = match self.tool_indexes.get(&delta.index).copied() {
+                        Some(i) => i,
+                        None => {
+                            let new_idx = self.tool_calls.len();
+                            self.tool_indexes.insert(delta.index, new_idx);
+                            self.tool_calls.push(ToolCall {
+                                id: delta.id.clone().unwrap_or_default(),
+                                tool_type: "function".to_string(),
+                                function: FunctionCallResponse {
+                                    name: String::new(),
+                                    arguments: Some(String::new()),
+                                },
+                            });
+                            new_idx
+                        }
+                    };
+                    if let Some(call) = self.tool_calls.get_mut(idx_into_calls) {
+                        if let Some(id) = &delta.id {
+                            if call.id.is_empty() {
+                                call.id.clone_from(id);
+                            }
+                        }
+                        if let Some(func) = &delta.function {
+                            if let Some(name) = &func.name {
+                                if !name.is_empty() && call.function.name.is_empty() {
+                                    call.function.name.clone_from(name);
+                                }
+                            }
+                            if let Some(args) = &func.arguments {
+                                if let Some(buf) = call.function.arguments.as_mut() {
+                                    buf.push_str(args);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(reason) = &choice.finish_reason {
+                self.finish_reason = Some(reason.clone());
+            }
+        }
+        if let Some(usage) = &chunk.usage {
+            self.usage = Some(usage.clone());
+        }
+    }
+
+    fn finalize(self) -> ChatCompletionResponse {
+        let message = ChatCompletionMessage {
+            role: "assistant".to_string(),
+            content: if self.content_buffer.is_empty() {
+                None
+            } else {
+                Some(self.content_buffer)
+            },
+            tool_calls: if self.tool_calls.is_empty() {
+                None
+            } else {
+                Some(self.tool_calls)
+            },
+            reasoning_content: if self.reasoning_buffer.is_empty() {
+                None
+            } else {
+                Some(self.reasoning_buffer)
+            },
+        };
+        ChatCompletionResponse {
+            id: self.id,
+            object: "chat.completion".to_string(),
+            created: self.created,
+            model: self.model,
+            choices: vec![ChatChoice {
+                index: 0,
+                message,
+                finish_reason: self.finish_reason,
+                logprobs: None,
+                matched_stop: None,
+                hidden_states: None,
+            }],
+            usage: self.usage,
+            system_fingerprint: None,
+        }
+    }
+}

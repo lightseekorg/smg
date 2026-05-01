@@ -145,11 +145,9 @@ pub fn build_mcp_tool_infos(entries: &[ToolEntry]) -> Vec<McpToolInfo> {
             name: entry.tool_name().to_string(),
             description: entry.tool.description.as_ref().map(|d| d.to_string()),
             input_schema: schema_to_value(&entry.tool.input_schema),
-            annotations: entry
-                .tool
-                .annotations
-                .as_ref()
-                .and_then(|a| serde_json::to_value(a).ok()),
+            annotations: Some(serde_json::json!({
+                "read_only": entry.annotations.read_only,
+            })),
         })
         .collect()
 }

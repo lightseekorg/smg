@@ -1,0 +1,1490 @@
+//! Shared OpenAI-compatible SSE infrastructure for `/v1/responses`.
+
+use axum::{body::Body, http::StatusCode, response::Response};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use bytes::Bytes;
+use http::header::{HeaderValue, CONTENT_TYPE};
+use openai_protocol::{
+    chat::ChatCompletionStreamResponse,
+    common::Usage,
+    event_types::{
+        CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
+        ImageGenerationCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
+        WebSearchCallEvent,
+    },
+    responses::{
+        response_tool_echo_value, InputTokensDetails, OutputTokensDetails, ResponseOutputItem,
+        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+    },
+};
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use uuid::Uuid;
+
+use crate::routers::common::agent_loop::{
+    ExecutedCall, LoopToolCall, OutputFamily, PendingToolExecution, ToolPresentation,
+};
+
+fn random_obfuscation() -> String {
+    use rand::Rng as _;
+
+    let mut rng = rand::rng();
+    let len = rng.random_range(8..=16);
+    let mut bytes = [0_u8; 16];
+    rng.fill(&mut bytes);
+    URL_SAFE_NO_PAD.encode(&bytes[..len])
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+pub(crate) enum OutputItemType {
+    Message,
+    McpListTools,
+    McpCall,
+    McpApprovalRequest,
+    FunctionCall,
+    Reasoning,
+    WebSearchCall,
+    CodeInterpreterCall,
+    FileSearchCall,
+    ImageGenerationCall,
+}
+
+pub(crate) struct ApprovedReplayHandle {
+    pub(crate) output_index: usize,
+    pub(crate) item_id: String,
+    pub(crate) presentation: ToolPresentation,
+}
+
+pub(crate) struct GatewayToolCompletion<'a> {
+    pub(crate) output_index: usize,
+    pub(crate) item_id: &'a str,
+    pub(crate) executed: &'a ExecutedCall,
+    pub(crate) presentation: &'a ToolPresentation,
+    pub(crate) server_label: &'a str,
+    pub(crate) approval_request_id: Option<&'a str>,
+}
+
+/// Status of an output item
+#[derive(Debug, Clone, PartialEq)]
+enum ItemStatus {
+    InProgress,
+    Completed,
+}
+
+/// State tracking for a single output item
+#[derive(Debug, Clone)]
+struct OutputItemState {
+    output_index: usize,
+    status: ItemStatus,
+    item_data: Option<Value>,
+}
+
+/// OpenAI-compatible event emitter for /v1/responses streaming
+///
+/// Manages state and sequence numbers to emit proper event types:
+/// - response.created
+/// - response.in_progress
+/// - response.output_item.added
+/// - response.output_item.done
+/// - response.completed
+/// - response.incomplete
+/// - response.content_part.added
+/// - response.content_part.done
+/// - response.output_text.delta
+/// - response.output_text.done
+/// - response.mcp_list_tools.in_progress
+/// - response.mcp_list_tools.completed
+/// - response.mcp_call.in_progress
+/// - response.mcp_call_arguments.delta
+/// - response.mcp_call_arguments.done
+/// - response.mcp_call.completed
+/// - response.mcp_call.failed
+/// - response.web_search_call.in_progress
+/// - response.web_search_call.searching
+/// - response.web_search_call.completed
+/// - response.function_call_arguments.delta
+/// - response.function_call_arguments.done
+pub(crate) struct ResponseStreamEventEmitter {
+    sequence_number: u64,
+    pub response_id: String,
+    model: String,
+    created_at: u64,
+    message_id: String,
+    accumulated_text: String,
+    has_emitted_output_item_added: bool,
+    has_emitted_content_part_added: bool,
+    // Output item tracking
+    output_items: Vec<OutputItemState>,
+    next_output_index: usize,
+    current_message_output_index: Option<usize>,
+    current_item_id: Option<String>,
+    current_reasoning_output_index: Option<usize>,
+    current_reasoning_item_id: Option<String>,
+    accumulated_reasoning_text: String,
+    has_emitted_reasoning_summary_part_added: bool,
+    original_request: Option<ResponsesRequest>,
+}
+
+// Streaming adapters share these emitter primitives and each uses a
+// different subset.
+#[expect(
+    dead_code,
+    reason = "primitives kept on the impl for future surface adapters"
+)]
+impl ResponseStreamEventEmitter {
+    pub fn new(response_id: String, model: String, created_at: u64) -> Self {
+        let message_id = format!("msg_{}", Uuid::now_v7());
+
+        Self {
+            sequence_number: 0,
+            response_id,
+            model,
+            created_at,
+            message_id,
+            accumulated_text: String::new(),
+            has_emitted_output_item_added: false,
+            has_emitted_content_part_added: false,
+            output_items: Vec::new(),
+            next_output_index: 0,
+            current_message_output_index: None,
+            current_item_id: None,
+            current_reasoning_output_index: None,
+            current_reasoning_item_id: None,
+            accumulated_reasoning_text: String::new(),
+            has_emitted_reasoning_summary_part_added: false,
+            original_request: None,
+        }
+    }
+
+    /// Set the original request for including all fields in response.completed
+    pub fn set_original_request(&mut self, request: ResponsesRequest) {
+        self.original_request = Some(request);
+    }
+
+    pub fn next_sequence(&mut self) -> u64 {
+        let seq = self.sequence_number;
+        self.sequence_number += 1;
+        seq
+    }
+
+    pub fn emit_created(&mut self) -> Value {
+        json!({
+            "type": ResponseEvent::CREATED,
+            "sequence_number": self.next_sequence(),
+            "response": {
+                "id": self.response_id,
+                "object": "response",
+                "created_at": self.created_at,
+                "status": "in_progress",
+                "model": self.model,
+                "output": []
+            }
+        })
+    }
+
+    pub fn emit_in_progress(&mut self) -> Value {
+        json!({
+            "type": ResponseEvent::IN_PROGRESS,
+            "sequence_number": self.next_sequence(),
+            "response": {
+                "id": self.response_id,
+                "object": "response",
+                "status": "in_progress"
+            }
+        })
+    }
+
+    pub fn emit_content_part_added(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        content_index: usize,
+    ) -> Value {
+        self.has_emitted_content_part_added = true;
+        json!({
+            "type": ContentPartEvent::ADDED,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "content_index": content_index,
+            "part": {
+                "type": "output_text",
+                "text": ""
+            }
+        })
+    }
+
+    pub fn emit_text_delta(
+        &mut self,
+        delta: &str,
+        output_index: usize,
+        item_id: &str,
+        content_index: usize,
+    ) -> Value {
+        self.accumulated_text.push_str(delta);
+        json!({
+            "type": OutputTextEvent::DELTA,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "content_index": content_index,
+            "delta": delta,
+            "obfuscation": random_obfuscation()
+        })
+    }
+
+    pub fn emit_text_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        content_index: usize,
+    ) -> Value {
+        json!({
+            "type": OutputTextEvent::DONE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "content_index": content_index,
+            "text": self.accumulated_text.clone()
+        })
+    }
+
+    pub fn emit_content_part_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        content_index: usize,
+    ) -> Value {
+        json!({
+            "type": ContentPartEvent::DONE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "content_index": content_index,
+            "part": {
+                "type": "output_text",
+                "text": self.accumulated_text.clone()
+            }
+        })
+    }
+
+    pub fn emit_completed(&mut self, usage: Option<&Value>) -> Value {
+        self.emit_terminal(ResponseEvent::COMPLETED, "completed", None, usage)
+    }
+
+    pub fn emit_incomplete(&mut self, reason: &str, usage: Option<&Value>) -> Value {
+        self.emit_terminal(ResponseEvent::INCOMPLETE, "incomplete", Some(reason), usage)
+    }
+
+    // INVARIANT: this method is terminal — it drains internal state via `take()`
+    // and must only be called once per emitter lifetime.
+    fn emit_terminal(
+        &mut self,
+        event_type: &str,
+        status: &str,
+        incomplete_reason: Option<&str>,
+        usage: Option<&Value>,
+    ) -> Value {
+        // Build output array from tracked items
+        let output: Vec<Value> = self
+            .output_items
+            .iter_mut()
+            .filter_map(|item| {
+                if item.status == ItemStatus::Completed {
+                    item.item_data.take()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // If no items were tracked, fall back to a generic message.
+        let output = if output.is_empty() {
+            vec![json!({
+                "id": std::mem::take(&mut self.message_id),
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": std::mem::take(&mut self.accumulated_text)
+                }]
+            })]
+        } else {
+            output
+        };
+
+        // Build base response object
+        let mut response_obj = json!({
+            "id": self.response_id,
+            "object": "response",
+            "created_at": self.created_at,
+            "status": status,
+            "model": self.model,
+            "output": output
+        });
+
+        // Add usage if provided
+        if let Some(usage_val) = usage {
+            response_obj["usage"] = usage_val.clone();
+        }
+
+        // Mirror the non-streaming `ResponsesResponse` shape so streaming
+        // `response.completed.response` echoes the same canonical-field set.
+        if let Some(ref req) = self.original_request {
+            response_obj["instructions"] = json!(req.instructions);
+            response_obj["max_output_tokens"] = json!(req.max_output_tokens);
+            response_obj["max_tool_calls"] = json!(req.max_tool_calls);
+            response_obj["previous_response_id"] = json!(req.previous_response_id);
+            // OpenAI Responses omits `conversation` when the request did not
+            // opt into one; when present it echoes the canonical object shape.
+            if let Some(conv) = req.conversation.as_ref() {
+                response_obj["conversation"] = json!({ "id": conv.as_id() });
+            }
+            response_obj["reasoning"] = json!(req.reasoning);
+            response_obj["temperature"] = json!(req.temperature);
+            response_obj["top_p"] = json!(req.top_p);
+            response_obj["truncation"] = json!(req.truncation);
+            response_obj["user"] = json!(req.user);
+            response_obj["background"] = json!(req.background);
+            response_obj["frequency_penalty"] = json!(req.frequency_penalty);
+            response_obj["presence_penalty"] = json!(req.presence_penalty);
+            response_obj["service_tier"] = json!(req.service_tier);
+            response_obj["prompt_cache_key"] = json!(req.prompt_cache_key);
+            response_obj["prompt_cache_retention"] = json!(req.prompt_cache_retention);
+            response_obj["top_logprobs"] = json!(req.top_logprobs);
+            response_obj["text"] = json!(req.text);
+            response_obj["safety_identifier"] = json!(req.safety_identifier);
+
+            response_obj["parallel_tool_calls"] = json!(req.parallel_tool_calls.unwrap_or(true));
+            response_obj["store"] = json!(req.store.unwrap_or(true));
+            let empty_metadata = Default::default();
+            let tools = req.tools.as_deref().unwrap_or(&[]);
+            response_obj["tools"] = Value::Array(
+                tools
+                    .iter()
+                    .map(response_tool_echo_value)
+                    .collect::<Vec<_>>(),
+            );
+            response_obj["metadata"] = json!(req.metadata.as_ref().unwrap_or(&empty_metadata));
+
+            // tool_choice: serialize if present, otherwise use "auto"
+            if let Some(ref tc) = req.tool_choice {
+                response_obj["tool_choice"] = json!(tc);
+            } else {
+                response_obj["tool_choice"] = json!("auto");
+            }
+        }
+
+        // Pure response-side fields the gateway does not populate today but
+        // that the OpenAI Responses NS body carries as `null`. `billing` is
+        // OpenAI-owned and omitted on self-hosted responses unless upstream
+        // provided it.
+        response_obj["moderation"] = Value::Null;
+        response_obj["completed_at"] = json!(unix_timestamp());
+        response_obj["error"] = Value::Null;
+        response_obj["incomplete_details"] = incomplete_reason
+            .map(|reason| json!({ "reason": reason }))
+            .unwrap_or(Value::Null);
+
+        json!({
+            "type": event_type,
+            "sequence_number": self.next_sequence(),
+            "response": response_obj
+        })
+    }
+
+    // ========================================================================
+    // MCP Event Emission Methods
+    // ========================================================================
+
+    pub fn emit_mcp_list_tools_in_progress(&mut self, output_index: usize, item_id: &str) -> Value {
+        json!({
+            "type": McpEvent::LIST_TOOLS_IN_PROGRESS,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id
+        })
+    }
+
+    pub fn emit_mcp_list_tools_completed(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        tool_items: &[Value],
+    ) -> Value {
+        json!({
+            "type": McpEvent::LIST_TOOLS_COMPLETED,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "tools": tool_items
+        })
+    }
+
+    pub fn emit_mcp_call_arguments_delta(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        delta: &str,
+    ) -> Value {
+        json!({
+            "type": McpEvent::CALL_ARGUMENTS_DELTA,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "delta": delta,
+            "obfuscation": random_obfuscation()
+        })
+    }
+
+    pub fn emit_mcp_call_arguments_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        arguments: &str,
+    ) -> Value {
+        json!({
+            "type": McpEvent::CALL_ARGUMENTS_DONE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "arguments": arguments
+        })
+    }
+
+    pub fn emit_mcp_call_failed(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        error: &str,
+    ) -> Value {
+        json!({
+            "type": McpEvent::CALL_FAILED,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "error": error
+        })
+    }
+
+    // ========================================================================
+    // Generic Tool Call Event Emission (based on OutputFamily)
+    // ========================================================================
+
+    /// Emit a tool call event with the specified event type.
+    /// This is the internal helper used by all tool call event methods.
+    fn emit_tool_event(
+        &mut self,
+        event_type: &'static str,
+        output_index: usize,
+        item_id: &str,
+    ) -> Value {
+        json!({
+            "type": event_type,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id
+        })
+    }
+
+    /// Emit the appropriate in_progress event based on output family.
+    ///
+    /// Returns `None` for `Function` (caller-declared function tools)
+    /// because the OpenAI wire spec carries `function_call`'s
+    /// in-progress state only on `output_item.added`'s `status`
+    /// field, not as a separate event. Hosted-builtin and `McpCall`
+    /// families return `Some(event)`.
+    pub fn emit_tool_call_in_progress(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        family: OutputFamily,
+    ) -> Option<Value> {
+        let event_type = match family {
+            OutputFamily::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
+            OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
+            OutputFamily::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
+            OutputFamily::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
+            OutputFamily::McpCall => McpEvent::CALL_IN_PROGRESS,
+            OutputFamily::Function => return None,
+        };
+        Some(self.emit_tool_event(event_type, output_index, item_id))
+    }
+
+    /// Emit the searching/interpreting/generating event for builtin tool calls (no-op for passthrough).
+    ///
+    /// For `image_generation_call` this emits the `generating` event. The
+    /// partial-image event is emitted separately via `emit_image_generation_partial_image`
+    /// because it carries additional payload (the partial b64 bytes) and is
+    /// optional per the `partial_images` request field.
+    pub fn emit_tool_call_searching(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        family: OutputFamily,
+    ) -> Option<Value> {
+        let event_type = match family {
+            OutputFamily::WebSearchCall => WebSearchCallEvent::SEARCHING,
+            OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
+            OutputFamily::FileSearchCall => FileSearchCallEvent::SEARCHING,
+            OutputFamily::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
+            OutputFamily::McpCall | OutputFamily::Function => return None,
+        };
+        Some(self.emit_tool_event(event_type, output_index, item_id))
+    }
+
+    /// Emit a `response.image_generation_call.partial_image` event.
+    ///
+    /// Returns `None` when `response_format` is anything other than
+    /// [`OutputFamily::ImageGenerationCall`], mirroring how
+    /// `emit_tool_call_searching` gates on format. The payload carries the
+    /// base64-encoded partial image bytes plus a 0-based partial image index.
+    ///
+    /// Per-router wiring is responsible for deciding when to call this and
+    /// how to source the partial-image bytes.
+    #[expect(
+        dead_code,
+        reason = "partial_image emission is wired by per-router integrations"
+    )]
+    pub fn emit_image_generation_partial_image(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        family: OutputFamily,
+        partial_image_index: u32,
+        partial_image_b64: &str,
+    ) -> Option<Value> {
+        if !matches!(family, OutputFamily::ImageGenerationCall) {
+            return None;
+        }
+        Some(json!({
+            "type": ImageGenerationCallEvent::PARTIAL_IMAGE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "partial_image_index": partial_image_index,
+            "partial_image_b64": partial_image_b64
+        }))
+    }
+
+    /// Emit the appropriate completed event based on output family.
+    ///
+    /// Returns `None` for `Function` because `function_call` has no
+    /// `*_completed` event — its completion is signalled only by
+    /// `output_item.done`. Hosted-builtin and `McpCall` return
+    /// `Some(event)`.
+    pub fn emit_tool_call_completed(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        family: OutputFamily,
+    ) -> Option<Value> {
+        let event_type = match family {
+            OutputFamily::WebSearchCall => WebSearchCallEvent::COMPLETED,
+            OutputFamily::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
+            OutputFamily::FileSearchCall => FileSearchCallEvent::COMPLETED,
+            OutputFamily::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
+            OutputFamily::McpCall => McpEvent::CALL_COMPLETED,
+            OutputFamily::Function => return None,
+        };
+        Some(self.emit_tool_event(event_type, output_index, item_id))
+    }
+
+    /// Emit a streaming `*_arguments.delta` event keyed on the
+    /// caller's [`OutputFamily`]. Returns `None` for families that
+    /// don't stream arguments on the wire (hosted builtins surface
+    /// progress through structured `*.in_progress` / `*.searching`
+    /// events instead).
+    pub fn emit_tool_call_arguments_delta(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        delta: &str,
+        family: OutputFamily,
+    ) -> Option<Value> {
+        match family {
+            OutputFamily::Function => {
+                Some(self.emit_function_call_arguments_delta(output_index, item_id, delta))
+            }
+            OutputFamily::McpCall => {
+                Some(self.emit_mcp_call_arguments_delta(output_index, item_id, delta))
+            }
+            OutputFamily::WebSearchCall
+            | OutputFamily::CodeInterpreterCall
+            | OutputFamily::FileSearchCall
+            | OutputFamily::ImageGenerationCall => None,
+        }
+    }
+
+    /// Emit the closing `*_arguments.done` event keyed on
+    /// [`OutputFamily`]. Mirrors [`emit_tool_call_arguments_delta`].
+    pub fn emit_tool_call_arguments_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        arguments: &str,
+        family: OutputFamily,
+    ) -> Option<Value> {
+        match family {
+            OutputFamily::Function => {
+                Some(self.emit_function_call_arguments_done(output_index, item_id, arguments))
+            }
+            OutputFamily::McpCall => {
+                Some(self.emit_mcp_call_arguments_done(output_index, item_id, arguments))
+            }
+            OutputFamily::WebSearchCall
+            | OutputFamily::CodeInterpreterCall
+            | OutputFamily::FileSearchCall
+            | OutputFamily::ImageGenerationCall => None,
+        }
+    }
+
+    // ========================================================================
+    // Helper Methods for OutputFamily
+    // ========================================================================
+
+    /// Map an [`OutputFamily`] (or absence) to the [`OutputItemType`]
+    /// the per-index allocator uses. Falls back to `FunctionCall` when
+    /// the caller has no family hint — caller-declared function tools
+    /// are the only family that legitimately reach this fallback path.
+    pub fn output_item_type_for_family(family: Option<OutputFamily>) -> OutputItemType {
+        match family {
+            Some(OutputFamily::WebSearchCall) => OutputItemType::WebSearchCall,
+            Some(OutputFamily::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
+            Some(OutputFamily::FileSearchCall) => OutputItemType::FileSearchCall,
+            Some(OutputFamily::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
+            Some(OutputFamily::McpCall) => OutputItemType::McpCall,
+            Some(OutputFamily::Function) | None => OutputItemType::FunctionCall,
+        }
+    }
+
+    // ========================================================================
+    // Function Call Event Emission Methods
+    // ========================================================================
+
+    pub fn emit_function_call_arguments_delta(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        delta: &str,
+    ) -> Value {
+        json!({
+            "type": FunctionCallEvent::ARGUMENTS_DELTA,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "delta": delta,
+            "obfuscation": random_obfuscation()
+        })
+    }
+
+    pub fn emit_function_call_arguments_done(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        arguments: &str,
+    ) -> Value {
+        json!({
+            "type": FunctionCallEvent::ARGUMENTS_DONE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "arguments": arguments
+        })
+    }
+
+    // ========================================================================
+    // Output Item Wrapper Events
+    // ========================================================================
+
+    /// Emit response.output_item.added event
+    pub fn emit_output_item_added(&mut self, output_index: usize, item: &Value) -> Value {
+        json!({
+            "type": OutputItemEvent::ADDED,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item": item
+        })
+    }
+
+    /// Emit response.output_item.done event
+    pub fn emit_output_item_done(&mut self, output_index: usize, item: &Value) -> Value {
+        // Store the item data for later use in emit_completed
+        self.store_output_item_data(output_index, item.clone());
+
+        json!({
+            "type": OutputItemEvent::DONE,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item": item
+        })
+    }
+
+    /// Generate unique ID for item type
+    fn generate_item_id(prefix: &str) -> String {
+        format!("{}_{}", prefix, Uuid::now_v7().simple())
+    }
+
+    /// Allocate next output index and track item
+    pub fn allocate_output_index(&mut self, item_type: OutputItemType) -> (usize, String) {
+        let index = self.next_output_index;
+        self.next_output_index += 1;
+
+        let id_prefix = match &item_type {
+            OutputItemType::McpListTools => "mcpl",
+            OutputItemType::McpCall => "mcp",
+            // `mcpr_` matches OpenAI's documented prefix for
+            // `mcp_approval_request` items.
+            OutputItemType::McpApprovalRequest => "mcpr",
+            OutputItemType::FunctionCall => "fc",
+            OutputItemType::Message => "msg",
+            OutputItemType::Reasoning => "rs",
+            OutputItemType::WebSearchCall => "ws",
+            OutputItemType::CodeInterpreterCall => "ci",
+            OutputItemType::FileSearchCall => "fs",
+            OutputItemType::ImageGenerationCall => "ig",
+        };
+
+        let id = Self::generate_item_id(id_prefix);
+
+        self.output_items.push(OutputItemState {
+            output_index: index,
+            status: ItemStatus::InProgress,
+            item_data: None,
+        });
+
+        (index, id)
+    }
+
+    pub fn next_output_index(&self) -> usize {
+        self.next_output_index
+    }
+
+    pub fn advance_next_output_index_to(&mut self, next_output_index: usize) {
+        self.next_output_index = self.next_output_index.max(next_output_index);
+    }
+
+    /// Mark output item as completed and store its data
+    pub fn complete_output_item(&mut self, output_index: usize) {
+        if let Some(item) = self
+            .output_items
+            .iter_mut()
+            .find(|i| i.output_index == output_index)
+        {
+            item.status = ItemStatus::Completed;
+        }
+    }
+
+    /// Store output item data when emitting output_item.done
+    pub fn store_output_item_data(&mut self, output_index: usize, item_data: Value) {
+        if let Some(item) = self
+            .output_items
+            .iter_mut()
+            .find(|i| i.output_index == output_index)
+        {
+            item.item_data = Some(item_data);
+        }
+    }
+
+    /// Finalize and return the complete ResponsesResponse
+    ///
+    /// This constructs the final ResponsesResponse from all accumulated output items
+    /// for persistence. Should be called after streaming is complete.
+    /// Reads non-destructively so `emit_completed()` can still drain state afterwards.
+    pub fn finalize(&self, usage: Option<Usage>) -> ResponsesResponse {
+        // Build output array from tracked items (clone — emit_completed drains later)
+        let output: Vec<ResponseOutputItem> = self
+            .output_items
+            .iter()
+            .filter_map(|item| {
+                item.item_data
+                    .as_ref()
+                    .and_then(|data| serde_json::from_value(data.clone()).ok())
+            })
+            .collect();
+
+        // Convert Usage to ResponsesUsage
+        let responses_usage = usage.map(|u| {
+            ResponsesUsage::Modern(ResponseUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+                input_tokens_details: u
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(InputTokensDetails::from),
+                output_tokens_details: u.completion_tokens_details.as_ref().and_then(|d| {
+                    d.reasoning_tokens.map(|tokens| OutputTokensDetails {
+                        reasoning_tokens: tokens,
+                    })
+                }),
+            })
+        });
+
+        // Build response using builder
+        ResponsesResponse::builder(&self.response_id, &self.model)
+            .created_at(self.created_at as i64)
+            .status(ResponseStatus::Completed)
+            .output(output)
+            .maybe_copy_from_request(self.original_request.as_ref())
+            .maybe_usage(responses_usage)
+            .build()
+    }
+
+    pub fn process_reasoning_delta(
+        &mut self,
+        delta: &str,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+
+        if self.current_reasoning_item_id.is_none() {
+            let (output_index, item_id) = self.allocate_output_index(OutputItemType::Reasoning);
+            self.current_reasoning_output_index = Some(output_index);
+            self.current_reasoning_item_id = Some(item_id.clone());
+
+            // Match the OpenAI Responses cloud reasoning item shape:
+            // only `id`, `type`, and `summary` are emitted (verified by
+            // hitting the cloud across effort=minimal/medium/high and
+            // summary=auto/detailed; `content` / `encrypted_content` /
+            // `status` never appear unless the client opts into
+            // `include: ["reasoning.encrypted_content"]`, which the
+            // gateway does not relay anyway).
+            let item = json!({
+                "id": item_id,
+                "type": "reasoning",
+                "summary": [],
+            });
+            let event = self.emit_output_item_added(output_index, &item);
+            self.send_event(&event, tx)?;
+        }
+
+        let Some(output_index) = self.current_reasoning_output_index else {
+            return Ok(());
+        };
+        let Some(item_id) = self.current_reasoning_item_id.clone() else {
+            return Ok(());
+        };
+
+        if !self.has_emitted_reasoning_summary_part_added {
+            let event = json!({
+                "type": "response.reasoning_summary_part.added",
+                "sequence_number": self.next_sequence(),
+                "output_index": output_index,
+                "item_id": item_id,
+                "summary_index": 0,
+                "part": { "type": "summary_text", "text": "" }
+            });
+            self.send_event(&event, tx)?;
+            self.has_emitted_reasoning_summary_part_added = true;
+        }
+
+        self.accumulated_reasoning_text.push_str(delta);
+        // Cloud emits reasoning summary deltas under
+        // `response.reasoning_summary_text.{delta,done}` keyed by
+        // `summary_index`, not `response.reasoning_text.*` /
+        // `content_index`. Use the cloud-aligned event family so
+        // OpenAI-SDK clients pick up the deltas as standard reasoning
+        // summary stream, and final `summary[]` is populated below in
+        // `finish_reasoning_item` with the same accumulated text.
+        let event = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "summary_index": 0,
+            "delta": delta,
+            "obfuscation": random_obfuscation()
+        });
+        self.send_event(&event, tx)
+    }
+
+    pub fn finish_reasoning_item(
+        &mut self,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let (Some(output_index), Some(item_id)) = (
+            self.current_reasoning_output_index,
+            self.current_reasoning_item_id.clone(),
+        ) else {
+            return Ok(());
+        };
+
+        let text = std::mem::take(&mut self.accumulated_reasoning_text);
+        let event = json!({
+            "type": "response.reasoning_summary_text.done",
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id,
+            "summary_index": 0,
+            "text": text.clone()
+        });
+        self.send_event(&event, tx)?;
+
+        if self.has_emitted_reasoning_summary_part_added {
+            let event = json!({
+                "type": "response.reasoning_summary_part.done",
+                "sequence_number": self.next_sequence(),
+                "output_index": output_index,
+                "item_id": item_id,
+                "summary_index": 0,
+                "part": { "type": "summary_text", "text": text.clone() }
+            });
+            self.send_event(&event, tx)?;
+        }
+
+        // Final reasoning item carries the accumulated text inside
+        // `summary[]` as a `summary_text` part, matching the cloud
+        // shape (verified across multiple effort/summary configs).
+        let item = json!({
+            "id": item_id,
+            "type": "reasoning",
+            "summary": [
+                { "type": "summary_text", "text": text }
+            ],
+        });
+        let event = self.emit_output_item_done(output_index, &item);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        self.current_reasoning_output_index = None;
+        self.current_reasoning_item_id = None;
+        self.has_emitted_reasoning_summary_part_added = false;
+        Ok(())
+    }
+
+    /// Process a chunk and emit appropriate events
+    pub fn process_chunk(
+        &mut self,
+        chunk: &ChatCompletionStreamResponse,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        // Process content if present
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(reasoning) = &choice.delta.reasoning_content {
+                self.process_reasoning_delta(reasoning, tx)?;
+            }
+
+            if let Some(content) = &choice.delta.content {
+                if !content.is_empty() {
+                    // Allocate output_index and item_id for this message item (once per message)
+                    if self.current_item_id.is_none() {
+                        let (output_index, item_id) =
+                            self.allocate_output_index(OutputItemType::Message);
+
+                        // Build message item structure
+                        let item = json!({
+                            "id": item_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": []
+                        });
+
+                        // Emit output_item.added
+                        let event = self.emit_output_item_added(output_index, &item);
+                        self.send_event(&event, tx)?;
+                        self.has_emitted_output_item_added = true;
+
+                        // Store for subsequent events
+                        self.current_item_id = Some(item_id);
+                        self.current_message_output_index = Some(output_index);
+                    }
+
+                    // output_index and item_id are always set in the block above
+                    // when current_item_id was None and we allocated new ones
+                    if let (Some(output_index), Some(item_id)) = (
+                        self.current_message_output_index,
+                        self.current_item_id.clone(),
+                    ) {
+                        let content_index = 0; // Single content part for now
+
+                        // Emit content_part.added before first delta
+                        if !self.has_emitted_content_part_added {
+                            let event =
+                                self.emit_content_part_added(output_index, &item_id, content_index);
+                            self.send_event(&event, tx)?;
+                            self.has_emitted_content_part_added = true;
+                        }
+
+                        // Emit text delta
+                        let event =
+                            self.emit_text_delta(content, output_index, &item_id, content_index);
+                        self.send_event(&event, tx)?;
+                    }
+                }
+            }
+
+            // Check for finish_reason to emit completion events
+            if let Some(reason) = &choice.finish_reason {
+                self.finish_reasoning_item(tx)?;
+                if reason == "stop" || reason == "length" {
+                    if let (Some(output_index), Some(item_id)) = (
+                        self.current_message_output_index,
+                        self.current_item_id.clone(),
+                    ) {
+                        let content_index = 0;
+
+                        // Emit closing events
+                        if self.has_emitted_content_part_added {
+                            let event = self.emit_text_done(output_index, &item_id, content_index);
+                            self.send_event(&event, tx)?;
+                            let event =
+                                self.emit_content_part_done(output_index, &item_id, content_index);
+                            self.send_event(&event, tx)?;
+                        }
+
+                        if self.has_emitted_output_item_added {
+                            // Build complete message item for output_item.done
+                            let item = json!({
+                                "id": item_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": std::mem::take(&mut self.accumulated_text)
+                                }]
+                            });
+                            let event = self.emit_output_item_done(output_index, &item);
+                            self.send_event(&event, tx)?;
+                        }
+
+                        // Mark item as completed
+                        self.complete_output_item(output_index);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[expect(
+        clippy::unused_self,
+        reason = "method on emitter for API consistency with send_event_best_effort"
+    )]
+    pub fn send_event(
+        &self,
+        event: &Value,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let event_json =
+            serde_json::to_string(event).map_err(|e| format!("Failed to serialize event: {e}"))?;
+
+        // Extract event type from the JSON for SSE event field
+        let event_type = event
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("message");
+
+        // Format as SSE with event: field
+        let sse_message = format!("event: {event_type}\ndata: {event_json}\n\n");
+
+        if tx.send(Ok(Bytes::from(sse_message))).is_err() {
+            return Err("Client disconnected".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Send event and log any errors (typically client disconnect)
+    ///
+    /// This is a convenience method for streaming scenarios where client
+    /// disconnection is expected and should be logged but not fail the operation.
+    /// Returns true if sent successfully, false if client disconnected.
+    pub fn send_event_best_effort(
+        &self,
+        event: &Value,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> bool {
+        match self.send_event(event, tx) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!("Failed to send event (likely client disconnect): {}", e);
+                false
+            }
+        }
+    }
+
+    /// Emit the full `mcp_list_tools` output item lifecycle.
+    pub fn emit_mcp_list_tools_item_lifecycle(
+        &mut self,
+        item: &ResponseOutputItem,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let ResponseOutputItem::McpListTools {
+            id,
+            server_label,
+            tools,
+            ..
+        } = item
+        else {
+            return Ok(());
+        };
+
+        let tool_items: Vec<Value> = tools
+            .iter()
+            .map(|tool| serde_json::to_value(tool).unwrap_or(Value::Null))
+            .collect();
+        let (output_index, _allocated_id) =
+            self.allocate_output_index(OutputItemType::McpListTools);
+        let item_in_progress = json!({
+            "id": id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "tools": [],
+        });
+
+        let event = self.emit_output_item_added(output_index, &item_in_progress);
+        self.send_event(&event, tx)?;
+        let event = self.emit_mcp_list_tools_in_progress(output_index, id);
+        self.send_event(&event, tx)?;
+        let event = self.emit_mcp_list_tools_completed(output_index, id, &tool_items);
+        self.send_event(&event, tx)?;
+
+        let item_done = json!({
+            "id": id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "tools": tool_items,
+        });
+        let event = self.emit_output_item_done(output_index, &item_done);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
+
+    /// Emit an approval request as an added/done output item lifecycle.
+    pub fn emit_approval_request_lifecycle(
+        &mut self,
+        pending: &PendingToolExecution,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let (output_index, _allocated_item_id) =
+            self.allocate_output_index(OutputItemType::McpApprovalRequest);
+        let item_id = format!("mcpr_{}", pending.call.call_id);
+        let item = json!({
+            "id": item_id,
+            "type": "mcp_approval_request",
+            "server_label": pending.server_label,
+            "name": pending.call.name,
+            "arguments": pending.call.arguments,
+        });
+
+        let event = self.emit_output_item_added(output_index, &item);
+        self.send_event(&event, tx)?;
+        let event = self.emit_output_item_done(output_index, &item);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
+
+    /// Emit the open-half lifecycle for an approval-continuation replay.
+    pub fn emit_approved_tool_replay_lifecycle(
+        &mut self,
+        call: &LoopToolCall,
+        family: OutputFamily,
+        server_label: &str,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<ApprovedReplayHandle, String> {
+        let presentation = ToolPresentation::from_family(family);
+        let output_item_type = Self::output_item_type_for_family(Some(family));
+        let (output_index, allocated_item_id) = self.allocate_output_index(output_item_type);
+        let item = presentation.render_initial_item(call, server_label, &allocated_item_id);
+
+        let event = self.emit_output_item_added(output_index, &item);
+        self.send_event(&event, tx)?;
+
+        if let Some(event) =
+            self.emit_tool_call_in_progress(output_index, &allocated_item_id, family)
+        {
+            self.send_event(&event, tx)?;
+        }
+
+        if presentation.streams_arguments() {
+            if let Some(event) = self.emit_tool_call_arguments_delta(
+                output_index,
+                &allocated_item_id,
+                &call.arguments,
+                family,
+            ) {
+                self.send_event(&event, tx)?;
+            }
+            if let Some(event) = self.emit_tool_call_arguments_done(
+                output_index,
+                &allocated_item_id,
+                &call.arguments,
+                family,
+            ) {
+                self.send_event(&event, tx)?;
+            }
+        }
+
+        Ok(ApprovedReplayHandle {
+            output_index,
+            item_id: allocated_item_id,
+            presentation,
+        })
+    }
+
+    /// Emit the close-half lifecycle for a gateway-executed tool call.
+    pub fn emit_gateway_tool_completed_lifecycle(
+        &mut self,
+        completion: GatewayToolCompletion<'_>,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let GatewayToolCompletion {
+            output_index,
+            item_id,
+            executed,
+            presentation,
+            server_label,
+            approval_request_id,
+        } = completion;
+        let family = presentation.family;
+        if executed.is_error && presentation.has_failed_event() {
+            let event = self.emit_mcp_call_failed(output_index, item_id, &executed.output_string);
+            self.send_event(&event, tx)?;
+        } else if let Some(event) = self.emit_tool_call_completed(output_index, item_id, family) {
+            self.send_event(&event, tx)?;
+        }
+
+        let mut item = presentation.render_final_item(executed, item_id);
+        if matches!(family, OutputFamily::McpCall) {
+            if let Some(obj) = item.as_object_mut() {
+                if !server_label.is_empty()
+                    && obj
+                        .get("server_label")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                {
+                    obj.insert(
+                        "server_label".to_string(),
+                        Value::String(server_label.to_string()),
+                    );
+                }
+                if let Some(approval_id) = approval_request_id {
+                    obj.insert(
+                        "approval_request_id".to_string(),
+                        Value::String(approval_id.to_string()),
+                    );
+                }
+            }
+        }
+
+        let event = self.emit_output_item_done(output_index, &item);
+        self.send_event(&event, tx)?;
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
+
+    /// Emit an error event
+    ///
+    /// Creates and sends an error event with the given error message.
+    /// Uses OpenAI's error event format.
+    /// Use this for terminal errors that should abort the streaming response.
+    pub fn emit_error(
+        &mut self,
+        error_msg: &str,
+        error_code: Option<&str>,
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) {
+        let event = json!({
+            "type": "error",
+            "code": error_code.unwrap_or("internal_error"),
+            "message": error_msg,
+            "param": null,
+            "sequence_number": self.next_sequence()
+        });
+        let sse_data = match serde_json::to_string(&event) {
+            Ok(json) => format!("data: {json}\n\n"),
+            Err(_) => "data: {\"type\":\"error\",\"code\":\"internal_error\",\"message\":\"serialization failed\",\"param\":null}\n\n".to_string(),
+        };
+        let _ = tx.send(Ok(Bytes::from(sse_data)));
+    }
+}
+
+/// Build a Server-Sent Events (SSE) response
+///
+/// Creates a Response with proper SSE headers and streaming body.
+#[expect(
+    clippy::expect_used,
+    reason = "Response::builder with static headers and valid status code is infallible"
+)]
+pub(crate) fn build_sse_response(
+    rx: mpsc::UnboundedReceiver<Result<Bytes, std::io::Error>>,
+) -> Response {
+    let stream = UnboundedReceiverStream::new(rx);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        )
+        .header("Cache-Control", HeaderValue::from_static("no-cache"))
+        .header("Connection", HeaderValue::from_static("keep-alive"))
+        .body(Body::from_stream(stream))
+        .expect("infallible: static headers and valid status code")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use openai_protocol::responses::{
+        McpTool, RequireApproval, RequireApprovalMode, ResponseInput, ResponseTool,
+    };
+
+    use super::*;
+
+    fn emitter() -> ResponseStreamEventEmitter {
+        ResponseStreamEventEmitter::new("resp_test".to_string(), "model".to_string(), 123)
+    }
+
+    fn parse_sse_payload(bytes: Bytes) -> Value {
+        let text = std::str::from_utf8(&bytes).expect("sse is utf8");
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("sse data line");
+        serde_json::from_str(data).expect("valid event json")
+    }
+
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<Result<Bytes, std::io::Error>>) -> Vec<Value> {
+        let mut events = Vec::new();
+        while let Ok(Ok(bytes)) = rx.try_recv() {
+            events.push(parse_sse_payload(bytes));
+        }
+        events
+    }
+
+    fn assert_obfuscation(event: &Value) {
+        let obfuscation = event
+            .get("obfuscation")
+            .and_then(Value::as_str)
+            .expect("obfuscation string");
+        assert!(!obfuscation.is_empty());
+    }
+
+    #[test]
+    fn incomplete_terminal_event_uses_response_incomplete() {
+        let mut emitter = emitter();
+
+        let event = emitter.emit_incomplete("max_output_tokens", None);
+
+        assert_eq!(event["type"], json!(ResponseEvent::INCOMPLETE));
+        assert_eq!(event["response"]["status"], json!("incomplete"));
+        assert!(event["response"]["completed_at"].as_i64().is_some());
+        assert_eq!(
+            event["response"]["incomplete_details"]["reason"],
+            json!("max_output_tokens")
+        );
+    }
+
+    #[test]
+    fn terminal_response_omits_absent_conversation_and_scrubs_tools() {
+        let mut emitter = emitter();
+        emitter.set_original_request(ResponsesRequest {
+            model: "model".to_string(),
+            input: ResponseInput::Text("hi".to_string()),
+            tools: Some(vec![ResponseTool::Mcp(McpTool {
+                server_url: Some("https://mcp.example.test/sse".to_string()),
+                authorization: Some("secret-token".to_string()),
+                headers: Some(HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer secret".to_string(),
+                )])),
+                server_label: "deepwiki".to_string(),
+                server_description: None,
+                require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Never)),
+                allowed_tools: None,
+                connector_id: None,
+                defer_loading: None,
+            })]),
+            ..Default::default()
+        });
+
+        let event = emitter.emit_completed(None);
+        let response = &event["response"];
+        let tool = &response["tools"][0];
+
+        assert!(response.get("conversation").is_none());
+        assert!(response.get("billing").is_none());
+        assert!(response["completed_at"].as_i64().is_some());
+        assert_eq!(tool["headers"], Value::Null);
+        assert_eq!(tool["allowed_tools"], Value::Null);
+        assert!(tool.get("authorization").is_none());
+    }
+
+    #[test]
+    fn mcp_list_tools_lifecycle_omits_status_on_items() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = emitter();
+        let item = ResponseOutputItem::McpListTools {
+            id: "mcpl_test".to_string(),
+            server_label: "deepwiki".to_string(),
+            tools: vec![],
+            error: None,
+        };
+
+        emitter
+            .emit_mcp_list_tools_item_lifecycle(&item, &tx)
+            .expect("sequence emits");
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0]["type"], json!(OutputItemEvent::ADDED));
+        assert!(events[0]["item"].get("status").is_none());
+        assert_eq!(events[3]["type"], json!(OutputItemEvent::DONE));
+        assert!(events[3]["item"].get("status").is_none());
+    }
+
+    #[test]
+    fn streaming_delta_events_carry_obfuscation_strings() {
+        let mut emitter = emitter();
+
+        assert_obfuscation(&emitter.emit_text_delta("hello", 0, "msg_1", 0));
+        assert_obfuscation(&emitter.emit_mcp_call_arguments_delta(1, "mcp_1", "{}"));
+        assert_obfuscation(&emitter.emit_function_call_arguments_delta(2, "fc_1", "{}"));
+    }
+
+    #[test]
+    fn reasoning_summary_part_done_carries_accumulated_text() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = emitter();
+
+        emitter
+            .process_reasoning_delta("first ", &tx)
+            .expect("reasoning delta emits");
+        emitter
+            .process_reasoning_delta("second", &tx)
+            .expect("reasoning delta emits");
+        emitter
+            .finish_reasoning_item(&tx)
+            .expect("reasoning item finishes");
+
+        let events = drain_events(&mut rx);
+        let delta = events
+            .iter()
+            .find(|event| event["type"] == json!("response.reasoning_summary_text.delta"))
+            .expect("summary delta event");
+        assert_obfuscation(delta);
+
+        let part_done = events
+            .iter()
+            .find(|event| event["type"] == json!("response.reasoning_summary_part.done"))
+            .expect("summary part done event");
+        assert_eq!(part_done["part"]["text"], json!("first second"));
+    }
+}

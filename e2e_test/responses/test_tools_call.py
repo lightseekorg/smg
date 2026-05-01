@@ -262,11 +262,12 @@ def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_cl
     resp2 = api_client.responses.create(
         model=model,
         input=(
-            "Search the web for 'Rust programming language'. Set count to 1 and return one "
-            "sentence response."
+            "Use brave_web_search to search the web for today's weather in Seattle. Set count "
+            "to 1 and return one sentence based only on the search result."
         ),
         previous_response_id=resp1.id,
         tools=[BRAVE_MCP_TOOL],
+        tool_choice="required",
         stream=False,
         reasoning={"effort": "low"},
     )
@@ -284,6 +285,7 @@ def assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_cl
         ),
         previous_response_id=resp2.id,
         tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
+        tool_choice="required",
         stream=False,
         reasoning={"effort": "low"},
     )
@@ -311,13 +313,14 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
         api_client.responses.create(
             model=model,
             input=(
-                "Search the web for 'Rust programming language'. Set count to 1 and return one "
-                "sentence response."
+                "Use brave_web_search to search the web for today's weather in Seattle. Set "
+                "count to 1 and return one sentence based only on the search result."
             ),
             previous_response_id=[e for e in events1 if e.type == "response.completed"][
                 0
             ].response.id,
             tools=[BRAVE_MCP_TOOL],
+            tool_choice="required",
             stream=True,
             reasoning={"effort": "low"},
         )
@@ -337,6 +340,7 @@ def assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client
                 0
             ].response.id,
             tools=[BRAVE_MCP_TOOL, DEEPWIKI_MCP_TOOL],
+            tool_choice="required",
             stream=True,
             reasoning={"effort": "low"},
         )
@@ -1122,6 +1126,16 @@ class TestToolChoiceGptOss:
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
 
+    def test_previous_response_id_mcp_binding_behavior(self, model, api_client):
+        """Resumed turns should not relist existing MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client)
+
+    def test_previous_response_id_mcp_binding_behavior_streaming(self, model, api_client):
+        """Streaming resumed turns should only list newly added MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client)
+
 
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model) - Tool Choice
@@ -1411,3 +1425,13 @@ class TestToolChoiceLocal:
         assert len(mcp_calls) > 0
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
+
+    def test_previous_response_id_mcp_binding_behavior(self, model, api_client):
+        """Resumed turns should not relist existing MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_non_streaming(model, api_client)
+
+    def test_previous_response_id_mcp_binding_behavior_streaming(self, model, api_client):
+        """Streaming resumed turns should only list newly added MCP bindings."""
+
+        assert_previous_response_id_mcp_binding_behavior_streaming(model, api_client)

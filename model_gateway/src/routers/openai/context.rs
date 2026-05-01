@@ -9,12 +9,16 @@ use smg_data_connector::{
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
     RequestContext as StorageRequestContext, ResponseStorage,
 };
-use smg_mcp::{McpOrchestrator, McpToolSession};
+use smg_mcp::McpOrchestrator;
 
 use super::provider::Provider;
 use crate::{
-    config::RouterConfig, memory::MemoryExecutionContext, middleware,
-    middleware::TenantRequestMeta, worker::Worker,
+    config::RouterConfig,
+    memory::MemoryExecutionContext,
+    middleware,
+    middleware::TenantRequestMeta,
+    routers::common::agent_loop::{PreparedLoopInput, ToolTransferDescriptor},
+    worker::Worker,
 };
 
 pub struct RequestContext {
@@ -115,7 +119,7 @@ impl ComponentRefs {
 pub struct ProcessingState {
     pub worker: Option<WorkerSelection>,
     pub payload: Option<PayloadState>,
-    pub responses_payload: Option<ResponsesPayloadState>,
+    pub(crate) responses_payload: Option<ResponsesPayloadState>,
 }
 
 pub struct WorkerSelection {
@@ -128,10 +132,11 @@ pub struct PayloadState {
     pub url: String,
 }
 
-#[derive(Default)]
-pub struct ResponsesPayloadState {
-    pub previous_response_id: Option<String>,
-    pub existing_mcp_list_tools_labels: Vec<String>,
+pub(crate) struct ResponsesPayloadState {
+    pub(crate) url: String,
+    pub(crate) existing_mcp_list_tools_labels: Vec<String>,
+    pub(crate) current_request: ResponsesRequest,
+    pub(crate) prepared: PreparedLoopInput,
 }
 
 impl RequestContext {
@@ -247,7 +252,7 @@ impl RequestContext {
         self.state.payload.take()
     }
 
-    pub fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
+    pub(crate) fn take_responses_payload(&mut self) -> Option<ResponsesPayloadState> {
         self.state.responses_payload.take()
     }
 }
@@ -256,72 +261,12 @@ pub struct StorageHandles {
     pub response: Arc<dyn ResponseStorage>,
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
-    /// Conversation memory writer (can be NoOp depending on backend).
-    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub request_context: Option<StorageRequestContext>,
-    pub memory_execution_context: MemoryExecutionContext,
-}
-
-pub struct OwnedStreamingContext {
-    pub url: String,
-    pub payload: Value,
-    pub original_body: ResponsesRequest,
-    pub previous_response_id: Option<String>,
-    pub existing_mcp_list_tools_labels: Vec<String>,
-    pub storage: StorageHandles,
-}
-
-impl RequestContext {
-    pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
-        let payload_state = self.take_payload().ok_or("Payload not prepared")?;
-        let responses_payload_state = self.take_responses_payload().unwrap_or_default();
-        let original_body = self
-            .responses_request()
-            .ok_or("Expected responses request")?
-            .clone();
-        let response = self
-            .components
-            .response_storage()
-            .ok_or("Response storage required")?
-            .clone();
-        let conversation = self
-            .components
-            .conversation_storage()
-            .ok_or("Conversation storage required")?
-            .clone();
-        let conversation_item = self
-            .components
-            .conversation_item_storage()
-            .ok_or("Conversation item storage required")?
-            .clone();
-        let conversation_memory_writer = self
-            .components
-            .conversation_memory_writer()
-            .ok_or("Conversation memory writer required")?
-            .clone();
-
-        Ok(OwnedStreamingContext {
-            url: payload_state.url,
-            payload: payload_state.json,
-            original_body,
-            previous_response_id: responses_payload_state.previous_response_id,
-            existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
-            storage: StorageHandles {
-                response,
-                conversation,
-                conversation_item,
-                conversation_memory_writer,
-                request_context: self.storage_request_context,
-                memory_execution_context: self.memory_execution_context,
-            },
-        })
-    }
 }
 
 pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
-    pub session: Option<&'a McpToolSession<'a>>,
+    pub tool_transfers: &'a std::collections::HashMap<String, ToolTransferDescriptor>,
+    pub tool_server_labels: &'a std::collections::HashMap<String, String>,
 }
-
-pub type StreamingRequest = OwnedStreamingContext;

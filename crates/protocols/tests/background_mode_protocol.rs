@@ -97,33 +97,38 @@ fn responses_response_round_trips_new_fields() {
     let v = serde_json::to_value(&resp).expect("serialize");
     assert_eq!(v["background"], true);
     assert_eq!(v["completed_at"], 1_700_000_000);
-    assert_eq!(v["conversation"], "conv_123");
+    // The builder normalizes `.conversation("conv_id")` into the
+    // `Object { id }` wire form to match OpenAI Responses' echoed
+    // `{"id": ...}` shape; bare-string deserialization stays
+    // supported via the untagged `ConversationRef::Id` variant.
+    assert_eq!(v["conversation"], serde_json::json!({"id": "conv_123"}));
 
     let back: ResponsesResponse = serde_json::from_value(v).expect("deserialize");
     assert_eq!(back.background, Some(true));
     assert_eq!(back.completed_at, Some(1_700_000_000));
-    assert_eq!(back.conversation.as_deref(), Some("conv_123"));
+    assert_eq!(
+        back.conversation.as_ref().map(|c| c.as_id()),
+        Some("conv_123")
+    );
 }
 
 #[test]
-fn responses_response_new_fields_absent_when_unset() {
-    // ResponsesResponse uses `#[serde_with::skip_serializing_none]`, so Option
-    // fields left as None are omitted from the wire output rather than emitted
-    // as `null`. This test locks that contract.
+fn responses_response_canonical_fields_null_when_unset() {
+    // Canonical Responses API top-level fields are emitted as null when unset
+    // so strict SDK clients see a stable response shape.
     let resp = ResponsesResponse::builder("resp_xyz", "gpt-5.4")
         .status(ResponseStatus::InProgress)
         .build();
 
     let v = serde_json::to_value(&resp).expect("serialize");
     let obj = v.as_object().expect("object");
+    assert!(obj.contains_key("background"), "background must be present");
+    assert!(v["background"].is_null());
     assert!(
-        !obj.contains_key("background"),
-        "background must be omitted"
+        obj.contains_key("completed_at"),
+        "completed_at must be present"
     );
-    assert!(
-        !obj.contains_key("completed_at"),
-        "completed_at must be omitted"
-    );
+    assert!(v["completed_at"].is_null());
     assert!(
         !obj.contains_key("conversation"),
         "conversation must be omitted"
@@ -165,7 +170,10 @@ fn copy_from_request_propagates_background_and_conversation() {
         .copy_from_request(&request)
         .build();
     assert_eq!(resp.background, Some(true));
-    assert_eq!(resp.conversation.as_deref(), Some("conv_abc"));
+    assert_eq!(
+        resp.conversation.as_ref().map(|c| c.as_id()),
+        Some("conv_abc")
+    );
 }
 
 #[test]
@@ -182,7 +190,10 @@ fn copy_from_request_accepts_conversation_object_form() {
     let resp = ResponsesResponse::builder("resp_xyz", "gpt-5.4")
         .copy_from_request(&request)
         .build();
-    assert_eq!(resp.conversation.as_deref(), Some("conv_obj"));
+    assert_eq!(
+        resp.conversation.as_ref().map(|c| c.as_id()),
+        Some("conv_obj")
+    );
 }
 
 #[test]

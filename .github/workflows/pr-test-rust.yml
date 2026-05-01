@@ -579,7 +579,8 @@ jobs:
       engine: sglang
       gpu_tier: "2"
       runner: 2-gpu-h100
-      timeout: 30
+      timeout: 40
+      test_timeout: 35
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
     secrets: inherit

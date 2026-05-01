@@ -11,7 +11,7 @@ use super::common::{extract_output_index, get_event_type, parse_sse_block};
 pub(crate) struct StreamingResponseAccumulator {
     /// The initial `response.created` payload (if emitted).
     initial_response: Option<Value>,
-    /// The final `response.completed` payload (if emitted).
+    /// The final `response.completed` / `response.incomplete` payload (if emitted).
     completed_response: Option<Value>,
     /// Collected output items keyed by the upstream output index, used when
     /// a final response payload is absent and we need to synthesize one.
@@ -39,18 +39,6 @@ impl StreamingResponseAccumulator {
     }
 
     /// Consume the accumulator and produce the best-effort final response value.
-    pub fn into_final_response(mut self) -> Option<Value> {
-        if self.completed_response.is_some() {
-            return self.completed_response;
-        }
-
-        self.build_fallback_response()
-    }
-
-    pub fn encountered_error(&self) -> Option<&Value> {
-        self.encountered_error.as_ref()
-    }
-
     pub fn original_response_id(&self) -> Option<&str> {
         self.initial_response
             .as_ref()
@@ -109,7 +97,7 @@ impl StreamingResponseAccumulator {
                     self.initial_response = Some(response.clone());
                 }
             }
-            ResponseEvent::COMPLETED => {
+            ResponseEvent::COMPLETED | ResponseEvent::INCOMPLETE => {
                 if let Some(response) = parsed.get("response") {
                     self.completed_response = Some(response.clone());
                 }
@@ -127,21 +115,40 @@ impl StreamingResponseAccumulator {
             _ => {}
         }
     }
+}
 
-    fn build_fallback_response(&mut self) -> Option<Value> {
-        let mut response = self.initial_response.clone()?;
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
 
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert("status".to_string(), Value::String("completed".to_string()));
+    use super::*;
 
-            self.output_items.sort_by_key(|(index, _)| *index);
-            let outputs: Vec<Value> = std::mem::take(&mut self.output_items)
-                .into_iter()
-                .map(|(_, item)| item)
-                .collect();
-            obj.insert("output".to_string(), Value::Array(outputs));
-        }
+    #[test]
+    fn captures_response_incomplete_as_final_response() {
+        let mut accumulator = StreamingResponseAccumulator::new();
+        let payload = json!({
+            "type": ResponseEvent::INCOMPLETE,
+            "response": {
+                "id": "resp_1",
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "output": []
+            }
+        });
 
-        Some(response)
+        accumulator.ingest_block(&format!(
+            "event: {}\ndata: {}\n\n",
+            ResponseEvent::INCOMPLETE,
+            payload
+        ));
+
+        let response = accumulator
+            .snapshot_final_response()
+            .expect("final response snapshot");
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
     }
 }
