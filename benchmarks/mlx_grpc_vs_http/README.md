@@ -42,7 +42,10 @@ cargo build --release --bin smg
 # Python deps in the main env
 pip install -e ./crates/grpc_client/python
 pip install -e "./grpc_servicer[mlx]"
-pip install "mlx-lm>=0.22.0" genai-bench
+pip install "mlx-lm==0.31.3" genai-bench oci_openai
+# (CI pins the same mlx-lm version. `oci_openai` is a transitive dep
+# genai-bench imports eagerly; pip won't resolve it on a fresh wheel
+# install, so `genai-bench --help` crashes without it.)
 
 # vllm-metal (separate venv to avoid dependency conflicts)
 curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh | bash
