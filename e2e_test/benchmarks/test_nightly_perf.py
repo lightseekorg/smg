@@ -42,10 +42,14 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
 
     # Get runtime and GPU info for metadata
     runtime = get_runtime()  # sglang / vllm / tokenspeed from E2E_RUNTIME env var
-    # Map to genai-bench expected case (SGLang, vLLM, TokenSpeed)
-    runtime_display = {"sglang": "SGLang", "vllm": "vLLM", "tokenspeed": "TokenSpeed"}.get(
-        runtime, runtime
-    )
+    # Map to a value genai-bench accepts for ``--server-engine``. Anything
+    # outside its allow-list (vLLM, SGLang, TGI, cohere-TensorRT,
+    # cohere-vLLM, LlamaCPP) makes the CLI exit non-zero before it writes
+    # any results, so ``tokenspeed`` returns ``None`` here — the conftest
+    # gates ``--server-engine`` on truthiness, and the summarizer's
+    # runtime detection falls back to folder-name parsing (which already
+    # encodes the runtime as part of ``experiment_folder``).
+    runtime_display = {"sglang": "SGLang", "vllm": "vLLM"}.get(runtime)
     gpu_type = os.environ.get("GPU_TYPE", "H200")
 
     # Get tp (tensor parallelism) from model spec - this is GPUs per worker
