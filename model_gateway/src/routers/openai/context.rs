@@ -82,9 +82,7 @@ impl ComponentRefs {
         }
     }
 
-    pub fn mcp_format_registry(
-        &self,
-    ) -> Option<&openai_bridge::FormatRegistry> {
+    pub fn mcp_format_registry(&self) -> Option<&openai_bridge::FormatRegistry> {
         match self {
             ComponentRefs::Shared(_) => None,
             ComponentRefs::Responses(r) => Some(&r.mcp_format_registry),

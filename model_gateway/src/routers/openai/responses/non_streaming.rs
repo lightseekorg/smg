@@ -95,10 +95,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             forwarded_headers,
         );
         if let Some(tools) = original_body.tools.as_deref() {
-            openai_bridge::configure_response_tools_approval(
-                &mut session,
-                tools,
-            );
+            openai_bridge::configure_response_tools_approval(&mut session, tools);
         }
         prepare_mcp_tools_as_functions(&mut payload, &session);
 

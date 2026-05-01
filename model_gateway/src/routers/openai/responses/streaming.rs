@@ -149,14 +149,11 @@ pub(super) fn apply_event_transformations_inplace(
                             let response_format = ctx
                                 .mcp_format_registry
                                 .map(|reg| {
-                                    openai_bridge::lookup_tool_format(
-                                        session, reg, &tool_name,
-                                    )
+                                    openai_bridge::lookup_tool_format(session, reg, &tool_name)
                                 })
                                 .unwrap_or(ResponseFormat::Passthrough);
 
-                            let d =
-                                openai_bridge::descriptor(response_format);
+                            let d = openai_bridge::descriptor(response_format);
                             let (new_type, id_prefix) = (d.type_str, d.id_prefix);
 
                             item["type"] = json!(new_type);

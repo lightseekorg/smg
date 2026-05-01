@@ -629,9 +629,7 @@ fn parse_item_from_value(
         // compactor is a no-op for non-image item types, so it's safe to
         // apply unconditionally on the non-message branch.
         let mut content = item_val.clone();
-        openai_bridge::compact_image_generation_outputs_json(
-            std::slice::from_mut(&mut content),
-        );
+        openai_bridge::compact_image_generation_outputs_json(std::slice::from_mut(&mut content));
         content
     };
 
