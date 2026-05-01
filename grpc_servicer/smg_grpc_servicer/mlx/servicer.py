@@ -145,22 +145,41 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
 
     Thread-safety
     -------------
-    ``self._gen_lock`` protects all mutations of the BatchGenerator and
-    of ``_active_uids`` / ``_uid_queues``. It is acquired by:
+    Every mlx-state mutation runs on the gen thread:
 
-      * the gen thread for each loop iteration (drain-pending + insert
-        + next + dispatch + finished-remove);
-      * the event loop in ``Generate``'s ``finally`` for the
-        client-disconnect cleanup ``remove()``;
-      * the event loop in ``Abort`` for the in-flight ``remove()``.
+      * ``insert(...)`` — drained from ``_pending`` at the start of
+        each loop iteration.
+      * ``next()`` — once per iteration.
+      * ``remove(...)`` — split into two paths:
 
-    ``self._pending_lock`` protects the pending list/index and is held
-    only briefly: append in ``Generate``, drain in the gen thread, pop
-    in ``Abort``. The gen thread nests it inside ``_gen_lock`` each
-    iteration; all other sites acquire just one of the two locks at a
-    time, so this is the only nesting direction in the codebase —
-    acquiring ``_gen_lock`` while already holding ``_pending_lock``
-    would deadlock.
+        - The natural-completion path (``finish_reason`` returned by
+          ``next()``) is handled inline inside the same iteration,
+          since we're already on the gen thread.
+        - The cleanup paths from event-loop callers (``Generate``'s
+          ``finally`` and ``CancelledError`` handler, ``Abort``)
+          enqueue the uid into ``_pending_remove`` instead of calling
+          ``BatchGenerator.remove(...)`` directly. The gen thread
+          drains that queue between phase 1 (insert) and phase 2
+          (next), keeping all mlx array operations on a single thread.
+
+    ``self._gen_lock`` protects ``_active_uids`` / ``_uid_queues`` /
+    ``_request_uid_map`` against the cross-thread visibility of
+    completed inserts. It is acquired by:
+
+      * the gen thread for each loop iteration (drain-pending +
+        insert + drain-removes + next + dispatch + finished-remove);
+      * the event loop in ``Generate``'s ``CancelledError`` handler
+        when checking whether the gen thread already inserted us
+        before the cancel landed.
+
+    ``self._pending_lock`` protects the pending lists/index and is
+    held only briefly: append/drain ``_pending``, append/drain
+    ``_pending_remove``, lookup/pop in ``_pending_by_request_id``.
+    The gen thread nests it inside ``_gen_lock`` each iteration; all
+    other sites acquire just one of the two locks at a time, so this
+    is the only nesting direction in the codebase — acquiring
+    ``_gen_lock`` while already holding ``_pending_lock`` would
+    deadlock.
 
     Cost model: the event loop can block up to one ``next()`` step
     (~10–50 ms on M-series) while the gen thread holds ``_gen_lock``.
@@ -222,6 +241,16 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # cancel a request that hasn't entered the batch yet.
         self._pending: list[_PendingRequest] = []
         self._pending_by_request_id: dict[str, _PendingRequest] = {}
+        # Removal commands queued by event-loop callers (Generate's
+        # finally / CancelledError handler, Abort). Drained on the gen
+        # thread between phase 1 (insert) and phase 2 (next), so
+        # ``BatchGenerator.remove()`` — which does mlx array indexing
+        # against the calling thread's stream context — runs only on
+        # the gen thread. Direct calls from the asyncio main thread
+        # produced cross-thread mlx-state corruption surfacing as
+        # ``RuntimeError: There is no Stream(gpu, 1) in current thread``
+        # or rope-shape mismatches under burst-with-cancel traffic.
+        self._pending_remove: list[int] = []
         self._pending_lock = threading.Lock()
         # Resolve context length once — config doesn't change at runtime,
         # and Generate was previously scanning these keys on every request.
@@ -614,6 +643,29 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                                 _set_future_result_safe, p.uid_future, uid
                             )
 
+                    # Phase 1.5: drain queued removals from event-loop
+                    # callers (Generate.finally / CancelledError /
+                    # Abort). They append to _pending_remove instead
+                    # of calling batch_generator.remove() directly so
+                    # mlx array indexing runs only on this thread.
+                    with self._pending_lock:
+                        to_remove = self._pending_remove[:]
+                        self._pending_remove.clear()
+                    # Filter to uids still active — the gen thread also
+                    # removes on finish_reason inline below, so a uid
+                    # may already be gone by the time the queued remove
+                    # is drained. Skipping inactive uids avoids
+                    # spurious "uid not found" exceptions in
+                    # batch_generator.remove().
+                    to_remove = [uid for uid in to_remove if uid in self._active_uids]
+                    if to_remove:
+                        try:
+                            self.batch_generator.remove(to_remove)
+                            for uid in to_remove:
+                                self._active_uids.discard(uid)
+                        except Exception:
+                            logger.exception("Failed to drain queued removes: %s", to_remove)
+
                     # Phase 2: advance one step. Skip when nothing is
                     # in flight — next() on an empty BatchGenerator is
                     # wasted work. (Successful insert above adds uids
@@ -753,17 +805,15 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                         self._request_uid_map.pop(request_id, None)
                     if inserted_uid is not None:
                         self._uid_queues.pop(inserted_uid, None)
-                        try:
-                            self.batch_generator.remove([inserted_uid])
-                            self._active_uids.discard(inserted_uid)
-                        except Exception:
-                            # Don't drop _active_uids on a failed remove
-                            # — keep the gate honest so drain-and-fill
-                            # doesn't insert into a partial batch.
-                            logger.exception(
-                                "Failed to remove uid %s during cancel cleanup",
-                                inserted_uid,
-                            )
+                # Queue the backend remove for the gen thread instead
+                # of calling batch_generator.remove() here. mlx array
+                # indexing inside remove() runs against the calling
+                # thread's stream context; doing it on the asyncio
+                # main thread violates the same single-thread mlx
+                # invariant this servicer enforces for insert/next.
+                if inserted_uid is not None:
+                    with self._pending_lock:
+                        self._pending_remove.append(inserted_uid)
                 raise
             # Note: _request_uid_map[request_id] = uid is published by
             # the gen thread BEFORE waking us, so Abort can find this
@@ -843,28 +893,19 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 self._active_requests -= 1
                 self._request_uid_map.pop(request_id, None)
                 self._uid_queues.pop(uid, None)
-                # Ensure the backend request is removed on any Generate exit
-                # (client disconnect, deadline, CancelledError, unexpected
-                # exception). Without this, a cancelled request keeps decoding
-                # until its own stop/max-tokens condition, wasting batch slots
-                # — and, crucially, holds drain-and-batch up so new requests
-                # in _pending can't enter until this one finishes naturally.
-                # Safe to double-call: the gen thread's finish-path remove
-                # and Abort's remove both land here if racing, and remove()
-                # raises on unknown uid (which we swallow).
-                with self._gen_lock:
-                    try:
-                        self.batch_generator.remove([uid])
-                        self._active_uids.discard(uid)
-                    except Exception:
-                        # Already removed by the gen thread or Abort —
-                        # in those paths, _active_uids was already
-                        # discarded after the successful remove. If the
-                        # remove failed for a real backend reason on
-                        # *every* path, the uid stays in _active_uids
-                        # so drain-and-fill won't insert into a still-
-                        # live batch.
-                        pass
+                # Queue the backend remove for the gen thread instead
+                # of calling batch_generator.remove() here. mlx array
+                # indexing inside remove() runs against the calling
+                # thread's stream context; doing it on the asyncio
+                # main thread violates the single-thread mlx invariant
+                # this servicer enforces for insert/next.
+                #
+                # Safe to double-queue: the gen thread also removes on
+                # finish_reason inline; the queued-remove drain filters
+                # by `uid in _active_uids` so a uid already gone
+                # produces no spurious error.
+                with self._pending_lock:
+                    self._pending_remove.append(uid)
 
         except ValueError as e:
             logger.warning("Generate invalid request %s: %s", request_id, e)
@@ -889,7 +930,8 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                     pending.uid_future.cancel()
                 continue
 
-            # Case B: already inserted — existing in-flight remove path.
+            # Case B: already inserted — queue the remove for the gen
+            # thread.
             uid = self._request_uid_map.pop(request_id, None)
             if uid is not None:
                 queue = self._uid_queues.pop(uid, None)
@@ -905,19 +947,13 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                     # Wake the Generate waiter blocked on queue.get() so it
                     # exits cleanly instead of hanging until transport cancel.
                     queue.put_nowait(None)
-                # remove() races with the gen thread's next() without the
-                # lock — see class docstring.
-                with self._gen_lock:
-                    try:
-                        self.batch_generator.remove([uid])
-                        self._active_uids.discard(uid)
-                    except Exception:
-                        # Same invariant as Generate's finally: only
-                        # discard from _active_uids on a successful
-                        # remove. If this fails because the gen thread
-                        # already removed, _active_uids was already
-                        # cleared on that success path.
-                        logger.warning("Failed to remove uid %d for request %s", uid, request_id)
+                # Queue the backend remove for the gen thread (see
+                # class docstring for why all batch_generator.remove
+                # calls run there). Generate.finally on the same uid
+                # also queues a remove; the drain filters by
+                # `uid in _active_uids` so the duplicate is a no-op.
+                with self._pending_lock:
+                    self._pending_remove.append(uid)
         return mlx_engine_pb2.AbortResponse()
 
     async def HealthCheck(self, request, context):
