@@ -205,8 +205,11 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # warmup has completed; ``server.serve_grpc`` waits on this
         # before flipping the health check to SERVING so that no
         # Generate RPC arrives before there's a BatchGenerator to
-        # insert into.
+        # insert into. ``_construction_failed`` lets ``wait_ready``
+        # report failure to the startup path even though the event
+        # itself was set (so waiters unblock instead of hanging).
         self._ready_event = threading.Event()
+        self._construction_failed = False
         self._loop = None
         self._gen_thread = None
         # Protects mlx-lm BatchGenerator state + ``_uid_queues`` +
@@ -236,7 +239,10 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         Called from ``server.serve_grpc`` (in an executor thread so the
         asyncio loop isn't blocked) before flipping the health probe
         to SERVING. Returns ``True`` when ready; ``False`` if the
-        servicer was shut down before becoming ready.
+        servicer was shut down before becoming ready, or if
+        BatchGenerator construction raised on the gen thread (in which
+        case the gen thread sets ``_construction_failed`` then sets the
+        event to unblock this waiter).
         """
         # Poll so a shutdown signal during warmup unblocks the waiter.
         deadline = None if timeout is None else (time.monotonic() + timeout)
@@ -250,7 +256,7 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                     return False
                 wait = min(wait, remaining)
             self._ready_event.wait(wait)
-        return True
+        return not self._construction_failed
 
     def _warmup(self) -> None:
         """Run one end-to-end token through the batch generator so the
@@ -520,7 +526,11 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             )
         except Exception:
             logger.exception("BatchGenerator construction failed")
-            self._ready_event.set()  # Unblock waiters; they'll see no batch_generator.
+            # Flag the failure BEFORE setting the event so wait_ready
+            # observes the flag (the event is set last, after the
+            # write — readers re-check the flag once unblocked).
+            self._construction_failed = True
+            self._ready_event.set()
             return
         logger.info(
             "BatchGenerator created on gen thread (prefill=%d, completion=%d)",
@@ -546,7 +556,6 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         while not self._shutdown_event.is_set():
             prompt_responses: list = []
             gen_responses: list = []
-            inserted_this_iter = False
             try:
                 with self._gen_lock:
                     # Phase 1: admit pending. NOT gated on _active_uids
@@ -604,12 +613,13 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                             self._loop.call_soon_threadsafe(
                                 _set_future_result_safe, p.uid_future, uid
                             )
-                        inserted_this_iter = True
 
-                    # Phase 2: advance one step. Skip when there's
-                    # nothing in flight AND nothing was just inserted —
-                    # next() on an empty BatchGenerator is wasted work.
-                    if self._active_uids or inserted_this_iter:
+                    # Phase 2: advance one step. Skip when nothing is
+                    # in flight — next() on an empty BatchGenerator is
+                    # wasted work. (Successful insert above adds uids
+                    # to _active_uids, so a separate "just inserted"
+                    # flag would be redundant.)
+                    if self._active_uids:
                         # BatchGenerator.next() wraps itself in
                         # `with mx.stream(self._stream):` internally
                         # (mlx_lm/generate.py:1847), so no outer wrap
@@ -647,12 +657,19 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 if pending_size == 0:
                     time.sleep(0.001)
 
-        # Shutdown — release wired-limit etc.
-        if self.batch_generator is not None:
-            try:
-                self.batch_generator.close()
-            except Exception:
-                logger.warning("BatchGenerator.close raised", exc_info=True)
+        # Shutdown — release wired-limit etc. Hold _gen_lock so an
+        # RPC's finally / Abort cleanup that races past server.stop()'s
+        # grace period can't call remove() on a half-closed generator.
+        # We also clear self.batch_generator under the lock so any such
+        # late call sees None and short-circuits.
+        with self._gen_lock:
+            if self.batch_generator is not None:
+                try:
+                    self.batch_generator.close()
+                except Exception:
+                    logger.warning("BatchGenerator.close raised", exc_info=True)
+                finally:
+                    self.batch_generator = None
 
     async def Generate(self, request, context):
         request_id = request.request_id

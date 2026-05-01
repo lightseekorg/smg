@@ -138,10 +138,16 @@ async def serve_grpc(args):
     # for it to signal ready before flipping the health check to SERVING,
     # otherwise a Generate RPC could slip into the window where the gen
     # thread hasn't constructed BatchGenerator yet and block forever on
-    # _pending.
+    # _pending. wait_ready() returns False if BatchGenerator construction
+    # raised on the gen thread — fail startup loudly in that case rather
+    # than advertising a healthy server with a dead gen thread that hangs
+    # every Generate RPC on _pending.
     servicer.start_generation_loop()
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, servicer.wait_ready)
+    ready = await loop.run_in_executor(None, servicer.wait_ready)
+    if not ready:
+        servicer.stop_generation_loop()
+        raise RuntimeError("MLX generation thread failed to become ready — see preceding logs")
 
     await server.start()
     health_servicer.set_serving()
