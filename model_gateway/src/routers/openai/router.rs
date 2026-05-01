@@ -19,6 +19,7 @@ use super::{
     health,
     provider::ProviderRegistry,
     responses::route::{self as responses_route, ResponsesRouterContext},
+    stateful_tools::{NoOpStatefulToolBootstrapper, SharedStatefulToolBootstrapper},
 };
 use crate::{
     app_context::AppContext,
@@ -76,11 +77,18 @@ impl std::fmt::Debug for OpenAIRouter {
 }
 
 impl OpenAIRouter {
+    pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
+        Self::new_with_stateful_tool_bootstrapper(ctx, Arc::new(NoOpStatefulToolBootstrapper)).await
+    }
+
     #[expect(
         clippy::unused_async,
         reason = "async for API consistency with other router constructors"
     )]
-    pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
+    pub async fn new_with_stateful_tool_bootstrapper(
+        ctx: &Arc<AppContext>,
+        stateful_tool_bootstrapper: SharedStatefulToolBootstrapper,
+    ) -> Result<Self, String> {
         let worker_registry = ctx.worker_registry.clone();
         let mcp_orchestrator = ctx
             .mcp_orchestrator
@@ -96,6 +104,7 @@ impl OpenAIRouter {
         let responses_components = Arc::new(ResponsesComponents {
             shared: Arc::clone(&shared_components),
             mcp_orchestrator: mcp_orchestrator.clone(),
+            stateful_tool_bootstrapper,
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),

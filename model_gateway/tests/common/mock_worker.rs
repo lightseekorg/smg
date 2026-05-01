@@ -83,6 +83,7 @@ impl MockWorker {
         } else {
             port
         };
+        clear_recorded_responses_requests_for_port(port);
 
         let app = Router::new()
             .route("/health", get(health_handler))
@@ -138,6 +139,9 @@ impl MockWorker {
 
     /// Stop the mock worker server
     pub async fn stop(&mut self) {
+        let port = self.config.read().await.port;
+        clear_recorded_responses_requests_for_port(port);
+
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
@@ -147,10 +151,18 @@ impl MockWorker {
             let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
         }
     }
+
+    pub async fn port(&self) -> u16 {
+        self.config.read().await.port
+    }
 }
 
 impl Drop for MockWorker {
     fn drop(&mut self) {
+        if let Ok(config) = self.config.try_read() {
+            clear_recorded_responses_requests_for_port(config.port);
+        }
+
         // Clean shutdown when dropped
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
@@ -594,6 +606,7 @@ async fn responses_handler(
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     let config = config.read().await;
+    record_responses_request_for_port(config.port, payload.clone());
 
     if should_fail(&config) {
         return (
@@ -1232,9 +1245,15 @@ async fn responses_cancel_handler(
 
 // --- Simple in-memory response store per worker port (for tests) ---
 static RESP_STORE: OnceLock<Mutex<HashMap<u16, HashSet<String>>>> = OnceLock::new();
+static RESPONSES_REQUEST_STORE: OnceLock<Mutex<HashMap<u16, Vec<serde_json::Value>>>> =
+    OnceLock::new();
 
 fn get_store() -> &'static Mutex<HashMap<u16, HashSet<String>>> {
     RESP_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_responses_request_store() -> &'static Mutex<HashMap<u16, Vec<serde_json::Value>>> {
+    RESPONSES_REQUEST_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[expect(
@@ -1255,6 +1274,33 @@ fn response_exists_for_port(port: u16, response_id: &str) -> bool {
     map.get(&port)
         .map(|set| set.contains(response_id))
         .unwrap_or(false)
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+fn record_responses_request_for_port(port: u16, payload: serde_json::Value) {
+    let mut map = get_responses_request_store().lock().unwrap();
+    map.entry(port).or_default().push(payload);
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+pub fn take_recorded_responses_requests_for_port(port: u16) -> Vec<serde_json::Value> {
+    let mut map = get_responses_request_store().lock().unwrap();
+    map.remove(&port).unwrap_or_default()
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+fn clear_recorded_responses_requests_for_port(port: u16) {
+    let mut map = get_responses_request_store().lock().unwrap();
+    map.remove(&port);
 }
 
 // Minimal rerank handler returning mock results; router shapes final response

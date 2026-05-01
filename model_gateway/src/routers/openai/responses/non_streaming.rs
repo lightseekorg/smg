@@ -11,7 +11,9 @@ use serde_json::Value;
 use smg_mcp::McpToolSession;
 use tracing::warn;
 
-use super::utils::{patch_response_with_request_metadata, restore_original_tools};
+use super::utils::{
+    build_persistence_request_body, patch_response_with_request_metadata, restore_original_tools,
+};
 use crate::routers::{
     common::{
         header_utils::{extract_forwardable_request_headers, ApiProvider},
@@ -39,16 +41,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         url,
     } = payload_state;
     let ResponsesPayloadState {
+        client_request,
         previous_response_id,
         existing_mcp_list_tools_labels,
+        stateful_tool_bootstrap,
     } = ctx.take_responses_payload().unwrap_or_default();
 
-    let original_body = match ctx.responses_request() {
+    let request_body = match ctx.responses_request() {
         Some(r) => r,
         None => {
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
+    let client_body = client_request.as_deref().unwrap_or(request_body);
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
@@ -63,7 +68,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     };
 
     // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+    let mcp_servers = if let Some(tools) = request_body.tools.as_deref() {
         ensure_request_mcp_client(mcp_orchestrator, tools).await
     } else {
         None
@@ -72,7 +77,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let mut response_json: Value;
 
     if let Some(mcp_servers) = mcp_servers {
-        let session_request_id = original_body
+        let session_request_id = request_body
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
@@ -83,7 +88,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             &session_request_id,
             forwarded_headers,
         );
-        if let Some(tools) = original_body.tools.as_deref() {
+        if let Some(tools) = request_body.tools.as_deref() {
             session.configure_response_tools_approval(tools);
         }
         prepare_mcp_tools_as_functions(&mut payload, &session);
@@ -95,8 +100,9 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             worker.api_key(),
             payload,
             ToolLoopExecutionContext {
-                original_body,
+                original_body: request_body,
                 existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
+                stateful_tool_bootstrap: &stateful_tool_bootstrap,
                 session: &session,
             },
         )
@@ -112,7 +118,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             }
         }
 
-        restore_original_tools(&mut response_json, original_body, Some(&session));
+        restore_original_tools(&mut response_json, client_body, Some(&session));
     } else {
         let mut request_builder = ctx.components.client().post(&url).json(&payload);
         let provider = ApiProvider::from_url(&url);
@@ -156,11 +162,11 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             }
         };
 
-        restore_original_tools(&mut response_json, original_body, None);
+        restore_original_tools(&mut response_json, client_body, None);
     }
     patch_response_with_request_metadata(
         &mut response_json,
-        original_body,
+        client_body,
         previous_response_id.as_deref(),
     );
 
@@ -169,12 +175,13 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         ctx.components.conversation_item_storage(),
         ctx.components.response_storage(),
     ) {
+        let persistence_body = build_persistence_request_body(request_body, client_body);
         if let Err(err) = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
             resp_storage.clone(),
             &response_json,
-            original_body,
+            &persistence_body,
             ctx.storage_request_context.clone(),
         )
         .await

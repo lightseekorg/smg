@@ -249,6 +249,7 @@ fn deserialize_items_from_array(array: &Value) -> Vec<ResponseInputOutputItem> {
                         .map_err(|e| warn!("Failed to deserialize item: {}. Item: {}", e, item))
                         .ok()
                 })
+                .filter(|item| !matches!(item, ResponseInputOutputItem::Reasoning { .. }))
                 .collect()
         })
         .unwrap_or_default()
@@ -321,9 +322,10 @@ pub(crate) fn inject_memory_context(
 
 #[cfg(test)]
 mod tests {
-    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+    use openai_protocol::responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest};
+    use serde_json::json;
 
-    use super::inject_memory_context;
+    use super::{deserialize_items_from_array, inject_memory_context};
     use crate::routers::common::header_utils::{
         ConversationMemoryConfig, LongTermMemoryConfig, ShortTermMemoryConfig,
     };
@@ -356,5 +358,34 @@ mod tests {
                 panic!("request input should remain unchanged for no-op hook")
             }
         }
+    }
+
+    #[test]
+    fn deserialize_items_from_array_drops_reasoning_replay_items() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": []
+        });
+        assert!(
+            serde_json::from_value::<ResponseInputOutputItem>(reasoning.clone()).is_ok(),
+            "reasoning fixture must deserialize so this test validates filtering logic"
+        );
+
+        let items = json!([
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }],
+                "status": "completed"
+            },
+            reasoning
+        ]);
+
+        let parsed = deserialize_items_from_array(&items);
+
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(parsed[0], ResponseInputOutputItem::Message { .. }));
     }
 }

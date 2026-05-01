@@ -15,5 +15,6 @@ mod provider;
 pub mod realtime;
 pub mod responses;
 mod router;
+pub mod stateful_tools;
 
 pub use router::OpenAIRouter;
