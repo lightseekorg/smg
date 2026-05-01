@@ -51,7 +51,7 @@ Perform rolling updates without service interruption. Graceful shutdown with req
 ## Mesh Architecture
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/mesh-architecture.svg" alt="SMG Mesh Architecture">
+  <img src="../../assets/images/mesh-architecture.svg" alt="SMG Mesh Architecture">
 </div>
 
 <div class="grid" markdown>
