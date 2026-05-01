@@ -602,10 +602,7 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.add_function(
         "raise_exception",
         |msg: String| -> Result<String, minijinja::Error> {
-            Err(minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                msg,
-            ))
+            Err(minijinja::Error::new(ErrorKind::InvalidOperation, msg))
         },
     );
 

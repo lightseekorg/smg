@@ -265,6 +265,10 @@ impl TrtllmServiceClient {
         clippy::unused_self,
         reason = "method receiver kept for consistent public API across gRPC backends"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "gRPC request builder requires all fields for the proto message"
+    )]
     pub fn build_generate_request_from_chat(
         &self,
         request_id: String,
@@ -661,6 +665,10 @@ impl TrtllmServiceClient {
     #[expect(
         clippy::unused_self,
         reason = "method receiver kept for consistent public API"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "gRPC request builder needs all fields from the Messages API request"
     )]
     pub fn build_generate_request_from_messages(
         &self,

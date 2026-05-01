@@ -6,7 +6,7 @@ use openai_protocol::chat::ChatMessage;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use smg_grpc_client::sglang_proto::DisaggregatedParams;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{
     routers::grpc::{context::WorkerSelection, proto_wrapper::ProtoGenerateRequest},

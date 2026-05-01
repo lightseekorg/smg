@@ -537,10 +537,7 @@ async fn run_event_loop(
                 }
             }
             Ok(WorkerEvent::StatusChanged {
-                worker,
-                new_status,
-                old_status: _,
-                ..
+                worker, new_status, ..
             }) => {
                 if new_status != WorkerStatus::Ready {
                     monitor.evict_worker_loads(worker.url());
