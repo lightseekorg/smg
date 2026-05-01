@@ -223,7 +223,7 @@ def _get_float(d: dict, key: str, default: float = 0.0) -> float:
 _KNOWN_PROTOCOLS = {"http", "grpc"}
 _KNOWN_WORKER_TYPES = {"single", "multi"}
 # Runtimes recognized in folder names. Add new runtimes here.
-_KNOWN_RUNTIMES = {"sglang", "vllm", "trtllm"}
+_KNOWN_RUNTIMES = {"sglang", "vllm", "trtllm", "tokenspeed"}
 
 
 def parse_folder_name(folder_name: str) -> dict:
@@ -621,7 +621,12 @@ def generate_charts(
 # Section generators
 # ---------------------------------------------------------------------------
 
-_RUNTIME_DISPLAY = {"sglang": "SGLang", "vllm": "vLLM", "trtllm": "TRT-LLM"}
+_RUNTIME_DISPLAY = {
+    "sglang": "SGLang",
+    "vllm": "vLLM",
+    "trtllm": "TRT-LLM",
+    "tokenspeed": "TokenSpeed",
+}
 _PROTOCOL_DISPLAY = {"http": "HTTP", "grpc": "gRPC"}
 
 
