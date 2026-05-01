@@ -332,16 +332,20 @@ pub(super) fn strip_image_generation_from_request_tools(
     session: &McpToolSession<'_>,
     format_registry: &FormatRegistry,
 ) {
-    // Check whether any MCP tool in the session carries the
-    // `ImageGenerationCall` response format — this is the authoritative
-    // signal that an MCP server is routed for the hosted
-    // `image_generation` tool in this request.
-    let mcp_has_image_generation = session.mcp_tools().iter().any(|entry| {
-        matches!(
-            format_registry.lookup(&entry.qualified_name),
-            ResponseFormat::ImageGenerationCall
-        )
-    });
+    // Strip only when the session exposes the literal `image_generation`
+    // name routed to an `ImageGenerationCall` format. Checking every MCP
+    // tool's format would also fire for unrelated custom tools that happen
+    // to share the image-generation output shape (e.g. a `thumbnailer`),
+    // and would then drop the real hosted `image_generation` tag even
+    // though the session has no dispatcher for it.
+    let mcp_has_image_generation = session
+        .qualified_name_for_exposed("image_generation")
+        .is_some_and(|qn| {
+            matches!(
+                format_registry.lookup(&qn),
+                ResponseFormat::ImageGenerationCall
+            )
+        });
 
     if !mcp_has_image_generation {
         return;

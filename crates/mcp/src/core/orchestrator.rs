@@ -1936,7 +1936,7 @@ mod tests {
             "search_web".to_string(),
             ToolConfig {
                 alias: None,
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 arg_mapping: Some(ArgMappingConfig {
                     renames: HashMap::new(),
                     defaults: HashMap::from([(
@@ -2182,7 +2182,7 @@ mod tests {
             "my_search".to_string(),
             ToolConfig {
                 alias: None,
-                response_format: ResponseFormatConfig::Passthrough, // Override default
+                response_format: Some(ResponseFormatConfig::Passthrough), // Override default
                 arg_mapping: None,
             },
         );

@@ -117,7 +117,9 @@ pub(super) async fn execute_mcp_tools(
     let results: Vec<ToolResult> = outputs
         .into_iter()
         .map(|output| {
-            let output_item = openai_bridge::transform_tool_output(&output, format_registry);
+            let response_format =
+                openai_bridge::lookup_tool_format(session, format_registry, &output.tool_name);
+            let output_item = openai_bridge::transform_tool_output(&output, &response_format);
 
             // Record this call in tracking
             tracking.record_call(output_item.clone());

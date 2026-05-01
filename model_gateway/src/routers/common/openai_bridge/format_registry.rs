@@ -12,8 +12,10 @@ use super::ResponseFormat;
 /// and the registry. Returns `Passthrough` for unknown tools.
 ///
 /// Lives next to `FormatRegistry` because it's a thin lookup helper that
-/// composes session's name map with `FormatRegistry::lookup_by_names`,
-/// avoiding the `Arc<str>` allocations of `QualifiedToolName::new`.
+/// composes the session's name map with `FormatRegistry::lookup`. Reuses the
+/// `QualifiedToolName` returned by `qualified_name_for_exposed` rather than
+/// rebuilding one, so we pay the two `Arc<str>` allocations once instead of
+/// twice per call.
 pub fn lookup_tool_format(
     session: &smg_mcp::McpToolSession<'_>,
     registry: &FormatRegistry,
@@ -22,7 +24,7 @@ pub fn lookup_tool_format(
     let Some(qn) = session.qualified_name_for_exposed(exposed_name) else {
         return ResponseFormat::Passthrough;
     };
-    registry.lookup_by_names(qn.server_key(), qn.tool_name())
+    registry.lookup(&qn)
 }
 
 #[derive(Default, Debug, Clone)]
@@ -51,7 +53,10 @@ impl FormatRegistry {
     }
 
     /// Populate from a server config: per-tool overrides + builtin defaults.
-    /// Safe to call repeatedly — entries are overwritten.
+    /// Safe to call repeatedly — entries for non-Passthrough formats are
+    /// overwritten. Downgrading a format back to `Passthrough` requires a
+    /// separate registry rebuild (no production caller mutates configs in
+    /// place today).
     ///
     /// Mirrors `McpOrchestrator::apply_tool_configs`:
     /// - When a tool has an `alias`, the format is attached **only** to the
@@ -60,10 +65,19 @@ impl FormatRegistry {
     ///   stays at the `Passthrough` default so direct calls aren't transformed.
     /// - When a tool has no alias but a non-default format, attach to
     ///   `(server, tool)` directly.
+    /// - When the per-tool stanza omits `response_format` entirely
+    ///   (`None`), the builtin default still applies. This lets users add an
+    ///   `alias` or `arg_mapping` to a builtin tool without disabling its
+    ///   hosted-format wire shape. An explicit `Some(Passthrough)` *does*
+    ///   block the builtin default — that is the documented escape hatch
+    ///   for opting out of the hosted shape.
     pub fn populate_from_server_config(&self, config: &McpServerConfig) {
         if let Some(tools) = &config.tools {
             for (tool_name, tool_config) in tools {
-                let format: ResponseFormat = tool_config.response_format.into();
+                let Some(format_config) = tool_config.response_format else {
+                    continue;
+                };
+                let format: ResponseFormat = format_config.into();
                 if format == ResponseFormat::Passthrough {
                     continue;
                 }
@@ -78,11 +92,12 @@ impl FormatRegistry {
         if let (Some(builtin_type), Some(tool_name)) =
             (&config.builtin_type, &config.builtin_tool_name)
         {
-            let has_explicit = config
+            let has_explicit_format = config
                 .tools
                 .as_ref()
-                .is_some_and(|tools| tools.contains_key(tool_name));
-            if !has_explicit {
+                .and_then(|tools| tools.get(tool_name))
+                .is_some_and(|cfg| cfg.response_format.is_some());
+            if !has_explicit_format {
                 let format: ResponseFormat = builtin_type.response_format().into();
                 self.insert(QualifiedToolName::new(&config.name, tool_name), format);
             }
@@ -135,7 +150,7 @@ mod tests {
             "brave_web_search".to_string(),
             ToolConfig {
                 alias: Some("web_search".to_string()),
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 arg_mapping: None,
             },
         );
@@ -164,7 +179,7 @@ mod tests {
             "search".to_string(),
             ToolConfig {
                 alias: None,
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 arg_mapping: None,
             },
         );
@@ -203,7 +218,7 @@ mod tests {
             ToolConfig {
                 alias: None,
                 // Explicit override differs from the builtin default.
-                response_format: ResponseFormatConfig::Passthrough,
+                response_format: Some(ResponseFormatConfig::Passthrough),
                 arg_mapping: None,
             },
         );
@@ -215,12 +230,42 @@ mod tests {
         let r = FormatRegistry::new();
         r.populate_from_server_config(&cfg);
 
-        // Explicit Passthrough override means "no entry inserted"; lookup
-        // falls back to Passthrough — same result, but importantly the
-        // builtin default is NOT applied on top.
+        // Explicit Some(Passthrough) override means "no entry inserted" AND
+        // the builtin default is NOT applied on top.
         assert_eq!(
             r.lookup_by_names("search", "do_search"),
             ResponseFormat::Passthrough
+        );
+    }
+
+    #[test]
+    fn alias_only_stanza_preserves_builtin_default() {
+        // Regression: a per-tool stanza that only aliases a builtin tool
+        // (or only sets arg_mapping) used to suppress the builtin default,
+        // collapsing the hosted format to plain mcp_call. With
+        // `response_format: None` meaning "inherit context", the builtin
+        // default must still apply.
+        let mut tools = HashMap::new();
+        tools.insert(
+            "do_search".to_string(),
+            ToolConfig {
+                alias: Some("web_search".to_string()),
+                response_format: None,
+                arg_mapping: None,
+            },
+        );
+        let mut cfg = server("search");
+        cfg.tools = Some(tools);
+        cfg.builtin_type = Some(BuiltinToolType::WebSearchPreview);
+        cfg.builtin_tool_name = Some("do_search".to_string());
+
+        let r = FormatRegistry::new();
+        r.populate_from_server_config(&cfg);
+
+        assert_eq!(
+            r.lookup_by_names("search", "do_search"),
+            ResponseFormat::WebSearchCall,
+            "alias-only stanza must not disable the builtin's hosted format"
         );
     }
 }

@@ -1089,11 +1089,14 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
-    let mcp_format_registry = ctx
-        .components
-        .mcp_format_registry()
-        .cloned()
-        .unwrap_or_default();
+    // Same fail-fast contract as the non-streaming path: a missing format
+    // registry means MCP routing decisions would be silently wrong.
+    let mcp_format_registry = match ctx.components.mcp_format_registry() {
+        Some(r) => r.clone(),
+        None => {
+            return error::internal_error("internal_error", "MCP format registry required");
+        }
+    };
 
     // Check for MCP tools and create request context if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {

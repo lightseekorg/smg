@@ -62,11 +62,15 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
-    let mcp_format_registry = ctx
-        .components
-        .mcp_format_registry()
-        .cloned()
-        .unwrap_or_default();
+    // The format registry is the router-side source of truth for MCP
+    // builtin/alias format resolution; falling back to a default would
+    // silently mis-route hosted tools instead of failing fast.
+    let mcp_format_registry = match ctx.components.mcp_format_registry() {
+        Some(r) => r.clone(),
+        None => {
+            return error::internal_error("internal_error", "MCP format registry required");
+        }
+    };
 
     // Check for MCP tools and create session if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {

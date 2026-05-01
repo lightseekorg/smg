@@ -445,7 +445,7 @@ mod tests {
         tools_config.insert(
             "web_search".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 ..Default::default()
             },
         );
@@ -589,7 +589,7 @@ mod tests {
         web_search_tools.insert(
             "web_search".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 ..Default::default()
             },
         );
@@ -598,7 +598,7 @@ mod tests {
         code_interp_tools.insert(
             "run_code".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::CodeInterpreterCall,
+                response_format: Some(ResponseFormatConfig::CodeInterpreterCall),
                 ..Default::default()
             },
         );
@@ -688,7 +688,7 @@ mod tests {
         image_gen_tools.insert(
             "generate_image".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::ImageGenerationCall,
+                response_format: Some(ResponseFormatConfig::ImageGenerationCall),
                 ..Default::default()
             },
         );

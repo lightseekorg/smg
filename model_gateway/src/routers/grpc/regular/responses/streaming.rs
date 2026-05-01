@@ -813,7 +813,7 @@ async fn execute_tool_loop_streaming_internal(
                 );
 
                 let output_item =
-                    openai_bridge::transform_tool_output(&tool_output, &ctx.mcp_format_registry);
+                    openai_bridge::transform_tool_output(&tool_output, &response_format);
 
                 // Record the call in state with transformed output item
                 state.record_call(

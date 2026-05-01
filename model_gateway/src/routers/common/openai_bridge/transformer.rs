@@ -7,22 +7,24 @@ use openai_protocol::responses::{
 };
 use tracing::warn;
 
-use super::{FormatRegistry, ResponseFormat};
+use super::ResponseFormat;
 
-/// Transform a `ToolExecutionOutput` to a `ResponseOutputItem`, looking up
-/// the format from the registry by `(server_key, tool_name)`.
+/// Transform a `ToolExecutionOutput` to a `ResponseOutputItem` using a
+/// pre-resolved `ResponseFormat`.
 ///
-/// Lives next to `ResponseTransformer::transform` since it's the thin
-/// session/registry-aware wrapper most callers want; avoids constructing a
-/// `QualifiedToolName` (and its two `Arc<str>` allocations) per tool call.
+/// The format MUST be resolved via the session's exposed-name map (e.g.
+/// [`super::lookup_tool_format`]). `output.tool_name` is the *invoked/exposed*
+/// name after `McpToolSession::execute_tool_result` rewrites it, so a registry
+/// lookup against `(output.server_key, output.tool_name)` would miss for
+/// disambiguated names like `mcp_<server>_<tool>` and silently degrade to
+/// `Passthrough`.
 pub fn transform_tool_output(
     output: &smg_mcp::ToolExecutionOutput,
-    registry: &FormatRegistry,
+    response_format: &ResponseFormat,
 ) -> ResponseOutputItem {
-    let response_format = registry.lookup_by_names(&output.server_key, &output.tool_name);
     ResponseTransformer::transform(
         &output.output,
-        &response_format,
+        response_format,
         &output.call_id,
         &output.server_label,
         &output.tool_name,

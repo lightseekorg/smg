@@ -286,7 +286,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         let output_str = tool_output.output.to_string();
         let mut mcp_call_item = to_value(openai_bridge::transform_tool_output(
             &tool_output,
-            format_registry,
+            &response_format,
         ))
         .unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
@@ -1028,7 +1028,11 @@ pub(crate) async fn execute_tool_loop(
                 &tool_item_id,
                 &server_label,
                 &call.name,
-                &call.arguments,
+                // Use the post-merge string so the client-visible item describes
+                // what the router actually dispatched (e.g. hosted-tool overrides
+                // like image-generation `size`/`quality` merged in above), not
+                // the pre-merge arguments the model emitted.
+                &effective_arguments,
             );
 
             state.record_call(

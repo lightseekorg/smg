@@ -407,8 +407,12 @@ pub(super) async fn execute_tool_loop(
                 );
 
                 // Record the call in state with transformed output item
-                let output_item =
-                    openai_bridge::transform_tool_output(&result, &ctx.mcp_format_registry);
+                let response_format = openai_bridge::lookup_tool_format(
+                    &session,
+                    &ctx.mcp_format_registry,
+                    &result.tool_name,
+                );
+                let output_item = openai_bridge::transform_tool_output(&result, &response_format);
                 let output_str = result.output.to_string();
                 state.record_call(
                     result.call_id,

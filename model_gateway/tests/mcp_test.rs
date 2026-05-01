@@ -285,7 +285,7 @@ async fn test_web_search_transform_handles_openai_search_response_with_mock() {
         "brave_web_search".to_string(),
         ToolConfig {
             alias: None,
-            response_format: ResponseFormatConfig::WebSearchCall,
+            response_format: Some(ResponseFormatConfig::WebSearchCall),
             arg_mapping: None,
         },
     );
@@ -370,7 +370,7 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
         "brave_web_search".to_string(),
         ToolConfig {
             alias: None,
-            response_format: ResponseFormatConfig::WebSearchCall,
+            response_format: Some(ResponseFormatConfig::WebSearchCall),
             arg_mapping: None,
         },
     );
