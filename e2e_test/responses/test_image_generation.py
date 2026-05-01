@@ -33,6 +33,7 @@ are filed as R6.6/R6.7 follow-ups rather than patched from this PR.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import httpx
@@ -456,21 +457,39 @@ class _ImageGenerationAssertions:
         )
 
         # Positive persistence guard: confirm an image_generation_call item
-        # was actually persisted. Otherwise the base64 absence below would
+        # was actually persisted. Otherwise the strip assertion below would
         # pass vacuously.
         items_data = items_resp.json()
         stored_items = items_data.get("data") or items_data.get("items") or []
-        assert any(item.get("type") == "image_generation_call" for item in stored_items), (
+        image_items = [
+            item for item in stored_items if item.get("type") == "image_generation_call"
+        ]
+        assert image_items, (
             "No image_generation_call item in stored conversation history; "
             "compactor-strip assertion would be vacuous. "
             f"stored types: {[item.get('type') for item in stored_items]}"
         )
 
-        payload = items_resp.text
-        assert mock_mcp.image_generation_png_base64 not in payload, (
-            "Compactor failed to strip base64 payload from stored conversation "
-            "history; replay would re-ship the image bytes to the model."
-        )
+        # Assert directly on the persisted image_generation_call shape rather
+        # than the entire payload text. The model's free-form assistant reply
+        # may legitimately echo the bytes back ("Base64 PNG data: iVBORw…")
+        # when it sees them in the function_call_output, which is unrelated
+        # to whether the compactor stripped `result` from the stored
+        # image_generation_call item itself.
+        for item in image_items:
+            content = item.get("content") or {}
+            assert "result" not in item, (
+                f"Compactor failed to strip top-level `result` from stored "
+                f"image_generation_call: {item!r}"
+            )
+            assert "result" not in content, (
+                f"Compactor failed to strip nested `result` from stored "
+                f"image_generation_call.content: {item!r}"
+            )
+            assert mock_mcp.image_generation_png_base64 not in json.dumps(item), (
+                f"Base64 payload survived inside stored image_generation_call "
+                f"item; replay would re-ship the bytes to the model: {item!r}"
+            )
 
 
 # =============================================================================
