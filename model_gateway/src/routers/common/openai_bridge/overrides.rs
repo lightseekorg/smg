@@ -18,7 +18,7 @@
 //!
 //! These helpers are intentionally:
 //! - **pure**: no session state, no I/O; testable in isolation.
-//! - **symmetric** with [`crate::transform::transformer`], which handles the
+//! - **symmetric** with [`super::transformer`], which handles the
 //!   inverse direction (MCP result → `ResponseOutputItem`).
 //!
 //! # Contract
@@ -35,8 +35,7 @@
 
 use openai_protocol::responses::ResponseTool;
 use serde_json::Value;
-
-use crate::core::config::BuiltinToolType;
+use smg_mcp::BuiltinToolType;
 
 /// Extract caller-declared configuration for the given hosted-tool kind from
 /// the request's `tools` declarations.

@@ -1278,6 +1278,7 @@ mod tests {
             worker_job_queue: worker_job_queue.clone(),
             workflow_engines: Arc::new(std::sync::OnceLock::new()),
             mcp_orchestrator: Arc::new(std::sync::OnceLock::new()),
+            mcp_format_registry: crate::routers::common::openai_bridge::FormatRegistry::new(),
             tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
             multimodal_config_registry: Arc::new(MultimodalConfigRegistry::new()),
             skill_service: None,

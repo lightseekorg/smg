@@ -346,7 +346,7 @@ pub struct ToolConfig {
 }
 
 /// Response format configuration (mirrors ResponseFormat but for config).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseFormatConfig {
     #[default]

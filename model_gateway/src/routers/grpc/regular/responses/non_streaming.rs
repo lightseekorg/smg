@@ -24,7 +24,10 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+        common::{
+            mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+            openai_bridge,
+        },
         error,
         grpc::common::responses::{
             collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
@@ -49,8 +52,12 @@ pub(super) async fn route_responses_internal(
     let modified_request = load_conversation_history(ctx, &request).await?;
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, mcp_servers) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
+    let (has_mcp_tools, mcp_servers) = ensure_mcp_connection(
+        &ctx.mcp_orchestrator,
+        &ctx.mcp_format_registry,
+        request.tools.as_deref(),
+    )
+    .await?;
 
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
@@ -228,7 +235,8 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                session.inject_client_visible_mcp_output_items(
+                crate::routers::common::openai_bridge::inject_client_visible_mcp_output_items(
+                    &session,
                     &mut responses_response.output,
                     state.mcp_call_items,
                     &user_function_names,
@@ -350,10 +358,14 @@ pub(super) async fn execute_tool_loop(
                             Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
                             _ => json!({}),
                         };
-                    let response_format = session.tool_response_format(&tc.name);
+                    let response_format = openai_bridge::lookup_tool_format(
+                        &session,
+                        &ctx.mcp_format_registry,
+                        &tc.name,
+                    );
                     prepare_hosted_dispatch_args(
                         &mut arguments,
-                        &response_format,
+                        response_format,
                         request_tools,
                         request_user,
                     );
@@ -395,7 +407,8 @@ pub(super) async fn execute_tool_loop(
                 );
 
                 // Record the call in state with transformed output item
-                let output_item = result.to_response_item();
+                let output_item =
+                    openai_bridge::transform_tool_output(&result, &ctx.mcp_format_registry);
                 let output_str = result.output.to_string();
                 state.record_call(
                     result.call_id,

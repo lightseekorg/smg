@@ -47,6 +47,7 @@ pub struct SharedComponents {
 pub struct ResponsesComponents {
     pub shared: Arc<SharedComponents>,
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+    pub mcp_format_registry: crate::routers::common::openai_bridge::FormatRegistry,
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
@@ -78,6 +79,15 @@ impl ComponentRefs {
         match self {
             ComponentRefs::Shared(_) => None,
             ComponentRefs::Responses(r) => Some(&r.mcp_orchestrator),
+        }
+    }
+
+    pub fn mcp_format_registry(
+        &self,
+    ) -> Option<&crate::routers::common::openai_bridge::FormatRegistry> {
+        match self {
+            ComponentRefs::Shared(_) => None,
+            ComponentRefs::Responses(r) => Some(&r.mcp_format_registry),
         }
     }
 
@@ -322,6 +332,7 @@ pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
     pub session: Option<&'a McpToolSession<'a>>,
+    pub mcp_format_registry: Option<&'a crate::routers::common::openai_bridge::FormatRegistry>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;

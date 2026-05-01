@@ -171,9 +171,13 @@ fn get_string(json: &Value, key: &str) -> Option<String> {
     json.get(key).and_then(|v| v.as_str()).map(String::from)
 }
 
-/// Build a StoredResponse from response JSON and original request
+/// Build a StoredResponse from response JSON and original request.
+///
+/// Takes `response_json` by value so it can be moved into `raw_response`
+/// without an extra clone — the persistence path passes a freshly-compacted
+/// JSON object that has no other live references.
 pub fn build_stored_response(
-    response_json: &Value,
+    response_json: Value,
     original_body: &ResponsesRequest,
 ) -> StoredResponse {
     let mut stored = StoredResponse::new(None);
@@ -181,7 +185,8 @@ pub fn build_stored_response(
     // Initialize empty array - will be populated by persist_conversation_items
     stored.input = Value::Array(vec![]);
 
-    stored.model = get_string(response_json, "model").or_else(|| Some(original_body.model.clone()));
+    stored.model =
+        get_string(&response_json, "model").or_else(|| Some(original_body.model.clone()));
 
     stored.safety_identifier.clone_from(&original_body.user);
     // `StoredResponse.conversation_id` is `Option<String>`; flatten the
@@ -191,7 +196,7 @@ pub fn build_stored_response(
         .as_ref()
         .map(|c| c.as_id().to_string());
 
-    stored.previous_response_id = get_string(response_json, "previous_response_id")
+    stored.previous_response_id = get_string(&response_json, "previous_response_id")
         .map(|s| ResponseId::from(s.as_str()))
         .or_else(|| {
             original_body
@@ -200,11 +205,11 @@ pub fn build_stored_response(
                 .map(ResponseId::from)
         });
 
-    if let Some(id_str) = get_string(response_json, "id") {
+    if let Some(id_str) = get_string(&response_json, "id") {
         stored.id = ResponseId::from(id_str.as_str());
     }
 
-    stored.raw_response = response_json.clone();
+    stored.raw_response = response_json;
     stored
 }
 
@@ -287,6 +292,13 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                                     obj.insert("id".to_string(), json!(generate_id(prefix)));
                                 }
                             }
+
+                            // Strip image_generation_call.result base64 from
+                            // historical replayed items before persistence —
+                            // a no-op for non-image item types.
+                            crate::routers::common::openai_bridge::compact_image_generation_outputs_json(
+                                std::slice::from_mut(&mut value),
+                            );
 
                             Ok(value)
                         }
@@ -415,24 +427,40 @@ async fn persist_conversation_items_inner(
         return Ok(());
     }
 
-    // Extract response ID
+    // Clone once, then strip multi-MB base64 from any `image_generation_call`
+    // items before they reach storage. Replay only references images by `id`,
+    // so storing the bytes per turn would balloon the response chain.
+    let mut response_json = response_json.clone();
+    if let Some(outputs) = response_json
+        .get_mut("output")
+        .and_then(|v| v.as_array_mut())
+    {
+        crate::routers::common::openai_bridge::compact_image_generation_outputs_json(outputs);
+    }
+
+    // Extract response ID and clone out the (already-compacted) output array
+    // before handing the rest of `response_json` to `build_stored_response`,
+    // which moves the value into `raw_response` without re-cloning the full
+    // response tree.
     let response_id_str = response_json
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Response missing id field".to_string())?;
-    let response_id = ResponseId::from(response_id_str);
+        .ok_or_else(|| "Response missing id field".to_string())?
+        .to_string();
+    let response_id = ResponseId::from(response_id_str.as_str());
 
     // Parse and normalize input items from request
     let input_items = extract_input_items(&original_body.input)?;
 
-    // Parse output items from response
+    // Cloning the array here is shallow against compacted items — base64
+    // image payloads have already been stripped above.
     let output_items = response_json
         .get("output")
         .and_then(|v| v.as_array())
         .cloned()
         .ok_or_else(|| "No output array in response".to_string())?;
 
-    // Build and store response
+    // Build and store response (consumes `response_json`).
     let mut stored_response = build_stored_response(response_json, original_body);
     stored_response.id = response_id.clone();
     stored_response.input = Value::Array(input_items.clone());
@@ -464,7 +492,7 @@ async fn persist_conversation_items_inner(
             &conv_id,
             &input_items,
             &output_items,
-            response_id_str,
+            &response_id_str,
         )
         .await?;
         info!(

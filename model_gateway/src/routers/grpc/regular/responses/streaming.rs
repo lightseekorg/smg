@@ -34,7 +34,7 @@ use smg_data_connector::{
     ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
     ResponseStorage,
 };
-use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
+use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -50,7 +50,10 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+        common::{
+            mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+            openai_bridge::{self, ResponseFormat},
+        },
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
@@ -637,8 +640,11 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.call_id
                 );
 
-                // Look up response_format for this tool
-                let response_format = session.tool_response_format(&tool_call.name);
+                let response_format = openai_bridge::lookup_tool_format(
+                    &session,
+                    &ctx.mcp_format_registry,
+                    &tool_call.name,
+                );
 
                 // Use emitter helpers to determine correct type and allocate index
                 let item_type =
@@ -715,7 +721,7 @@ async fn execute_tool_loop_streaming_internal(
                 };
                 prepare_hosted_dispatch_args(
                     &mut arguments,
-                    &response_format,
+                    response_format,
                     original_request.tools.as_deref().unwrap_or(&[]),
                     original_request.user.as_deref(),
                 );
@@ -806,8 +812,8 @@ async fn execute_tool_loop_streaming_internal(
                     },
                 );
 
-                // Use the centralized tool output transformer from MCP crate output type.
-                let output_item = tool_output.to_response_item();
+                let output_item =
+                    openai_bridge::transform_tool_output(&tool_output, &ctx.mcp_format_registry);
 
                 // Record the call in state with transformed output item
                 state.record_call(

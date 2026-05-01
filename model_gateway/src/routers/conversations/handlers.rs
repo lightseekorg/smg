@@ -622,7 +622,14 @@ fn parse_item_from_value(
     let content = if item_type == "message" || item_type == "reasoning" {
         item_val.get("content").cloned().unwrap_or(json!([]))
     } else {
-        item_val.clone()
+        // Strip image_generation_call.result base64 before storage. The
+        // compactor is a no-op for non-image item types, so it's safe to
+        // apply unconditionally on the non-message branch.
+        let mut content = item_val.clone();
+        crate::routers::common::openai_bridge::compact_image_generation_outputs_json(
+            std::slice::from_mut(&mut content),
+        );
+        content
     };
 
     Ok((

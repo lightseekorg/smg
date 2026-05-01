@@ -55,6 +55,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
     let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
+        &ctx.mcp_format_registry,
         current_request.tools.as_deref(),
     )
     .await
@@ -170,7 +171,11 @@ async fn execute_mcp_tool_loop_streaming(
     // advertises only the MCP-exposed function-tool name (which
     // `has_exposed_tool` actually recognizes for dispatch). See the
     // helper doc comment in `common.rs` for the full rationale.
-    strip_image_generation_from_request_tools(&mut current_request, &session);
+    strip_image_generation_from_request_tools(
+        &mut current_request,
+        &session,
+        &ctx.mcp_format_registry,
+    );
 
     let mut mcp_tracking = McpCallTracking::new();
 
@@ -241,6 +246,7 @@ async fn execute_mcp_tool_loop_streaming(
             emitter,
             tx,
             Some(&session),
+            Some(&ctx.mcp_format_registry),
         )
         .await
         {
@@ -319,6 +325,7 @@ async fn execute_mcp_tool_loop_streaming(
                 } else {
                     match execute_mcp_tools(
                         &session,
+                        &ctx.mcp_format_registry,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
@@ -454,6 +461,7 @@ async fn execute_without_mcp_streaming(
         execution_result,
         emitter,
         tx,
+        None,
         None,
     )
     .await

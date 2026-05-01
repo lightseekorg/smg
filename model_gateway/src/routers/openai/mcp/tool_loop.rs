@@ -20,10 +20,7 @@ use openai_protocol::{
     responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
-use smg_mcp::{
-    extract_embedded_openai_responses, mcp_response_item_id, McpServerBinding, McpToolSession,
-    ResponseFormat, ResponseTransformer, ToolExecutionInput, ToolExecutionResult,
-};
+use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput, ToolExecutionResult};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -34,6 +31,10 @@ use crate::{
         common::{
             header_utils::ApiProvider,
             mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+            openai_bridge::{
+                self, extract_embedded_openai_responses, mcp_response_item_id, FormatRegistry,
+                ResponseFormat, ResponseTransformer,
+            },
         },
         error,
     },
@@ -171,6 +172,7 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
     session: &McpToolSession<'_>,
+    format_registry: &FormatRegistry,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
@@ -198,7 +200,8 @@ pub(crate) async fn execute_streaming_tool_calls(
             &call.arguments_buffer
         };
 
-        let response_format = session.tool_response_format(&call.name);
+        let response_format =
+            openai_bridge::lookup_tool_format(session, format_registry, &call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
         let mut arguments: Value = match serde_json::from_str(args_str) {
@@ -256,12 +259,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         // on image_generation) into dispatch args, then forward the request-
         // level `user` so a downstream MCP server can attribute per-user usage.
         // Both steps are no-ops for plain MCP function tools.
-        prepare_hosted_dispatch_args(
-            &mut arguments,
-            &response_format,
-            request_tools,
-            request_user,
-        );
+        prepare_hosted_dispatch_args(&mut arguments, response_format, request_tools, request_user);
 
         // Log the effective (post-merge) args so the log reflects what the
         // MCP server actually receives, not the pre-merge string from the model.
@@ -286,7 +284,11 @@ pub(crate) async fn execute_streaming_tool_calls(
         );
 
         let output_str = tool_output.output.to_string();
-        let mut mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+        let mut mcp_call_item = to_value(openai_bridge::transform_tool_output(
+            &tool_output,
+            format_registry,
+        ))
+        .unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
             json!({})
         });
@@ -343,7 +345,7 @@ pub(crate) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
         }
     }
 
-    let session_tools = session.build_function_tools_json();
+    let session_tools = openai_bridge::function_tools_json(session);
     let mut tools_json = Vec::with_capacity(retained_tools.len() + session_tools.len());
     tools_json.append(&mut retained_tools);
     tools_json.extend(session_tools);
@@ -413,7 +415,7 @@ pub(crate) fn send_mcp_list_tools_events(
     sequence_number: &mut u64,
     server_key: &str,
 ) -> bool {
-    let tools_item_full = session.build_mcp_list_tools_json(server_label, server_key);
+    let tools_item_full = openai_bridge::mcp_list_tools_json(session, server_label, server_key);
     let item_id = tools_item_full
         .get("id")
         .and_then(|v| v.as_str())
@@ -667,7 +669,11 @@ pub(crate) fn inject_mcp_metadata_streaming(
         let mut prefix = Vec::with_capacity(list_tools_bindings.len() + state.mcp_call_items.len());
         for (server_label, server_key) in &list_tools_bindings {
             if !session.is_internal_server_label(server_label) {
-                prefix.push(session.build_mcp_list_tools_json(server_label, server_key));
+                prefix.push(openai_bridge::mcp_list_tools_json(
+                    session,
+                    server_label,
+                    server_key,
+                ));
             }
         }
         prefix.extend(
@@ -682,7 +688,11 @@ pub(crate) fn inject_mcp_metadata_streaming(
         let mut output_items = Vec::new();
         for (server_label, server_key) in &list_tools_bindings {
             if !session.is_internal_server_label(server_label) {
-                output_items.push(session.build_mcp_list_tools_json(server_label, server_key));
+                output_items.push(openai_bridge::mcp_list_tools_json(
+                    session,
+                    server_label,
+                    server_key,
+                ));
             }
         }
         // Use stored transformed items (no reconstruction needed)
@@ -776,7 +786,11 @@ fn approval_prefix_items(
     let mut prefix = Vec::with_capacity(list_tools_bindings.len() + state.mcp_call_items.len() + 1);
     for (list_server_label, server_key) in list_tools_bindings {
         if !session.is_internal_server_label(list_server_label) {
-            prefix.push(session.build_mcp_list_tools_json(list_server_label, server_key));
+            prefix.push(openai_bridge::mcp_list_tools_json(
+                session,
+                list_server_label,
+                server_key,
+            ));
         }
     }
     prefix.extend(
@@ -796,6 +810,7 @@ pub(crate) struct ToolLoopExecutionContext<'a> {
     pub original_body: &'a ResponsesRequest,
     pub existing_mcp_list_tools_labels: &'a [String],
     pub session: &'a McpToolSession<'a>,
+    pub format_registry: &'a FormatRegistry,
 }
 
 /// Execute the tool calling loop
@@ -811,6 +826,7 @@ pub(crate) async fn execute_tool_loop(
         original_body,
         existing_mcp_list_tools_labels,
         session,
+        format_registry,
     } = tool_loop_ctx;
 
     let mut state = ToolLoopState::new(
@@ -897,7 +913,8 @@ pub(crate) async fn execute_tool_loop(
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
                     let error_output = format!("Invalid tool arguments: {e}");
-                    let response_format = session.tool_response_format(&call.name);
+                    let response_format =
+                        openai_bridge::lookup_tool_format(session, format_registry, &call.name);
                     let server_label = session.resolve_tool_server_label(&call.name);
                     let tool_item_id =
                         non_streaming_tool_item_id_source(&call.item_id, &response_format);
@@ -939,10 +956,11 @@ pub(crate) async fn execute_tool_loop(
             // and forward the request-level `user` so a downstream MCP server
             // can attribute per-user usage. Both steps are no-ops for plain
             // MCP function tools (Passthrough format).
-            let response_format = session.tool_response_format(&call.name);
+            let response_format =
+                openai_bridge::lookup_tool_format(session, format_registry, &call.name);
             prepare_hosted_dispatch_args(
                 &mut arguments,
-                &response_format,
+                response_format,
                 original_body.tools.as_deref().unwrap_or(&[]),
                 original_body.user.as_deref(),
             );
@@ -1112,7 +1130,11 @@ fn build_incomplete_response(
             );
             for (server_label, server_key) in &list_tools_bindings {
                 if !session.is_internal_server_label(server_label) {
-                    prefix.push(session.build_mcp_list_tools_json(server_label, server_key));
+                    prefix.push(openai_bridge::mcp_list_tools_json(
+                        session,
+                        server_label,
+                        server_key,
+                    ));
                 }
             }
             prefix.extend(
@@ -1280,7 +1302,7 @@ mod tests {
     use serde_json::json;
     use smg_mcp::{
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
-        McpToolSession, McpTransport, ResponseFormat, Tool, ToolEntry,
+        McpToolSession, McpTransport, Tool, ToolEntry,
     };
     use tokio::sync::mpsc;
 
@@ -1289,6 +1311,7 @@ mod tests {
         is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
         ToolLoopState,
     };
+    use crate::routers::common::openai_bridge::ResponseFormat;
 
     fn test_tool(name: &str) -> Tool {
         let mut schema = serde_json::Map::new();

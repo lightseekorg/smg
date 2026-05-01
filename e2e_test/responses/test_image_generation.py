@@ -255,22 +255,6 @@ def _assert_streaming_envelope(events: list) -> None:
             )
 
 
-def _extract_conversation_id(resp) -> str | None:
-    """Normalise the conversation id across SDK variations.
-
-    The OpenAI Responses SDK surfaces the conversation id as either
-    ``resp.conversation_id`` (a plain string) or ``resp.conversation`` (an
-    object with an ``.id`` attribute), and older releases expose neither.
-    This helper collapses those cases to a single ``str | None``.
-    """
-    conv_attr = getattr(resp, "conversation_id", None) or getattr(resp, "conversation", None)
-    if conv_attr is None:
-        return None
-    if isinstance(conv_attr, str):
-        return conv_attr
-    return getattr(conv_attr, "id", None)
-
-
 # =============================================================================
 # Shared test mix-in body
 # =============================================================================
@@ -427,8 +411,21 @@ class _ImageGenerationAssertions:
         )
 
     def test_image_generation_compactor_strips_base64(self, request, image_gen_tool_args) -> None:
-        """Multi-turn replay: base64 payload must not survive into stored context."""
+        """Multi-turn replay: base64 payload must not survive into stored context.
+
+        Creates a conversation explicitly and pins the first response to it,
+        so the GET /v1/conversations/{id}/items round-trip actually exercises
+        the persistence path. Without an explicit `conversation=...` the
+        Responses API stores to response chains only — no conversation rows
+        are written and the assertion would have nothing to inspect.
+        """
         gateway, client, mock_mcp, model = self._ctx(request)
+
+        # Create the conversation up front so the response gets linked into
+        # `conversation_items` (the storage path that
+        # `compact_image_generation_outputs_json` is wired into).
+        conv = client.conversations.create()
+        conversation_id = conv.id
 
         resp1 = client.responses.create(
             model=model,
@@ -437,22 +434,16 @@ class _ImageGenerationAssertions:
             tool_choice=_FORCED_TOOL_CHOICE,
             stream=False,
             store=True,
+            conversation=conversation_id,
         )
         assert resp1.error is None, f"Turn 1 error: {resp1.error}"
 
         # Sanity-check that the tool actually ran.
         assert _find_image_generation_call(resp1.output) is not None, (
             "Turn 1 response did not contain an image_generation_call item; "
-            "the compactor-replay assertion would be vacuous. "
+            "the compactor-strip assertion would be vacuous. "
             f"output types: {[getattr(i, 'type', None) for i in resp1.output or []]}"
         )
-
-        conversation_id = _extract_conversation_id(resp1)
-        if not conversation_id:
-            pytest.skip(
-                "Gateway did not expose a conversation_id on the first response "
-                "— compactor-replay assertion depends on stored history."
-            )
 
         api_key = client.api_key
         with httpx.Client(timeout=10.0) as http:
@@ -464,12 +455,15 @@ class _ImageGenerationAssertions:
             f"Failed to list conversation items: {items_resp.status_code} {items_resp.text}"
         )
 
-        # Positive persistence guard.
+        # Positive persistence guard: confirm an image_generation_call item
+        # was actually persisted. Otherwise the base64 absence below would
+        # pass vacuously.
         items_data = items_resp.json()
         stored_items = items_data.get("data") or items_data.get("items") or []
-        assert stored_items, (
-            "Conversation persisted no items — compactor-strip assertion would be "
-            f"vacuous. Full response: {items_data!r}"
+        assert any(item.get("type") == "image_generation_call" for item in stored_items), (
+            "No image_generation_call item in stored conversation history; "
+            "compactor-strip assertion would be vacuous. "
+            f"stored types: {[item.get('type') for item in stored_items]}"
         )
 
         payload = items_resp.text

@@ -7,7 +7,28 @@ use openai_protocol::responses::{
 };
 use tracing::warn;
 
-use super::ResponseFormat;
+use super::{FormatRegistry, ResponseFormat};
+
+/// Transform a `ToolExecutionOutput` to a `ResponseOutputItem`, looking up
+/// the format from the registry by `(server_key, tool_name)`.
+///
+/// Lives next to `ResponseTransformer::transform` since it's the thin
+/// session/registry-aware wrapper most callers want; avoids constructing a
+/// `QualifiedToolName` (and its two `Arc<str>` allocations) per tool call.
+pub fn transform_tool_output(
+    output: &smg_mcp::ToolExecutionOutput,
+    registry: &FormatRegistry,
+) -> ResponseOutputItem {
+    let response_format = registry.lookup_by_names(&output.server_key, &output.tool_name);
+    ResponseTransformer::transform(
+        &output.output,
+        &response_format,
+        &output.call_id,
+        &output.server_label,
+        &output.tool_name,
+        &output.arguments_str,
+    )
+}
 
 /// Normalize an MCP response item id source into an external `mcp_call.id`.
 ///
@@ -600,12 +621,28 @@ impl ResponseTransformer {
 /// For any non-image item this is a no-op.
 pub fn compact_image_generation_output(item: &mut ResponseOutputItem) {
     if let ResponseOutputItem::ImageGenerationCall { result, .. } = item {
-        // `result.clear()` zeros the length but keeps the heap buffer
-        // allocated — for base64 image bytes that can be several MB of
-        // wasted capacity per stored item, defeating the compaction goal.
-        // Replace with a fresh empty string to actually free the backing
-        // buffer.
+        // Drop the heap buffer; `clear()` would retain (multi-MB) capacity.
         *result = String::new();
+    }
+}
+
+/// Compact every `image_generation_call` item inside `outputs` in-place. JSON
+/// counterpart to [`compact_image_generation_output`] used by the storage
+/// layer, which works with `serde_json::Value` arrays rather than typed
+/// `ResponseOutputItem`s. Non-image items are untouched.
+pub fn compact_image_generation_outputs_json(outputs: &mut [serde_json::Value]) {
+    for item in outputs {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        if obj.get("type").and_then(|v| v.as_str()) != Some("image_generation_call") {
+            continue;
+        }
+        // Remove rather than blank: the input/replay shape models `result` as
+        // `Option<String>` with `skip_serializing_if`, so the id-only multi-turn
+        // reference form requires field absence — an empty string would still
+        // surface on the wire and diverge from the documented replay payload.
+        obj.remove("result");
     }
 }
 
@@ -1506,5 +1543,38 @@ mod tests {
             ResponseOutputItem::WebSearchCall { id, .. } => assert_eq!(id, "ws_xyz"),
             _ => panic!("Expected WebSearchCall"),
         }
+    }
+
+    #[test]
+    fn test_compact_image_generation_outputs_json_strips_base64() {
+        let mut outputs = vec![
+            serde_json::json!({
+                "type": "image_generation_call",
+                "id": "ig_1",
+                "result": "AAAA_LONG_BASE64",
+                "revised_prompt": "cat",
+                "status": "completed"
+            }),
+            // Untouched: not an image_generation_call.
+            serde_json::json!({
+                "type": "mcp_call",
+                "id": "mcp_1",
+                "output": "raw text",
+            }),
+            // Image item with no `result` field: must not panic.
+            serde_json::json!({
+                "type": "image_generation_call",
+                "id": "ig_2",
+                "status": "in_progress"
+            }),
+        ];
+
+        compact_image_generation_outputs_json(&mut outputs);
+
+        assert!(outputs[0].get("result").is_none());
+        assert_eq!(outputs[0]["revised_prompt"], serde_json::json!("cat"));
+        assert_eq!(outputs[0]["status"], serde_json::json!("completed"));
+        assert_eq!(outputs[1]["output"], serde_json::json!("raw text"));
+        assert!(outputs[2].get("result").is_none());
     }
 }

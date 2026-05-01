@@ -34,6 +34,7 @@ use crate::{
 /// Returns Ok((has_mcp_tools, mcp_servers)) on success.
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
+    format_registry: &crate::routers::common::openai_bridge::FormatRegistry,
     tools: Option<&[ResponseTool]>,
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
@@ -72,7 +73,7 @@ pub(crate) async fn ensure_mcp_connection(
     if let Some(tools) = tools {
         // TODO: Thread real request headers through the gRPC responses path if/when
         // gRPC MCP flows need the same forwarded-header preservation contract.
-        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
+        match ensure_request_mcp_client(mcp_orchestrator, format_registry, tools).await {
             Some(mcp_servers) => {
                 return Ok((true, mcp_servers));
             }

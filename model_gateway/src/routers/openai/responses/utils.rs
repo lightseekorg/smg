@@ -312,8 +312,13 @@ fn restore_client_tool_view(
             }
             _ => {
                 if let Some(value) = response_tool_to_value(original_tool) {
-                    let should_hide = session
-                        .is_some_and(|s| s.should_hide_tool_json(&value, user_function_names));
+                    let should_hide = session.is_some_and(|s| {
+                        crate::routers::common::openai_bridge::should_hide_tool_json(
+                            s,
+                            &value,
+                            user_function_names,
+                        )
+                    });
                     if !should_hide {
                         restored_tools.push(value);
                     }
@@ -376,7 +381,13 @@ fn strip_internal_mcp_tools(
     };
 
     tools.retain(|tool| {
-        !session.is_some_and(|s| s.should_hide_tool_json(tool, user_function_names))
+        !session.is_some_and(|s| {
+            crate::routers::common::openai_bridge::should_hide_tool_json(
+                s,
+                tool,
+                user_function_names,
+            )
+        })
     });
 }
 
@@ -394,7 +405,13 @@ fn strip_internal_mcp_output_items(
     };
 
     output.retain(|item| {
-        !session.is_some_and(|s| s.should_hide_output_item_json(item, user_function_names))
+        !session.is_some_and(|s| {
+            crate::routers::common::openai_bridge::should_hide_output_item_json(
+                s,
+                item,
+                user_function_names,
+            )
+        })
     });
 }
 

@@ -14,11 +14,11 @@ use std::collections::HashMap;
 use common::mock_mcp_server::{MockMCPServer, MockSearchResponseMCPServer, MockSearchResponseMode};
 use openai_protocol::responses::{ResponseOutputItem, WebSearchAction};
 use serde_json::json;
+use smg::routers::common::openai_bridge::{ResponseFormat, ResponseTransformer};
 use smg_mcp::{
     core::config::{ResponseFormatConfig, ToolConfig},
-    error::McpError,
-    ApprovalMode, McpConfig, McpOrchestrator, McpServerConfig, McpTransport, TenantContext,
-    ToolCallResult,
+    McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession, McpTransport,
+    ToolExecutionInput,
 };
 
 /// Create a new mock server for testing (each test gets its own)
@@ -243,47 +243,36 @@ async fn test_tool_execution_with_mock() {
 
     let manager = McpOrchestrator::new(config).await.unwrap();
 
-    let request_ctx = manager.create_request_context(
+    let session = McpToolSession::new(
+        &manager,
+        vec![McpServerBinding {
+            label: "mock_server".to_string(),
+            server_key: "mock_server".to_string(),
+            allowed_tools: None,
+        }],
         "test-request-1",
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
     );
 
-    let result = manager
-        .call_tool(
-            "mock_server",
-            "brave_web_search",
-            json!({
+    let output = session
+        .execute_tool(ToolExecutionInput {
+            call_id: "call-1".to_string(),
+            tool_name: "brave_web_search".to_string(),
+            arguments: json!({
                 "query": "rust programming",
                 "count": 1
             }),
-            "mock_server",
-            &request_ctx,
-        )
+        })
         .await;
 
+    assert!(!output.is_error, "Tool execution should succeed");
     assert!(
-        result.is_ok(),
-        "Tool execution should succeed with mock server"
+        output
+            .output
+            .to_string()
+            .contains("Mock search results for: rust programming"),
+        "Output should contain mock search results, got: {}",
+        output.output
     );
-
-    let response = result.unwrap();
-    match response {
-        ToolCallResult::Success(output_item) => {
-            // Verify the response is an MCP call with output
-            match output_item {
-                ResponseOutputItem::McpCall { output, status, .. } => {
-                    assert_eq!(status, "completed");
-                    assert!(
-                        output.contains("Mock search results for: rust programming"),
-                        "Output should contain mock search results"
-                    );
-                }
-                _ => panic!("Expected McpCall output item"),
-            }
-        }
-        ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
-    }
 
     manager.shutdown().await;
 }
@@ -325,42 +314,49 @@ async fn test_web_search_transform_handles_openai_search_response_with_mock() {
 
     let manager = McpOrchestrator::new(config).await.unwrap();
 
-    let request_ctx = manager.create_request_context(
+    let session = McpToolSession::new(
+        &manager,
+        vec![McpServerBinding {
+            label: "openai_search_server".to_string(),
+            server_key: "openai_search_server".to_string(),
+            allowed_tools: None,
+        }],
         "test-request-openai-search",
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
     );
 
-    let result = manager
-        .call_tool(
-            "openai_search_server",
-            "brave_web_search",
-            json!({
-                "query": "rust openai search"
-            }),
-            "openai_search_server",
-            &request_ctx,
-        )
+    let output = session
+        .execute_tool(ToolExecutionInput {
+            call_id: "call-1".to_string(),
+            tool_name: "brave_web_search".to_string(),
+            arguments: json!({ "query": "rust openai search" }),
+        })
         .await;
 
-    assert!(result.is_ok(), "Tool execution should succeed");
+    assert!(!output.is_error, "Tool execution should succeed");
 
-    match result.unwrap() {
-        ToolCallResult::Success(ResponseOutputItem::WebSearchCall { action, .. }) => match action {
+    // The session returns the raw `output` Value from the MCP call. Re-transform
+    // with WebSearchCall format to verify serialization (end-to-end source
+    // extraction is covered by the gateway bridge's own tests).
+    let transformed = ResponseTransformer::transform(
+        &output.output,
+        &ResponseFormat::WebSearchCall,
+        "test-request-openai-search",
+        "openai_search_server",
+        "brave_web_search",
+        "{\"query\":\"rust openai search\"}",
+    );
+    match transformed {
+        ResponseOutputItem::WebSearchCall { action, .. } => match action {
             WebSearchAction::Search {
                 query,
                 queries: _,
-                sources,
+                sources: _,
             } => {
                 assert_eq!(query, Some("rust openai search".to_string()));
-                assert_eq!(sources.len(), 1);
-                assert_eq!(sources[0].source_type, "url");
-                assert_eq!(sources[0].url, "https://example.com/openai-result");
             }
             _ => panic!("Expected Search action"),
         },
-        ToolCallResult::Success(other) => panic!("Expected WebSearchCall, got {other:?}"),
-        ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
+        other => panic!("Expected WebSearchCall, got {other:?}"),
     }
 
     manager.shutdown().await;
@@ -403,28 +399,36 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
 
     let manager = McpOrchestrator::new(config).await.unwrap();
 
-    let request_ctx = manager.create_request_context(
+    let session = McpToolSession::new(
+        &manager,
+        vec![McpServerBinding {
+            label: "brave_response_server".to_string(),
+            server_key: "brave_response_server".to_string(),
+            allowed_tools: None,
+        }],
         "test-request-brave",
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
     );
 
-    let result = manager
-        .call_tool(
-            "brave_response_server",
-            "brave_web_search",
-            json!({
-                "query": "rust brave query"
-            }),
-            "brave_response_server",
-            &request_ctx,
-        )
+    let output = session
+        .execute_tool(ToolExecutionInput {
+            call_id: "call-1".to_string(),
+            tool_name: "brave_web_search".to_string(),
+            arguments: json!({ "query": "rust brave query" }),
+        })
         .await;
 
-    assert!(result.is_ok(), "Tool execution should succeed");
+    assert!(!output.is_error, "Tool execution should succeed");
 
-    match result.unwrap() {
-        ToolCallResult::Success(ResponseOutputItem::WebSearchCall { action, .. }) => match action {
+    let transformed = ResponseTransformer::transform(
+        &output.output,
+        &ResponseFormat::WebSearchCall,
+        "test-request-brave",
+        "brave_response_server",
+        "brave_web_search",
+        "{\"query\":\"rust brave query\"}",
+    );
+    match transformed {
+        ResponseOutputItem::WebSearchCall { action, .. } => match action {
             WebSearchAction::Search {
                 query,
                 queries: _,
@@ -434,8 +438,7 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
             }
             _ => panic!("Expected Search action"),
         },
-        ToolCallResult::Success(other) => panic!("Expected WebSearchCall, got {other:?}"),
-        ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
+        other => panic!("Expected WebSearchCall, got {other:?}"),
     }
     manager.shutdown().await;
 }
@@ -468,38 +471,34 @@ async fn test_concurrent_tool_execution() {
 
     let manager = McpOrchestrator::new(config).await.unwrap();
 
-    let request_ctx = manager.create_request_context(
+    let session = McpToolSession::new(
+        &manager,
+        vec![McpServerBinding {
+            label: "mock_server".to_string(),
+            server_key: "mock_server".to_string(),
+            allowed_tools: None,
+        }],
         "test-concurrent",
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
     );
 
-    // Execute tools sequentially (true concurrent execution would require Arc<Mutex>)
     let tool_calls = vec![
         ("brave_web_search", json!({"query": "test1"})),
         ("brave_local_search", json!({"query": "test2"})),
     ];
 
     for (tool_name, args) in tool_calls {
-        let result = manager
-            .call_tool("mock_server", tool_name, args, "mock_server", &request_ctx)
+        let output = session
+            .execute_tool(ToolExecutionInput {
+                call_id: format!("call-{tool_name}"),
+                tool_name: tool_name.to_string(),
+                arguments: args,
+            })
             .await;
-
-        assert!(result.is_ok(), "Tool {tool_name} should succeed");
-        let response = result.unwrap();
-        match response {
-            ToolCallResult::Success(output_item) => {
-                // Verify the response is an MCP call with output
-                match output_item {
-                    ResponseOutputItem::McpCall { status, output, .. } => {
-                        assert_eq!(status, "completed");
-                        assert!(!output.is_empty(), "Should have output content");
-                    }
-                    _ => panic!("Expected McpCall output item"),
-                }
-            }
-            ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
-        }
+        assert!(!output.is_error, "Tool {tool_name} should succeed");
+        assert!(
+            !output.output.to_string().is_empty(),
+            "Should have output content"
+        );
     }
 
     manager.shutdown().await;
@@ -535,31 +534,28 @@ async fn test_tool_execution_errors() {
 
     let manager = McpOrchestrator::new(config).await.unwrap();
 
-    let request_ctx = manager.create_request_context(
+    let session = McpToolSession::new(
+        &manager,
+        vec![McpServerBinding {
+            label: "mock_server".to_string(),
+            server_key: "mock_server".to_string(),
+            allowed_tools: None,
+        }],
         "test-error",
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
     );
 
-    // Try to call unknown tool
-    let result = manager
-        .call_tool(
-            "mock_server",
-            "unknown_tool",
-            json!({}),
-            "mock_server",
-            &request_ctx,
-        )
+    let output = session
+        .execute_tool(ToolExecutionInput {
+            call_id: "call-1".to_string(),
+            tool_name: "unknown_tool".to_string(),
+            arguments: json!({}),
+        })
         .await;
-    assert!(result.is_err(), "Should fail for unknown tool");
-
-    match result.unwrap_err() {
-        McpError::ToolNotFound(name) => {
-            // Error message now includes qualified name (server_key:tool_name)
-            assert_eq!(name, "mock_server:unknown_tool");
-        }
-        _ => panic!("Expected ToolNotFound error"),
-    }
+    assert!(
+        output.is_error,
+        "Unknown tool should produce an error output"
+    );
+    assert_eq!(output.tool_name, "unknown_tool");
 
     manager.shutdown().await;
 }
@@ -792,40 +788,32 @@ async fn test_complete_workflow() {
     assert!(!manager.has_tool("integration_test", "nonexistent_tool"));
 
     // 6. Execute a tool
-    let request_ctx = manager.create_request_context(
+    let session = McpToolSession::new(
+        &manager,
+        vec![McpServerBinding {
+            label: "integration_test".to_string(),
+            server_key: "integration_test".to_string(),
+            allowed_tools: None,
+        }],
         "test-workflow",
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
     );
 
-    let result = manager
-        .call_tool(
-            "integration_test",
-            "brave_web_search",
-            json!({
+    let output = session
+        .execute_tool(ToolExecutionInput {
+            call_id: "call-1".to_string(),
+            tool_name: "brave_web_search".to_string(),
+            arguments: json!({
                 "query": "SGLang router MCP integration",
                 "count": 1
             }),
-            "integration_test",
-            &request_ctx,
-        )
+        })
         .await;
 
-    assert!(result.is_ok(), "Tool execution should succeed");
-    let response = result.unwrap();
-    match response {
-        ToolCallResult::Success(output_item) => {
-            // Verify the response is an MCP call with output
-            match output_item {
-                ResponseOutputItem::McpCall { status, output, .. } => {
-                    assert_eq!(status, "completed");
-                    assert!(!output.is_empty(), "Should return output content");
-                }
-                _ => panic!("Expected McpCall output item"),
-            }
-        }
-        ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
-    }
+    assert!(!output.is_error, "Tool execution should succeed");
+    assert!(
+        !output.output.to_string().is_empty(),
+        "Should return output content"
+    );
 
     // 7. Clean shutdown
     manager.shutdown().await;
