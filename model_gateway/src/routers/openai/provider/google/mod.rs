@@ -8,3 +8,6 @@ mod response;
 mod streaming;
 
 pub(crate) use google::GoogleProvider;
+
+#[cfg(test)]
+mod tests;
