@@ -22,9 +22,10 @@ impl Provider for GoogleProvider {
 
     fn transform_response(
         &self,
-        _response: &mut Value,
-        _endpoint: Endpoint,
+        response: &mut Value,
+        endpoint: Endpoint,
     ) -> Result<(), ProviderError> {
+        GoogleProvider::transform_response_impl(response, endpoint);
         Ok(())
     }
 
