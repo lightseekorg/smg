@@ -12,6 +12,8 @@ use tracing::debug;
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
 static HEADER_MCP: HeaderName = HeaderName::from_static("x-smg-mcp");
+static HEADER_PROVIDER_ENDPOINT: HeaderName = HeaderName::from_static("x-provider-endpoint");
+static HEADER_MODEL_PROVIDER: HeaderName = HeaderName::from_static("x-model-provider");
 
 /// Parsed and normalized memory-related request headers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -71,6 +73,14 @@ pub fn extract_target_worker(headers: Option<&HeaderMap>) -> Option<&str> {
 
 pub fn extract_routing_key(headers: Option<&HeaderMap>) -> Option<&str> {
     extract_header_value(headers, &HEADER_ROUTING_KEY)
+}
+
+pub fn extract_provider_endpoint(headers: Option<&HeaderMap>) -> Option<&str> {
+    extract_header_value(headers, &HEADER_PROVIDER_ENDPOINT)
+}
+
+pub fn extract_model_provider(headers: Option<&HeaderMap>) -> Option<&str> {
+    extract_header_value(headers, &HEADER_MODEL_PROVIDER)
 }
 
 /// Check if SMG MCP orchestration is enabled via `X-SMG-MCP: enabled` header.
@@ -481,6 +491,8 @@ mod tests {
         assert!(!should_forward_request_header("cookie"));
         assert!(!should_forward_request_header("x-custom-header"));
         assert!(!should_forward_request_header("x-api-key"));
+        assert!(!should_forward_request_header("x-provider-endpoint"));
+        assert!(!should_forward_request_header("x-model-provider"));
     }
 
     #[test]
