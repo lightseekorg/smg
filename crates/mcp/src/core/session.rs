@@ -864,6 +864,7 @@ impl<'a> McpToolSession<'a> {
             BuiltinToolType::WebSearchPreview,
             BuiltinToolType::CodeInterpreter,
             BuiltinToolType::FileSearch,
+            BuiltinToolType::Shell,
         ]
         .into_iter()
         .filter_map(|builtin_type| orchestrator.find_builtin_server(builtin_type))

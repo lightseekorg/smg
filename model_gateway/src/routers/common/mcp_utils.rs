@@ -188,6 +188,7 @@ pub fn collect_builtin_routing(
             ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
             ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
             ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
+            ResponseTool::Shell(_) => BuiltinToolType::Shell,
             _ => continue,
         };
 
@@ -229,6 +230,7 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
             ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
+            ResponseTool::Shell(_) => Some(BuiltinToolType::Shell),
             _ => None,
         })
         .collect()
@@ -414,7 +416,7 @@ mod tests {
         common::Function,
         responses::{
             CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseTool,
-            WebSearchPreviewTool,
+            ShellTool, WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -697,6 +699,51 @@ mod tests {
             routing[0].response_format,
             ResponseFormat::ImageGenerationCall
         );
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_shell() {
+        let mut shell_tools = HashMap::new();
+        shell_tools.insert(
+            "execute_shell_commands".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::Passthrough,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "shell-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9996/shell".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(shell_tools),
+                builtin_type: Some(BuiltinToolType::Shell),
+                builtin_tool_name: Some("execute_shell_commands".to_string()),
+                internal: false,
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+        let tools = vec![ResponseTool::Shell(ShellTool::default())];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::Shell);
+        assert_eq!(routing[0].server_name, "shell-server");
+        assert_eq!(routing[0].tool_name, "execute_shell_commands");
+        assert_eq!(routing[0].response_format, ResponseFormat::Passthrough);
     }
 
     // =========================================================================

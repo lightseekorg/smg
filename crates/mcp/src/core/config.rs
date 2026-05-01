@@ -304,6 +304,8 @@ pub enum BuiltinToolType {
     FileSearch,
     /// Image generation tool (OpenAI: image_generation)
     ImageGeneration,
+    /// Shell tool (OpenAI: shell)
+    Shell,
 }
 
 impl BuiltinToolType {
@@ -314,6 +316,7 @@ impl BuiltinToolType {
             BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
             BuiltinToolType::FileSearch => ResponseFormatConfig::FileSearchCall,
             BuiltinToolType::ImageGeneration => ResponseFormatConfig::ImageGenerationCall,
+            BuiltinToolType::Shell => ResponseFormatConfig::Passthrough,
         }
     }
 }
@@ -325,6 +328,7 @@ impl fmt::Display for BuiltinToolType {
             BuiltinToolType::CodeInterpreter => write!(f, "code_interpreter"),
             BuiltinToolType::FileSearch => write!(f, "file_search"),
             BuiltinToolType::ImageGeneration => write!(f, "image_generation"),
+            BuiltinToolType::Shell => write!(f, "shell"),
         }
     }
 }
@@ -1201,6 +1205,7 @@ policy:
             (BuiltinToolType::CodeInterpreter, "\"code_interpreter\""),
             (BuiltinToolType::FileSearch, "\"file_search\""),
             (BuiltinToolType::ImageGeneration, "\"image_generation\""),
+            (BuiltinToolType::Shell, "\"shell\""),
         ];
 
         for (builtin_type, expected) in types {
@@ -1229,6 +1234,10 @@ policy:
         assert_eq!(
             BuiltinToolType::ImageGeneration.response_format(),
             ResponseFormatConfig::ImageGenerationCall
+        );
+        assert_eq!(
+            BuiltinToolType::Shell.response_format(),
+            ResponseFormatConfig::Passthrough
         );
     }
 
@@ -1522,5 +1531,10 @@ servers:
             "code_interpreter"
         );
         assert_eq!(BuiltinToolType::FileSearch.to_string(), "file_search");
+        assert_eq!(
+            BuiltinToolType::ImageGeneration.to_string(),
+            "image_generation"
+        );
+        assert_eq!(BuiltinToolType::Shell.to_string(), "shell");
     }
 }
