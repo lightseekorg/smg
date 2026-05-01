@@ -87,7 +87,10 @@ impl PipelineStage for ChatRequestBuildingStage {
         }
 
         let message_hashes = if self.enable_message_hash {
-            Some(helpers::compute_and_log_message_hashes(&request_id, &chat_request.messages))
+            Some(helpers::compute_and_log_message_hashes(
+                &request_id,
+                &chat_request.messages,
+            ))
         } else {
             None
         };

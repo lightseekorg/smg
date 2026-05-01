@@ -3,7 +3,10 @@
 //! This module defines the RequestPipeline orchestrator that coordinates
 //! the execution of pipeline stages from request preparation to response delivery.
 
-use std::{sync::{atomic::AtomicU64, Arc}, time::Instant};
+use std::{
+    sync::{atomic::AtomicU64, Arc},
+    time::Instant,
+};
 
 use axum::response::{IntoResponse, Response};
 use openai_protocol::{
@@ -109,7 +112,10 @@ impl RequestPipeline {
     }
 
     /// Create a regular (single-worker) pipeline
-    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_regular(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -230,7 +236,10 @@ impl RequestPipeline {
     }
 
     /// Create a PD (prefill-decode) pipeline
-    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -341,7 +350,10 @@ impl RequestPipeline {
     /// Uses Messages-specific stages for preparation, request building, and response
     /// processing. Shares worker selection, client acquisition, dispatch metadata,
     /// and request execution stages with other pipelines.
-    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_messages(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -392,7 +404,10 @@ impl RequestPipeline {
     }
 
     /// Create a Messages API PD (prefill-decode) pipeline
-    #[expect(clippy::too_many_arguments, reason = "all params are distinct required dependencies")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_messages_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,

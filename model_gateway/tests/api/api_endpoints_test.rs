@@ -112,8 +112,10 @@ mod health_tests {
 
     #[tokio::test]
     async fn test_health_generate_endpoint() {
-        use std::sync::atomic::Ordering;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::{
+            sync::atomic::Ordering,
+            time::{SystemTime, UNIX_EPOCH},
+        };
 
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18005,
@@ -160,8 +162,10 @@ mod health_tests {
     /// Fast path: if last_token_time is recent (< 10s), the probe is skipped.
     #[tokio::test]
     async fn test_health_generate_fast_path_skips_probe() {
-        use std::sync::atomic::Ordering;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::{
+            sync::atomic::Ordering,
+            time::{SystemTime, UNIX_EPOCH},
+        };
 
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18006,
@@ -207,8 +211,10 @@ mod health_tests {
     /// The probe will fail (no real server at api_port=0), returning 503.
     #[tokio::test]
     async fn test_health_generate_stale_token_falls_through_to_probe() {
-        use std::sync::atomic::Ordering;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::{
+            sync::atomic::Ordering,
+            time::{SystemTime, UNIX_EPOCH},
+        };
 
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18007,

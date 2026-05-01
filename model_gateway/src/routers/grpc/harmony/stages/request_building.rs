@@ -113,7 +113,10 @@ impl PipelineStage for HarmonyRequestBuildingStage {
 
         let message_hashes = if self.enable_message_hash {
             if let RequestType::Chat(req) = &ctx.input.request_type {
-                Some(helpers::compute_and_log_message_hashes(&request_id, &req.messages))
+                Some(helpers::compute_and_log_message_hashes(
+                    &request_id,
+                    &req.messages,
+                ))
             } else {
                 None
             }
