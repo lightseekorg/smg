@@ -303,16 +303,26 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         the same thread-local stream binding the bench traffic will use.
         """
         logger.info("Running warmup generation...")
+        uids = None
         try:
             uids = self.batch_generator.insert(prompts=[[1]], max_tokens=[1])
             for _ in range(10):
                 _, gen_responses = self.batch_generator.next()
                 if any(r.finish_reason is not None for r in gen_responses if r.uid == uids[0]):
                     break
-            self.batch_generator.remove(uids)
             logger.info("Warmup complete")
         except Exception:
             logger.warning("Warmup failed (non-fatal)", exc_info=True)
+        finally:
+            # Always clean up the warmup probe even if next() raised
+            # mid-iteration. Otherwise the warmup uid leaks inside
+            # BatchGenerator and the first real request runs against
+            # corrupted batch state.
+            if uids is not None:
+                try:
+                    self.batch_generator.remove(uids)
+                except Exception:
+                    logger.warning("Warmup cleanup failed", exc_info=True)
 
     @staticmethod
     def _build_sampler(sampling_params):
@@ -727,6 +737,34 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # We also clear self.batch_generator under the lock so any such
         # late call sees None and short-circuits.
         with self._gen_lock:
+            # Wake any RPCs still waiting on the gen loop. Without
+            # this, Generate calls blocked on `await uid_future` (not
+            # yet inserted) or `await queue.get()` (mid-stream) hang
+            # until the client deadline or transport cancellation.
+            with self._pending_lock:
+                pending = self._pending[:]
+                self._pending.clear()
+                self._pending_remove.clear()
+                for p in pending:
+                    self._pending_by_request_id.pop(p.request_id, None)
+
+            shutdown_exc = RuntimeError("MlxEngineServicer is shutting down")
+            for p in pending:
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        _set_future_exception_safe, p.uid_future, shutdown_exc
+                    )
+
+            queues = list(self._uid_queues.values())
+            self._uid_queues.clear()
+            self._request_uid_map.clear()
+            self._active_uids.clear()
+            for queue in queues:
+                # Sentinel — Generate's stream/non-stream loops both
+                # treat None as "Abort received, stop emitting".
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(queue.put_nowait, None)
+
             if self.batch_generator is not None:
                 try:
                     self.batch_generator.close()
