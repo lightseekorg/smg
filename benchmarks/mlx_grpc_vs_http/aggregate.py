@@ -1,4 +1,4 @@
-"""Aggregate genai-bench output across the three MLX backends.
+"""Aggregate genai-bench output across the MLX bench backends.
 
 Walks $RESULTS_DIR for sub-directories matching:
     {label}_{scenario}_c{concurrency}/
@@ -8,6 +8,13 @@ Inside each, finds the genai-bench result JSON (filename pattern
 `<scenario_slug>_text-to-text_num_concurrency_<n>_time_<m>s.json`,
 skipping `experiment_metadata.json` and `gpu_utilization*.json`) and
 emits a per-scenario markdown comparison table.
+
+The set of backend rows in the rendered table is inferred from the
+data: phases that didn't run produce no `{label}_*` directories and
+their rows are simply omitted, rather than rendered as a column of
+`—`. The document title is "Two-Way" / "Three-Way" / "Single-backend"
+based on how many backends actually have data, so a CI run with
+`PHASES=mlx grpc` doesn't pretend it had a vllm-metal column.
 """
 
 from __future__ import annotations
@@ -20,7 +27,15 @@ from typing import Any
 
 DIRNAME_RE = re.compile(r"^(?P<label>mlx|grpc|vllm)_(?P<scenario>[^_]+)_c(?P<concurrency>\d+)$")
 
+# Display order — earlier in this list is rendered first per scenario.
+LABEL_ORDER: tuple[str, ...] = ("mlx", "grpc", "vllm")
 LABEL_PRETTY = {"mlx": "mlx-lm.server", "grpc": "smg → mlx-grpc", "vllm": "vllm-metal"}
+LABEL_DESCRIPTION = {
+    "mlx": "`mlx-lm.server` — direct HTTP (mlx-lm package)",
+    "grpc": "`smg → mlx-grpc` — SMG router fronting our MLX gRPC servicer (PR #1099)",
+    "vllm": "`vllm-metal` — vllm-project/vllm-metal `vllm serve`",
+}
+WAY_NAME = {1: "Single-backend", 2: "Two-Way", 3: "Three-Way"}
 
 
 def _find_result_json(folder: Path) -> Path | None:
@@ -84,6 +99,7 @@ def build_section(
     results: dict[tuple[str, str, int], dict[str, Any]],
     scenario: str,
     concurrencies: list[int],
+    labels: list[str],
 ) -> list[str]:
     lines = [
         "",
@@ -93,7 +109,7 @@ def build_section(
         "|---|---|---|---|---|---|---|---|",
     ]
     for c in concurrencies:
-        for label in ("mlx", "grpc", "vllm"):
+        for label in labels:
             r = results.get((label, scenario, c))
             pretty = LABEL_PRETTY[label]
             if r is None:
@@ -116,15 +132,22 @@ def build_section(
 def build_table(results: dict[tuple[str, str, int], dict[str, Any]], model: str) -> str:
     if not results:
         return "_No results found._"
+    # Render only the backends that actually produced data, in the
+    # canonical LABEL_ORDER. A CI run with PHASES=mlx grpc gets a
+    # two-row table per scenario; PHASES=mlx grpc vllm gets three.
+    present = {k[0] for k in results}
+    labels = [label for label in LABEL_ORDER if label in present]
     scenarios = sorted({k[1] for k in results})
     concurrencies = sorted({k[2] for k in results})
+    way = WAY_NAME.get(len(labels), f"{len(labels)}-way")
     lines = [
-        "## MLX Three-Way Benchmark",
+        f"## MLX {way} Benchmark",
         "",
         f"**Model:** `{model}`",
         "",
-        "Three backends serving the same MLX model on Apple Silicon, driven "
-        "by `genai-bench` against synthetic deterministic scenarios:",
+        f"{len(labels)} backend{'s' if len(labels) != 1 else ''} serving the same MLX "
+        "model on Apple Silicon, driven by `genai-bench` against synthetic "
+        "deterministic scenarios:",
         "",
         "- `chat` = `D(100,256)` — short prompt + medium output (typical chat turn)",
         "- `agent` = `D(2500,256)` — ~2.5k token context + medium output "
@@ -133,12 +156,10 @@ def build_table(results: dict[tuple[str, str, int], dict[str, Any]], model: str)
         f"**Concurrencies:** {', '.join(str(c) for c in concurrencies)}",
         "",
         "Backends:",
-        "- `mlx-lm.server` — direct HTTP (mlx-lm package)",
-        "- `smg → mlx-grpc` — SMG router fronting our MLX gRPC servicer (PR #1099)",
-        "- `vllm-metal` — vllm-project/vllm-metal `vllm serve`",
     ]
+    lines.extend(f"- {LABEL_DESCRIPTION[label]}" for label in labels)
     for s in scenarios:
-        lines.extend(build_section(results, s, concurrencies))
+        lines.extend(build_section(results, s, concurrencies, labels))
     return "\n".join(lines)
 
 
