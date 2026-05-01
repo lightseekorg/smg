@@ -2,8 +2,8 @@
 
 use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
-    ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
-    WebSearchSource,
+    ImageGenerationCallStatus, ResponseOutputItem, ShellCallAction, ShellCallStatus,
+    WebSearchAction, WebSearchCallStatus, WebSearchSource,
 };
 use tracing::warn;
 
@@ -101,6 +101,7 @@ impl ResponseTransformer {
             ResponseFormat::ImageGenerationCall => {
                 Self::to_image_generation_call(result, tool_call_id)
             }
+            ResponseFormat::ShellCall => Self::to_shell_call(tool_call_id, arguments),
         }
     }
 
@@ -586,6 +587,30 @@ impl ResponseTransformer {
             attributes: None,
         })
     }
+
+    /// Transform to shell_call output.
+    fn to_shell_call(tool_call_id: &str, arguments: &str) -> ResponseOutputItem {
+        let action = serde_json::from_str::<ShellCallAction>(arguments).unwrap_or_else(|e| {
+            warn!(
+                error = %e,
+                "Failed to parse shell_call arguments as ShellCallAction; emitting empty action"
+            );
+            ShellCallAction {
+                commands: Vec::new(),
+                max_output_length: None,
+                timeout_ms: None,
+            }
+        });
+
+        ResponseOutputItem::ShellCall {
+            id: normalize_shell_call_id(tool_call_id),
+            call_id: tool_call_id.to_string(),
+            action,
+            environment: None,
+            status: ShellCallStatus::Completed,
+            created_by: None,
+        }
+    }
 }
 
 /// Strip the base64 `result` payload from an `ImageGenerationCall` output
@@ -631,6 +656,18 @@ fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Valu
             None
         }
     }
+}
+
+fn normalize_shell_call_id(source_id: &str) -> String {
+    if source_id.starts_with("sc_") {
+        return source_id.to_string();
+    }
+
+    source_id
+        .strip_prefix("fc_")
+        .or_else(|| source_id.strip_prefix("call_"))
+        .map(|stripped| format!("sc_{stripped}"))
+        .unwrap_or_else(|| format!("sc_{source_id}"))
 }
 
 #[cfg(test)]
@@ -1019,6 +1056,37 @@ mod tests {
                 assert_eq!(outputs.unwrap().len(), 1);
             }
             _ => panic!("Expected CodeInterpreterCall"),
+        }
+    }
+
+    #[test]
+    fn test_shell_call_transform() {
+        let transformed = ResponseTransformer::transform(
+            &json!({}),
+            &ResponseFormat::ShellCall,
+            "call-shell-1",
+            "server",
+            "shell",
+            r#"{"commands":["echo hello"],"timeout_ms":1000}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::ShellCall {
+                id,
+                call_id,
+                action,
+                environment,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "sc_call-shell-1");
+                assert_eq!(call_id, "call-shell-1");
+                assert_eq!(action.commands, vec!["echo hello"]);
+                assert_eq!(action.timeout_ms, Some(1000));
+                assert!(environment.is_none());
+                assert_eq!(status, ShellCallStatus::Completed);
+            }
+            _ => panic!("Expected ShellCall"),
         }
     }
 

@@ -707,7 +707,7 @@ mod tests {
         shell_tools.insert(
             "execute_shell_commands".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::Passthrough,
+                response_format: ResponseFormatConfig::ShellCall,
                 ..Default::default()
             },
         );
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(routing[0].builtin_type, BuiltinToolType::Shell);
         assert_eq!(routing[0].server_name, "shell-server");
         assert_eq!(routing[0].tool_name, "execute_shell_commands");
-        assert_eq!(routing[0].response_format, ResponseFormat::Passthrough);
+        assert_eq!(routing[0].response_format, ResponseFormat::ShellCall);
     }
 
     // =========================================================================

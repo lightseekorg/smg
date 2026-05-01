@@ -19,6 +19,8 @@ pub enum ResponseFormat {
     FileSearchCall,
     /// Transform to OpenAI image_generation_call format
     ImageGenerationCall,
+    /// Transform to OpenAI shell_call format
+    ShellCall,
 }
 
 impl ResponseFormat {
@@ -36,6 +38,7 @@ impl ResponseFormat {
             ResponseFormat::CodeInterpreterCall => Some(BuiltinToolType::CodeInterpreter),
             ResponseFormat::FileSearchCall => Some(BuiltinToolType::FileSearch),
             ResponseFormat::ImageGenerationCall => Some(BuiltinToolType::ImageGeneration),
+            ResponseFormat::ShellCall => Some(BuiltinToolType::Shell),
         }
     }
 }
@@ -48,6 +51,7 @@ impl From<ResponseFormatConfig> for ResponseFormat {
             ResponseFormatConfig::CodeInterpreterCall => ResponseFormat::CodeInterpreterCall,
             ResponseFormatConfig::FileSearchCall => ResponseFormat::FileSearchCall,
             ResponseFormatConfig::ImageGenerationCall => ResponseFormat::ImageGenerationCall,
+            ResponseFormatConfig::ShellCall => ResponseFormat::ShellCall,
         }
     }
 }
@@ -70,6 +74,7 @@ mod tests {
                 ResponseFormat::ImageGenerationCall,
                 "\"image_generation_call\"",
             ),
+            (ResponseFormat::ShellCall, "\"shell_call\""),
         ];
 
         for (format, expected) in formats {
@@ -95,6 +100,7 @@ mod tests {
             BuiltinToolType::CodeInterpreter,
             BuiltinToolType::FileSearch,
             BuiltinToolType::ImageGeneration,
+            BuiltinToolType::Shell,
         ];
         for kind in kinds {
             let fmt: ResponseFormat = kind.response_format().into();

@@ -316,7 +316,7 @@ impl BuiltinToolType {
             BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
             BuiltinToolType::FileSearch => ResponseFormatConfig::FileSearchCall,
             BuiltinToolType::ImageGeneration => ResponseFormatConfig::ImageGenerationCall,
-            BuiltinToolType::Shell => ResponseFormatConfig::Passthrough,
+            BuiltinToolType::Shell => ResponseFormatConfig::ShellCall,
         }
     }
 }
@@ -359,6 +359,7 @@ pub enum ResponseFormatConfig {
     CodeInterpreterCall,
     FileSearchCall,
     ImageGenerationCall,
+    ShellCall,
 }
 
 /// Argument mapping configuration for tool aliases.
@@ -1038,6 +1039,7 @@ tools:
                 ResponseFormatConfig::ImageGenerationCall,
                 "\"image_generation_call\"",
             ),
+            (ResponseFormatConfig::ShellCall, "\"shell_call\""),
         ];
 
         for (format, expected) in formats {
@@ -1237,7 +1239,7 @@ policy:
         );
         assert_eq!(
             BuiltinToolType::Shell.response_format(),
-            ResponseFormatConfig::Passthrough
+            ResponseFormatConfig::ShellCall
         );
     }
 

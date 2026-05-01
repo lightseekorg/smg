@@ -34,6 +34,7 @@ pub(crate) enum OutputItemType {
     CodeInterpreterCall,
     FileSearchCall,
     ImageGenerationCall,
+    ShellCall,
 }
 
 /// Status of an output item
@@ -477,6 +478,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
             ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
+            ResponseFormat::ShellCall => McpEvent::CALL_IN_PROGRESS,
             ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -499,6 +501,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
             ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
+            ResponseFormat::ShellCall => return None,
             ResponseFormat::Passthrough => return None,
         };
         Some(self.emit_tool_event(event_type, output_index, item_id))
@@ -550,6 +553,7 @@ impl ResponseStreamEventEmitter {
             ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
             ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
             ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
+            ResponseFormat::ShellCall => McpEvent::CALL_COMPLETED,
             ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
         };
         self.emit_tool_event(event_type, output_index, item_id)
@@ -566,6 +570,7 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
             Some(ResponseFormat::FileSearchCall) => "file_search_call",
             Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
+            Some(ResponseFormat::ShellCall) => "shell_call",
             Some(ResponseFormat::Passthrough) => "mcp_call",
             None => "function_call",
         }
@@ -578,6 +583,7 @@ impl ResponseStreamEventEmitter {
             Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
             Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
             Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
+            Some(ResponseFormat::ShellCall) => OutputItemType::ShellCall,
             Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
             None => OutputItemType::FunctionCall,
         }
@@ -672,6 +678,7 @@ impl ResponseStreamEventEmitter {
             OutputItemType::CodeInterpreterCall => "ci",
             OutputItemType::FileSearchCall => "fs",
             OutputItemType::ImageGenerationCall => "ig",
+            OutputItemType::ShellCall => "sc",
         };
 
         let id = Self::generate_item_id(id_prefix);

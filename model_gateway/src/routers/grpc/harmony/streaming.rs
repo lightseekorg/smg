@@ -48,7 +48,7 @@ use crate::{
 /// `mcp_call.arguments.delta` / `function_call.arguments.delta` events.
 ///
 /// Hosted built-in tools (`web_search_call`, `code_interpreter_call`,
-/// `file_search_call`, `image_generation_call`) instead surface their
+/// `file_search_call`, `image_generation_call`, `shell_call`) instead surface their
 /// progress through structured events emitted by the shared
 /// [`ResponseStreamEventEmitter`] helpers (`emit_tool_call_in_progress`,
 /// `emit_tool_call_searching`, `emit_tool_call_completed` — plus
@@ -64,7 +64,8 @@ fn streams_arguments(response_format: Option<&ResponseFormat>) -> bool {
         Some(ResponseFormat::WebSearchCall)
         | Some(ResponseFormat::CodeInterpreterCall)
         | Some(ResponseFormat::FileSearchCall)
-        | Some(ResponseFormat::ImageGenerationCall) => false,
+        | Some(ResponseFormat::ImageGenerationCall)
+        | Some(ResponseFormat::ShellCall) => false,
     }
 }
 
@@ -1119,7 +1120,8 @@ mod tests {
             ResponseFormat::WebSearchCall
             | ResponseFormat::CodeInterpreterCall
             | ResponseFormat::FileSearchCall
-            | ResponseFormat::ImageGenerationCall => false,
+            | ResponseFormat::ImageGenerationCall
+            | ResponseFormat::ShellCall => false,
         }
     }
 
@@ -1167,5 +1169,12 @@ mod tests {
             "image_generation_call must ride the structured-event path",
         );
         assert!(!expected_streams_arguments(&image_generation));
+
+        let shell = ResponseFormat::ShellCall;
+        assert!(
+            !streams_arguments(Some(&shell)),
+            "shell_call must ride the structured-event path",
+        );
+        assert!(!expected_streams_arguments(&shell));
     }
 }
