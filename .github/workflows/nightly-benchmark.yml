@@ -10,7 +10,7 @@ on:
         required: false
         default: 'all'
       runtime:
-        description: 'Runtime: sglang, vllm, or all (default: all)'
+        description: 'Runtime: sglang, vllm, tokenspeed, or all (default: all)'
         required: false
         default: 'all'
 
@@ -125,8 +125,19 @@ jobs:
           - { id: meta-llama/Llama-3.3-70B-Instruct, slug: meta-llama-Llama-3.3-70B-Instruct, test_class: TestNightlyLlama70bSingle }
           - { id: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic, slug: RedHatAI-Llama-3.3-70B-Instruct-FP8-dynamic, test_class: TestNightlyLlama70bFp8Single }
         variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
-          - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false }
+          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, setup_tokenspeed: false }
+          - { id: vllm,   runtime: vllm,   grpc_only: "false", setup_vllm: true, setup_trtllm: false, setup_tokenspeed: false }
+        # TokenSpeed runs only on the subset of models the engine supports
+        # today (text-only, gRPC-only). Listed via ``include:`` rather than
+        # crossed with the full variant matrix so we don't have to exclude
+        # the unsupported models one-by-one.
+        include:
+          - model: { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
+            variant: { id: tokenspeed, runtime: tokenspeed, grpc_only: "true", setup_vllm: false, setup_trtllm: false, setup_tokenspeed: true }
+          - model: { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
+            variant: { id: tokenspeed, runtime: tokenspeed, grpc_only: "true", setup_vllm: false, setup_trtllm: false, setup_tokenspeed: true }
+          - model: { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
+            variant: { id: tokenspeed, runtime: tokenspeed, grpc_only: "true", setup_vllm: false, setup_trtllm: false, setup_tokenspeed: true }
 
     steps:
       - name: Check filters
@@ -155,8 +166,14 @@ jobs:
         if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_trtllm
         uses: ./.github/actions/setup-trtllm
 
+      - name: Setup TokenSpeed backend
+        if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_tokenspeed
+        uses: ./.github/actions/setup-tokenspeed
+        with:
+          github-token: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
+
       - name: Setup SGLang backend
-        if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm
+        if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm && !matrix.variant.setup_tokenspeed
         uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact

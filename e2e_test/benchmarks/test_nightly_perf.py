@@ -41,9 +41,11 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
     backend, model_path, client, gateway = setup_backend
 
     # Get runtime and GPU info for metadata
-    runtime = get_runtime()  # sglang or vllm from E2E_RUNTIME env var
-    # Map to genai-bench expected case (SGLang, vLLM)
-    runtime_display = {"sglang": "SGLang", "vllm": "vLLM"}.get(runtime, runtime)
+    runtime = get_runtime()  # sglang / vllm / tokenspeed from E2E_RUNTIME env var
+    # Map to genai-bench expected case (SGLang, vLLM, TokenSpeed)
+    runtime_display = {"sglang": "SGLang", "vllm": "vLLM", "tokenspeed": "TokenSpeed"}.get(
+        runtime, runtime
+    )
     gpu_type = os.environ.get("GPU_TYPE", "H200")
 
     # Get tp (tensor parallelism) from model spec - this is GPUs per worker
