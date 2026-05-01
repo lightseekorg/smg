@@ -15,11 +15,12 @@ categories = ["api-bindings", "data-structures"]
 
 [features]
 default = []
-axum = ["dep:axum"]
+axum = ["dep:axum", "axum/multipart"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
 bitflags.workspace = true
+bytes = "1.8.0"
 chrono.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }

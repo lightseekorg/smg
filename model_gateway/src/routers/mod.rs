@@ -23,7 +23,7 @@ use openai_protocol::{
     },
     rerank::RerankRequest,
     responses::ResponsesRequest,
-    transcription::TranscriptionRequest,
+    transcription::{AudioFile, TranscriptionRequest},
 };
 
 use crate::middleware::TenantRequestMeta;
@@ -47,20 +47,6 @@ pub mod tokenize;
 pub use factory::RouterFactory;
 // Re-export HTTP routers for convenience
 pub use http::{pd_router, pd_types, router};
-
-/// Binary audio payload for `/v1/audio/transcriptions`.
-///
-/// The transcription endpoint uses multipart/form-data, so the file bytes
-/// travel alongside the JSON-like `TranscriptionRequest` rather than inside it.
-#[derive(Debug, Clone)]
-pub struct AudioFile {
-    /// Raw audio bytes (wav/mp3/m4a/etc.).
-    pub bytes: bytes::Bytes,
-    /// Original filename from the multipart part. Forwarded verbatim to the worker.
-    pub file_name: String,
-    /// Original content-type of the audio part (e.g. `audio/wav`), if the client supplied one.
-    pub content_type: Option<String>,
-}
 
 /// Core trait for all router implementations
 ///

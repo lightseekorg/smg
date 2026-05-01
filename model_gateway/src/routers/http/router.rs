@@ -17,7 +17,7 @@ use openai_protocol::{
     generate::GenerateRequest,
     rerank::{RerankRequest, RerankResponse, RerankResult},
     responses::ResponsesRequest,
-    transcription::TranscriptionRequest,
+    transcription::{AudioFile, TranscriptionRequest},
 };
 use reqwest::{
     multipart::{Form, Part},
@@ -44,7 +44,7 @@ use crate::{
         },
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
-        AudioFile, RouterTrait,
+        RouterTrait,
     },
     worker::{AttachedBody, ConnectionMode, Worker, WorkerLoadGuard, WorkerRegistry, WorkerType},
 };
