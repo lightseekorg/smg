@@ -339,7 +339,7 @@ async fn test_web_search_transform_handles_openai_search_response_with_mock() {
     // extraction is covered by the gateway bridge's own tests).
     let transformed = ResponseTransformer::transform(
         &output.output,
-        &ResponseFormat::WebSearchCall,
+        ResponseFormat::WebSearchCall,
         "test-request-openai-search",
         "openai_search_server",
         "brave_web_search",
@@ -421,7 +421,7 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
 
     let transformed = ResponseTransformer::transform(
         &output.output,
-        &ResponseFormat::WebSearchCall,
+        ResponseFormat::WebSearchCall,
         "test-request-brave",
         "brave_response_server",
         "brave_web_search",

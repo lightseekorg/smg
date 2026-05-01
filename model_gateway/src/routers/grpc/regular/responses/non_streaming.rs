@@ -235,7 +235,7 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                crate::routers::common::openai_bridge::inject_client_visible_mcp_output_items(
+                openai_bridge::inject_client_visible_mcp_output_items(
                     &session,
                     &mut responses_response.output,
                     state.mcp_call_items,
@@ -412,7 +412,7 @@ pub(super) async fn execute_tool_loop(
                     &ctx.mcp_format_registry,
                     &result.tool_name,
                 );
-                let output_item = openai_bridge::transform_tool_output(&result, &response_format);
+                let output_item = openai_bridge::transform_tool_output(&result, response_format);
                 let output_str = result.output.to_string();
                 state.record_call(
                     result.call_id,

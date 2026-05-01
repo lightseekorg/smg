@@ -38,7 +38,7 @@ use super::{
         rewrite_streaming_block,
     },
 };
-use crate::routers::common::openai_bridge::{mcp_response_item_id, ResponseFormat};
+use crate::routers::common::openai_bridge::{self, mcp_response_item_id, ResponseFormat};
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
 use crate::{
@@ -149,14 +149,14 @@ pub(super) fn apply_event_transformations_inplace(
                             let response_format = ctx
                                 .mcp_format_registry
                                 .map(|reg| {
-                                    crate::routers::common::openai_bridge::lookup_tool_format(
+                                    openai_bridge::lookup_tool_format(
                                         session, reg, &tool_name,
                                     )
                                 })
                                 .unwrap_or(ResponseFormat::Passthrough);
 
                             let d =
-                                crate::routers::common::openai_bridge::descriptor(response_format);
+                                openai_bridge::descriptor(response_format);
                             let (new_type, id_prefix) = (d.type_str, d.id_prefix);
 
                             item["type"] = json!(new_type);
@@ -675,7 +675,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
-    format_registry: crate::routers::common::openai_bridge::FormatRegistry,
+    format_registry: openai_bridge::FormatRegistry,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
     let payload = req.payload;

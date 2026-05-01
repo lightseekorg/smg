@@ -20,7 +20,7 @@ use super::ResponseFormat;
 /// `Passthrough`.
 pub fn transform_tool_output(
     output: &smg_mcp::ToolExecutionOutput,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
 ) -> ResponseOutputItem {
     ResponseTransformer::transform(
         &output.output,
@@ -104,7 +104,7 @@ impl ResponseTransformer {
     /// Returns a `ResponseOutputItem` from the protocols crate.
     pub fn transform(
         result: &serde_json::Value,
-        format: &ResponseFormat,
+        format: ResponseFormat,
         tool_call_id: &str,
         server_label: &str,
         tool_name: &str,
@@ -683,7 +683,7 @@ mod tests {
         let result = json!({"key": "value"});
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "call_test-1",
             "server",
             "tool",
@@ -707,7 +707,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "test-2",
             "server",
             "tool",
@@ -727,7 +727,7 @@ mod tests {
         let result = json!({"key": "value"});
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "fc_abc123",
             "server",
             "tool",
@@ -751,7 +751,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "test-3",
             "server",
             "tool",
@@ -771,7 +771,7 @@ mod tests {
         let result = json!({"key": "value"});
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "mcp_existing",
             "server",
             "tool",
@@ -796,7 +796,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "test-4",
             "server",
             "tool",
@@ -820,7 +820,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "test-4b",
             "server",
             "tool",
@@ -846,7 +846,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "test-5",
             "server",
             "tool",
@@ -875,7 +875,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::Passthrough,
+            ResponseFormat::Passthrough,
             "test-6",
             "server",
             "tool",
@@ -909,7 +909,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::WebSearchCall,
+            ResponseFormat::WebSearchCall,
             "req-123",
             "server",
             "web_search",
@@ -963,7 +963,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::WebSearchCall,
+            ResponseFormat::WebSearchCall,
             "req-embedded",
             "server",
             "web_search",
@@ -1000,7 +1000,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::WebSearchCall,
+            ResponseFormat::WebSearchCall,
             "req-legacy",
             "server",
             "web_search",
@@ -1036,7 +1036,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::CodeInterpreterCall,
+            ResponseFormat::CodeInterpreterCall,
             "req-456",
             "server",
             "code_interpreter",
@@ -1073,7 +1073,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::FileSearchCall,
+            ResponseFormat::FileSearchCall,
             "req-789",
             "server",
             "file_search",
@@ -1108,7 +1108,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-1",
             "server",
             "image_generation",
@@ -1143,7 +1143,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-2",
             "server",
             "image_generation",
@@ -1179,7 +1179,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-3",
             "server",
             "image_generation",
@@ -1221,7 +1221,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-toplevel",
             "server",
             "image_generation",
@@ -1255,7 +1255,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-alias",
             "server",
             "image_generation",
@@ -1296,7 +1296,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-dist",
             "server",
             "image_generation",
@@ -1325,7 +1325,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-4",
             "server",
             "image_generation",
@@ -1368,7 +1368,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-meta",
             "server",
             "image_generation",
@@ -1428,7 +1428,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-meta-textblock",
             "server",
             "image_generation",
@@ -1466,7 +1466,7 @@ mod tests {
 
         let transformed = ResponseTransformer::transform(
             &result,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             "req-img-nometa",
             "server",
             "image_generation",

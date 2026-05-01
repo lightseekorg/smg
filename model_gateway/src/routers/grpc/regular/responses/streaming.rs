@@ -676,7 +676,7 @@ async fn execute_tool_loop_streaming_internal(
 
                 // Emit tool_call.in_progress
                 let event =
-                    emitter.emit_tool_call_in_progress(output_index, &item_id, &response_format);
+                    emitter.emit_tool_call_in_progress(output_index, &item_id, response_format);
                 emitter.send_event(&event, &tx)?;
 
                 // Emit arguments events for mcp_call only (skip for builtin tools)
@@ -700,7 +700,7 @@ async fn execute_tool_loop_streaming_internal(
 
                 // Emit searching/interpreting event for builtin tools
                 if let Some(event) =
-                    emitter.emit_tool_call_searching(output_index, &item_id, &response_format)
+                    emitter.emit_tool_call_searching(output_index, &item_id, response_format)
                 {
                     emitter.send_event(&event, &tx)?;
                 }
@@ -742,7 +742,7 @@ async fn execute_tool_loop_streaming_internal(
                 if success {
                     // Emit tool_call.completed
                     let event =
-                        emitter.emit_tool_call_completed(output_index, &item_id, &response_format);
+                        emitter.emit_tool_call_completed(output_index, &item_id, response_format);
                     emitter.send_event(&event, &tx)?;
 
                     // Build complete item with output
@@ -813,7 +813,7 @@ async fn execute_tool_loop_streaming_internal(
                 );
 
                 let output_item =
-                    openai_bridge::transform_tool_output(&tool_output, &response_format);
+                    openai_bridge::transform_tool_output(&tool_output, response_format);
 
                 // Record the call in state with transformed output item
                 state.record_call(

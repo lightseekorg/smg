@@ -16,6 +16,7 @@ use crate::routers::{
     common::{
         header_utils::{extract_forwardable_request_headers, ApiProvider},
         mcp_utils::ensure_request_mcp_client,
+        openai_bridge,
         persistence_utils::persist_conversation_items,
     },
     error,
@@ -94,7 +95,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             forwarded_headers,
         );
         if let Some(tools) = original_body.tools.as_deref() {
-            crate::routers::common::openai_bridge::configure_response_tools_approval(
+            openai_bridge::configure_response_tools_approval(
                 &mut session,
                 tools,
             );

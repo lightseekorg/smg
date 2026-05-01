@@ -119,7 +119,7 @@ pub(super) async fn execute_mcp_tools(
         .map(|output| {
             let response_format =
                 openai_bridge::lookup_tool_format(session, format_registry, &output.tool_name);
-            let output_item = openai_bridge::transform_tool_output(&output, &response_format);
+            let output_item = openai_bridge::transform_tool_output(&output, response_format);
 
             // Record this call in tracking
             tracking.record_call(output_item.clone());

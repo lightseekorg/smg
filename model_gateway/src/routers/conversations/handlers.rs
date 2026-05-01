@@ -15,7 +15,10 @@ use smg_data_connector::{
 };
 use tracing::info;
 
-use crate::{memory::MemoryExecutionContext, routers::common::persistence_utils::item_to_json};
+use crate::{
+    memory::MemoryExecutionContext,
+    routers::common::{openai_bridge, persistence_utils::item_to_json},
+};
 
 // ============================================================================
 // Constants
@@ -626,7 +629,7 @@ fn parse_item_from_value(
         // compactor is a no-op for non-image item types, so it's safe to
         // apply unconditionally on the non-message branch.
         let mut content = item_val.clone();
-        crate::routers::common::openai_bridge::compact_image_generation_outputs_json(
+        openai_bridge::compact_image_generation_outputs_json(
             std::slice::from_mut(&mut content),
         );
         content

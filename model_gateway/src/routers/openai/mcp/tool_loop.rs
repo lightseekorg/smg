@@ -212,7 +212,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                 let error_output = json!({ "error": &err_str });
                 let mut mcp_call_item = build_transformed_mcp_call_item(
                     &error_output,
-                    &response_format,
+                    response_format,
                     &call.call_id,
                     &server_label,
                     &call.name,
@@ -221,14 +221,14 @@ pub(crate) async fn execute_streaming_tool_calls(
                 if let Some(obj) = mcp_call_item.as_object_mut() {
                     obj.insert(
                         "id".to_string(),
-                        Value::String(stable_streaming_tool_item_id(&call, &response_format)),
+                        Value::String(stable_streaming_tool_item_id(&call, response_format)),
                     );
                 }
                 if !send_tool_call_completion_events(
                     tx,
                     &call,
                     &mcp_call_item,
-                    &response_format,
+                    response_format,
                     sequence_number,
                 ) {
                     return false;
@@ -245,7 +245,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             }
         };
 
-        if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
+        if !send_tool_call_intermediate_event(tx, &call, response_format, sequence_number) {
             return false;
         }
 
@@ -286,7 +286,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         let output_str = tool_output.output.to_string();
         let mut mcp_call_item = to_value(openai_bridge::transform_tool_output(
             &tool_output,
-            &response_format,
+            response_format,
         ))
         .unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
@@ -295,7 +295,7 @@ pub(crate) async fn execute_streaming_tool_calls(
         if let Some(obj) = mcp_call_item.as_object_mut() {
             obj.insert(
                 "id".to_string(),
-                Value::String(stable_streaming_tool_item_id(&call, &response_format)),
+                Value::String(stable_streaming_tool_item_id(&call, response_format)),
             );
         }
 
@@ -303,7 +303,7 @@ pub(crate) async fn execute_streaming_tool_calls(
             tx,
             &call,
             &mcp_call_item,
-            &response_format,
+            response_format,
             sequence_number,
         ) {
             return false;
@@ -499,7 +499,7 @@ pub(crate) fn send_mcp_list_tools_events(
 fn send_tool_call_intermediate_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
     sequence_number: &mut u64,
 ) -> bool {
     // Determine event type and ID prefix based on response format
@@ -540,7 +540,7 @@ fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
     tool_call_item: &Value,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
     sequence_number: &mut u64,
 ) -> bool {
     let effective_output_index = call.effective_output_index();
@@ -593,7 +593,7 @@ fn send_tool_call_completion_events(
 
 fn stable_streaming_tool_item_id(
     call: &FunctionCallInProgress,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
 ) -> String {
     let source_id = call.item_id.as_deref().unwrap_or(call.call_id.as_str());
 
@@ -621,7 +621,7 @@ fn normalize_tool_item_id_with_prefix(source_id: &str, target_prefix: &str) -> S
         .unwrap_or_else(|| format!("{target_prefix}{source_id}"))
 }
 
-fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFormat) -> String {
+fn non_streaming_tool_item_id_source(item_id: &str, response_format: ResponseFormat) -> String {
     match response_format {
         ResponseFormat::Passthrough => item_id.to_string(),
         ResponseFormat::WebSearchCall
@@ -917,11 +917,11 @@ pub(crate) async fn execute_tool_loop(
                         openai_bridge::lookup_tool_format(session, format_registry, &call.name);
                     let server_label = session.resolve_tool_server_label(&call.name);
                     let tool_item_id =
-                        non_streaming_tool_item_id_source(&call.item_id, &response_format);
+                        non_streaming_tool_item_id_source(&call.item_id, response_format);
                     let error_json = json!({ "error": &error_output });
                     let transformed_item = build_transformed_mcp_call_item(
                         &error_json,
-                        &response_format,
+                        response_format,
                         &tool_item_id,
                         &server_label,
                         &call.name,
@@ -984,7 +984,7 @@ pub(crate) async fn execute_tool_loop(
                 .await;
 
             let server_label = session.resolve_tool_server_label(&call.name);
-            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, &response_format);
+            let tool_item_id = non_streaming_tool_item_id_source(&call.item_id, response_format);
             let approval_request_id = approval_request_item_id_source(&call.item_id);
 
             let tool_output = match tool_result {
@@ -1024,7 +1024,7 @@ pub(crate) async fn execute_tool_loop(
             let output_str = tool_output.output.to_string();
             let transformed_item = build_transformed_mcp_call_item(
                 &tool_output.output,
-                &response_format,
+                response_format,
                 &tool_item_id,
                 &server_label,
                 &call.name,
@@ -1233,7 +1233,7 @@ fn build_mcp_approval_request_item(
 /// Returns the result as a JSON Value for SSE event streaming.
 fn build_transformed_mcp_call_item(
     output: &Value,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
     tool_item_id: &str,
     server_label: &str,
     tool_name: &str,
@@ -1342,7 +1342,7 @@ mod tests {
                     { "url": "https://example.com" }
                 ]
             }),
-            &ResponseFormat::WebSearchCall,
+            ResponseFormat::WebSearchCall,
             "call_123",
             "internal-label",
             "brave_web_search",
@@ -1683,7 +1683,7 @@ mod tests {
             &tx,
             &call,
             &tool_call_item,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             &mut sequence_number,
         );
         assert!(ok, "send_tool_call_completion_events should not disconnect");
@@ -1740,7 +1740,7 @@ mod tests {
             &tx,
             &call,
             &tool_call_item,
-            &ResponseFormat::WebSearchCall,
+            ResponseFormat::WebSearchCall,
             &mut sequence_number,
         );
         assert!(ok);
@@ -1796,7 +1796,7 @@ mod tests {
             &tx,
             &call,
             &tool_call_item,
-            &ResponseFormat::CodeInterpreterCall,
+            ResponseFormat::CodeInterpreterCall,
             &mut sequence_number,
         );
         assert!(ok);
@@ -1864,7 +1864,7 @@ mod tests {
             &tx,
             &call,
             &tool_call_item,
-            &ResponseFormat::FileSearchCall,
+            ResponseFormat::FileSearchCall,
             &mut sequence_number,
         );
         assert!(ok);

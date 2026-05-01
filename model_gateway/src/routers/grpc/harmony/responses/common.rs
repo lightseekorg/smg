@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::execution::ToolResult;
 use crate::routers::{
-    common::openai_bridge::{FormatRegistry, ResponseFormat},
+    common::openai_bridge::{self, FormatRegistry, ResponseFormat},
     error,
     grpc::common::responses::ResponsesContext,
 };
@@ -181,7 +181,7 @@ pub(super) fn inject_mcp_metadata(
         .map(|record| record.output_item.clone())
         .collect();
 
-    crate::routers::common::openai_bridge::inject_client_visible_mcp_output_items(
+    openai_bridge::inject_client_visible_mcp_output_items(
         session,
         &mut response.output,
         tool_output_items,

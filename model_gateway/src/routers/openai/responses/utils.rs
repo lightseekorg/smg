@@ -12,7 +12,7 @@ use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::common::parse_sse_block;
-use crate::routers::common::mcp_utils::collect_user_function_names;
+use crate::routers::common::{mcp_utils::collect_user_function_names, openai_bridge};
 
 /// Check if a JSON value is missing, null, or an empty string
 fn is_missing_or_empty(value: Option<&Value>) -> bool {
@@ -313,7 +313,7 @@ fn restore_client_tool_view(
             _ => {
                 if let Some(value) = response_tool_to_value(original_tool) {
                     let should_hide = session.is_some_and(|s| {
-                        crate::routers::common::openai_bridge::should_hide_tool_json(
+                        openai_bridge::should_hide_tool_json(
                             s,
                             &value,
                             user_function_names,
@@ -382,7 +382,7 @@ fn strip_internal_mcp_tools(
 
     tools.retain(|tool| {
         !session.is_some_and(|s| {
-            crate::routers::common::openai_bridge::should_hide_tool_json(
+            openai_bridge::should_hide_tool_json(
                 s,
                 tool,
                 user_function_names,
@@ -406,7 +406,7 @@ fn strip_internal_mcp_output_items(
 
     output.retain(|item| {
         !session.is_some_and(|s| {
-            crate::routers::common::openai_bridge::should_hide_output_item_json(
+            openai_bridge::should_hide_output_item_json(
                 s,
                 item,
                 user_function_names,

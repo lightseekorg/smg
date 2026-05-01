@@ -22,7 +22,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::routers::{
-    common::openai_bridge::{descriptor, ResponseFormat},
+    common::openai_bridge::{self, descriptor, ResponseFormat},
     grpc::harmony::responses::ToolResult,
 };
 
@@ -360,7 +360,7 @@ impl ResponseStreamEventEmitter {
     fn tool_entries_to_json(
         tools: &[mcp::ToolEntry],
     ) -> Result<Vec<serde_json::Value>, serde_json::Error> {
-        crate::routers::common::openai_bridge::build_mcp_tool_infos(tools)
+        openai_bridge::build_mcp_tool_infos(tools)
             .into_iter()
             .map(serde_json::to_value)
             .collect()
@@ -471,9 +471,9 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
     ) -> serde_json::Value {
-        let event_type = descriptor(*response_format).in_progress_event;
+        let event_type = descriptor(response_format).in_progress_event;
         self.emit_tool_event(event_type, output_index, item_id)
     }
 
@@ -483,9 +483,9 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
     ) -> Option<serde_json::Value> {
-        let event_type = descriptor(*response_format).searching_event?;
+        let event_type = descriptor(response_format).searching_event?;
         Some(self.emit_tool_event(event_type, output_index, item_id))
     }
 
@@ -499,11 +499,11 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
         partial_image_index: u32,
         partial_image_b64: &str,
     ) -> Option<serde_json::Value> {
-        let event_type = descriptor(*response_format).partial_image_event?;
+        let event_type = descriptor(response_format).partial_image_event?;
         Some(json!({
             "type": event_type,
             "sequence_number": self.next_sequence(),
@@ -518,9 +518,9 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
     ) -> serde_json::Value {
-        let event_type = descriptor(*response_format).completed_event;
+        let event_type = descriptor(response_format).completed_event;
         self.emit_tool_event(event_type, output_index, item_id)
     }
 

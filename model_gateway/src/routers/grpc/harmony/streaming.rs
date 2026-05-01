@@ -720,7 +720,7 @@ impl HarmonyStreamingProcessor {
 
                                 tool_call_tracking.insert(
                                     call_index,
-                                    (output_index, item_id.clone(), response_format.clone()),
+                                    (output_index, item_id.clone(), response_format),
                                 );
 
                                 // Build output_item.added event
@@ -746,7 +746,7 @@ impl HarmonyStreamingProcessor {
                                 emitter.send_event_best_effort(&event, tx);
 
                                 // Emit in_progress event for MCP tools
-                                if let Some(ref fmt) = response_format {
+                                if let Some(fmt) = response_format {
                                     let event = emitter.emit_tool_call_in_progress(
                                         output_index,
                                         &item_id,
@@ -881,7 +881,7 @@ impl HarmonyStreamingProcessor {
                                 }
 
                                 // Emit completed event for MCP tools
-                                if let Some(ref fmt) = response_format {
+                                if let Some(fmt) = *response_format {
                                     let event = emitter.emit_tool_call_completed(
                                         *output_index,
                                         item_id,
@@ -1018,7 +1018,7 @@ impl HarmonyStreamingProcessor {
                         }
 
                         // Emit completed event for MCP tools
-                        if let Some(ref fmt) = response_format {
+                        if let Some(fmt) = *response_format {
                             let event =
                                 emitter.emit_tool_call_completed(*output_index, item_id, fmt);
                             emitter.send_event_best_effort(&event, tx);
@@ -1133,7 +1133,7 @@ mod tests {
     /// the production classifier so a drift between the two is a separate
     /// failure (runtime assertion miss) from a missing variant (compile
     /// error here).
-    fn expected_streams_arguments(format: &ResponseFormat) -> bool {
+    fn expected_streams_arguments(format: ResponseFormat) -> bool {
         match format {
             ResponseFormat::Passthrough => true,
             ResponseFormat::WebSearchCall
@@ -1164,28 +1164,28 @@ mod tests {
             streams_arguments(Some(&passthrough)),
             "mcp_call (Passthrough) should stream args",
         );
-        assert!(expected_streams_arguments(&passthrough));
+        assert!(expected_streams_arguments(passthrough));
 
         // Hosted built-ins do *not* stream arguments — they surface
         // progress via structured `*.in_progress` / `*.searching` /
         // `*.generating` / `*.completed` events from the shared emitter.
         let web_search = ResponseFormat::WebSearchCall;
         assert!(!streams_arguments(Some(&web_search)));
-        assert!(!expected_streams_arguments(&web_search));
+        assert!(!expected_streams_arguments(web_search));
 
         let code_interpreter = ResponseFormat::CodeInterpreterCall;
         assert!(!streams_arguments(Some(&code_interpreter)));
-        assert!(!expected_streams_arguments(&code_interpreter));
+        assert!(!expected_streams_arguments(code_interpreter));
 
         let file_search = ResponseFormat::FileSearchCall;
         assert!(!streams_arguments(Some(&file_search)));
-        assert!(!expected_streams_arguments(&file_search));
+        assert!(!expected_streams_arguments(file_search));
 
         let image_generation = ResponseFormat::ImageGenerationCall;
         assert!(
             !streams_arguments(Some(&image_generation)),
             "image_generation_call must ride the structured-event path",
         );
-        assert!(!expected_streams_arguments(&image_generation));
+        assert!(!expected_streams_arguments(image_generation));
     }
 }

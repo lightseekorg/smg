@@ -15,6 +15,8 @@ use smg_data_connector::{
 };
 use tracing::{debug, info, warn};
 
+use super::openai_bridge;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -296,7 +298,7 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                             // Strip image_generation_call.result base64 from
                             // historical replayed items before persistence —
                             // a no-op for non-image item types.
-                            crate::routers::common::openai_bridge::compact_image_generation_outputs_json(
+                            openai_bridge::compact_image_generation_outputs_json(
                                 std::slice::from_mut(&mut value),
                             );
 
@@ -435,7 +437,7 @@ async fn persist_conversation_items_inner(
         .get_mut("output")
         .and_then(|v| v.as_array_mut())
     {
-        crate::routers::common::openai_bridge::compact_image_generation_outputs_json(outputs);
+        openai_bridge::compact_image_generation_outputs_json(outputs);
     }
 
     // Extract response ID and clone out the (already-compacted) output array
