@@ -5,5 +5,6 @@
 mod google;
 mod request;
 mod response;
+mod streaming;
 
 pub(crate) use google::GoogleProvider;
