@@ -124,7 +124,7 @@ python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) 
 
 | Environment | `PHASES` default | `MODEL` default | Why |
 |---|---|---|---|
-| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx grpc` (two-way) | `mlx-community/gemma-4-e2b-it-4bit` (~3.2 GB) | Gemma 4 E2B Q4 is the smallest production-quality MLX checkpoint with day-0 mlx-lm support. Fits the macos-latest runner's 7 GB RAM with headroom for KV cache and the bench harness. |
+| GitHub Actions (`nightly-mlx-bench.yml`) | `mlx grpc` (two-way) | `mlx-community/gemma-3-4b-it-qat-4bit` (~3 GB) | Same model as the local default — keeps CI vs local apples-to-apples and produces meaningful 4 B numbers. mlx-lm 0.31.x supports Gemma 4 for the dense 26 B/31 B text variants only; the Gemma 4 e2b/e4b "Effective" variants are multimodal-only and `mlx_lm.server`'s text-only `load()` rejects their `language_model.*` weight namespace. Revisit Gemma 4 once upstream wraps multimodal-text-only loading into `mlx_lm.server`. |
 | Local Mac (`run.sh`) | `mlx grpc vllm` (three-way) | `mlx-community/gemma-3-4b-it-qat-4bit` (~3 GB) | M-series Pro/Max with 16+ GB unified memory runs the full three-way comparison — vllm-metal's Metal backend works on real Apple Silicon hardware. |
 
 **Why vllm-metal isn't in the CI default**: vllm-metal needs direct

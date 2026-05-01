@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id. CI default is Gemma 4 E2B (~3.2 GB). Override on a beefier runner if needed."
+        description: "Model id. CI default is Gemma 3 4B QAT (~3 GB) — known-working with the mlx-lm pip pin. Gemma 4's e2b/e4b variants are multimodal-only and don't load through mlx_lm.server today; revisit when upstream adds multimodal-text-only support."
         required: false
-        default: "mlx-community/gemma-4-e2b-it-4bit"
+        default: "mlx-community/gemma-3-4b-it-qat-4bit"
       phases:
         description: "Phases to run (space-separated subset of 'mlx grpc vllm'). vllm is local-only — vllm-metal's Metal backend doesn't run reliably on macos-latest GitHub runners. Set this to 'mlx grpc vllm' on a self-hosted Apple Silicon runner."
         required: false
@@ -54,12 +54,21 @@ jobs:
     # build and model download. Cap at 4 h for safety.
     timeout-minutes: 240
     env:
-      # Model default is Gemma 4 E2B Q4 (~3.2 GB on disk). Day-0 mlx-lm
-      # support; mlx-community publishes the MLX 4-bit variant. E2B has
-      # 5.1B total params with 2.3B "effective" via per-layer embeddings
-      # — fits comfortably in the macos-latest runner's 7 GB RAM with
-      # plenty of headroom for KV cache and the bench harness.
-      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-4-e2b-it-4bit' }}
+      # Model default is Gemma 3 4B QAT (~3 GB on disk). Same as the
+      # local run.sh default — keeps CI vs local apples-to-apples and
+      # produces meaningful 4B numbers in the runner's 7 GB RAM (mlx
+      # and grpc phases are sequential, so each gets the full RAM).
+      #
+      # Why not Gemma 4: mlx-lm 0.31.x added Gemma 4 support, but only
+      # for the *dense* 26B/31B text variants. The Gemma 4 e2b/e4b
+      # checkpoints are multimodal-only (text + vision + audio tower
+      # in one safetensors), and mlx_lm.server's `load()` only knows
+      # text-only CausalLM classes — it can't bind the `language_model.*`
+      # weight namespace from a multimodal checkpoint. Bridging
+      # mlx_lm.server to mlx-vlm's multimodal loader is a separate
+      # workstream; until then, Gemma 3 4B QAT is the fresher MLX
+      # checkpoint that loads cleanly via mlx_lm.server today.
+      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
       # CI default is two-way (mlx + grpc). vllm-metal is dropped from
       # the default because the macos-latest VM doesn't reliably expose
       # Metal GPU access — vllm-metal silently falls back to a PyTorch
