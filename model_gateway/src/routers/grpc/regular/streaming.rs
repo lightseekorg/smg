@@ -206,9 +206,9 @@ impl StreamingProcessor {
         let mut first_token_time: Option<Instant> = None;
 
         // Extract request parameters — skip reasoning parsing for structured output
-        let has_structured_output = matches!(
-            original_request.response_format,
-            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        let has_structured_output = utils::has_constrained_output(
+            original_request.tool_choice.as_ref(),
+            original_request.response_format.as_ref(),
         );
         let separate_reasoning = original_request.separate_reasoning && !has_structured_output;
         let tool_choice = &original_request.tool_choice;
@@ -297,9 +297,9 @@ impl StreamingProcessor {
         // content even with constraints.  The reasoning parser must run.
         let output_is_constrained = !separate_reasoning
             && (is_specific_function
-                || matches!(
-                    &original_request.response_format,
-                    Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. })
+                || utils::has_constrained_output(
+                    tool_choice.as_ref(),
+                    original_request.response_format.as_ref(),
                 ));
 
         let tool_parser_available = tools.is_some()

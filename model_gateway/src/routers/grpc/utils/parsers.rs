@@ -304,6 +304,14 @@ mod tests {
         assert!(has_constrained_output(None, Some(&rf)));
     }
 
+    #[test]
+    fn response_format_regex_is_constrained() {
+        let rf = ResponseFormat::Regex {
+            pattern: "(positive|neutral|negative)".to_string(),
+        };
+        assert!(has_constrained_output(None, Some(&rf)));
+    }
+
     // ── has_constrained_output: combinations ────────────────────────────
 
     #[test]

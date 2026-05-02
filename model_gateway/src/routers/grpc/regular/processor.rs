@@ -96,9 +96,9 @@ impl ResponseProcessor {
         let mut reasoning_text: Option<String> = None;
         let mut processed_text = final_text;
 
-        let has_structured_output = matches!(
-            original_request.response_format,
-            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        let has_structured_output = utils::has_constrained_output(
+            original_request.tool_choice.as_ref(),
+            original_request.response_format.as_ref(),
         );
 
         if original_request.separate_reasoning
@@ -328,9 +328,9 @@ impl ResponseProcessor {
 
         let history_tool_calls_count = utils::get_history_tool_calls_count(&chat_request);
 
-        let has_structured_output = matches!(
-            chat_request.response_format,
-            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        let has_structured_output = utils::has_constrained_output(
+            chat_request.tool_choice.as_ref(),
+            chat_request.response_format.as_ref(),
         );
 
         // Check parser availability once upfront (not per choice)
