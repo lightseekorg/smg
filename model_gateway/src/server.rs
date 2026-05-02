@@ -230,6 +230,7 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
         target: "smg::health",
         model = %model_id,
         probe_url = %probe_url,
+        timeout_secs = state.context.router_config.health_generate_timeout_secs,
         max_tokens = 1,
         "health_generate: sending real inference probe"
     );
@@ -240,7 +241,9 @@ async fn health_generate(State(state): State<Arc<AppState>>, _req: Request) -> R
         .client
         .post(&probe_url)
         .json(&probe_body)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(
+            state.context.router_config.health_generate_timeout_secs,
+        ))
         .send()
         .await;
     let duration_ms = start.elapsed().as_millis();

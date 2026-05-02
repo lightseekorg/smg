@@ -283,6 +283,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn health_generate_timeout_secs(mut self, timeout: u64) -> Self {
+        self.config.health_generate_timeout_secs = timeout;
+        self
+    }
+
     // ==================== Discovery ====================
 
     pub fn discovery_config(mut self, discovery: DiscoveryConfig) -> Self {

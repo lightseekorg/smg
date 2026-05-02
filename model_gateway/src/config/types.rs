@@ -126,6 +126,8 @@ pub struct RouterConfig {
     #[serde(default)]
     pub disable_circuit_breaker: bool,
     pub health_check: HealthCheckConfig,
+    #[serde(default = "default_health_generate_timeout_secs")]
+    pub health_generate_timeout_secs: u64,
     #[serde(default)]
     pub enable_igw: bool,
     /// Can be a HuggingFace model ID or local path
@@ -220,6 +222,10 @@ pub struct TokenizerCacheConfig {
 
 fn default_load_monitor_interval_secs() -> u64 {
     10
+}
+
+fn default_health_generate_timeout_secs() -> u64 {
+    3
 }
 
 fn default_enable_l0() -> bool {
@@ -659,6 +665,7 @@ impl Default for RouterConfig {
             disable_retries: false,
             disable_circuit_breaker: false,
             health_check: HealthCheckConfig::default(),
+            health_generate_timeout_secs: default_health_generate_timeout_secs(),
             enable_igw: false,
             connection_mode: ConnectionMode::Http,
             model_path: None,
@@ -773,6 +780,7 @@ mod tests {
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
         assert_eq!(config.load_monitor_interval_secs, 10);
+        assert_eq!(config.health_generate_timeout_secs, 3);
         assert!(config.discovery.is_none());
         assert!(config.metrics.is_none());
         assert!(config.trace_config.is_none());
@@ -960,6 +968,7 @@ stream_retention_secs: 3600
         assert!(deserialized.skills_enabled);
         assert!(deserialized.skills.is_none());
         assert!(!deserialized.tenant_resolution.trust_tenant_header);
+        assert_eq!(deserialized.health_generate_timeout_secs, 3);
         assert_eq!(
             deserialized.tenant_resolution.tenant_header_name,
             DEFAULT_TENANT_HEADER_NAME
