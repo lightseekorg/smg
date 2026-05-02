@@ -461,9 +461,7 @@ class _ImageGenerationAssertions:
         # pass vacuously.
         items_data = items_resp.json()
         stored_items = items_data.get("data") or items_data.get("items") or []
-        image_items = [
-            item for item in stored_items if item.get("type") == "image_generation_call"
-        ]
+        image_items = [item for item in stored_items if item.get("type") == "image_generation_call"]
         assert image_items, (
             "No image_generation_call item in stored conversation history; "
             "compactor-strip assertion would be vacuous. "
