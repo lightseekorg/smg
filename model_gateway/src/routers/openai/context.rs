@@ -1,9 +1,6 @@
 //! Request context types for OpenAI router pipeline.
 
-use std::sync::{
-    atomic::AtomicU64,
-    Arc,
-};
+use std::sync::{atomic::AtomicU64, Arc};
 
 use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};

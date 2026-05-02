@@ -1097,7 +1097,10 @@ pub(crate) fn attach_mcp_server_label(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
 
     use axum::{body::to_bytes, http::StatusCode};
     use bytes::Bytes;
@@ -1126,8 +1129,14 @@ mod tests {
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
 
         let stored = last_token_time.load(Ordering::Relaxed);
-        assert!(stored >= before, "timestamp should be >= before: {stored} < {before}");
-        assert!(stored <= before + 5, "timestamp should be within 5s: {stored}");
+        assert!(
+            stored >= before,
+            "timestamp should be >= before: {stored} < {before}"
+        );
+        assert!(
+            stored <= before + 5,
+            "timestamp should be within 5s: {stored}"
+        );
     }
 
     #[tokio::test]
