@@ -1022,6 +1022,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 &original_request.model,
                 original_request.tools.as_deref().unwrap_or(&[]),
                 original_request.user.as_deref(),
+                original_request.include.as_deref(),
             )
             .await
             {
