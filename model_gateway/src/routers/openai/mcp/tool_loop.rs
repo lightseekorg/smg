@@ -511,6 +511,7 @@ fn send_tool_call_intermediate_event(
         // it streams preview chunks; the tool_loop path only emits the coarse
         // in_progress → generating → completed sequence.
         ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
+        ResponseFormat::ShellCall => return true,
         ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
     };
 
@@ -604,6 +605,7 @@ fn stable_streaming_tool_item_id(
         // (`to_image_generation_call`) and the 2-letter convention used by
         // the other hosted tool formats.
         ResponseFormat::ImageGenerationCall => normalize_tool_item_id_with_prefix(source_id, "ig_"),
+        ResponseFormat::ShellCall => normalize_tool_item_id_with_prefix(source_id, "sc_"),
     }
 }
 
@@ -625,7 +627,8 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: &ResponseFo
         ResponseFormat::WebSearchCall
         | ResponseFormat::CodeInterpreterCall
         | ResponseFormat::FileSearchCall
-        | ResponseFormat::ImageGenerationCall => item_id
+        | ResponseFormat::ImageGenerationCall
+        | ResponseFormat::ShellCall => item_id
             .strip_prefix("fc_")
             .or_else(|| item_id.strip_prefix("call_"))
             .unwrap_or(item_id)

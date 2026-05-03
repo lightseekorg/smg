@@ -2,8 +2,8 @@
 
 use openai_protocol::responses::{
     CodeInterpreterCallStatus, CodeInterpreterOutput, FileSearchCallStatus, FileSearchResult,
-    ImageGenerationCallStatus, ResponseOutputItem, WebSearchAction, WebSearchCallStatus,
-    WebSearchSource,
+    ImageGenerationCallStatus, ResponseOutputItem, ShellCallAction, ShellCallStatus,
+    WebSearchAction, WebSearchCallStatus, WebSearchSource,
 };
 use tracing::warn;
 
@@ -101,6 +101,7 @@ impl ResponseTransformer {
             ResponseFormat::ImageGenerationCall => {
                 Self::to_image_generation_call(result, tool_call_id)
             }
+            ResponseFormat::ShellCall => Self::to_shell_call(tool_call_id, arguments),
         }
     }
 
@@ -586,6 +587,54 @@ impl ResponseTransformer {
             attributes: None,
         })
     }
+
+    /// Transform to shell_call output.
+    fn to_shell_call(tool_call_id: &str, arguments: &str) -> ResponseOutputItem {
+        let action = parse_shell_call_action(arguments);
+
+        ResponseOutputItem::ShellCall {
+            id: normalize_shell_call_id(tool_call_id),
+            call_id: tool_call_id.to_string(),
+            action,
+            environment: None,
+            status: ShellCallStatus::Completed,
+            created_by: None,
+        }
+    }
+}
+
+fn parse_shell_call_action(arguments: &str) -> ShellCallAction {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        warn!("Failed to parse shell_call arguments as JSON; emitting empty action");
+        return empty_shell_call_action();
+    };
+
+    let Some(object) = value.as_object() else {
+        warn!("Expected shell_call arguments to be a JSON object; emitting empty action");
+        return empty_shell_call_action();
+    };
+
+    let action = serde_json::json!({
+        "commands": object.get("commands").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "max_output_length": object.get("max_output_length").cloned().unwrap_or(serde_json::Value::Null),
+        "timeout_ms": object.get("timeout_ms").cloned().unwrap_or(serde_json::Value::Null),
+    });
+
+    serde_json::from_value::<ShellCallAction>(action).unwrap_or_else(|e| {
+        warn!(
+            error = %e,
+            "Failed to parse shell_call action fields; emitting empty action"
+        );
+        empty_shell_call_action()
+    })
+}
+
+fn empty_shell_call_action() -> ShellCallAction {
+    ShellCallAction {
+        commands: Vec::new(),
+        max_output_length: None,
+        timeout_ms: None,
+    }
 }
 
 /// Strip the base64 `result` payload from an `ImageGenerationCall` output
@@ -631,6 +680,18 @@ fn parse_text_block_payload(item: &serde_json::Value) -> Option<serde_json::Valu
             None
         }
     }
+}
+
+fn normalize_shell_call_id(source_id: &str) -> String {
+    if source_id.starts_with("sc_") {
+        return source_id.to_string();
+    }
+
+    source_id
+        .strip_prefix("fc_")
+        .or_else(|| source_id.strip_prefix("call_"))
+        .map(|stripped| format!("sc_{stripped}"))
+        .unwrap_or_else(|| format!("sc_{source_id}"))
 }
 
 #[cfg(test)]
@@ -1019,6 +1080,58 @@ mod tests {
                 assert_eq!(outputs.unwrap().len(), 1);
             }
             _ => panic!("Expected CodeInterpreterCall"),
+        }
+    }
+
+    #[test]
+    fn test_shell_call_transform() {
+        let transformed = ResponseTransformer::transform(
+            &json!({}),
+            &ResponseFormat::ShellCall,
+            "call-shell-1",
+            "server",
+            "shell",
+            r#"{"commands":["echo hello"],"timeout_ms":1000}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::ShellCall {
+                id,
+                call_id,
+                action,
+                environment,
+                status,
+                ..
+            } => {
+                assert_eq!(id, "sc_call-shell-1");
+                assert_eq!(call_id, "call-shell-1");
+                assert_eq!(action.commands, vec!["echo hello"]);
+                assert_eq!(action.timeout_ms, Some(1000));
+                assert!(environment.is_none());
+                assert_eq!(status, ShellCallStatus::Completed);
+            }
+            _ => panic!("Expected ShellCall"),
+        }
+    }
+
+    #[test]
+    fn test_shell_call_transform_preserves_action_with_dispatch_metadata() {
+        let transformed = ResponseTransformer::transform(
+            &json!({}),
+            &ResponseFormat::ShellCall,
+            "call-shell-2",
+            "server",
+            "shell",
+            r#"{"commands":["pwd"],"timeout_ms":500,"user":"request-user"}"#,
+        );
+
+        match transformed {
+            ResponseOutputItem::ShellCall { action, .. } => {
+                assert_eq!(action.commands, vec!["pwd"]);
+                assert_eq!(action.timeout_ms, Some(500));
+                assert_eq!(action.max_output_length, None);
+            }
+            _ => panic!("Expected ShellCall"),
         }
     }
 
