@@ -621,20 +621,68 @@ impl ResponseTransformer {
 
     /// Extract file search results from MCP result.
     fn extract_file_results(result: &serde_json::Value) -> Vec<FileSearchResult> {
-        result
-            .as_object()
-            .and_then(|obj| obj.get("results"))
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(Self::parse_file_result).collect())
-            .unwrap_or_default()
+        let mut parsed = Vec::new();
+
+        // 1) Embedded OpenAI-style payloads inside MCP text blocks:
+        //    [{"type":"text","text":"{\"openai_response\": {...}}"}]
+        //    Accept both openai_response.results[] and openai_response.data[].
+        if result.is_array() {
+            for openai_response in extract_embedded_openai_responses(result) {
+                let Some(items) = openai_response
+                    .get("results")
+                    .and_then(|v| v.as_array())
+                    .or_else(|| openai_response.get("data").and_then(|v| v.as_array()))
+                else {
+                    continue;
+                };
+                parsed.extend(items.iter().filter_map(Self::parse_file_result));
+            }
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+
+        // 2) Direct tool-result payloads from MCP servers.
+        //    Accept top-level results[] and data[] (genai-data-plane shape).
+        let fallback_items = result
+            .as_array()
+            .or_else(|| {
+                result
+                    .as_object()
+                    .and_then(|obj| obj.get("results").and_then(|v| v.as_array()))
+            })
+            .or_else(|| {
+                result
+                    .as_object()
+                    .and_then(|obj| obj.get("data").and_then(|v| v.as_array()))
+            })
+            .map(|items| items.as_slice())
+            .unwrap_or_default();
+
+        parsed.extend(fallback_items.iter().filter_map(Self::parse_file_result));
+        parsed
     }
 
     /// Parse a file search result from JSON.
     fn parse_file_result(item: &serde_json::Value) -> Option<FileSearchResult> {
         let obj = item.as_object()?;
-        let file_id = obj.get("file_id").and_then(|v| v.as_str())?.to_string();
-        let filename = obj.get("filename").and_then(|v| v.as_str())?.to_string();
-        let text = obj.get("text").and_then(|v| v.as_str()).map(String::from);
+        let file_id = obj
+            .get("file_id")
+            .or_else(|| obj.get("fileId"))
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let filename = obj
+            .get("filename")
+            .or_else(|| obj.get("file_name"))
+            .or_else(|| obj.get("fileName"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| file_id.clone());
+        let text = obj
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| Self::extract_file_result_text_from_content(item));
         let score = obj.get("score").and_then(|v| v.as_f64()).map(|f| f as f32);
 
         Some(FileSearchResult {
@@ -642,8 +690,47 @@ impl ResponseTransformer {
             filename,
             text,
             score,
-            attributes: None,
+            attributes: obj.get("attributes").cloned(),
         })
+    }
+
+    /// Extract text from a file-search `content` array.
+    ///
+    /// Accepted item shapes:
+    /// - `{ "text": "..." }`
+    /// - `{ "text": { "value": "..." } }`
+    /// - `{ "type": "text", "value": "..." }`
+    fn extract_file_result_text_from_content(item: &serde_json::Value) -> Option<String> {
+        let content = item.get("content")?.as_array()?;
+        let mut parts: Vec<String> = Vec::new();
+
+        for node in content {
+            let Some(obj) = node.as_object() else {
+                continue;
+            };
+            let text = obj
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    obj.get("text")
+                        .and_then(|v| v.get("value"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        obj.get("value").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(text) = text.filter(|s| !s.is_empty()) {
+                parts.push(text);
+            }
+        }
+
+        (!parts.is_empty()).then(|| parts.join("\n"))
     }
 }
 
@@ -1130,6 +1217,209 @@ mod tests {
                 assert_eq!(results.len(), 2);
                 assert_eq!(results[0].file_id, "file_1");
                 assert_eq!(results[0].score, Some(0.95));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_embedded_openai_response_results() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "queries": ["rust async await"],
+                  "openai_response": {
+                    "results": [
+                      {
+                        "file_id": "file_emb_1",
+                        "filename": "async_book.md",
+                        "text": "executor notes",
+                        "score": 0.91
+                      }
+                    ]
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-embedded-results",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall {
+                id,
+                status,
+                queries,
+                results,
+            } => {
+                assert_eq!(id, "fs_req-fs-embedded-results");
+                assert_eq!(status, FileSearchCallStatus::Completed);
+                assert_eq!(queries, vec!["rust async await"]);
+                let results = results.expect("expected embedded results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_emb_1");
+                assert_eq!(results[0].filename, "async_book.md");
+                assert_eq!(results[0].text.as_deref(), Some("executor notes"));
+                assert_eq!(results[0].score, Some(0.91));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_embedded_openai_response_data() {
+        let result = json!([
+            {
+                "type": "text",
+                "text": r#"{
+                  "openai_response": {
+                    "data": [
+                      {
+                        "file_id": "file_emb_data",
+                        "filename": "guide.md",
+                        "text": "from data alias"
+                      }
+                    ]
+                  }
+                }"#
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-embedded-data",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall { results, .. } => {
+                let results = results.expect("expected embedded data[] results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_emb_data");
+                assert_eq!(results[0].filename, "guide.md");
+                assert_eq!(results[0].text.as_deref(), Some("from data alias"));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_top_level_data_with_aliases_and_content_text() {
+        let result = json!({
+            "query": "mock mcp",
+            "data": [
+                {
+                    "fileId": "file_alias_1",
+                    "file_name": "mock.md",
+                    "score": 0.77,
+                    "attributes": {"section": "intro"},
+                    "content": [
+                        {"text": "first line"},
+                        {"text": {"value": "second line"}},
+                        {"type": "text", "value": "third line"}
+                    ]
+                }
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-data-alias",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall {
+                queries, results, ..
+            } => {
+                assert_eq!(queries, vec!["mock mcp"]);
+                let results = results.expect("expected data[] results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_alias_1");
+                assert_eq!(results[0].filename, "mock.md");
+                assert_eq!(
+                    results[0].text.as_deref(),
+                    Some("first line\nsecond line\nthird line")
+                );
+                assert_eq!(results[0].score, Some(0.77));
+                assert_eq!(results[0].attributes, Some(json!({"section": "intro"})));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_filename_defaults_to_file_id() {
+        let result = json!({
+            "results": [
+                {
+                    "file_id": "file_missing_name",
+                    "content": [{"text": "fallback name check"}]
+                }
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-fallback-name",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall { results, .. } => {
+                let results = results.expect("expected results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_missing_name");
+                assert_eq!(results[0].filename, "file_missing_name");
+                assert_eq!(results[0].text.as_deref(), Some("fallback name check"));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_top_level_array_results() {
+        let result = json!([
+            {
+                "file_id": "file_arr_1",
+                "fileName": "array-shape.md",
+                "content": [{"type": "text", "value": "from top-level array"}]
+            }
+        ]);
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-array",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall { queries, results, .. } => {
+                assert!(queries.is_empty());
+                let results = results.expect("expected array fallback results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_arr_1");
+                assert_eq!(results[0].filename, "array-shape.md");
+                assert_eq!(results[0].text.as_deref(), Some("from top-level array"));
             }
             _ => panic!("Expected FileSearchCall"),
         }
