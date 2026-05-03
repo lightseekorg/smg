@@ -30,10 +30,7 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, Value};
-use smg_data_connector::{
-    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
-    ResponseStorage,
-};
+use smg_data_connector::RequestContext as StorageRequestContext;
 use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -48,14 +45,18 @@ use super::{
     conversions,
 };
 use crate::{
+    memory::MemoryExecutionContext,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+        common::{
+            mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
+            persistence_utils::ConversationTurnInfo,
+        },
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
                 streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
-                ResponsesContext,
+                PersistenceHandles, ResponsesContext,
             },
             utils,
         },
@@ -79,6 +80,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     chat_request: Arc<ChatCompletionRequest>,
     params: ResponsesCallContext,
     original_request: &ResponsesRequest,
+    conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Response {
     debug!("Converting chat SSE stream to responses SSE format");
 
@@ -102,10 +104,9 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 
     // Spawn background task to transform stream
     let original_request_clone = original_request.clone();
-    let response_storage = ctx.response_storage.clone();
-    let conversation_storage = ctx.conversation_storage.clone();
-    let conversation_item_storage = ctx.conversation_item_storage.clone();
+    let persistence = ctx.persistence.clone();
     let request_context = ctx.request_context.clone();
+    let memory_execution_context = ctx.memory_execution_context.clone();
 
     #[expect(
         clippy::disallowed_methods,
@@ -115,10 +116,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
         if let Err(e) = process_and_transform_sse_stream(
             body,
             original_request_clone,
-            response_storage,
-            conversation_storage,
-            conversation_item_storage,
+            persistence,
             request_context,
+            memory_execution_context,
+            conversation_turn_info,
             tx.clone(),
         )
         .await
@@ -139,10 +140,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
 async fn process_and_transform_sse_stream(
     body: Body,
     original_request: ResponsesRequest,
-    response_storage: Arc<dyn ResponseStorage>,
-    conversation_storage: Arc<dyn ConversationStorage>,
-    conversation_item_storage: Arc<dyn ConversationItemStorage>,
+    persistence: PersistenceHandles,
     request_context: Option<StorageRequestContext>,
+    memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     // Create accumulator for final response
@@ -231,9 +232,9 @@ async fn process_and_transform_sse_stream(
     // Finalize and persist accumulated response
     let final_response = accumulator.finalize();
     persist_response_if_needed(
-        conversation_storage,
-        conversation_item_storage,
-        response_storage,
+        &persistence,
+        memory_execution_context,
+        conversation_turn_info,
         &final_response,
         &original_request,
         request_context,

@@ -106,6 +106,9 @@ pub struct RouterConfig {
     pub storage_context_headers: HashMap<String, String>,
     #[serde(default)]
     pub memory_runtime: MemoryRuntimeConfig,
+    /// Maximum conversation items to load into request context.
+    #[serde(default = "default_max_conversation_history_items")]
+    pub max_conversation_history_items: usize,
     #[serde(default)]
     pub background: BackgroundConfig,
     #[serde(default)]
@@ -217,6 +220,10 @@ pub struct TokenizerCacheConfig {
 
 fn default_load_monitor_interval_secs() -> u64 {
     10
+}
+
+fn default_max_conversation_history_items() -> usize {
+    100
 }
 
 fn default_enable_l0() -> bool {
@@ -628,8 +635,9 @@ impl Default for RouterConfig {
             policy: PolicyConfig::Random,
             host: "0.0.0.0".to_string(),
             port: 3001,
-            max_payload_size: 536_870_912,     // 512MB
-            request_timeout_secs: 1800,        // 30 minutes
+            max_payload_size: 536_870_912, // 512MB
+            request_timeout_secs: 1800,    // 30 minutes
+            max_conversation_history_items: default_max_conversation_history_items(),
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
             load_monitor_interval_secs: 10,
@@ -766,6 +774,7 @@ mod tests {
         assert_eq!(config.port, 3001);
         assert_eq!(config.max_payload_size, 536_870_912);
         assert_eq!(config.request_timeout_secs, 1800);
+        assert_eq!(config.max_conversation_history_items, 100);
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
         assert_eq!(config.load_monitor_interval_secs, 10);
@@ -955,6 +964,7 @@ stream_retention_secs: 3600
 
         assert!(deserialized.skills_enabled);
         assert!(deserialized.skills.is_none());
+        assert_eq!(deserialized.max_conversation_history_items, 100);
         assert!(!deserialized.tenant_resolution.trust_tenant_header);
         assert_eq!(
             deserialized.tenant_resolution.tenant_header_name,

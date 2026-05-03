@@ -14,7 +14,8 @@ use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
+        handlers::cancel_response_impl, utils::validate_worker_availability, PersistenceHandles,
+        ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -24,7 +25,8 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    config::types::RetryConfig,
+    config::types::{MemoryRuntimeConfig, RetryConfig},
+    memory::MemoryExecutionContext,
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
@@ -47,6 +49,8 @@ pub struct GrpcRouter {
     shared_components: Arc<SharedComponents>,
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
+    max_conversation_history_items: usize,
+    memory_runtime_config: MemoryRuntimeConfig,
     retry_config: RetryConfig,
 }
 
@@ -139,18 +143,27 @@ impl GrpcRouter {
 
         // Capture storage request context from middleware task-local (before any spawn)
         let storage_request_context = smg_data_connector::current_request_context();
+        let max_conversation_history_items = ctx.router_config.max_conversation_history_items;
+        let memory_runtime_config = ctx.router_config.memory_runtime.clone();
 
-        // Helper closure to create responses context with a given pipeline
+        // Helper closure to create responses context with a given pipeline.
+        // Uses MemoryExecutionContext::default() because these contexts are built at
+        // startup before any request headers are available. Per-request contexts are
+        // rebuilt inside route_responses_impl with the actual request headers.
         let create_responses_context = |pipeline: &RequestPipeline| {
             ResponsesContext::new(
                 Arc::new(pipeline.clone()),
                 shared_components.clone(),
-                ctx.response_storage.clone(),
-                ctx.conversation_storage.clone(),
-                ctx.conversation_item_storage.clone(),
-                ctx.conversation_memory_writer.clone(),
+                PersistenceHandles {
+                    response_storage: ctx.response_storage.clone(),
+                    conversation_storage: ctx.conversation_storage.clone(),
+                    conversation_item_storage: ctx.conversation_item_storage.clone(),
+                    conversation_memory_writer: ctx.conversation_memory_writer.clone(),
+                },
                 mcp_orchestrator.clone(),
                 storage_request_context.clone(),
+                max_conversation_history_items,
+                MemoryExecutionContext::default(),
             )
         };
 
@@ -169,6 +182,8 @@ impl GrpcRouter {
             shared_components,
             responses_context,
             harmony_responses_context,
+            max_conversation_history_items,
+            memory_runtime_config,
             retry_config: ctx.router_config.effective_retry_config(),
         })
     }
@@ -325,6 +340,15 @@ impl GrpcRouter {
         let is_harmony =
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
 
+        // Build memory execution context from per-request headers. gRPC clients map
+        // metadata to HTTP/2 headers, so headers may carry memory config just like
+        // the HTTP path. An absent or empty header produces the default (no-op) context.
+        let empty_headers = HeaderMap::new();
+        let memory_execution_context = MemoryExecutionContext::from_http_headers(
+            headers.unwrap_or(&empty_headers),
+            &self.memory_runtime_config,
+        );
+
         if is_harmony {
             debug!(
                 "Processing Harmony responses request for model: {}, streaming: {}",
@@ -334,16 +358,11 @@ impl GrpcRouter {
             let harmony_ctx = ResponsesContext::new(
                 Arc::new(self.harmony_pipeline.clone()),
                 self.shared_components.clone(),
-                self.harmony_responses_context.response_storage.clone(),
-                self.harmony_responses_context.conversation_storage.clone(),
-                self.harmony_responses_context
-                    .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context
-                    .conversation_memory_writer
-                    .clone(),
+                self.harmony_responses_context.persistence.clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
                 smg_data_connector::current_request_context(),
+                self.max_conversation_history_items,
+                memory_execution_context,
             );
 
             if body.stream.unwrap_or(false) {
@@ -357,8 +376,20 @@ impl GrpcRouter {
                 }
             }
         } else {
+            // Build a fresh per-request context so that storage_request_context and
+            // memory_execution_context reflect the current request's headers rather
+            // than the stale values captured at startup.
+            let regular_ctx = ResponsesContext::new(
+                Arc::new(self.pipeline.clone()),
+                self.shared_components.clone(),
+                self.responses_context.persistence.clone(),
+                self.responses_context.mcp_orchestrator.clone(),
+                smg_data_connector::current_request_context(),
+                self.max_conversation_history_items,
+                memory_execution_context,
+            );
             responses::route_responses(
-                &self.responses_context,
+                &regular_ctx,
                 Arc::new(body.clone()),
                 headers.cloned(),
                 tenant_meta.clone(),

@@ -14,7 +14,8 @@ use smg_mcp::{McpOrchestrator, McpToolSession};
 use super::provider::Provider;
 use crate::{
     config::RouterConfig, memory::MemoryExecutionContext, middleware,
-    middleware::TenantRequestMeta, worker::Worker,
+    middleware::TenantRequestMeta, routers::common::persistence_utils::ConversationTurnInfo,
+    worker::Worker,
 };
 
 pub struct RequestContext {
@@ -132,6 +133,7 @@ pub struct PayloadState {
 pub struct ResponsesPayloadState {
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub conversation_turn_info: Option<ConversationTurnInfo>,
 }
 
 impl RequestContext {
@@ -268,6 +270,7 @@ pub struct OwnedStreamingContext {
     pub original_body: ResponsesRequest,
     pub previous_response_id: Option<String>,
     pub existing_mcp_list_tools_labels: Vec<String>,
+    pub conversation_turn_info: Option<ConversationTurnInfo>,
     pub storage: StorageHandles,
 }
 
@@ -306,6 +309,7 @@ impl RequestContext {
             original_body,
             previous_response_id: responses_payload_state.previous_response_id,
             existing_mcp_list_tools_labels: responses_payload_state.existing_mcp_list_tools_labels,
+            conversation_turn_info: responses_payload_state.conversation_turn_info,
             storage: StorageHandles {
                 response,
                 conversation,

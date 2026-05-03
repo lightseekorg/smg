@@ -115,12 +115,23 @@ pub(in crate::routers::openai) async fn route_responses(
     let mut request_body = body.clone();
     request_body.model = model_id.to_string();
     request_body.conversation = None;
+    let memory_config = extract_conversation_memory_config(headers);
+    let stm_enabled = memory_config
+        .as_ref()
+        .is_some_and(|cfg| cfg.short_term_memory.enabled)
+        && deps
+            .responses_components
+            .shared
+            .router_config
+            .memory_runtime
+            .enabled;
 
     let loaded_history = match super::history::load_input_history(
         deps.responses_components,
         conversation.map(|c| c.as_id()),
         &mut request_body,
         model,
+        stm_enabled,
     )
     .await
     {
@@ -128,7 +139,7 @@ pub(in crate::routers::openai) async fn route_responses(
         Err(response) => return response,
     };
 
-    if let Some(memory_config) = extract_conversation_memory_config(headers) {
+    if let Some(memory_config) = memory_config {
         super::history::inject_memory_context(&memory_config, &mut request_body);
     }
 
@@ -189,6 +200,7 @@ pub(in crate::routers::openai) async fn route_responses(
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
         existing_mcp_list_tools_labels: loaded_history.existing_mcp_list_tools_labels,
+        conversation_turn_info: loaded_history.conversation_turn_info,
     });
 
     let response = if ctx.is_streaming() {

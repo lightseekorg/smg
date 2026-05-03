@@ -10,10 +10,13 @@ use openai_protocol::responses::{
 use serde_json::{json, Value};
 use smg_data_connector::{
     with_request_context, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationStorage, NewConversationItem,
+    ConversationItemStorage, ConversationMemoryStatus, ConversationMemoryType,
+    ConversationMemoryWriter, ConversationStorage, NewConversationItem, NewConversationMemory,
     RequestContext as StorageRequestContext, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
+
+use crate::memory::MemoryExecutionContext;
 
 // ============================================================================
 // Constants
@@ -375,6 +378,162 @@ async fn link_items_to_conversation(
     Ok(())
 }
 
+#[expect(
+    clippy::manual_is_multiple_of,
+    reason = "usize::is_multiple_of is not stable; % remainder check is the portable equivalent"
+)]
+fn should_enqueue_stmo(user_turns: usize) -> bool {
+    user_turns >= 4 && (user_turns - 1) % 3 == 0
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConversationTurnInfo {
+    pub user_turns: usize,
+    pub total_items: usize,
+}
+
+pub fn count_conversation_turn_info(input: &ResponseInput) -> ConversationTurnInfo {
+    match input {
+        ResponseInput::Text(_) => ConversationTurnInfo {
+            user_turns: 1,
+            total_items: 1,
+        },
+        ResponseInput::Items(items) => {
+            let user_turns = items
+                .iter()
+                .filter(|item| match item {
+                    ResponseInputOutputItem::SimpleInputMessage { role, .. } => {
+                        role.eq_ignore_ascii_case("user")
+                    }
+                    ResponseInputOutputItem::Message { role, .. } => {
+                        role.eq_ignore_ascii_case("user")
+                    }
+                    _ => false,
+                })
+                .count();
+            ConversationTurnInfo {
+                user_turns,
+                total_items: items.len(),
+            }
+        }
+    }
+}
+
+async fn maybe_schedule_stmo_after_persist(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: &ResponseId,
+    user_turns: usize,
+    total_items: usize,
+) -> Result<bool, String> {
+    if !memory_execution_context.stm_enabled.active() {
+        return Ok(false);
+    }
+
+    if !should_enqueue_stmo(user_turns) {
+        return Ok(false);
+    }
+
+    let mut memory_config = json!({
+        "last_index": user_turns,
+        "target_item_end": total_items,
+    });
+
+    if let Some(model_id) = &memory_execution_context.stm_condenser_model_id {
+        memory_config["condenser_model"] = json!(model_id);
+    }
+
+    let memory_config = serde_json::to_string(&memory_config)
+        .map_err(|e| format!("Failed to serialize STMO memory config: {e}"))?;
+
+    let input = NewConversationMemory {
+        conversation_id: conversation_id.clone(),
+        conversation_version: None,
+        response_id: Some(response_id.clone()),
+        memory_type: ConversationMemoryType::Stmo,
+        status: ConversationMemoryStatus::Ready,
+        attempt: 0,
+        owner_id: None,
+        next_run_at: Utc::now(),
+        lease_until: None,
+        content: None,
+        memory_config: Some(memory_config),
+        scope_id: None,
+        error_msg: None,
+    };
+
+    conversation_memory_writer
+        .create_memory(input)
+        .await
+        .map_err(|e| format!("Failed to enqueue STMO memory: {e}"))?;
+
+    Ok(true)
+}
+
+async fn handle_stmo_after_persist(
+    conversation_memory_writer: &Arc<dyn ConversationMemoryWriter>,
+    memory_execution_context: &MemoryExecutionContext,
+    conversation_id: &ConversationId,
+    response_id: &ResponseId,
+    conversation_turn_info: Option<ConversationTurnInfo>,
+    output_item_count: usize,
+) {
+    if !memory_execution_context.stm_enabled.active() {
+        return;
+    }
+
+    let Some(turn_info) = conversation_turn_info else {
+        debug!(
+            conversation_id = %conversation_id.0,
+            response_id = %response_id.0,
+            "STMO skipped: missing conversation turn info"
+        );
+        return;
+    };
+
+    let user_turns = turn_info.user_turns;
+    let total_items = turn_info.total_items + output_item_count;
+
+    match maybe_schedule_stmo_after_persist(
+        conversation_memory_writer,
+        memory_execution_context,
+        conversation_id,
+        response_id,
+        user_turns,
+        total_items,
+    )
+    .await
+    {
+        Ok(true) => {
+            info!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                user_turns,
+                total_items,
+                "Enqueued STMO memory condensation job"
+            );
+        }
+        Ok(false) => {
+            debug!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                user_turns,
+                total_items,
+                "STMO not enqueued for this response boundary"
+            );
+        }
+        Err(e) => {
+            warn!(
+                conversation_id = %conversation_id.0,
+                response_id = %response_id.0,
+                error = %e,
+                "Failed to enqueue STMO memory job; continuing without failing response"
+            );
+        }
+    }
+}
+
 /// Persist conversation items to storage
 ///
 /// This function:
@@ -382,20 +541,30 @@ async fn link_items_to_conversation(
 /// 2. Extracts output items from the response
 /// 3. Stores ALL items in response storage (always)
 /// 4. If conversation provided, also links items to conversation
+#[expect(
+    clippy::too_many_arguments,
+    reason = "persistence entrypoint assembles all storage handles and request context in one call"
+)]
 pub async fn persist_conversation_items(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
     request_context: Option<StorageRequestContext>,
+    memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Result<(), String> {
     let inner = persist_conversation_items_inner(
         conversation_storage,
         item_storage,
+        conversation_memory_writer,
         response_storage,
         response_json,
         original_body,
+        memory_execution_context,
+        conversation_turn_info,
     );
     match request_context {
         Some(ctx) => with_request_context(ctx, inner).await,
@@ -403,12 +572,19 @@ pub async fn persist_conversation_items(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inner persistence fn assembles all storage handles, memory context, and turn info in one flow"
+)]
 async fn persist_conversation_items_inner(
     conversation_storage: Arc<dyn ConversationStorage>,
     item_storage: Arc<dyn ConversationItemStorage>,
+    conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
+    memory_execution_context: MemoryExecutionContext,
+    conversation_turn_info: Option<ConversationTurnInfo>,
 ) -> Result<(), String> {
     // Respect store=false: skip persistence entirely (matches official API behavior)
     if !original_body.store.unwrap_or(true) {
@@ -467,6 +643,17 @@ async fn persist_conversation_items_inner(
             response_id_str,
         )
         .await?;
+
+        handle_stmo_after_persist(
+            &conversation_memory_writer,
+            &memory_execution_context,
+            &conv_id,
+            &response_id,
+            conversation_turn_info,
+            output_items.len(),
+        )
+        .await;
+
         info!(
             conversation_id = %conv_id.0,
             response_id = %response_id.0,
@@ -484,4 +671,111 @@ async fn persist_conversation_items_inner(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stmo_fires_at_boundary_turns() {
+        // Fires at 4, 7, 10 — not before or between
+        assert!(!should_enqueue_stmo(3));
+        assert!(should_enqueue_stmo(4));
+        assert!(!should_enqueue_stmo(5));
+        assert!(!should_enqueue_stmo(6));
+        assert!(should_enqueue_stmo(7));
+        assert!(should_enqueue_stmo(10));
+    }
+
+    #[test]
+    fn count_user_turns_case_insensitive() {
+        let input = ResponseInput::Items(vec![
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u1".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a1".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u2".to_string()),
+                role: "User".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::FunctionToolCall {
+                id: "fc_1".to_string(),
+                call_id: "call_1".to_string(),
+                name: "tool".to_string(),
+                arguments: "{}".to_string(),
+                output: None,
+                status: None,
+            },
+        ]);
+        let info = count_conversation_turn_info(&input);
+        assert_eq!(info.user_turns, 2);
+        assert_eq!(info.total_items, 4);
+    }
+
+    #[test]
+    fn total_items_exceeds_user_turns() {
+        let input = ResponseInput::Items(vec![
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u1".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a1".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u2".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a2".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u3".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("a3".to_string()),
+                role: "assistant".to_string(),
+                r#type: None,
+                phase: None,
+            },
+            ResponseInputOutputItem::SimpleInputMessage {
+                content: StringOrContentParts::String("u4".to_string()),
+                role: "user".to_string(),
+                r#type: None,
+                phase: None,
+            },
+        ]);
+
+        let info = count_conversation_turn_info(&input);
+        let target_item_end = info.total_items + 2; // response output contributes after load
+
+        assert_eq!(info.user_turns, 4);
+        assert_eq!(info.total_items, 7);
+        assert_eq!(target_item_end, 9); // total > user turns
+        assert!(should_enqueue_stmo(info.user_turns));
+    }
 }

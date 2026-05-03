@@ -48,6 +48,8 @@ pub struct MemoryExecutionContext {
     pub subject_id: Option<String>,
     pub embedding_model: Option<String>,
     pub extraction_model: Option<String>,
+    pub stm_enabled: MemoryExecutionState,
+    pub stm_condenser_model_id: Option<String>,
 }
 
 impl MemoryExecutionContext {
@@ -68,6 +70,8 @@ impl MemoryExecutionContext {
         }
         let store_ltm_requested = policy.allows_ltm_store();
         let recall_requested = policy.allows_recall();
+        let stm_enabled =
+            MemoryExecutionState::from_requested_and_runtime(headers.stm_enabled, runtime.enabled);
 
         Self {
             store_ltm: MemoryExecutionState::from_requested_and_runtime(
@@ -82,6 +86,11 @@ impl MemoryExecutionContext {
             subject_id: headers.subject_id.clone(),
             embedding_model: headers.embedding_model.clone(),
             extraction_model: headers.extraction_model.clone(),
+            stm_enabled,
+            stm_condenser_model_id: stm_enabled
+                .active()
+                .then_some(headers.stm_condenser_model_id.clone())
+                .flatten(),
         }
     }
 }
@@ -151,6 +160,8 @@ mod tests {
     fn store_and_recall_requested_but_not_active_when_runtime_disabled() {
         let headers = MemoryHeaderView {
             policy: Some("store_and_recall".to_string()),
+            stm_enabled: true,
+            stm_condenser_model_id: Some("condense-1".to_string()),
             ..MemoryHeaderView::default()
         };
 
@@ -159,6 +170,8 @@ mod tests {
         assert_eq!(ctx.store_ltm, MemoryExecutionState::GatedOff);
         assert_eq!(ctx.recall, MemoryExecutionState::GatedOff);
         assert_eq!(ctx.policy_mode, MemoryPolicyMode::StoreAndRecall);
+        assert_eq!(ctx.stm_enabled, MemoryExecutionState::GatedOff);
+        assert_eq!(ctx.stm_condenser_model_id, None);
     }
 
     #[test]
@@ -167,7 +180,7 @@ mod tests {
         headers.insert(
             "x-conversation-memory-config",
             HeaderValue::from_static(
-                r#"{"long_term_memory":{"enabled":true,"policy":"store_and_recall","subject_id":"  subject_abc  ","embedding_model_id":"  text-embedding-3-small  ","extraction_model_id":"  gpt-4.1-mini  "}}"#,
+                r#"{"long_term_memory":{"enabled":true,"policy":"store_and_recall","subject_id":"  subject_abc  ","embedding_model_id":"  text-embedding-3-small  ","extraction_model_id":"  gpt-4.1-mini  "},"short_term_memory":{"enabled":true,"condenser_model_id":"  condense-1  "}}"#,
             ),
         );
 
@@ -182,5 +195,7 @@ mod tests {
             Some("text-embedding-3-small")
         );
         assert_eq!(ctx.extraction_model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(ctx.stm_enabled, MemoryExecutionState::Active);
+        assert_eq!(ctx.stm_condenser_model_id.as_deref(), Some("condense-1"));
     }
 }
