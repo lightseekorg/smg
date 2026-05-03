@@ -17,7 +17,7 @@ use openai_protocol::{
         is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
         ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
     },
-    responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
+    responses::{generate_id, IncludeField, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
 use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput, ToolExecutionResult};
@@ -163,11 +163,15 @@ fn build_message_from_openai_response(openai_response: Value) -> Option<Value> {
 /// can attribute usage. Plain MCP function tools (Passthrough format) are
 /// not affected.
 ///
+/// `request_include` carries the top-level `include[]` list so hosted
+/// file-search output can honor OpenAI include semantics for
+/// `file_search_call.results`.
+///
 /// Returns false if client disconnected during execution
 #[expect(
     clippy::too_many_arguments,
     reason = "Streaming tool dispatch threads channel + state + per-request inputs \
-              (tools, user) directly to the loop without an intermediate context struct."
+              (tools, user, include) directly to the loop without an intermediate context struct."
 )]
 pub(crate) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
@@ -179,6 +183,7 @@ pub(crate) async fn execute_streaming_tool_calls(
     model_id: &str,
     request_tools: &[ResponseTool],
     request_user: Option<&str>,
+    request_include: Option<&[IncludeField]>,
 ) -> bool {
     for call in pending_calls {
         if call.name.is_empty() {
@@ -224,6 +229,10 @@ pub(crate) async fn execute_streaming_tool_calls(
                         Value::String(stable_streaming_tool_item_id(&call, response_format)),
                     );
                 }
+                apply_file_search_include_filter(
+                    &mut mcp_call_item,
+                    request_include,
+                );
                 if !send_tool_call_completion_events(
                     tx,
                     &call,
@@ -298,6 +307,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                 Value::String(stable_streaming_tool_item_id(&call, response_format)),
             );
         }
+        apply_file_search_include_filter(&mut mcp_call_item, request_include);
 
         if !send_tool_call_completion_events(
             tx,
@@ -919,13 +929,17 @@ pub(crate) async fn execute_tool_loop(
                     let tool_item_id =
                         non_streaming_tool_item_id_source(&call.item_id, response_format);
                     let error_json = json!({ "error": &error_output });
-                    let transformed_item = build_transformed_mcp_call_item(
+                    let mut transformed_item = build_transformed_mcp_call_item(
                         &error_json,
                         response_format,
                         &tool_item_id,
                         &server_label,
                         &call.name,
                         &call.arguments,
+                    );
+                    apply_file_search_include_filter(
+                        &mut transformed_item,
+                        original_body.include.as_deref(),
                     );
 
                     Metrics::record_mcp_tool_call(
@@ -1022,7 +1036,7 @@ pub(crate) async fn execute_tool_loop(
             );
 
             let output_str = tool_output.output.to_string();
-            let transformed_item = build_transformed_mcp_call_item(
+            let mut transformed_item = build_transformed_mcp_call_item(
                 &tool_output.output,
                 response_format,
                 &tool_item_id,
@@ -1033,6 +1047,10 @@ pub(crate) async fn execute_tool_loop(
                 // like image-generation `size`/`quality` merged in above), not
                 // the pre-merge arguments the model emitted.
                 &effective_arguments,
+            );
+            apply_file_search_include_filter(
+                &mut transformed_item,
+                original_body.include.as_deref(),
             );
 
             state.record_call(
@@ -1253,6 +1271,23 @@ fn build_transformed_mcp_call_item(
     })
 }
 
+fn should_include_file_search_results(include: Option<&[IncludeField]>) -> bool {
+    include.is_some_and(|fields| fields.contains(&IncludeField::FileSearchCallResults))
+}
+
+fn apply_file_search_include_filter(item: &mut Value, include: Option<&[IncludeField]>) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+
+    let is_file_search_call =
+        obj.get("type").and_then(|v| v.as_str()) == Some(ItemType::FILE_SEARCH_CALL);
+
+    if is_file_search_call && !should_include_file_search_results(include) {
+        obj.remove("results");
+    }
+}
+
 /// A function call extracted from a non-streaming response
 struct ExtractedFunctionCall {
     pub call_id: String,
@@ -1303,6 +1338,7 @@ fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
 mod tests {
     use std::collections::HashSet;
 
+    use openai_protocol::responses::IncludeField;
     use serde_json::json;
     use smg_mcp::{
         BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
@@ -1311,8 +1347,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        build_transformed_mcp_call_item, extract_openai_response_output_items,
-        is_internal_mcp_response_item, mcp_list_tools_bindings_to_emit, ResponseInput,
+        apply_file_search_include_filter, build_transformed_mcp_call_item,
+        extract_openai_response_output_items, is_internal_mcp_response_item,
+        mcp_list_tools_bindings_to_emit, should_include_file_search_results, ResponseInput,
         ToolLoopState,
     };
     use crate::routers::common::openai_bridge::ResponseFormat;
@@ -1354,6 +1391,55 @@ mod tests {
             Some("web_search_call")
         );
         assert!(item.get("server_label").is_none());
+    }
+
+    #[test]
+    fn should_include_file_search_results_only_when_explicitly_requested() {
+        assert!(!should_include_file_search_results(None));
+        assert!(!should_include_file_search_results(Some(&[])));
+        assert!(!should_include_file_search_results(Some(&[
+            IncludeField::ReasoningEncryptedContent,
+            IncludeField::CodeInterpreterCallOutputs,
+        ])));
+        assert!(should_include_file_search_results(Some(&[
+            IncludeField::FileSearchCallResults,
+        ])));
+    }
+
+    #[test]
+    fn apply_file_search_include_filter_removes_results_when_not_included() {
+        let mut item = json!({
+            "type": "file_search_call",
+            "id": "fs_1",
+            "status": "completed",
+            "queries": ["needle"],
+            "results": [
+                { "file_id": "file_1", "filename": "a.txt", "score": 0.8, "text": "hit" }
+            ]
+        });
+
+        apply_file_search_include_filter(&mut item, None);
+
+        assert!(item.get("results").is_none());
+        assert_eq!(
+            item.get("type").and_then(|value| value.as_str()),
+            Some("file_search_call")
+        );
+    }
+
+    #[test]
+    fn apply_file_search_include_filter_keeps_results_when_included() {
+        let mut item = json!({
+            "type": "file_search_call",
+            "id": "fs_2",
+            "status": "completed",
+            "queries": ["needle"],
+            "results": [{"file_id": "file_1"}],
+        });
+
+        apply_file_search_include_filter(&mut item, Some(&[IncludeField::FileSearchCallResults]));
+
+        assert_eq!(item.get("results"), Some(&json!([{"file_id": "file_1"}])));
     }
 
     #[tokio::test]
