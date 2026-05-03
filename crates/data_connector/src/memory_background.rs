@@ -179,6 +179,7 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         &self,
         req: EnqueueRequest,
         request_context: Option<RequestContext>,
+        max_queue_depth: Option<u64>,
     ) -> BackgroundRepositoryResult<QueuedResponse> {
         let now = Utc::now();
         let response_id = req.response_id.clone();
@@ -189,6 +190,17 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
                 "response {} already exists",
                 req.response_id
             )));
+        }
+
+        if let Some(limit) = max_queue_depth {
+            let current = state
+                .entries
+                .values()
+                .filter(|e| e.status == InternalStatus::Queued)
+                .count() as u64;
+            if current >= limit {
+                return Err(BackgroundRepositoryError::QueueFull { current, limit });
+            }
         }
 
         let entry = Entry {
@@ -561,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn enqueue_creates_queued_response() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        let ack = repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        let ack = repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         assert_eq!(ack.response_id, ResponseId::from("r1"));
         assert_eq!(ack.queue_depth_at_insert, 1);
     }
@@ -571,7 +583,7 @@ mod tests {
         // GET /v1/responses/{id} must see background-mode writes.
         let rs = Arc::new(MemoryResponseStorage::new());
         let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let stored = rs.get_response(&ResponseId::from("r1")).await.unwrap();
         assert!(
             stored.is_some(),
@@ -583,7 +595,7 @@ mod tests {
     async fn finalize_and_delete_mirror_into_shared_response_storage() {
         let rs = Arc::new(MemoryResponseStorage::new());
         let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
 
         let claim_time = Utc::now();
         let _ = repo
@@ -628,7 +640,7 @@ mod tests {
         // GET /v1/responses/{id} stays stuck on the in-progress state).
         let rs = Arc::new(MemoryResponseStorage::new());
         let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
 
         let claim_time = Utc::now();
         let _ = repo
@@ -670,7 +682,7 @@ mod tests {
     async fn queued_cancel_mirrors_cancelled_payload_into_shared_storage() {
         let rs = Arc::new(MemoryResponseStorage::new());
         let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         assert_eq!(
             repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
             StoredCancelResult::QueuedCancelled
@@ -684,10 +696,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enqueue_rejects_when_queue_depth_at_limit() {
+        let repo = MemoryBackgroundRepository::new_standalone();
+        repo.enqueue(enqueue_req("r1"), None, Some(2))
+            .await
+            .unwrap();
+        repo.enqueue(enqueue_req("r2"), None, Some(2))
+            .await
+            .unwrap();
+        let err = repo
+            .enqueue(enqueue_req("r3"), None, Some(2))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackgroundRepositoryError::QueueFull { current, limit } if current == 2 && limit == 2),
+            "expected QueueFull, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn enqueue_rejects_duplicate() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
-        let err = repo.enqueue(enqueue_req("r1"), None).await.unwrap_err();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+        let err = repo
+            .enqueue(enqueue_req("r1"), None, None)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             BackgroundRepositoryError::InvalidTransition(_)
@@ -706,9 +740,9 @@ mod tests {
         r2.priority = 1;
         let mut r3 = enqueue_req("r3");
         r3.priority = 5;
-        repo.enqueue(r1, None).await.unwrap();
-        repo.enqueue(r2, None).await.unwrap();
-        repo.enqueue(r3, None).await.unwrap();
+        repo.enqueue(r1, None, None).await.unwrap();
+        repo.enqueue(r2, None, None).await.unwrap();
+        repo.enqueue(r3, None, None).await.unwrap();
 
         let now = Utc::now();
         let lease = Duration::from_secs(60);
@@ -738,8 +772,8 @@ mod tests {
         r1.priority = 1;
         let mut r2 = enqueue_req("r2");
         r2.priority = 5;
-        repo.enqueue(r1, None).await.unwrap();
-        repo.enqueue(r2, None).await.unwrap();
+        repo.enqueue(r1, None, None).await.unwrap();
+        repo.enqueue(r2, None, None).await.unwrap();
 
         // 1. Claim r1 (higher priority), ask to cancel → r1 becomes
         //    InProgress with cancel_requested=true.
@@ -791,7 +825,7 @@ mod tests {
     #[tokio::test]
     async fn claim_on_cancel_requested_skips_worker_and_marks_cancelled() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         assert!(matches!(
             repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
             StoredCancelResult::QueuedCancelled
@@ -806,7 +840,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_requires_active_lease() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
 
         let err = repo
             .heartbeat(
@@ -861,7 +895,7 @@ mod tests {
             StoredCancelResult::NotFound
         );
 
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         assert_eq!(
             repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
             StoredCancelResult::QueuedCancelled
@@ -871,7 +905,7 @@ mod tests {
             StoredCancelResult::AlreadyTerminal
         );
 
-        repo.enqueue(enqueue_req("r2"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r2"), None, None).await.unwrap();
         let _ = repo
             .claim_next("w1", Utc::now(), Duration::from_secs(60))
             .await
@@ -885,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn append_and_load_stream_events_monotonic() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let id = ResponseId::from("r1");
 
         let e0 = repo
@@ -914,7 +948,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_writes_terminal_and_clears_lease() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
             .claim_next("w1", claim_time, Duration::from_secs(60))
@@ -947,7 +981,7 @@ mod tests {
         // `GET /v1/responses/{id}` must see status=cancelled in the persisted
         // payload, not the original queued snapshot.
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         assert_eq!(
             repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
             StoredCancelResult::QueuedCancelled
@@ -960,7 +994,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_cancel_wins_over_worker_status() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
             .claim_next("w1", claim_time, Duration::from_secs(60))
@@ -993,7 +1027,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_rejects_non_lease_holder() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
             .claim_next("w1", claim_time, Duration::from_secs(60))
@@ -1019,7 +1053,7 @@ mod tests {
         // not be able to commit terminal state, even if `requeue_expired`
         // hasn't run yet.
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
             .claim_next("w1", claim_time, Duration::from_secs(60))
@@ -1043,7 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn requeue_expired_moves_in_progress_back_to_queued() {
         let repo = MemoryBackgroundRepository::new_standalone();
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
             .claim_next("w1", claim_time, Duration::from_secs(60))
@@ -1082,7 +1116,7 @@ mod tests {
         let mut ctx = RequestContext::default();
         ctx.set("tenant_id", "acme");
         ctx.set("principal", "alice");
-        repo.enqueue(enqueue_req("r1"), Some(ctx.clone()))
+        repo.enqueue(enqueue_req("r1"), Some(ctx.clone()), None)
             .await
             .unwrap();
         let loaded = repo
@@ -1092,7 +1126,7 @@ mod tests {
             .expect("context must round-trip");
         assert_eq!(loaded.data(), ctx.data());
 
-        repo.enqueue(enqueue_req("r2"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r2"), None, None).await.unwrap();
         assert!(repo
             .load_request_context(&ResponseId::from("r2"))
             .await
@@ -1110,7 +1144,7 @@ mod tests {
             DeleteResult::NotFound
         );
 
-        repo.enqueue(enqueue_req("r1"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
         assert_eq!(
             repo.delete_background_response(&ResponseId::from("r1"))
                 .await
@@ -1118,7 +1152,7 @@ mod tests {
             DeleteResult::Deleted
         );
 
-        repo.enqueue(enqueue_req("r2"), None).await.unwrap();
+        repo.enqueue(enqueue_req("r2"), None, None).await.unwrap();
         let claim_time = Utc::now();
         let _ = repo
             .claim_next("w1", claim_time, Duration::from_secs(60))
