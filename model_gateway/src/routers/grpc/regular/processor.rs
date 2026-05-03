@@ -921,15 +921,18 @@ fn coerce_tool_args_to_schema(
                     _ => None,
                 },
                 Some("number") => match &val {
-                    serde_json::Value::String(s) => {
-                        s.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(serde_json::Value::Number)
-                    }
+                    serde_json::Value::String(s) => s
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number),
                     _ => None,
                 },
                 Some("integer") => match &val {
-                    serde_json::Value::String(s) => {
-                        s.parse::<i64>().ok().map(|n| serde_json::Value::Number(n.into()))
-                    }
+                    serde_json::Value::String(s) => s
+                        .parse::<i64>()
+                        .ok()
+                        .map(|n| serde_json::Value::Number(n.into())),
                     _ => None,
                 },
                 Some("array") => match &val {

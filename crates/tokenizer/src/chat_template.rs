@@ -3,7 +3,7 @@
 //! This module provides functionality to apply chat templates to messages,
 //! similar to HuggingFace transformers' apply_chat_template method.
 
-use std::{borrow::Cow, collections::HashMap, fs};
+use std::{borrow::Cow, collections::HashMap, fs, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use minijinja::{
@@ -13,7 +13,7 @@ use minijinja::{
         parse, WhitespaceConfig,
     },
     syntax::SyntaxConfig,
-    value::Kwargs,
+    value::{Enumerator, Kwargs, Object, ObjectRepr},
     Environment, Error as MinijinjaError, ErrorKind, Value,
 };
 use serde::Serialize;
@@ -674,6 +674,45 @@ pub struct ChatTemplateParams<'a> {
     pub special_tokens: Option<&'a crate::traits::SpecialTokens>,
 }
 
+/// Serde JSON formatter that produces Python `json.dumps`-compatible output.
+///
+/// Python's json.dumps default uses `": "` between key and value and `", "` between
+/// entries/elements. The standard `serde_json` compact formatter uses `":"` and `","`.
+/// This formatter matches Python's default separators so that SMG chat templates produce
+/// the same token sequence as Python/TGL for tool-calling prompts.
+struct PythonCompatFormatter;
+
+impl serde_json::ser::Formatter for PythonCompatFormatter {
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + std::io::Write,
+    {
+        writer.write_all(b": ")
+    }
+}
+
 /// Custom tojson filter compatible with HuggingFace transformers' implementation.
 ///
 /// HuggingFace transformers registers a custom `tojson` filter that accepts additional
@@ -743,10 +782,19 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
             }
             serialize_with_indent(value_to_serialize, spaces as usize)
         } else {
-            serde_json::to_string(value_to_serialize).map_err(|e| {
+            let mut buf = Vec::new();
+            let mut serializer =
+                serde_json::Serializer::with_formatter(&mut buf, PythonCompatFormatter);
+            value_to_serialize.serialize(&mut serializer).map_err(|e| {
                 MinijinjaError::new(
                     ErrorKind::InvalidOperation,
                     format!("Failed to serialize JSON: {e}"),
+                )
+            })?;
+            String::from_utf8(buf).map_err(|e| {
+                MinijinjaError::new(
+                    ErrorKind::InvalidOperation,
+                    format!("Invalid UTF-8 in JSON output: {e}"),
                 )
             })
         }
@@ -818,6 +866,70 @@ fn special_token_value(token: Option<&str>) -> Value {
     token.map_or(Value::UNDEFINED, Value::from)
 }
 
+/// A minijinja Object that wraps a JSON object and preserves insertion order.
+///
+/// minijinja's default Value::from_serialize converts JSON objects into a BTreeMap,
+/// which sorts keys alphabetically. This breaks chat templates (e.g. GLM-5.1) that
+/// iterate tool.items() and expect Python dict insertion order (name before description).
+///
+/// This wrapper stores entries as a Vec to preserve the original JSON key order.
+#[derive(Debug)]
+struct OrderedMap {
+    keys: Vec<Arc<str>>,
+    values: Vec<Value>,
+}
+
+impl Object for OrderedMap {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Map
+    }
+
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        let key_str = key.as_str()?;
+        self.keys
+            .iter()
+            .position(|k| k.as_ref() == key_str)
+            .map(|i| self.values[i].clone())
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        // Return keys in insertion order so template's tool.items() preserves order
+        Enumerator::Values(self.keys.iter().map(|k| Value::from(k.as_ref())).collect())
+    }
+}
+
+/// Convert a serde_json::Value into a minijinja::Value preserving JSON object key order.
+///
+/// Unlike Value::from_serialize, which converts JSON objects through serde and ends up
+/// with a BTreeMap (alphabetical key order), this function wraps JSON objects in a
+/// custom OrderedMap that returns keys in their original insertion order.
+fn json_to_minijinja_ordered(json: &JsonValue) -> Value {
+    match json {
+        JsonValue::Object(map) => {
+            let (keys, values): (Vec<Arc<str>>, Vec<Value>) = map
+                .iter()
+                .map(|(k, v)| (Arc::from(k.as_str()), json_to_minijinja_ordered(v)))
+                .unzip();
+            Value::from_object(OrderedMap { keys, values })
+        }
+        JsonValue::Array(arr) => Value::from(
+            arr.iter()
+                .map(json_to_minijinja_ordered)
+                .collect::<Vec<_>>(),
+        ),
+        JsonValue::String(s) => Value::from(s.as_str()),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::from(i)
+            } else {
+                Value::from(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
+        JsonValue::Bool(b) => Value::from(*b),
+        JsonValue::Null => Value::from(()),
+    }
+}
+
 fn render_chat_template(
     env: &Environment<'_>,
     messages: &[serde_json::Value],
@@ -827,14 +939,28 @@ fn render_chat_template(
         .get_template("chat")
         .map_err(|e| anyhow!("Failed to get template: {e}"))?;
 
-    // Convert messages to minijinja::Value (messages already processed by router)
-    let minijinja_messages: Vec<Value> = messages.iter().map(Value::from_serialize).collect();
+    // Convert messages to minijinja::Value preserving JSON object key order.
+    // json_to_minijinja_ordered wraps JSON objects in OrderedMap so that templates
+    // iterating message fields get insertion order, not alphabetical.
+    let minijinja_messages: Vec<Value> = messages.iter().map(json_to_minijinja_ordered).collect();
 
     // Use Value::UNDEFINED for missing optional params so they are truly "undefined"
     // in the template context, matching HuggingFace Python behavior. Many chat templates
     // use `{% if tools is defined %}` guards — passing null (none) instead of undefined
     // would bypass those guards since `none` IS defined, causing `tools | length` to fail.
-    let tools_value = params.tools.map_or(Value::UNDEFINED, Value::from_serialize);
+    //
+    // Use json_to_minijinja_ordered instead of Value::from_serialize so that tool JSON
+    // objects are iterated in insertion order (name before description) matching Python's
+    // Jinja2 behavior with dict.items(). Without this, minijinja's BTreeMap-backed objects
+    // sort keys alphabetically (description before name), diverging from TGL.
+    let tools_value = params.tools.map_or(Value::UNDEFINED, |tools| {
+        Value::from(
+            tools
+                .iter()
+                .map(json_to_minijinja_ordered)
+                .collect::<Vec<_>>(),
+        )
+    });
     let documents_value = params
         .documents
         .map_or(Value::UNDEFINED, Value::from_serialize);

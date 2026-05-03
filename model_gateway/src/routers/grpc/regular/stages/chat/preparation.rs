@@ -142,6 +142,16 @@ impl ChatPreparationStage {
 
         let mut token_ids = encoding.token_ids().to_vec();
 
+        debug!(
+            target: "smg::tokenizer_debug",
+            model_id = %ctx.input.model_id,
+            rendered_len = processed_messages.text.len(),
+            rendered_text_prefix = %&processed_messages.text[..processed_messages.text.len().min(2000)],
+            token_count = token_ids.len(),
+            token_ids_prefix = ?&token_ids[..token_ids.len().min(200)],
+            "SMG tokenized prompt"
+        );
+
         // Step 4: Full multimodal processing (fetch + preprocess + expand tokens + hash)
         let mut multimodal_intermediate = None;
         if let Some((mm_components, model_id, tokenizer_source)) = mm_context {

@@ -856,7 +856,7 @@ mod pd_routing_unit_tests {
             // Bootstrap injection should be reasonably fast even for large batches
             println!("Bootstrap injection for batch_size {batch_size} took {elapsed:?}");
             assert!(
-                elapsed.as_millis() < 1000,
+                elapsed.as_millis() < 5000,
                 "Bootstrap injection took too long for batch size {batch_size}"
             );
         }

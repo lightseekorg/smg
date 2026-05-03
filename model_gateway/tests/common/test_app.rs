@@ -103,6 +103,7 @@ pub fn create_test_app(
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        api_port: 0,
     });
 
     // Configure request ID headers (use defaults if not specified)
@@ -133,17 +134,19 @@ pub fn create_test_app_with_context(
     router: Arc<dyn RouterTrait>,
     app_context: Arc<AppContext>,
 ) -> Router {
-    // Create AppState with the test router and context
+    // Get config from the context
+    let router_config = &app_context.router_config;
+
+    // Create AppState with the test router and context.
+    // api_port = 0 signals test mode: health_generate skips the HTTP probe.
     let app_state = Arc::new(AppState {
         router,
         context: app_context.clone(),
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        api_port: 0,
     });
-
-    // Get config from the context
-    let router_config = &app_context.router_config;
 
     // Configure request ID headers (use defaults if not specified)
     let request_id_headers = router_config.request_id_headers.clone().unwrap_or_else(|| {

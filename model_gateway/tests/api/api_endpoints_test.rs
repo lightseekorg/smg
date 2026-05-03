@@ -135,8 +135,11 @@ mod health_tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(body_json.is_object());
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(
+            body_str.contains("workers healthy"),
+            "Expected workers healthy in body, got: {body_str}"
+        );
 
         ctx.shutdown().await;
     }

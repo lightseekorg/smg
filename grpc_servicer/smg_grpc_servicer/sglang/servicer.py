@@ -759,6 +759,10 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
 
         input_text = grpc_req.tokenized.original_text
         input_ids = list(grpc_req.tokenized.input_ids)
+        logger.debug(
+            "gRPC-received input_ids: rid=%s count=%d first200=%s",
+            grpc_req.request_id, len(input_ids), input_ids[:200]
+        )
 
         # Convert sampling params
         sampling_params = self._convert_sampling_params(grpc_req.sampling_params)
