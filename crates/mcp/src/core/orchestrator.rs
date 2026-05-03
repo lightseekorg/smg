@@ -39,8 +39,10 @@ use std::{
 use dashmap::DashMap;
 use openai_protocol::responses::ResponseOutputItem;
 use rmcp::{
-    model::{CallToolRequestParam, CallToolResult},
-    service::{RunningService, ServiceError},
+    model::{
+        CallToolRequest, CallToolRequestParam, CallToolResult, ClientRequest, Meta, ServerResult,
+    },
+    service::{PeerRequestOptions, RunningService, ServiceError},
     RoleClient,
 };
 use serde_json::Value;
@@ -1201,7 +1203,9 @@ impl McpOrchestrator {
                     return Err(McpError::ToolDenied(entry.tool_name().to_string()));
                 }
                 self.metrics.record_approval_granted();
-                let result = self.execute_tool_with_reconnect(entry, arguments).await?;
+                let result = self
+                    .execute_tool_with_reconnect(entry, arguments, &request_ctx.forwarded_headers)
+                    .await?;
                 Ok(ApprovalExecutionResult::Success(result))
             }
             ApprovalOutcome::Pending {
@@ -1220,7 +1224,13 @@ impl McpOrchestrator {
                 match rx.await {
                     Ok(ApprovalDecision::Approved) => {
                         self.metrics.record_approval_granted();
-                        let result = self.execute_tool_with_reconnect(entry, arguments).await?;
+                        let result = self
+                            .execute_tool_with_reconnect(
+                                entry,
+                                arguments,
+                                &request_ctx.forwarded_headers,
+                            )
+                            .await?;
                         Ok(ApprovalExecutionResult::Success(result))
                     }
                     Ok(ApprovalDecision::Denied { reason }) => {
@@ -1236,6 +1246,7 @@ impl McpOrchestrator {
         &self,
         entry: &ToolEntry,
         arguments: Value,
+        forwarded_headers: &HashMap<String, String>,
     ) -> McpResult<CallToolResult> {
         let server_name = entry.server_key();
 
@@ -1245,7 +1256,10 @@ impl McpOrchestrator {
             .get(server_name)
             .map(|e| Arc::clone(&e.client));
 
-        match self.execute_tool_impl(entry, arguments.clone()).await {
+        match self
+            .execute_tool_impl(entry, arguments.clone(), forwarded_headers)
+            .await
+        {
             Ok(result) => Ok(result),
             Err(McpError::ServerDisconnected(name)) => {
                 // Acquire/Create the mutex for this server to prevent concurrent reconnects
@@ -1272,7 +1286,9 @@ impl McpOrchestrator {
                             "Server '{}' already reconnected by another task, retrying call",
                             name
                         );
-                        return self.execute_tool_impl(entry, arguments).await;
+                        return self
+                            .execute_tool_impl(entry, arguments, forwarded_headers)
+                            .await;
                     }
                 }
 
@@ -1297,7 +1313,8 @@ impl McpOrchestrator {
                     .await?;
 
                 // Retry execution after successful reconnection
-                self.execute_tool_impl(entry, arguments).await
+                self.execute_tool_impl(entry, arguments, forwarded_headers)
+                    .await
             }
             Err(e) => Err(e),
         }
@@ -1308,6 +1325,7 @@ impl McpOrchestrator {
         &self,
         entry: &ToolEntry,
         mut arguments: Value,
+        forwarded_headers: &HashMap<String, String>,
     ) -> McpResult<CallToolResult> {
         // Resolve alias if needed
         let (target_server, target_tool) = if let Some(alias) = &entry.alias_target {
@@ -1346,7 +1364,8 @@ impl McpOrchestrator {
         };
 
         // Execute on server
-        self.execute_on_server(&target_server, request).await
+        self.execute_on_server(&target_server, request, forwarded_headers)
+            .await
     }
 
     /// Coerce argument types based on tool schema.
@@ -1437,13 +1456,45 @@ impl McpOrchestrator {
     }
 
     /// Execute a tool call on a server.
+    ///
+    /// When `forwarded_headers` is non-empty, cherry-picked headers are passed to
+    /// the MCP server inside the JSON-RPC `_meta.extra_headers` field rather
+    /// than at the HTTP transport level.
     async fn execute_on_server(
         &self,
         server_key: &str,
         request: CallToolRequestParam,
+        forwarded_headers: &HashMap<String, String>,
     ) -> McpResult<CallToolResult> {
         if let Some(entry) = self.static_servers.get(server_key) {
-            return entry.client.call_tool(request).await.map_err(|e| match e {
+            return self
+                .call_tool_on_peer(entry.client.peer(), server_key, request, forwarded_headers)
+                .await;
+        }
+
+        if let Some(client) = self.connection_pool.get_by_url(server_key) {
+            return self
+                .call_tool_on_peer(client.peer(), server_key, request, forwarded_headers)
+                .await;
+        }
+
+        Err(McpError::ServerNotFound(server_key.to_string()))
+    }
+
+    /// Send a `tools/call` JSON-RPC request to an MCP peer.
+    ///
+    /// When `forwarded_headers` is non-empty, they are embedded in the
+    /// `_meta.extra_headers` field of the request so the MCP server can
+    /// read them from the protocol message.
+    async fn call_tool_on_peer(
+        &self,
+        peer: &rmcp::service::Peer<RoleClient>,
+        server_key: &str,
+        request: CallToolRequestParam,
+        forwarded_headers: &HashMap<String, String>,
+    ) -> McpResult<CallToolResult> {
+        if forwarded_headers.is_empty() {
+            return peer.call_tool(request).await.map_err(|e| match e {
                 // Typed detection for transport-level failures
                 ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
                     McpError::ServerDisconnected(server_key.to_string())
@@ -1452,18 +1503,49 @@ impl McpOrchestrator {
             });
         }
 
-        if let Some(client) = self.connection_pool.get_by_url(server_key) {
-            return client.call_tool(request).await.map_err(|e| match e {
+        // Build _meta with forwarded_headers
+        let headers_value: serde_json::Map<String, Value> = forwarded_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        let mut meta_map = serde_json::Map::new();
+        meta_map.insert("extra_headers".to_string(), Value::Object(headers_value));
+        let meta = Meta(meta_map);
+
+        let call_request = ClientRequest::CallToolRequest(CallToolRequest {
+            method: Default::default(),
+            params: request,
+            extensions: Default::default(),
+        });
+        let options = PeerRequestOptions {
+            meta: Some(meta),
+            timeout: None,
+        };
+
+        let result = peer
+            .send_request_with_option(call_request, options)
+            .await
+            .map_err(|e| match e {
                 ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
-                    // Note: Pooled connections trigger Disconnected but
-                    // recovery logic is currently scoped to static servers.
                     McpError::ServerDisconnected(server_key.to_string())
                 }
                 _ => McpError::ToolExecution(format!("MCP call failed: {e}")),
-            });
-        }
+            })?
+            .await_response()
+            .await
+            .map_err(|e| match e {
+                ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
+                    McpError::ServerDisconnected(server_key.to_string())
+                }
+                _ => McpError::ToolExecution(format!("MCP call failed: {e}")),
+            })?;
 
-        Err(McpError::ServerNotFound(server_key.to_string()))
+        match result {
+            ServerResult::CallToolResult(result) => Ok(result),
+            _ => Err(McpError::ToolExecution(
+                "unexpected response type for tools/call".to_string(),
+            )),
+        }
     }
 
     // ========================================================================
@@ -1843,7 +1925,9 @@ impl McpOrchestrator {
             .ok_or_else(|| McpError::ToolNotFound(format!("{server_key}:{tool_name}")))?;
 
         // Execute directly (approval already handled)
-        let result = self.execute_tool_impl(&entry, arguments.clone()).await?;
+        let result = self
+            .execute_tool_impl(&entry, arguments.clone(), &request_ctx.forwarded_headers)
+            .await?;
 
         // Transform response
         let output = Self::transform_result(
@@ -2030,10 +2114,11 @@ impl<'a> McpRequestContext<'a> {
             arguments: args_map,
         };
 
-        let result = client
-            .call_tool(request)
-            .await
-            .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {e}")))?;
+        let server_key = entry.server_key();
+        let result = self
+            .orchestrator
+            .call_tool_on_peer(client.peer(), server_key, request, &self.forwarded_headers)
+            .await?;
 
         let output = McpOrchestrator::transform_result(
             &result,

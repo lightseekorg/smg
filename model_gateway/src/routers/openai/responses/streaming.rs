@@ -47,7 +47,8 @@ use crate::{
     routers::{
         common::{
             header_utils::{
-                extract_forwardable_request_headers, preserve_response_headers, ApiProvider,
+                extract_forwardable_request_headers, extract_mcp_forward_headers,
+                preserve_response_headers, ApiProvider,
             },
             mcp_utils::DEFAULT_MAX_ITERATIONS,
             persistence_utils::persist_conversation_items,
@@ -691,7 +692,8 @@ pub(super) fn handle_streaming_with_tool_interception(
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
-    let forwarded_headers = extract_forwardable_request_headers(headers);
+    let mut forwarded_headers = extract_forwardable_request_headers(headers);
+    forwarded_headers.extend(extract_mcp_forward_headers(headers));
 
     #[expect(
         clippy::disallowed_methods,

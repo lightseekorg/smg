@@ -188,6 +188,7 @@ pub fn collect_builtin_routing(
             ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
             ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
             ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
+            ResponseTool::FileSearch(_) => BuiltinToolType::FileSearch,
             _ => continue,
         };
 
@@ -229,6 +230,7 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
             ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
             ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
             ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
+            ResponseTool::FileSearch(_) => Some(BuiltinToolType::FileSearch),
             _ => None,
         })
         .collect()

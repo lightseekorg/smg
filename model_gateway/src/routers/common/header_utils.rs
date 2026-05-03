@@ -285,9 +285,40 @@ pub fn extract_auth_header(
         .or_else(|| worker_api_key.and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok()))
 }
 
-/// Extract the subset of request headers that SMG is allowed to preserve for
-/// internal execution paths such as MCP tool calls.
+/// Extract the subset of request headers that SMG forwards to upstream HTTP
+/// requests (tracing, auth, routing). Does **not** include MCP-specific headers;
+/// use [`extract_mcp_forward_headers`] for those.
 pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    extract_matching_headers(headers, should_forward_request_header)
+}
+
+/// Extract headers forwarded only to MCP tool calls (e.g., OCI delegation token).
+///
+/// These are embedded in `_meta.extra_headers` of the JSON-RPC request and
+/// must not be sent to LLM provider calls.
+pub fn extract_mcp_forward_headers(headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    extract_matching_headers(headers, is_mcp_forward_header)
+}
+
+/// Headers where multiple values are comma-joined per RFC 9110.
+/// All other headers are treated as singletons (first value wins).
+const CSV_MERGE_HEADERS: &[&str] = &["tracestate", "traceparent"];
+
+/// Returns `true` if repeated values for `name` should be comma-joined.
+fn is_csv_mergeable(name: &str) -> bool {
+    CSV_MERGE_HEADERS
+        .iter()
+        .any(|h| name.eq_ignore_ascii_case(h))
+}
+
+/// Shared extraction logic: collect headers whose names pass `predicate`.
+///
+/// Headers listed in [`CSV_MERGE_HEADERS`] have repeated values comma-joined.
+/// All other headers are singletons — only the first value is kept.
+fn extract_matching_headers(
+    headers: Option<&HeaderMap>,
+    predicate: fn(&str) -> bool,
+) -> HashMap<String, String> {
     let Some(headers) = headers else {
         return HashMap::new();
     };
@@ -295,7 +326,8 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
     let mut forwarded = HashMap::new();
 
     for (name, value) in headers {
-        if !should_forward_request_header(name.as_str()) {
+        let name_str = name.as_str();
+        if !predicate(name_str) {
             continue;
         }
 
@@ -304,10 +336,13 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
         };
 
         forwarded
-            .entry(name.as_str().to_string())
+            .entry(name_str.to_string())
             .and_modify(|existing: &mut String| {
-                existing.push_str(", ");
-                existing.push_str(value);
+                if is_csv_mergeable(name_str) {
+                    existing.push_str(", ");
+                    existing.push_str(value);
+                }
+                // Singleton headers: keep the first value, ignore subsequent.
             })
             .or_insert_with(|| value.to_string());
     }
@@ -315,6 +350,7 @@ pub fn extract_forwardable_request_headers(headers: Option<&HeaderMap>) -> HashM
     forwarded
 }
 
+/// Headers forwarded to all upstream HTTP requests (LLM providers, etc.).
 #[inline]
 pub fn should_forward_request_header(name: &str) -> bool {
     const REQUEST_ID_PREFIX: &str = "x-request-id-";
@@ -328,6 +364,13 @@ pub fn should_forward_request_header(name: &str) -> bool {
         || name
             .get(..REQUEST_ID_PREFIX.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(REQUEST_ID_PREFIX))
+}
+
+/// Headers forwarded only to MCP tool calls (via `_meta.extra_headers`).
+#[inline]
+pub fn is_mcp_forward_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("x-smg-oci-delegation-token")
+        || name.eq_ignore_ascii_case("x-smg-oci-compartment-id")
 }
 
 // ── Conversation memory config ────────────────────────────────────────────────
@@ -480,7 +523,20 @@ mod tests {
         assert!(!should_forward_request_header("user-agent"));
         assert!(!should_forward_request_header("cookie"));
         assert!(!should_forward_request_header("x-custom-header"));
-        assert!(!should_forward_request_header("x-api-key"));
+        assert!(!should_forward_request_header("x-api-key")); // OCI headers are MCP-only, not in the general forwarding list
+        assert!(!should_forward_request_header("x-smg-oci-delegation-token"));
+        assert!(!should_forward_request_header("x-smg-oci-compartment-id"));
+    }
+
+    #[test]
+    fn test_is_mcp_forward_header() {
+        assert!(is_mcp_forward_header("x-smg-oci-delegation-token"));
+        assert!(is_mcp_forward_header("X-SMG-OCI-Delegation-Token"));
+        assert!(is_mcp_forward_header("x-smg-oci-compartment-id"));
+        assert!(is_mcp_forward_header("X-SMG-OCI-Compartment-Id"));
+        // General headers are not MCP-specific
+        assert!(!is_mcp_forward_header("authorization"));
+        assert!(!is_mcp_forward_header("traceparent"));
     }
 
     #[test]
@@ -501,16 +557,94 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_forwardable_request_headers_preserves_repeated_values() {
+    fn test_extract_forwardable_excludes_mcp_only_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc".parse().unwrap());
+        headers.insert("x-smg-oci-delegation-token", "dt-secret".parse().unwrap());
+        headers.insert("x-smg-oci-compartment-id", "ocid1.comp".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        assert!(forwarded.contains_key("authorization"));
+        assert!(!forwarded.contains_key("x-smg-oci-delegation-token"));
+        assert!(!forwarded.contains_key("x-smg-oci-compartment-id"));
+    }
+
+    #[test]
+    fn test_extract_mcp_forward_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer abc".parse().unwrap());
+        headers.insert("x-smg-oci-delegation-token", "dt-secret".parse().unwrap());
+        headers.insert("x-smg-oci-compartment-id", "ocid1.comp".parse().unwrap());
+        headers.insert("traceparent", "00-trace".parse().unwrap());
+
+        let mcp = extract_mcp_forward_headers(Some(&headers));
+
+        assert_eq!(mcp.len(), 2);
+        assert_eq!(
+            mcp.get("x-smg-oci-delegation-token"),
+            Some(&"dt-secret".to_string())
+        );
+        assert_eq!(
+            mcp.get("x-smg-oci-compartment-id"),
+            Some(&"ocid1.comp".to_string())
+        );
+        assert!(!mcp.contains_key("authorization"));
+        assert!(!mcp.contains_key("traceparent"));
+    }
+
+    #[test]
+    fn test_extract_mcp_forward_headers_empty_when_none() {
+        assert!(extract_mcp_forward_headers(None).is_empty());
+
+        let headers = HeaderMap::new();
+        assert!(extract_mcp_forward_headers(Some(&headers)).is_empty());
+    }
+
+    #[test]
+    fn test_extract_forwardable_request_headers_csv_merges_tracestate() {
         let mut headers = HeaderMap::new();
         headers.append("tracestate", "vendor1=value1".parse().unwrap());
         headers.append("tracestate", "vendor2=value2".parse().unwrap());
 
         let forwarded = extract_forwardable_request_headers(Some(&headers));
 
+        // tracestate is CSV-mergeable: repeated values are comma-joined.
         assert_eq!(
             forwarded.get("tracestate"),
             Some(&"vendor1=value1, vendor2=value2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_singleton_headers_keep_first_value() {
+        let mut headers = HeaderMap::new();
+        headers.append("authorization", "Bearer first".parse().unwrap());
+        headers.append("authorization", "Bearer second".parse().unwrap());
+
+        let forwarded = extract_forwardable_request_headers(Some(&headers));
+
+        // Singleton: first value wins, no comma-joining.
+        assert_eq!(
+            forwarded.get("authorization"),
+            Some(&"Bearer first".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mcp_singleton_headers_keep_first_value() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-smg-oci-delegation-token", "token-first".parse().unwrap());
+        headers.append(
+            "x-smg-oci-delegation-token",
+            "token-second".parse().unwrap(),
+        );
+
+        let mcp = extract_mcp_forward_headers(Some(&headers));
+
+        assert_eq!(
+            mcp.get("x-smg-oci-delegation-token"),
+            Some(&"token-first".to_string())
         );
     }
 
