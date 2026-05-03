@@ -1447,12 +1447,16 @@ mod tests {
             McpServerBinding {
                 label: "deepwiki_ask".to_string(),
                 server_key: "server-ask".to_string(),
-                allowed_tools: Some(vec!["ask_question".to_string()]),
+                allowed_tools: Some(smg_mcp::McpToolExposureFilter::tool_names(vec![
+                    "ask_question".to_string(),
+                ])),
             },
             McpServerBinding {
                 label: "deepwiki_read".to_string(),
                 server_key: "server-read".to_string(),
-                allowed_tools: Some(vec!["read_wiki_structure".to_string()]),
+                allowed_tools: Some(smg_mcp::McpToolExposureFilter::tool_names(vec![
+                    "read_wiki_structure".to_string(),
+                ])),
             },
         ];
 
@@ -1470,7 +1474,9 @@ mod tests {
         let bindings = vec![McpServerBinding {
             label: "deepwiki_ask".to_string(),
             server_key: "server-ask".to_string(),
-            allowed_tools: Some(vec!["ask_question".to_string()]),
+            allowed_tools: Some(smg_mcp::McpToolExposureFilter::tool_names(vec![
+                "ask_question".to_string(),
+            ])),
         }];
 
         let bindings_to_emit = mcp_list_tools_bindings_to_emit(&existing_labels, &bindings);

@@ -112,7 +112,9 @@ impl RouterTrait for AnthropicRouter {
                     url: Some(server.url.clone()),
                     authorization: server.authorization_token.clone(),
                     headers: HashMap::new(),
-                    allowed_tools: toolset_allowed.get(&server.name).and_then(|v| v.clone()),
+                    allowed_tools: toolset_allowed
+                        .get(&server.name)
+                        .and_then(|v| v.clone().map(smg_mcp::McpToolExposureFilter::tool_names)),
                 })
                 .collect();
 
