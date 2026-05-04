@@ -1,5 +1,7 @@
 //! Streaming infrastructure for /v1/responses endpoint
 
+use std::sync::{atomic::AtomicU64, Arc};
+
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
@@ -17,7 +19,7 @@ use openai_protocol::{
 use serde_json::json;
 use smg_mcp::{self as mcp};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -1002,6 +1004,42 @@ pub(crate) fn build_sse_response(
         .expect("infallible: static headers and valid status code")
 }
 
+/// Like `build_sse_response` but atomically records the current time whenever a
+/// chunk is successfully written, allowing the health check to skip its inference
+/// probe when tokens have flowed recently.
+#[expect(
+    clippy::expect_used,
+    reason = "Response::builder with static headers and valid status code is infallible"
+)]
+pub(crate) fn build_tracked_sse_response(
+    rx: mpsc::UnboundedReceiver<Result<Bytes, std::io::Error>>,
+    last_token_time: &Arc<AtomicU64>,
+) -> Response {
+    use std::sync::atomic::Ordering;
+
+    let last_token_time = last_token_time.clone();
+    let stream = UnboundedReceiverStream::new(rx).map(move |result| {
+        if result.is_ok() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            last_token_time.store(now, Ordering::Relaxed);
+        }
+        result
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        )
+        .header("Cache-Control", HeaderValue::from_static("no-cache"))
+        .header("Connection", HeaderValue::from_static("keep-alive"))
+        .body(Body::from_stream(stream))
+        .expect("infallible: static headers and valid status code")
+}
+
 /// Attach `server_label` to an MCP tool-call JSON item.
 ///
 /// Only sets the field when `response_format` indicates a passthrough (mcp_call)
@@ -1014,5 +1052,69 @@ pub(crate) fn attach_mcp_server_label(
 ) {
     if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
         item["server_label"] = json!(label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+
+    use axum::{body::to_bytes, http::StatusCode};
+    use bytes::Bytes;
+    use tokio::sync::mpsc;
+
+    use super::build_tracked_sse_response;
+
+    #[tokio::test]
+    async fn tracked_sse_response_updates_timestamp_on_ok_chunk() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let last_token_time = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+
+        let resp = build_tracked_sse_response(rx, &last_token_time);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        tx.send(Ok(Bytes::from("data: hello\n\n"))).unwrap();
+        drop(tx);
+
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+
+        let stored = last_token_time.load(Ordering::Relaxed);
+        assert!(
+            stored >= before,
+            "timestamp should be >= before: {stored} < {before}"
+        );
+        assert!(
+            stored <= before + 5,
+            "timestamp should be within 5s: {stored}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tracked_sse_response_does_not_update_timestamp_on_error_chunk() {
+        let last_token_time = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+
+        let resp = build_tracked_sse_response(rx, &last_token_time);
+
+        tx.send(Err(std::io::Error::other("stream error"))).unwrap();
+        drop(tx);
+
+        let _ = to_bytes(resp.into_body(), usize::MAX).await;
+
+        assert_eq!(
+            last_token_time.load(Ordering::Relaxed),
+            0,
+            "error chunk should not update the timestamp"
+        );
     }
 }

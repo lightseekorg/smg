@@ -11,7 +11,7 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    common::{FunctionCallResponse, ResponseFormat, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
@@ -96,7 +96,15 @@ impl ResponseProcessor {
         let mut reasoning_text: Option<String> = None;
         let mut processed_text = final_text;
 
-        if original_request.separate_reasoning && reasoning_parser_available {
+        let has_structured_output = utils::has_constrained_output(
+            original_request.tool_choice.as_ref(),
+            original_request.response_format.as_ref(),
+        );
+
+        if original_request.separate_reasoning
+            && reasoning_parser_available
+            && !has_structured_output
+        {
             let pooled_parser = utils::get_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
@@ -156,19 +164,43 @@ impl ResponseProcessor {
                 }
             };
 
-            if used_json_schema {
+            let output_is_constrained = utils::has_constrained_output(
+                original_request.tool_choice.as_ref(),
+                original_request.response_format.as_ref(),
+            );
+            if self.configured_tool_parser.is_some()
+                && tool_parser_available
+                && !output_is_constrained
+            {
+                // Configured parser for native tool call tokens (auto/required modes)
+                (tool_calls, processed_text) = self
+                    .parse_tool_calls(
+                        &processed_text,
+                        &original_request.model,
+                        history_tool_calls_count,
+                        original_request.tools.as_deref(),
+                    )
+                    .await;
+            }
+
+            if tool_calls.is_none() && used_json_schema {
+                // Constrained decoding output: pure JSON wrapped as a tool call
                 (tool_calls, processed_text) = utils::parse_json_schema_response(
                     &processed_text,
                     original_request.tool_choice.as_ref(),
                     &original_request.model,
                     history_tool_calls_count,
                 );
-            } else if tool_parser_available {
+            }
+
+            if tool_calls.is_none() && tool_parser_available {
+                // Fallback: auto-detected parser
                 (tool_calls, processed_text) = self
                     .parse_tool_calls(
                         &processed_text,
                         &original_request.model,
                         history_tool_calls_count,
+                        original_request.tools.as_deref(),
                     )
                     .await;
             }
@@ -191,7 +223,73 @@ impl ResponseProcessor {
             utils::convert_proto_to_openai_logprobs(proto_logprobs, tokenizer)
         });
 
-        // Step 5: Build ChatCompletionMessage (proper response message type)
+        // Strip leaked chatml tokens only when a model-specific parser is configured
+        if self.configured_tool_parser.is_some() || self.configured_reasoning_parser.is_some() {
+            for token in [
+                "<|im_end|>",
+                "<|im_start|>",
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|im_system|>",
+                "<|im_middle|>",
+            ] {
+                processed_text = processed_text.replace(token, "");
+            }
+            processed_text = processed_text.trim().to_string();
+        }
+
+        let is_json_response = matches!(
+            &original_request.response_format,
+            Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. })
+        );
+        if is_json_response {
+            if processed_text.starts_with("```json") || processed_text.starts_with("```JSON") {
+                if let Some(start) = processed_text.find('\n') {
+                    let inner = &processed_text[start + 1..];
+                    if let Some(end) = inner.rfind("```") {
+                        processed_text = inner[..end].trim().to_string();
+                    }
+                }
+            }
+
+            if processed_text.starts_with('{') {
+                let mut depth = 0i32;
+                let mut in_string = false;
+                let mut escape = false;
+                let mut json_end = None;
+                for (i, ch) in processed_text.char_indices() {
+                    if escape {
+                        escape = false;
+                        continue;
+                    }
+                    if ch == '\\' && in_string {
+                        escape = true;
+                        continue;
+                    }
+                    if ch == '"' {
+                        in_string = !in_string;
+                        continue;
+                    }
+                    if in_string {
+                        continue;
+                    }
+                    if ch == '{' {
+                        depth += 1;
+                    } else if ch == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            json_end = Some(i + 1);
+                            break;
+                        }
+                    }
+                }
+                if let Some(end) = json_end {
+                    processed_text = processed_text[..end].to_string();
+                }
+            }
+        }
+
+        // Build ChatCompletionMessage (proper response message type)
         let chat_message = ChatCompletionMessage {
             role: "assistant".to_string(),
             content: if processed_text.is_empty() {
@@ -230,8 +328,14 @@ impl ResponseProcessor {
 
         let history_tool_calls_count = utils::get_history_tool_calls_count(&chat_request);
 
+        let has_structured_output = utils::has_constrained_output(
+            chat_request.tool_choice.as_ref(),
+            chat_request.response_format.as_ref(),
+        );
+
         // Check parser availability once upfront (not per choice)
         let reasoning_parser_available = chat_request.separate_reasoning
+            && !has_structured_output
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
@@ -312,6 +416,7 @@ impl ResponseProcessor {
         processed_text: &str,
         model: &str,
         history_tool_calls_count: usize,
+        tools: Option<&[openai_protocol::common::Tool]>,
     ) -> (Option<Vec<ToolCall>>, String) {
         // Get pooled parser for this model
         let pooled_parser = utils::get_tool_parser(
@@ -337,19 +442,23 @@ impl ResponseProcessor {
                     .into_iter()
                     .enumerate()
                     .map(|(index, tc)| {
-                        // Generate ID for this tool call
                         let id = utils::generate_tool_call_id(
                             model,
                             &tc.function.name,
                             index,
                             history_tool_calls_count,
                         );
+                        let arguments = coerce_tool_args_to_schema(
+                            &tc.function.arguments,
+                            &tc.function.name,
+                            tools.unwrap_or(&[]),
+                        );
                         ToolCall {
                             id,
                             tool_type: "function".to_string(),
                             function: FunctionCallResponse {
                                 name: tc.function.name,
-                                arguments: Some(tc.function.arguments),
+                                arguments: Some(arguments),
                             },
                         }
                     })
@@ -634,7 +743,18 @@ impl ResponseProcessor {
                     Some(messages::ToolChoice::Tool { .. } | messages::ToolChoice::Any { .. })
                 );
 
-            if used_json_schema {
+            if self.configured_tool_parser.is_some() && tool_parser_available {
+                (tool_calls, processed_text) = self
+                    .parse_tool_calls(
+                        &processed_text,
+                        &messages_request.model,
+                        utils::message_utils::get_history_tool_calls_count_messages(
+                            &messages_request,
+                        ),
+                        None,
+                    )
+                    .await;
+            } else if used_json_schema {
                 // Bridge Messages ToolChoice to Chat ToolChoice for reuse
                 let chat_tool_choice = messages_request
                     .tool_choice
@@ -655,12 +775,28 @@ impl ResponseProcessor {
                         utils::message_utils::get_history_tool_calls_count_messages(
                             &messages_request,
                         ),
+                        None,
                     )
                     .await;
             }
         }
 
-        // Step 3: Build content blocks
+        // Strip leaked chatml tokens only when a model-specific parser is configured
+        if self.configured_tool_parser.is_some() || self.configured_reasoning_parser.is_some() {
+            for token in [
+                "<|im_end|>",
+                "<|im_start|>",
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|im_system|>",
+                "<|im_middle|>",
+            ] {
+                processed_text = processed_text.replace(token, "");
+            }
+            processed_text = processed_text.trim().to_string();
+        }
+
+        // Build content blocks
         let mut content_blocks: Vec<messages::ContentBlock> = Vec::new();
 
         // Thinking block first (if present)
@@ -858,4 +994,92 @@ impl ResponseProcessor {
             system_fingerprint: dispatch.weight_version.clone(),
         })
     }
+}
+
+/// Coerce tool call argument values to match the types declared in the function
+/// schema. Models sometimes return `546382` (integer) for a `"type": "string"`
+/// parameter, or `null` for `"type": "string"` when the user said "null". This
+/// mirrors the type coercion that production tproxy performs.
+fn coerce_tool_args_to_schema(
+    arguments_json: &str,
+    function_name: &str,
+    tools: &[openai_protocol::common::Tool],
+) -> String {
+    let schema = tools.iter().find_map(|t| {
+        let f = &t.function;
+        if f.name == function_name {
+            Some(&f.parameters)
+        } else {
+            None
+        }
+    });
+    let schema = match schema {
+        Some(s) if s.is_object() => s,
+        _ => return arguments_json.to_string(),
+    };
+
+    let mut args: serde_json::Value = match serde_json::from_str(arguments_json) {
+        Ok(v) => v,
+        Err(_) => return arguments_json.to_string(),
+    };
+
+    let props = match schema.get("properties").and_then(|p| p.as_object()) {
+        Some(p) => p,
+        None => return arguments_json.to_string(),
+    };
+
+    if let Some(obj) = args.as_object_mut() {
+        for (key, prop_schema) in props {
+            let expected_type = prop_schema.get("type").and_then(|t| t.as_str());
+            let val = match obj.get(key) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            let coerced = match expected_type {
+                Some("string") => match &val {
+                    serde_json::Value::Number(n) => Some(serde_json::Value::String(n.to_string())),
+                    serde_json::Value::Bool(b) => Some(serde_json::Value::String(b.to_string())),
+                    serde_json::Value::Null => Some(serde_json::Value::String("null".to_string())),
+                    _ => None,
+                },
+                Some("number") => match &val {
+                    serde_json::Value::String(s) => s
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number),
+                    _ => None,
+                },
+                Some("integer") => match &val {
+                    serde_json::Value::String(s) => s
+                        .parse::<i64>()
+                        .ok()
+                        .map(|n| serde_json::Value::Number(n.into())),
+                    _ => None,
+                },
+                Some("array") => match &val {
+                    serde_json::Value::String(_) | serde_json::Value::Number(_) => {
+                        Some(serde_json::Value::Array(vec![val.clone()]))
+                    }
+                    _ => None,
+                },
+                Some("boolean") => match &val {
+                    serde_json::Value::String(s) => match s.as_str() {
+                        "true" => Some(serde_json::Value::Bool(true)),
+                        "false" => Some(serde_json::Value::Bool(false)),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(new_val) = coerced {
+                obj.insert(key.clone(), new_val);
+            }
+        }
+    }
+
+    serde_json::to_string(&args).unwrap_or_else(|_| arguments_json.to_string())
 }

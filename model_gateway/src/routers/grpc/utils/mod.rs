@@ -22,5 +22,5 @@ pub(crate) use metrics::{error_type_from_status, route_to_endpoint};
 pub(crate) use parsers::{
     check_reasoning_parser_availability, check_tool_parser_availability, create_reasoning_parser,
     create_tool_parser, extract_thinking_from_kwargs, get_reasoning_parser, get_tool_parser,
-    should_mark_reasoning_started,
+    has_constrained_output, should_mark_reasoning_started,
 };

@@ -597,6 +597,15 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     // like ensure_ascii, separators, and sort_keys that HuggingFace templates use
     env.add_filter("tojson", tojson_filter);
 
+    // HuggingFace's Jinja2 environment registers `raise_exception` as a global
+    // callable so templates can do `{{ raise_exception("msg") }}`.
+    env.add_function(
+        "raise_exception",
+        |msg: String| -> Result<String, minijinja::Error> {
+            Err(MinijinjaError::new(ErrorKind::InvalidOperation, msg))
+        },
+    );
+
     Ok(env)
 }
 

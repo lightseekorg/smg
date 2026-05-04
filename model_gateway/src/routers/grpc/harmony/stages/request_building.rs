@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::routers::{
@@ -21,12 +21,16 @@ use crate::routers::{
 /// Unlike regular request building, this uses token_ids directly (Harmony encoding handles messages).
 pub(crate) struct HarmonyRequestBuildingStage {
     inject_pd_metadata: bool,
+    enable_message_hash: bool,
 }
 
 impl HarmonyRequestBuildingStage {
     /// Create a new Harmony request building stage
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, enable_message_hash: bool) -> Self {
+        Self {
+            inject_pd_metadata,
+            enable_message_hash,
+        }
     }
 }
 
@@ -72,10 +76,24 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             ClientSelection::Dual { prefill, .. } => prefill,
         };
 
-        // Generate request_id based on request type
+        // Generate request_id based on request type — use user-supplied request_id if provided
         let request_id = match &ctx.input.request_type {
-            RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
-            RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
+            RequestType::Chat(req) => {
+                if let Some(id) = req.request_id.clone() {
+                    info!(target: "smg::request", request_id = %id, "Using user-supplied request ID");
+                    id
+                } else {
+                    format!("chatcmpl-{}", Uuid::now_v7())
+                }
+            }
+            RequestType::Responses(req) => {
+                if let Some(id) = req.request_id.clone() {
+                    info!(target: "smg::request", request_id = %id, "Using user-supplied request ID");
+                    id
+                } else {
+                    format!("responses-{}", Uuid::now_v7())
+                }
+            }
             request_type @ (RequestType::Generate(_)
             | RequestType::Completion(_)
             | RequestType::Embedding(_)
@@ -91,6 +109,19 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     format!("{request_type} requests are not supported with Harmony models"),
                 ));
             }
+        };
+
+        let message_hashes = if self.enable_message_hash {
+            if let RequestType::Chat(req) = &ctx.input.request_type {
+                Some(helpers::compute_and_log_message_hashes(
+                    &request_id,
+                    &req.messages,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
         };
 
         // Build gRPC request using token_ids directly (Harmony encoding already handled message rendering)
@@ -189,6 +220,10 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 ProtoGenerateRequest::Vllm(Box::new(req))
             }
             GrpcClient::Trtllm(trtllm_client) => {
+                let eos_ids = ctx
+                    .tokenizer_arc()
+                    .map(|t| t.eos_token_ids().to_vec())
+                    .unwrap_or_default();
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
                         let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
@@ -200,6 +235,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 token_ids,
                                 None, // No multimodal in Harmony pipeline
                                 tool_constraints,
+                                &eos_ids,
+                                message_hashes,
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
@@ -213,6 +250,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             placeholder_processed_text,
                             token_ids,
                             tool_constraints,
+                            None,
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request from responses");

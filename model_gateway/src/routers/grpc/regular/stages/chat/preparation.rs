@@ -130,8 +130,11 @@ impl ChatPreparationStage {
             }
         };
 
-        // Step 3: Tokenize the processed text (no special tokens - chat template already handles them)
-        let encoding = match tokenizer.encode(&processed_messages.text, false) {
+        // Step 3: Tokenize the processed text.
+        // Use add_special_tokens=true so the tokenizer recognizes special tokens
+        // (e.g. <|im_system|>, <|im_end|>, <think>) embedded in the chat template
+        // output as single token IDs rather than splitting them into characters.
+        let encoding = match tokenizer.encode(&processed_messages.text, true) {
             Ok(encoding) => encoding,
             Err(e) => {
                 error!(function = "ChatPreparationStage::execute", error = %e, "Tokenization failed");

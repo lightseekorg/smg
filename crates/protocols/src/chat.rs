@@ -11,6 +11,7 @@ use super::{
         StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference,
         Usage,
     },
+    messages::ThinkingConfig,
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
 use crate::{
@@ -48,6 +49,7 @@ pub enum ChatMessage {
     Tool {
         content: MessageContent,
         tool_call_id: String,
+        name: Option<String>,
     },
     #[serde(rename = "function")]
     Function { content: String, name: String },
@@ -201,6 +203,10 @@ pub struct ChatCompletionRequest {
     /// Effort level for reasoning models (low, medium, high)
     pub reasoning_effort: Option<String>,
 
+    /// Configuration for extended thinking (Anthropic-style).
+    /// Maps to chat_template_kwargs for thinking-capable models.
+    pub thinking: Option<ThinkingConfig>,
+
     /// An object specifying the format that the model must output
     pub response_format: Option<ResponseFormat>,
 
@@ -317,6 +323,11 @@ pub struct ChatCompletionRequest {
     /// Random seed for sampling for deterministic outputs
     pub sampling_seed: Option<u64>,
 
+    /// User-supplied request ID for log correlation.
+    /// If set, SMG passes it through to the engine instead of generating its own UUID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+
     /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
     #[serde(flatten)]
     pub other: Map<String, Value>,
@@ -403,6 +414,7 @@ fn validate_chat_cross_parameters(
         req.regex.is_some(),
         req.ebnf.is_some(),
         matches!(req.response_format, Some(ResponseFormat::JsonSchema { .. })),
+        matches!(req.response_format, Some(ResponseFormat::Regex { .. })),
     ]
     .iter()
     .filter(|&&x| x)
@@ -565,6 +577,29 @@ impl Normalizable for ChatCompletionRequest {
                 },
             });
             self.function_call = None; // Clear deprecated field
+        }
+
+        // Migrate thinking → chat_template_kwargs
+        if let Some(ref thinking) = self.thinking {
+            let kwargs = self.chat_template_kwargs.get_or_insert_with(HashMap::new);
+            match thinking {
+                ThinkingConfig::Enabled { .. } => {
+                    kwargs
+                        .entry("enable_thinking".to_string())
+                        .or_insert(Value::Bool(true));
+                    kwargs
+                        .entry("thinking".to_string())
+                        .or_insert(Value::Bool(true));
+                }
+                ThinkingConfig::Disabled => {
+                    kwargs
+                        .entry("enable_thinking".to_string())
+                        .or_insert(Value::Bool(false));
+                    kwargs
+                        .entry("thinking".to_string())
+                        .or_insert(Value::Bool(false));
+                }
+            }
         }
 
         // Apply tool_choice defaults

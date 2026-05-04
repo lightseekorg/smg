@@ -236,6 +236,7 @@ impl HuggingFaceTokenizer {
             cls_token: find_token(&["[CLS]", "<cls>", "<CLS>"]),
             mask_token: find_token(&["[MASK]", "<mask>", "<MASK>"]),
             additional_special_tokens,
+            ..Default::default()
         }
     }
 

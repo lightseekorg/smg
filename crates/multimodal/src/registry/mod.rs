@@ -126,14 +126,7 @@ pub(super) mod test_helpers {
 
         fn get_special_tokens(&self) -> &SpecialTokens {
             static TOKENS: Lazy<SpecialTokens> = Lazy::new(|| SpecialTokens {
-                bos_token: None,
-                eos_token: None,
-                unk_token: None,
-                sep_token: None,
-                pad_token: None,
-                cls_token: None,
-                mask_token: None,
-                additional_special_tokens: vec![],
+                ..Default::default()
             });
             &TOKENS
         }
