@@ -738,6 +738,14 @@ impl ProtoGenerateComplete {
         matches!(self, Self::Mlx(_))
     }
 
+    /// Return the raw matched stop token ID for MLX responses; None for all other backends.
+    pub fn mlx_matched_stop_token_id(&self) -> Option<u32> {
+        match self {
+            Self::Mlx(c) => c.matched_stop_token_id,
+            _ => None,
+        }
+    }
+
     /// Get token IDs from either backend (output_ids in proto)
     pub fn token_ids(&self) -> &[u32] {
         match self {

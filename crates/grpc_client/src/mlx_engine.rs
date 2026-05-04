@@ -242,11 +242,8 @@ impl MlxEngineClient {
     //   - response_format — same as constrained decoding
     //
     // Servicer limitations (fixable without mlx-lm changes):
-    //   - TODO(mlx): String stop sequences — mlx-lm supports this via
-    //     tokenizer.encode() → SequenceStateMachine. Fix by converting stop
-    //     strings to token IDs in the preparation stage (which already has the
-    //     Rust tokenizer) and passing them as stop_token_ids in the proto.
-    //
+    //   - String stop sequences: supported in chat and completion pipelines.
+    //     Messages and Generate pipelines still reject string stops (see reject_stop_strings).
     // Track upstream: https://github.com/ml-explore/mlx-lm
 
     fn reject_constraint(constraint: Option<&(String, String)>) -> Result<(), String> {
@@ -309,7 +306,6 @@ impl MlxEngineClient {
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
         Self::reject_n(body.n)?;
-        Self::reject_stop_strings(body.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
         Self::reject_response_format(body.response_format.is_some())?;
 
         let sampling_params = Self::build_sampling_params_from_chat(body);
@@ -335,7 +331,6 @@ impl MlxEngineClient {
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_n(body.n)?;
-        Self::reject_stop_strings(body.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
         Self::reject_if_any_constraint(
             body.json_schema.as_ref(),
             body.regex.as_ref(),
