@@ -47,6 +47,7 @@ use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
 use parking_lot::RwLock;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation};
 use tracing::{debug, warn};
 
@@ -54,7 +55,7 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::worker::{KvEventMonitor, Worker, UNKNOWN_MODEL_ID};
+use crate::worker::{KvEventMonitor, Worker};
 
 /// Cache-aware routing policy
 ///
@@ -78,17 +79,37 @@ pub struct CacheAwarePolicy {
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
-    /// Hash → matched prefix index for resolving tenant delta hashes.
-    /// Populated on local inserts with the MATCHED PREFIX from the radix
-    /// tree (not the full prompt text). Consumed on remote tenant delta
-    /// application. Bounded by eviction at `max_tree_size` entries.
+    /// Model-scoped hash indexes for resolving tenant delta hashes.
+    /// Outer key is the normalized model_id; inner maps hold
+    /// `hash → reconstructable prefix/tokens` per tree kind.
+    /// Spec §7.1 mandates model scoping: the same hash can refer
+    /// to different prefixes in different models, so a global
+    /// index mis-routes multi-model deployments. Bounded by
+    /// eviction at `max_tree_size` total entries.
     ///
-    /// TODO: this index is NOT scoped by model_id — if two models produce the
-    /// same text hash but match different prefixes, the last writer wins.
-    /// Low risk in practice (most deployments serve a single model) but a
-    /// compound key `(model_id, hash)` or hashing `model_id\0text` would be
-    /// correct.  Deferring to a follow-up to avoid changing the wire format.
-    path_hash_index: Arc<DashMap<u64, String>>,
+    /// Per-entry value semantics differ by populate site:
+    /// - `select_worker_*` (request hot paths) store the prior
+    ///   shared prefix from a pre-insert match. Bytes/entry is
+    ///   bounded by tree depth, not input size — a 32K-token
+    ///   request costs O(matched-prefix), not O(input).
+    /// - `apply_insert_to_trees` (snapshot/restore replay) stores
+    ///   the full inserted path because `apply_tenant_delta`
+    ///   re-inserts whatever value is stored, and the canonical
+    ///   path is required to attach tenants at the right node.
+    ///   This path runs at replay frequency, not request rate.
+    hash_index: Arc<DashMap<String, PerModelHashIndex>>,
+}
+
+/// Per-model inner container for [`CacheAwarePolicy::hash_index`].
+/// Keeping both kinds in one struct per model makes the
+/// "separate model-scoped hash indexes for string and token
+/// trees" invariant from spec §7.1 explicit in the type.
+#[derive(Debug, Default)]
+struct PerModelHashIndex {
+    /// path hash → matched prefix (reconstructs the string-tree node).
+    string_tree: DashMap<u64, String>,
+    /// token-path hash → tokens (reconstructs the token-tree node).
+    token_tree: DashMap<u64, Vec<u32>>,
 }
 
 impl CacheAwarePolicy {
@@ -99,13 +120,13 @@ impl CacheAwarePolicy {
     pub fn with_config(config: CacheAwareConfig) -> Self {
         let string_trees = Arc::new(DashMap::<String, Arc<Tree>>::new());
         let token_trees = Arc::new(DashMap::<String, Arc<TokenTree>>::new());
-        let path_hash_index = Arc::new(DashMap::<u64, String>::new());
+        let hash_index = Arc::new(DashMap::<String, PerModelHashIndex>::new());
 
         // Start background eviction thread if configured
         let eviction_task = if config.eviction_interval_secs > 0 {
             let string_trees_clone = Arc::clone(&string_trees);
             let token_trees_clone = Arc::clone(&token_trees);
-            let path_hash_index_clone = Arc::clone(&path_hash_index);
+            let hash_index_clone = Arc::clone(&hash_index);
             let max_tree_size = config.max_tree_size;
 
             Some(PeriodicTask::spawn(
@@ -134,25 +155,42 @@ impl CacheAwarePolicy {
                             model_id, max_tree_size
                         );
                     }
-                    // Evict path hash index if it exceeds tree size limit.
-                    // Entries are repopulated on the next local insert.
-                    if path_hash_index_clone.len() > max_tree_size {
-                        path_hash_index_clone.clear();
-                        debug!(
-                            "Path hash index cleared (exceeded max_tree_size: {})",
-                            max_tree_size
-                        );
+                    // Evict hash index per model: `max_tree_size` is a
+                    // per-tree bound, so clearing one model's overflow
+                    // must not wipe other models' still-valid metadata.
+                    // Each tree kind is checked independently.
+                    let mut hash_total: usize = 0;
+                    for entry in hash_index_clone.iter() {
+                        let per_model = entry.value();
+                        if per_model.string_tree.len() > max_tree_size {
+                            per_model.string_tree.clear();
+                            debug!(
+                                model_id = entry.key(),
+                                "String hash index cleared (exceeded max_tree_size: {})",
+                                max_tree_size
+                            );
+                        }
+                        if per_model.token_tree.len() > max_tree_size {
+                            per_model.token_tree.clear();
+                            debug!(
+                                model_id = entry.key(),
+                                "Token hash index cleared (exceeded max_tree_size: {})",
+                                max_tree_size
+                            );
+                        }
+                        hash_total += per_model.string_tree.len() + per_model.token_tree.len();
                     }
 
-                    // Log tree sizes — use model count + path_hash_index only.
-                    // DO NOT call tree.snapshot() here — it clones all edge text
-                    // (~170 MB) every eviction cycle, causing allocator fragmentation.
+                    // Log tree sizes — model counts + hash-index total.
+                    // DO NOT call tree.snapshot() here — it clones all
+                    // edge text (~170 MB) every cycle.
                     tracing::info!(
                         "Tree memory: string_trees={} models, token_trees={} models, \
-                         path_hash_index={} entries",
+                         hash_index={} models / {} entries",
                         string_trees_clone.len(),
                         token_trees_clone.len(),
-                        path_hash_index_clone.len(),
+                        hash_index_clone.len(),
+                        hash_total,
                     );
                 },
             ))
@@ -167,7 +205,7 @@ impl CacheAwarePolicy {
             mesh_sync: RwLock::new(None),
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
-            path_hash_index,
+            hash_index,
         }
     }
 
@@ -295,18 +333,8 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Normalize model_id for mesh synchronization
-    /// Converts empty model_id to UNKNOWN_MODEL_ID for consistency
-    fn normalize_mesh_model_id(model_id: &str) -> &str {
-        if model_id.is_empty() {
-            UNKNOWN_MODEL_ID
-        } else {
-            model_id
-        }
-    }
-
     pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &TreeOperation) {
-        let tree_key = Self::normalize_mesh_model_id(model_id);
+        let tree_key = normalize_model_key(model_id);
 
         match operation {
             TreeOperation::Insert(insert_op) => {
@@ -333,17 +361,55 @@ impl CacheAwarePolicy {
             .or_insert_with(|| Arc::new(TokenTree::new()))
             .clone();
 
-        Self::apply_insert_to_trees(&string_tree, &token_tree, insert_op);
+        self.apply_insert_to_trees(model_id, &string_tree, &token_tree, insert_op);
     }
 
+    /// Apply a tree insert and populate the model-scoped hash
+    /// index alongside it. Remote-replay paths
+    /// (`apply_remote_tree_operation`, `restore_tree_state_from_mesh`)
+    /// funnel here, so `TreeHandle::contains_hash` reflects nodes
+    /// learned from gossip — not just locally-routed inserts.
+    /// Without this, replayed prefixes would be misclassified as
+    /// unknown and trigger unnecessary repair once the adapter is
+    /// wired up. The string-side value is the full `text` (not a
+    /// matched prefix) because remote apply doesn't compute a
+    /// match; `apply_tenant_delta` re-inserts whatever string is
+    /// stored.
     fn apply_insert_to_trees(
+        &self,
+        model_id: &str,
         string_tree: &Arc<Tree>,
         token_tree: &Arc<TokenTree>,
         insert_op: &TreeInsertOp,
     ) {
+        // Replay/restore path: store the FULL inserted path, not a
+        // matched prefix. `apply_tenant_delta` re-inserts whatever
+        // value is stored, so the canonical path is required to
+        // attach remote tenants at the correct node.
+        // On cold start the local tree is empty → a pre-insert
+        // `match_prefix_with_counts` would return 0 → storing ""
+        // would later cause `insert_text("", remote_worker)`,
+        // attaching the worker at root and tainting routing for
+        // every request to this model. This path runs at replay
+        // frequency (cold start, snapshot reconciliation), not per
+        // request, so the unbounded value cost is acceptable.
         match &insert_op.key {
-            TreeKey::Text(text) => string_tree.insert_text(text, &insert_op.tenant),
-            TreeKey::Tokens(tokens) => token_tree.insert_tokens(tokens, &insert_op.tenant),
+            TreeKey::Text(text) => {
+                string_tree.insert_text(text, &insert_op.tenant);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .string_tree
+                    .insert(smg_mesh::hash_node_path(text), text.clone());
+            }
+            TreeKey::Tokens(tokens) => {
+                token_tree.insert_tokens(tokens, &insert_op.tenant);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .token_tree
+                    .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
+            }
         }
     }
 
@@ -353,7 +419,7 @@ impl CacheAwarePolicy {
     fn sync_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
         let mesh_sync = self.mesh_sync.read().clone();
         if let Some(mesh_sync) = mesh_sync {
-            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            let mesh_model_id = normalize_model_key(model_id);
             mesh_sync.sync_tree_insert_hash(mesh_model_id, path_hash, tenant);
         }
     }
@@ -366,7 +432,7 @@ impl CacheAwarePolicy {
                 key: TreeKey::Tokens(tokens.to_vec()),
                 tenant: tenant.to_string(),
             });
-            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            let mesh_model_id = normalize_model_key(model_id);
             if let Err(error) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
                 warn!("Failed to sync tree insert operation to mesh: {}", error);
             }
@@ -376,7 +442,7 @@ impl CacheAwarePolicy {
     /// Merge remote tree state into local trees incrementally.
     /// Uses entry-based insertion to preserve existing local routing state.
     pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
         for operation in &tree_state.operations {
             if let TreeOperation::Insert(insert_op) = operation {
                 self.apply_insert_operation(model_id, insert_op);
@@ -393,7 +459,7 @@ impl CacheAwarePolicy {
         inserts: &[smg_mesh::TenantInsert],
         evictions: &[smg_mesh::TenantEvict],
     ) {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
 
         let string_tree = self
             .string_trees
@@ -401,13 +467,15 @@ impl CacheAwarePolicy {
             .or_insert_with(|| Arc::new(Tree::new()))
             .clone();
 
-        // Apply inserts — look up the prefix path by hash in our local index.
-        // If the hash is unknown (prefix doesn't exist locally), the insert is
-        // silently dropped. The next structure snapshot (every ~30s) will deliver
-        // the full tree including this prefix + its tenants.
+        // Apply inserts — look up the prefix path by hash in this
+        // model's index. Unknown hashes are silently dropped; the
+        // next structure snapshot (every ~30s) delivers the full
+        // tree including this prefix + its tenants.
         for insert in inserts {
-            if let Some(path_entry) = self.path_hash_index.get(&insert.node_path_hash) {
-                string_tree.insert_text(path_entry.value(), &insert.worker_url);
+            if let Some(model_entry) = self.hash_index.get(model_id) {
+                if let Some(path) = model_entry.string_tree.get(&insert.node_path_hash) {
+                    string_tree.insert_text(path.value(), &insert.worker_url);
+                }
             }
             // Unknown hash — dropped, next snapshot corrects
         }
@@ -433,7 +501,7 @@ impl CacheAwarePolicy {
         reason = "pop() after last_mut().is_some() is infallible"
     )]
     pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
         let tree = self.string_trees.get(model_id)?;
         let snapshot = tree.snapshot();
         if snapshot.nodes.is_empty() {
@@ -485,7 +553,7 @@ impl CacheAwarePolicy {
     /// which preserves shared prefixes and is much smaller than the flat
     /// `TreeState` returned by [`export_tree_state`].
     pub fn export_tree_snapshot(&self, model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
-        let model_id = Self::normalize_mesh_model_id(model_id);
+        let model_id = normalize_model_key(model_id);
         let tree = self.string_trees.get(model_id)?;
         let snapshot = tree.snapshot();
         if snapshot.nodes.is_empty() {
@@ -516,10 +584,25 @@ impl CacheAwarePolicy {
                 model_id, max_size
             );
         }
-        // Evict path hash index if it exceeds tree size limit
-        if self.path_hash_index.len() > max_size {
-            self.path_hash_index.clear();
-            debug!("Path hash index cleared (exceeded max_size: {})", max_size);
+        // Evict hash index per model per tree kind. `max_size` is a
+        // per-tree bound; clearing one model's overflow must not wipe
+        // other models' still-valid metadata.
+        for entry in self.hash_index.iter() {
+            let per_model = entry.value();
+            if per_model.string_tree.len() > max_size {
+                per_model.string_tree.clear();
+                debug!(
+                    model_id = entry.key(),
+                    "String hash index cleared (exceeded max_size: {})", max_size
+                );
+            }
+            if per_model.token_tree.len() > max_size {
+                per_model.token_tree.clear();
+                debug!(
+                    model_id = entry.key(),
+                    "Token hash index cleared (exceeded max_size: {})", max_size
+                );
+            }
         }
     }
 
@@ -556,7 +639,21 @@ impl CacheAwarePolicy {
                 .get(model_id)
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
+                // Match BEFORE insert (mirrors the string-side
+                // imbalanced path below). After `insert_tokens`,
+                // the tree contains a full path for `tokens` so a
+                // match returns the entire input length and we'd
+                // store the full sequence — at 32K tokens × 4 bytes
+                // × max_tree_size that's multi-GB per model.
+                let result = tree.match_prefix_with_counts(tokens);
+                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+
                 tree.insert_tokens(tokens, worker_url);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .token_tree
+                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
                 self.sync_insert_tokens(model_id, tokens, worker_url);
             }
         } else if let Some(text) = info.request_text {
@@ -567,15 +664,23 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
 
             if let Some(tree) = tree {
+                // Match BEFORE insert: after `insert_text`, the
+                // tree contains a full path for `text` so a match
+                // would return the entire input length and we'd
+                // store the full prompt — exactly the memory leak
+                // we're trying to avoid. The pre-insert match
+                // returns the prior shared prefix (~50-200 chars).
+                let result = tree.match_prefix_with_counts(text);
+                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
+
                 tree.insert_text(text, worker_url);
 
-                // Don't populate path_hash_index here — we don't have a
-                // match result and storing the full prompt text (80k+ chars)
-                // would recreate the memory leak. Layer 2 snapshots handle
-                // convergence for entries from the imbalanced-load path.
-
-                // Use hash-based sync to avoid 80k+ String clone.
                 let path_hash = smg_mesh::hash_node_path(text);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .string_tree
+                    .insert(path_hash, matched_prefix);
                 self.sync_insert_hash(model_id, path_hash, worker_url);
             } else {
                 debug!(
@@ -589,6 +694,35 @@ impl CacheAwarePolicy {
         workers[min_load_idx].increment_processed();
 
         Some(min_load_idx)
+    }
+}
+
+/// Which of the two local trees a hash query targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TreeKind {
+    String,
+    Token,
+}
+
+/// Read-only handle the policy exposes so mesh-adjacent consumers
+/// can answer "is this hash known locally?" without reaching into
+/// private fields. Defined here (not in the adapter) to keep the
+/// dependency direction `adapter → policy`.
+pub trait TreeHandle: Send + Sync + std::fmt::Debug {
+    fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool;
+}
+
+impl TreeHandle for CacheAwarePolicy {
+    fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool {
+        // Normalize empty → UNKNOWN_MODEL_ID so lookups match the
+        // key shape every populate site already uses.
+        let model_id = normalize_model_key(model_id);
+        self.hash_index
+            .get(model_id)
+            .is_some_and(|entry| match tree_kind {
+                TreeKind::String => entry.string_tree.contains_key(&node_hash),
+                TreeKind::Token => entry.token_tree.contains_key(&node_hash),
+            })
     }
 }
 
@@ -815,11 +949,24 @@ impl CacheAwarePolicy {
             if let Some(idx) = selected_idx {
                 tree.insert_tokens(tokens, workers[idx].url());
 
-                // Note: token-based inserts do NOT populate path_hash_index.
-                // Token hashes can't be resolved back to the original token
-                // sequence on the receiving side. Token trees rely on Layer 2
-                // (periodic structure snapshots) for cross-node convergence,
-                // not tenant deltas.
+                // Record hash(full_tokens)→matched_prefix tokens.
+                // The hash key matches what sync_tree_operation
+                // sends on the wire (hash of full sequence). The
+                // VALUE is only the matched prefix — not the full
+                // sequence (32K tokens × 4 bytes = 128 KB worst
+                // case). v1 never populated a token hash index;
+                // v2's `TreeHandle` impl consults this map per
+                // incoming token delta, so maintain it alongside
+                // the tree. Mirrors the string side at the
+                // analogous block; reuses the match `result`
+                // already computed at the top of this branch.
+                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .token_tree
+                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
+
                 self.sync_insert_tokens(model_id, tokens, workers[idx].url());
                 workers[idx].increment_processed();
                 return Some(idx);
@@ -885,7 +1032,11 @@ impl CacheAwarePolicy {
                 // tree node. This keeps the index memory-bounded.
                 let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
                 let path_hash = smg_mesh::hash_node_path(text);
-                self.path_hash_index.insert(path_hash, matched_prefix);
+                self.hash_index
+                    .entry(model_id.to_string())
+                    .or_default()
+                    .string_tree
+                    .insert(path_hash, matched_prefix);
 
                 // Use hash-based sync to avoid cloning 80k+ prompt text.
                 self.sync_insert_hash(model_id, path_hash, workers[idx].url());
@@ -921,7 +1072,7 @@ mod tests {
     use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
-    use crate::worker::{BasicWorkerBuilder, WorkerType};
+    use crate::worker::{BasicWorkerBuilder, WorkerType, UNKNOWN_MODEL_ID};
 
     fn no_health_check() -> HealthCheckConfig {
         HealthCheckConfig {
