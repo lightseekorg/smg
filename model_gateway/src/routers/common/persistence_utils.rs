@@ -85,8 +85,23 @@ pub fn item_to_json(item: &ConversationItem) -> Value {
                 obj.insert("phase".to_string(), phase_value);
             }
         }
+    } else if let Some(content_obj) = item.content.as_object() {
+        // Whole-item store path (`store_whole_item` in
+        // `item_to_new_conversation_item`): `content` is the original item
+        // value with its fields at the top level. Hoist them back rather
+        // than wrapping them under `content`, otherwise replayed structural
+        // items come back as `{"type":"…","content":{"type":"…",…}}` and
+        // lose `revised_prompt`/`status`/etc. on the wire.
+        for (k, v) in content_obj {
+            if matches!(k.as_str(), "id" | "type" | "role" | "status") {
+                continue;
+            }
+            obj.insert(k.clone(), v.clone());
+        }
     } else {
-        // Default: include content as-is
+        // Pre-fix rows for non-listed types stored `[]` instead of the
+        // whole item; preserve the legacy `{"content": …}` wrapping so we
+        // don't drop data that came in under the old write path.
         obj.insert("content".to_string(), item.content.clone());
     }
 
@@ -517,7 +532,52 @@ async fn persist_conversation_items_inner(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::*;
+
+    fn stored_item(item_type: &str, content: Value) -> ConversationItem {
+        ConversationItem {
+            id: ConversationItemId::from("ig_replay_1"),
+            response_id: None,
+            item_type: item_type.to_string(),
+            role: None,
+            content,
+            status: Some("completed".to_string()),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn item_to_json_restores_top_level_fields_for_whole_item_store() {
+        let stored = stored_item(
+            "image_generation_call",
+            json!({
+                "id": "ig_replay_1",
+                "type": "image_generation_call",
+                "status": "completed",
+                "revised_prompt": "cat",
+            }),
+        );
+
+        let serialized = item_to_json(&stored);
+        assert_eq!(serialized["type"], json!("image_generation_call"));
+        assert_eq!(serialized["revised_prompt"], json!("cat"));
+        assert!(
+            serialized.get("content").is_none(),
+            "non-message whole-item store must hoist top-level fields, not \
+             nest the original item under `content`: {serialized}"
+        );
+    }
+
+    #[test]
+    fn item_to_json_falls_back_to_legacy_content_wrap_for_array_content() {
+        // Pre-fix rows for non-listed types may have stored `[]`. Preserve
+        // the legacy wrapping so old data still round-trips.
+        let stored = stored_item("image_generation_call", json!([]));
+        let serialized = item_to_json(&stored);
+        assert_eq!(serialized["content"], json!([]));
+    }
 
     #[test]
     fn replayed_image_generation_input_item_is_stored_whole() {
