@@ -168,6 +168,10 @@ async fn test_router_with_tracing() {
     );
     println!("Logging initialized with OTEL layer");
 
+    let otel_layer = otel_trace::get_otel_layer().expect("Failed to get OTEL layer");
+    let subscriber = tracing_subscriber::registry().with(otel_layer);
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
     // 5. Create a span and sleep for a while
     let _span = info_span!(target: "smg::otel-trace", "test_router_with_tracing");
     tokio::time::sleep(Duration::from_secs(1)).await;
