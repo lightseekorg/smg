@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-use crate::{skills::MessagesSkillRef, validated::Normalizable};
+use crate::{
+    skills::MessagesSkillRef,
+    validated::{Normalizable, Preprocessable},
+};
 
 // ============================================================================
 // Request Types
@@ -79,9 +82,8 @@ pub struct CreateMessageRequest {
     pub request_id: Option<String>,
 }
 
-impl Normalizable for CreateMessageRequest {
-    // Use default no-op implementation
-}
+impl Normalizable for CreateMessageRequest {}
+impl Preprocessable for CreateMessageRequest {}
 
 impl CreateMessageRequest {
     /// Check if the request is for streaming

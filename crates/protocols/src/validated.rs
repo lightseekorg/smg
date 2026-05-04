@@ -11,9 +11,19 @@ pub trait Normalizable {
     }
 }
 
+/// Trait for request types that need to preprocess the raw JSON value before
+/// serde deserialization. Use this to extract fields that would otherwise be
+/// silently dropped (e.g., extra fields inside enum variants).
+pub trait Preprocessable {
+    /// Mutate the raw JSON value before it is deserialized into `Self`.
+    fn preprocess(_raw: &mut serde_json::Value) {
+        // Default: no-op
+    }
+}
+
 #[cfg(feature = "axum")]
 use axum::{
-    extract::{rejection::JsonRejection, FromRequest, Request},
+    extract::{FromRequest, Request},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -47,42 +57,49 @@ pub struct ValidatedJson<T>(pub T);
 #[cfg(feature = "axum")]
 impl<S, T> FromRequest<S> for ValidatedJson<T>
 where
-    T: DeserializeOwned + Validate + Normalizable + Send,
+    T: DeserializeOwned + Validate + Normalizable + Preprocessable + Send,
     S: Send + Sync,
 {
     type Rejection = Response;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        // First, extract and deserialize the JSON
-        let Json(mut data) =
-            Json::<T>::from_request(req, state)
-                .await
-                .map_err(|err: JsonRejection| {
-                    let error_message = match err {
-                        JsonRejection::JsonDataError(e) => {
-                            format!("Invalid JSON data: {e}")
-                        }
-                        JsonRejection::JsonSyntaxError(e) => {
-                            format!("JSON syntax error: {e}")
-                        }
-                        JsonRejection::MissingJsonContentType(_) => {
-                            "Missing Content-Type: application/json header".to_string()
-                        }
-                        _ => format!("Failed to parse JSON: {err}"),
-                    };
+        let make_error = |msg: String| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": msg,
+                        "type": "invalid_request_error",
+                        "code": "json_parse_error"
+                    }
+                })),
+            )
+                .into_response()
+        };
 
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "error": {
-                                "message": error_message,
-                                "type": "invalid_request_error",
-                                "code": "json_parse_error"
-                            }
-                        })),
-                    )
-                        .into_response()
-                })?;
+        // First pass: parse as raw Value (handles content-type + syntax errors).
+        let Json(mut raw) = Json::<serde_json::Value>::from_request(req, state)
+            .await
+            .map_err(|err| {
+                use axum::extract::rejection::JsonRejection;
+                let msg = match err {
+                    JsonRejection::JsonDataError(e) => format!("Invalid JSON data: {e}"),
+                    JsonRejection::JsonSyntaxError(e) => format!("JSON syntax error: {e}"),
+                    JsonRejection::MissingJsonContentType(_) => {
+                        "Missing Content-Type: application/json header".to_string()
+                    }
+                    _ => format!("Failed to parse JSON: {err}"),
+                };
+                make_error(msg)
+            })?;
+
+        // Allow the target type to mutate the raw value before deserialization
+        // (e.g., to lift fields that serde would otherwise silently drop).
+        T::preprocess(&mut raw);
+
+        // Second pass: deserialize into T.
+        let mut data: T = serde_json::from_value(raw)
+            .map_err(|e| make_error(format!("Invalid JSON data: {e}")))?;
 
         // Normalize the request (apply defaults based on other fields)
         data.normalize();
@@ -138,9 +155,8 @@ mod tests {
         name: String,
     }
 
-    impl Normalizable for TestRequest {
-        // Use default no-op implementation
-    }
+    impl Normalizable for TestRequest {}
+    impl Preprocessable for TestRequest {}
 
     #[tokio::test]
     async fn test_validated_json_valid() {

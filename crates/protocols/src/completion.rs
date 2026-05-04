@@ -8,7 +8,7 @@ use super::{
     common::*,
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
-use crate::validated::Normalizable;
+use crate::validated::{Normalizable, Preprocessable};
 
 // ============================================================================
 // Completions API (v1/completions) - DEPRECATED but still supported
@@ -150,6 +150,7 @@ pub struct CompletionRequest {
 }
 
 impl Normalizable for CompletionRequest {}
+impl Preprocessable for CompletionRequest {}
 
 fn validate_completion_prompt(prompt: &StringOrArray) -> Result<(), validator::ValidationError> {
     match prompt {

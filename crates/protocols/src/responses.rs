@@ -16,7 +16,9 @@ use super::{
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
 use crate::{
-    builders::ResponsesResponseBuilder, skills::ResponsesSkillEntry, validated::Normalizable,
+    builders::ResponsesResponseBuilder,
+    skills::ResponsesSkillEntry,
+    validated::{Normalizable, Preprocessable},
 };
 
 // ============================================================================
@@ -1133,6 +1135,8 @@ impl Normalizable for ResponsesRequest {
         }
     }
 }
+
+impl Preprocessable for ResponsesRequest {}
 
 impl GenerationRequest for ResponsesRequest {
     fn is_stream(&self) -> bool {

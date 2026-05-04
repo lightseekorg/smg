@@ -9,7 +9,7 @@ use validator::{Validate, ValidationError};
 
 use crate::{
     common::{Redacted, ResponsePrompt, ToolReference},
-    validated::Normalizable,
+    validated::{Normalizable, Preprocessable},
 };
 
 // ============================================================================
@@ -37,6 +37,7 @@ pub struct RealtimeSessionCreateRequest {
 }
 
 impl Normalizable for RealtimeSessionCreateRequest {}
+impl Preprocessable for RealtimeSessionCreateRequest {}
 
 fn validate_session_create_request(
     req: &RealtimeSessionCreateRequest,
@@ -89,9 +90,8 @@ pub struct RealtimeTranscriptionSessionCreateRequest {
     pub prompt: Option<String>,
 }
 
-impl Normalizable for RealtimeTranscriptionSessionCreateRequest {
-    // Use default no-op implementation
-}
+impl Normalizable for RealtimeTranscriptionSessionCreateRequest {}
+impl Preprocessable for RealtimeTranscriptionSessionCreateRequest {}
 
 fn validate_transcription_session_create_request(
     req: &RealtimeTranscriptionSessionCreateRequest,
@@ -489,6 +489,7 @@ pub struct RealtimeClientSecretCreateRequest {
 }
 
 impl Normalizable for RealtimeClientSecretCreateRequest {}
+impl Preprocessable for RealtimeClientSecretCreateRequest {}
 
 fn validate_client_secret_create_request(
     req: &RealtimeClientSecretCreateRequest,

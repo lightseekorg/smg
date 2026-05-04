@@ -11,7 +11,7 @@ use validator::{Validate, ValidationError};
 use super::{
     common::{default_true, deserialize_null_as_false, Function, GenerationRequest},
     sampling_params::validate_top_p_value,
-    validated::Normalizable,
+    validated::{Normalizable, Preprocessable},
 };
 
 // ============================================================================
@@ -94,9 +94,8 @@ impl Default for InteractionsRequest {
     }
 }
 
-impl Normalizable for InteractionsRequest {
-    // Use default no-op implementation
-}
+impl Normalizable for InteractionsRequest {}
+impl Preprocessable for InteractionsRequest {}
 
 impl GenerationRequest for InteractionsRequest {
     fn is_stream(&self) -> bool {
