@@ -85,12 +85,11 @@ pub struct CacheAwarePolicy {
     /// Spec §7.1 mandates model scoping: the same hash can refer
     /// to different prefixes in different models, so a global
     /// index mis-routes multi-model deployments. Bounded by
-    /// eviction at `max_tree_size` total entries.
-    ///
-    /// String side stores the matched prefix (short) rather than
-    /// the full prompt text; remote apply re-inserts by that
-    /// prefix. Token side stores the full token sequence — v1
-    /// had no token hash index, so this is new v2 plumbing.
+    /// eviction at `max_tree_size` total entries and by per-entry
+    /// payload size: every populate site stores the prior shared
+    /// prefix from a pre-insert match, never the full input. A
+    /// 32K-token request therefore costs O(matched-prefix), not
+    /// O(input), keeping the worst-case bytes/entry small.
     hash_index: Arc<DashMap<String, PerModelHashIndex>>,
 }
 
@@ -378,20 +377,29 @@ impl CacheAwarePolicy {
     ) {
         match &insert_op.key {
             TreeKey::Text(text) => {
+                // Match BEFORE insert: post-insert the tree contains
+                // a full path for `text`, so the match would return
+                // the entire input length and we'd store the full
+                // prompt — exactly the memory bloat we avoid on the
+                // local cache-aware paths.
+                let result = string_tree.match_prefix_with_counts(text);
+                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
                 string_tree.insert_text(text, &insert_op.tenant);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .string_tree
-                    .insert(smg_mesh::hash_node_path(text), text.clone());
+                    .insert(smg_mesh::hash_node_path(text), matched_prefix);
             }
             TreeKey::Tokens(tokens) => {
+                let result = token_tree.match_prefix_with_counts(tokens);
+                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
                 token_tree.insert_tokens(tokens, &insert_op.tenant);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
+                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
             }
         }
     }
@@ -622,12 +630,21 @@ impl CacheAwarePolicy {
                 .get(model_id)
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
+                // Match BEFORE insert (mirrors the string-side
+                // imbalanced path below). After `insert_tokens`,
+                // the tree contains a full path for `tokens` so a
+                // match returns the entire input length and we'd
+                // store the full sequence — at 32K tokens × 4 bytes
+                // × max_tree_size that's multi-GB per model.
+                let result = tree.match_prefix_with_counts(tokens);
+                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+
                 tree.insert_tokens(tokens, worker_url);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), tokens.to_vec());
+                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
                 self.sync_insert_tokens(model_id, tokens, worker_url);
             }
         } else if let Some(text) = info.request_text {
@@ -923,14 +940,23 @@ impl CacheAwarePolicy {
             if let Some(idx) = selected_idx {
                 tree.insert_tokens(tokens, workers[idx].url());
 
-                // v1 never populated a token hash index; v2's
-                // `TreeHandle` impl consults this map per incoming
-                // token delta, so maintain it alongside the tree.
+                // Record hash(full_tokens)→matched_prefix tokens.
+                // The hash key matches what sync_tree_operation
+                // sends on the wire (hash of full sequence). The
+                // VALUE is only the matched prefix — not the full
+                // sequence (32K tokens × 4 bytes = 128 KB worst
+                // case). v1 never populated a token hash index;
+                // v2's `TreeHandle` impl consults this map per
+                // incoming token delta, so maintain it alongside
+                // the tree. Mirrors the string side at the
+                // analogous block; reuses the match `result`
+                // already computed at the top of this branch.
+                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), tokens.to_vec());
+                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
 
                 self.sync_insert_tokens(model_id, tokens, workers[idx].url());
                 workers[idx].increment_processed();
