@@ -247,6 +247,22 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
         .collect()
 }
 
+/// True if `tools` carries any MCP-routed entry (declared MCP server or a
+/// builtin family that the gateway intercepts via MCP). Used by the OpenAI
+/// router to decide whether the format-registry component is required for
+/// the request — plain-tool requests don't need it and must not 500.
+pub fn request_uses_mcp_routing(tools: &[ResponseTool]) -> bool {
+    tools.iter().any(|t| {
+        matches!(
+            t,
+            ResponseTool::Mcp(_)
+                | ResponseTool::WebSearchPreview(_)
+                | ResponseTool::CodeInterpreter(_)
+                | ResponseTool::ImageGeneration(_)
+        )
+    })
+}
+
 /// Collect user-declared function tool names from a Responses request.
 pub(crate) fn collect_user_function_names(request: &ResponsesRequest) -> HashSet<String> {
     request

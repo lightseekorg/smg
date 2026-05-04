@@ -15,7 +15,7 @@ use super::utils::{patch_response_with_request_metadata, restore_original_tools}
 use crate::routers::{
     common::{
         header_utils::{extract_forwardable_request_headers, ApiProvider},
-        mcp_utils::ensure_request_mcp_client,
+        mcp_utils::{ensure_request_mcp_client, request_uses_mcp_routing},
         openai_bridge,
         persistence_utils::persist_conversation_items,
     },
@@ -65,24 +65,33 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
 
     // The format registry is the router-side source of truth for MCP
     // builtin/alias format resolution; falling back to a default would
-    // silently mis-route hosted tools instead of failing fast.
-    let mcp_format_registry = match ctx.components.mcp_format_registry() {
-        Some(r) => r.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP format registry required");
+    // silently mis-route hosted tools instead of failing fast. The check is
+    // scoped to MCP-laden requests — plain non-MCP requests must still
+    // succeed in deployments where the gateway runs without MCP wiring.
+    //
+    // A request with MCP tools but no registry component is a configuration
+    // error: route resolution would silently degrade to `Passthrough`, so we
+    // fail fast instead. Resolve `(mcp_servers, registry)` together so the
+    // typed result carries the registry into the MCP arm without a second
+    // option lookup.
+    let mcp_routing = match original_body.tools.as_deref() {
+        Some(tools) if request_uses_mcp_routing(tools) => {
+            let Some(registry) = ctx.components.mcp_format_registry() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP format registry required for requests carrying MCP/builtin tools",
+                );
+            };
+            ensure_request_mcp_client(mcp_orchestrator, registry, tools)
+                .await
+                .map(|servers| (servers, registry.clone()))
         }
-    };
-
-    // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, &mcp_format_registry, tools).await
-    } else {
-        None
+        _ => None,
     };
 
     let mut response_json: Value;
 
-    if let Some(mcp_servers) = mcp_servers {
+    if let Some((mcp_servers, mcp_format_registry)) = mcp_routing {
         let session_request_id = original_body
             .request_id
             .clone()
