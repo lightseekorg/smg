@@ -5,10 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
-    sync::{
-        atomic::AtomicU64,
-        Arc,
-    },
+    sync::{atomic::AtomicU64, Arc},
     time::Instant,
 };
 
@@ -41,8 +38,7 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     routers::grpc::{
         common::{
-            response_formatting::CompletionTokenTracker,
-            responses::build_tracked_sse_response,
+            response_formatting::CompletionTokenTracker, responses::build_tracked_sse_response,
         },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
