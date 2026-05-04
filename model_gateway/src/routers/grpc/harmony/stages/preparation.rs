@@ -9,7 +9,7 @@ use openai_protocol::{
     common::{ResponseFormat, Tool, ToolChoice, ToolChoiceValue},
     responses::ResponsesRequest,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::error;
 
 use super::super::HarmonyBuilder;
@@ -108,9 +108,11 @@ impl HarmonyPreparationStage {
         } else {
             None
         };
-        let response_format_constraint =
-            Self::generate_response_format_constraint(body_ref.response_format.as_ref())
-                .map_err(|e| *e)?;
+        let response_format_constraint = Self::generate_response_format_constraint(
+            body_ref.response_format.as_ref(),
+            body_ref.json_object_schema.as_ref(),
+        )
+        .map_err(|e| *e)?;
 
         // Reject requests that specify both tool call and response_format constraints
         if tool_constraint.is_some() && response_format_constraint.is_some() {
@@ -280,6 +282,7 @@ impl HarmonyPreparationStage {
     /// Returns None if response_format is not specified or is "text".
     fn generate_response_format_constraint(
         response_format: Option<&ResponseFormat>,
+        json_object_schema: Option<&Value>,
     ) -> Result<Option<(String, String)>, Box<Response>> {
         let Some(format) = response_format else {
             return Ok(None);
@@ -287,7 +290,9 @@ impl HarmonyPreparationStage {
 
         let schema = match format {
             ResponseFormat::Text => return Ok(None),
-            ResponseFormat::JsonObject => Cow::Owned(serde_json::json!({"type": "object"})),
+            ResponseFormat::JsonObject => json_object_schema
+                .map(Cow::Borrowed)
+                .unwrap_or_else(|| Cow::Owned(serde_json::json!({"type": "object"}))),
             ResponseFormat::JsonSchema { json_schema } => Cow::Borrowed(&json_schema.schema),
         };
 
@@ -435,9 +440,7 @@ impl HarmonyPreparationStage {
 /// channel tokens (otherwise xgrammar blocks all non-trigger-prefix tokens).
 ///
 /// This is used for the Responses API text.format field (json_object or json_schema).
-pub(crate) fn build_text_format_structural_tag(
-    schema: &serde_json::Value,
-) -> Result<String, String> {
+pub(crate) fn build_text_format_structural_tag(schema: &Value) -> Result<String, String> {
     let structural_tag = json!({
         "format": {
             "type": "triggered_tags",

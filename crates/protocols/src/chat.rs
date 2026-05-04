@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     builders::{ChatCompletionResponseBuilder, ChatCompletionStreamResponseBuilder},
-    validated::Normalizable,
+    validated::{Normalizable, Preprocessable},
 };
 
 // ============================================================================
@@ -328,6 +328,11 @@ pub struct ChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 
+    /// Schema extracted from response_format.schema when type is "json_object".
+    /// Populated during JSON preprocessing before serde deserialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_object_schema: Option<Value>,
+
     /// Additional fields not explicitly defined above (e.g. engine-specific parameters)
     #[serde(flatten)]
     pub other: Map<String, Value>,
@@ -612,6 +617,26 @@ impl Normalizable for ChatCompletionRequest {
                 self.tool_choice = Some(ToolChoice::Value(choice_value));
             }
             // If tools is None, leave tool_choice as None (don't set it)
+        }
+    }
+}
+
+impl Preprocessable for ChatCompletionRequest {
+    fn preprocess(raw: &mut Value) {
+        // When response_format.type == "json_object" and a schema is present,
+        // lift it to a top-level json_object_schema field so it survives the
+        // unit-variant deserialization of ResponseFormat::JsonObject.
+        let schema = raw.get("response_format").and_then(|rf| {
+            if rf.get("type").and_then(|t| t.as_str()) == Some("json_object") {
+                rf.get("schema").cloned()
+            } else {
+                None
+            }
+        });
+        if let Some(schema) = schema {
+            if let Some(obj) = raw.as_object_mut() {
+                obj.entry("json_object_schema").or_insert(schema);
+            }
         }
     }
 }
