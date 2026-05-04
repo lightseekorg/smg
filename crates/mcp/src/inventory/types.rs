@@ -161,7 +161,13 @@ impl ToolEntry {
 
     pub fn from_server_tool(server_key: impl AsRef<str>, tool: Tool) -> Self {
         let name = tool.name.to_string();
-        Self::new(QualifiedToolName::new(server_key, name), tool)
+        // Lift the rmcp annotations the server advertised into our richer
+        // wrapper so `entry.annotations.read_only` (and the other hints the
+        // approval pipeline reads) reflect what the tool actually declared.
+        // Without this, every server-loaded tool reports `read_only: false`
+        // because `Self::new` initialises annotations to default.
+        let annotations = ToolAnnotations::from_rmcp_option(tool.annotations.as_ref());
+        Self::new(QualifiedToolName::new(server_key, name), tool).with_annotations(annotations)
     }
 
     #[must_use]
@@ -270,6 +276,28 @@ mod tests {
         assert_eq!(entry.tool_name(), "my_tool");
         assert_eq!(entry.category, ToolCategory::Static);
         assert!(!entry.is_expired());
+    }
+
+    #[test]
+    fn from_server_tool_lifts_rmcp_annotations() {
+        // Without this lift the read_only hint is lost on every server-loaded
+        // tool, and `mcp_list_tools[].tools[].annotations.read_only` reports
+        // false even for tools the MCP server explicitly marked read-only.
+        use rmcp::model::ToolAnnotations as RmcpToolAnnotations;
+
+        let mut tool = create_test_tool("read_only_tool");
+        tool.annotations = Some(RmcpToolAnnotations {
+            title: None,
+            read_only_hint: Some(true),
+            destructive_hint: Some(false),
+            idempotent_hint: Some(true),
+            open_world_hint: Some(false),
+        });
+        let entry = ToolEntry::from_server_tool("server", tool);
+        assert!(entry.annotations.read_only);
+        assert!(!entry.annotations.destructive);
+        assert!(entry.annotations.idempotent);
+        assert!(!entry.annotations.open_world);
     }
 
     #[test]
