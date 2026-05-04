@@ -384,8 +384,8 @@ impl CacheAwarePolicy {
     ) {
         // Replay/restore path: store the FULL inserted path, not a
         // matched prefix. `apply_tenant_delta` re-inserts whatever
-        // value is stored (line 460), so the canonical path is
-        // required to attach remote tenants at the correct node.
+        // value is stored, so the canonical path is required to
+        // attach remote tenants at the correct node.
         // On cold start the local tree is empty → a pre-insert
         // `match_prefix_with_counts` would return 0 → storing ""
         // would later cause `insert_text("", remote_worker)`,
