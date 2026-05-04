@@ -87,7 +87,13 @@ impl PipelineStage for CompletionRequestBuildingStage {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
             }
         }
-
+        if builder_client.is_mlx() {
+            helpers::apply_mlx_stop_sequences(
+                &mut proto_request,
+                completion_request.stop.as_ref(),
+                ctx.state.tokenizer.as_deref(),
+            )?;
+        }
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }
