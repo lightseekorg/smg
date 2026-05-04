@@ -226,10 +226,7 @@ pub(crate) async fn execute_streaming_tool_calls(
                         Value::String(stable_streaming_tool_item_id(&call, &response_format)),
                     );
                 }
-                apply_file_search_include_filter(
-                    &mut mcp_call_item,
-                    request_include,
-                );
+                apply_file_search_include_filter(&mut mcp_call_item, request_include);
                 if !send_tool_call_completion_events(
                     tx,
                     &call,

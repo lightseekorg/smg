@@ -1338,7 +1338,9 @@ mod tests {
         );
 
         match transformed {
-            ResponseOutputItem::FileSearchCall { queries, results, .. } => {
+            ResponseOutputItem::FileSearchCall {
+                queries, results, ..
+            } => {
                 assert!(queries.is_empty());
                 let results = results.expect("expected array fallback results");
                 assert_eq!(results.len(), 1);
