@@ -85,6 +85,14 @@ pub fn response_tools(session: &McpToolSession<'_>) -> Vec<ResponseTool> {
 }
 
 /// `McpToolInfo` records used inside `mcp_list_tools` output items.
+///
+/// Wire-shape note: OpenAI's Responses API exposes only `{"read_only": …}`
+/// inside `mcp_list_tools[].tools[].annotations`. The richer SMG
+/// `ToolAnnotations` (which also carries `destructive`/`idempotent`/
+/// `open_world`) is intentionally narrowed here to match that shape — those
+/// extra hints are read directly off `ToolEntry::annotations` by the approval
+/// pipeline and would only confuse downstream OpenAI-compatible clients if
+/// emitted on the wire.
 pub fn build_mcp_tool_infos(entries: &[smg_mcp::ToolEntry]) -> Vec<McpToolInfo> {
     entries
         .iter()
@@ -92,11 +100,9 @@ pub fn build_mcp_tool_infos(entries: &[smg_mcp::ToolEntry]) -> Vec<McpToolInfo> 
             name: entry.tool_name().to_string(),
             description: entry.tool.description.as_ref().map(|d| d.to_string()),
             input_schema: schema_to_value(&entry.tool.input_schema),
-            annotations: entry
-                .tool
-                .annotations
-                .as_ref()
-                .and_then(|a| serde_json::to_value(a).ok()),
+            annotations: Some(json!({
+                "read_only": entry.annotations.read_only,
+            })),
         })
         .collect()
 }
@@ -309,5 +315,50 @@ fn is_client_visible_output_item(
         | ResponseOutputItem::Compaction { .. }
         | ResponseOutputItem::LocalShellCall { .. }
         | ResponseOutputItem::LocalShellCallOutput { .. } => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, sync::Arc};
+
+    use rmcp::model::Tool;
+    use smg_mcp::{ToolAnnotations, ToolEntry};
+
+    use super::*;
+
+    fn entry_with_annotations(annotations: ToolAnnotations) -> ToolEntry {
+        let tool = Tool {
+            name: Cow::Owned("widget".to_string()),
+            title: None,
+            description: Some(Cow::Owned("widget description".to_string())),
+            input_schema: Arc::new(serde_json::Map::new()),
+            output_schema: None,
+            annotations: None,
+            icons: None,
+        };
+        ToolEntry::from_server_tool("srv", tool).with_annotations(annotations)
+    }
+
+    #[test]
+    fn build_mcp_tool_infos_emits_only_read_only_annotation() {
+        // Wire-spec parity: OpenAI's `mcp_list_tools[].tools[].annotations`
+        // exposes `{"read_only": …}` only. The richer SMG `ToolAnnotations`
+        // carries `destructive`/`idempotent`/`open_world` that the approval
+        // pipeline reads internally; surfacing them on the wire would change
+        // the documented shape.
+        let annotations = ToolAnnotations::default()
+            .with_read_only(true)
+            .with_destructive(true);
+        let entries = vec![entry_with_annotations(annotations)];
+
+        let infos = build_mcp_tool_infos(&entries);
+        assert_eq!(infos.len(), 1);
+        let serialized = serde_json::to_value(&infos[0])
+            .expect("McpToolInfo must serialize")
+            .get("annotations")
+            .cloned()
+            .expect("annotations must serialize");
+        assert_eq!(serialized, json!({ "read_only": true }));
     }
 }
