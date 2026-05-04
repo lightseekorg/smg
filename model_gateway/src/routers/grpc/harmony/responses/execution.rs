@@ -12,7 +12,10 @@ use tracing::{debug, error};
 use super::common::McpCallTracking;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::common::mcp_utils::prepare_hosted_dispatch_args,
+    routers::common::{
+        mcp_utils::prepare_hosted_dispatch_args,
+        openai_bridge::{self, FormatRegistry},
+    },
 };
 
 /// Tool execution result
@@ -53,6 +56,7 @@ pub(crate) struct ToolResult {
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
     session: &McpToolSession<'_>,
+    format_registry: &FormatRegistry,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
@@ -90,8 +94,9 @@ pub(super) async fn execute_mcp_tools(
                     json!({})
                 }
             };
-            let response_format = session.tool_response_format(&tc.function.name);
-            prepare_hosted_dispatch_args(&mut args, &response_format, request_tools, request_user);
+            let response_format =
+                openai_bridge::lookup_tool_format(session, format_registry, &tc.function.name);
+            prepare_hosted_dispatch_args(&mut args, response_format, request_tools, request_user);
             ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
@@ -112,8 +117,9 @@ pub(super) async fn execute_mcp_tools(
     let results: Vec<ToolResult> = outputs
         .into_iter()
         .map(|output| {
-            // Transform to correctly-typed ResponseOutputItem
-            let output_item = output.to_response_item();
+            let response_format =
+                openai_bridge::lookup_tool_format(session, format_registry, &output.tool_name);
+            let output_item = openai_bridge::transform_tool_output(&output, response_format);
 
             // Record this call in tracking
             tracking.record_call(output_item.clone());
@@ -145,5 +151,5 @@ pub(super) async fn execute_mcp_tools(
 pub(crate) fn convert_mcp_tools_to_response_tools(
     session: &McpToolSession<'_>,
 ) -> Vec<ResponseTool> {
-    session.build_response_tools()
+    openai_bridge::response_tools(session)
 }

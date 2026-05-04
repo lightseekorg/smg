@@ -62,6 +62,7 @@ impl AnthropicRouter {
 
         let router_ctx = RouterContext {
             mcp_orchestrator,
+            mcp_format_registry: context.mcp_format_registry.clone(),
             http_client: context.client.clone(),
             worker_registry: context.worker_registry.clone(),
             request_timeout,
@@ -116,8 +117,13 @@ impl RouterTrait for AnthropicRouter {
                 })
                 .collect();
 
-            match mcp_utils::ensure_mcp_servers(&self.router_ctx.mcp_orchestrator, &inputs, &[])
-                .await
+            match mcp_utils::ensure_mcp_servers(
+                &self.router_ctx.mcp_orchestrator,
+                &self.router_ctx.mcp_format_registry,
+                &inputs,
+                &[],
+            )
+            .await
             {
                 Some(servers) => {
                     info!(

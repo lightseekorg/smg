@@ -7,22 +7,24 @@ use openai_protocol::{
     chat::ChatCompletionStreamResponse,
     common::{Usage, UsageInfo},
     event_types::{
-        CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-        ImageGenerationCallEvent, McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent,
-        WebSearchCallEvent,
+        ContentPartEvent, FunctionCallEvent, McpEvent, OutputItemEvent, OutputTextEvent,
+        ResponseEvent,
     },
     responses::{
         ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::json;
-use smg_mcp::{self as mcp, ResponseFormat};
+use smg_mcp::{self as mcp};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::routers::grpc::harmony::responses::ToolResult;
+use crate::routers::{
+    common::openai_bridge::{self, descriptor, ResponseFormat},
+    grpc::harmony::responses::ToolResult,
+};
 
 pub(crate) enum OutputItemType {
     Message,
@@ -354,11 +356,11 @@ impl ResponseStreamEventEmitter {
         })
     }
 
-    /// Convert tool entries to JSON values using the shared `build_mcp_tool_infos` bridge.
+    /// Convert tool entries to JSON values using the shared bridge builder.
     fn tool_entries_to_json(
         tools: &[mcp::ToolEntry],
     ) -> Result<Vec<serde_json::Value>, serde_json::Error> {
-        mcp::build_mcp_tool_infos(tools)
+        openai_bridge::build_mcp_tool_infos(tools)
             .into_iter()
             .map(serde_json::to_value)
             .collect()
@@ -465,54 +467,30 @@ impl ResponseStreamEventEmitter {
         })
     }
 
-    /// Emit the appropriate in_progress event based on response format
     pub fn emit_tool_call_in_progress(
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
     ) -> serde_json::Value {
-        let event_type = match response_format {
-            ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
-            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
-            ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::IN_PROGRESS,
-            ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
-        };
+        let event_type = descriptor(response_format).in_progress_event;
         self.emit_tool_event(event_type, output_index, item_id)
     }
 
-    /// Emit the searching/interpreting/generating event for builtin tool calls (no-op for passthrough).
-    ///
-    /// For `image_generation_call` this emits the `generating` event. The
-    /// partial-image event is emitted separately via `emit_image_generation_partial_image`
-    /// because it carries additional payload (the partial b64 bytes) and is
-    /// optional per the `partial_images` request field.
+    /// Emit the searching/interpreting/generating event; `None` for formats
+    /// with no intermediate phase.
     pub fn emit_tool_call_searching(
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
     ) -> Option<serde_json::Value> {
-        let event_type = match response_format {
-            ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
-            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
-            ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
-            ResponseFormat::Passthrough => return None,
-        };
+        let event_type = descriptor(response_format).searching_event?;
         Some(self.emit_tool_event(event_type, output_index, item_id))
     }
 
-    /// Emit a `response.image_generation_call.partial_image` event.
-    ///
-    /// Returns `None` when `response_format` is anything other than
-    /// [`ResponseFormat::ImageGenerationCall`], mirroring how
-    /// `emit_tool_call_searching` gates on format. The payload carries the
-    /// base64-encoded partial image bytes plus a 0-based partial image index.
-    ///
-    /// Per-router wiring is responsible for deciding when to call this and
-    /// how to source the partial-image bytes.
+    /// Emit a `response.image_generation_call.partial_image` event. Returns
+    /// `None` for formats with no partial-image frame.
     #[expect(
         dead_code,
         reason = "partial_image emission is wired by per-router integrations"
@@ -521,15 +499,13 @@ impl ResponseStreamEventEmitter {
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
         partial_image_index: u32,
         partial_image_b64: &str,
     ) -> Option<serde_json::Value> {
-        if !matches!(response_format, ResponseFormat::ImageGenerationCall) {
-            return None;
-        }
+        let event_type = descriptor(response_format).partial_image_event?;
         Some(json!({
-            "type": ImageGenerationCallEvent::PARTIAL_IMAGE,
+            "type": event_type,
             "sequence_number": self.next_sequence(),
             "output_index": output_index,
             "item_id": item_id,
@@ -538,40 +514,24 @@ impl ResponseStreamEventEmitter {
         }))
     }
 
-    /// Emit the appropriate completed event based on response format
     pub fn emit_tool_call_completed(
         &mut self,
         output_index: usize,
         item_id: &str,
-        response_format: &ResponseFormat,
+        response_format: ResponseFormat,
     ) -> serde_json::Value {
-        let event_type = match response_format {
-            ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
-            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
-            ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
-            ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::COMPLETED,
-            ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
-        };
+        let event_type = descriptor(response_format).completed_event;
         self.emit_tool_event(event_type, output_index, item_id)
     }
 
-    // ========================================================================
-    // Helper Methods for ResponseFormat
-    // ========================================================================
-
-    /// Get the type string for JSON based on response format.
     pub fn type_str_for_format(response_format: Option<&ResponseFormat>) -> &'static str {
         match response_format {
-            Some(ResponseFormat::WebSearchCall) => "web_search_call",
-            Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
-            Some(ResponseFormat::FileSearchCall) => "file_search_call",
-            Some(ResponseFormat::ImageGenerationCall) => "image_generation_call",
-            Some(ResponseFormat::Passthrough) => "mcp_call",
+            Some(format) => descriptor(*format).type_str,
             None => "function_call",
         }
     }
 
-    /// Get the OutputItemType based on response format.
+    /// Map a `ResponseFormat` to the grpc-router-private `OutputItemType` enum.
     pub fn output_item_type_for_format(response_format: Option<&ResponseFormat>) -> OutputItemType {
         match response_format {
             Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,

@@ -9,4 +9,6 @@ pub mod index;
 pub mod types;
 
 pub use index::{IndexCounts, ToolInventory};
-pub use types::{AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry};
+pub use types::{
+    AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ALIAS_SERVER_KEY,
+};

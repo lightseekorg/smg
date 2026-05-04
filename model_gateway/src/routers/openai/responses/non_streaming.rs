@@ -16,6 +16,7 @@ use crate::routers::{
     common::{
         header_utils::{extract_forwardable_request_headers, ApiProvider},
         mcp_utils::ensure_request_mcp_client,
+        openai_bridge,
         persistence_utils::persist_conversation_items,
     },
     error,
@@ -62,9 +63,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
+    // The format registry is the router-side source of truth for MCP
+    // builtin/alias format resolution; falling back to a default would
+    // silently mis-route hosted tools instead of failing fast.
+    let mcp_format_registry = match ctx.components.mcp_format_registry() {
+        Some(r) => r.clone(),
+        None => {
+            return error::internal_error("internal_error", "MCP format registry required");
+        }
+    };
+
     // Check for MCP tools and create session if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+        ensure_request_mcp_client(mcp_orchestrator, &mcp_format_registry, tools).await
     } else {
         None
     };
@@ -84,7 +95,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             forwarded_headers,
         );
         if let Some(tools) = original_body.tools.as_deref() {
-            session.configure_response_tools_approval(tools);
+            openai_bridge::configure_response_tools_approval(&mut session, tools);
         }
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
@@ -98,6 +109,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 original_body,
                 existing_mcp_list_tools_labels: &existing_mcp_list_tools_labels,
                 session: &session,
+                format_registry: &mcp_format_registry,
             },
         )
         .await

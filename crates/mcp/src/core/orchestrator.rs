@@ -37,7 +37,6 @@ use std::{
 };
 
 use dashmap::DashMap;
-use openai_protocol::responses::ResponseOutputItem;
 use rmcp::{
     model::{CallToolRequestParam, CallToolResult},
     service::{RunningService, ServiceError},
@@ -63,9 +62,9 @@ use crate::{
     error::{McpError, McpResult},
     inventory::{
         AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
+        ALIAS_SERVER_KEY,
     },
     tenant::TenantContext,
-    transform::{ResponseFormat, ResponseTransformer},
 };
 
 /// Build request headers from token and custom headers.
@@ -130,70 +129,12 @@ struct ServerEntry {
     config: McpServerConfig,
 }
 
-/// Result of a tool call.
-#[derive(Debug)]
-pub enum ToolCallResult {
-    /// Successfully executed and transformed.
-    Success(ResponseOutputItem),
-    /// Pending approval from user.
-    PendingApproval(McpApprovalRequest),
-}
-
 /// Internal result type for approval-checked execution.
-///
-/// Used to avoid code duplication between `execute_tool_with_approval` and
-/// `execute_tool_with_approval_raw`. Contains either the raw result or
-/// the pending approval request.
 enum ApprovalExecutionResult {
     /// Tool executed successfully, contains raw result.
     Success(CallToolResult),
     /// Pending approval from user (interactive mode only).
     PendingApproval(McpApprovalRequest),
-}
-
-impl ToolCallResult {
-    /// Get the transformed output item directly without serialization.
-    ///
-    /// Returns `Some(item)` for successful tool calls, `None` for pending approvals.
-    /// This avoids the serialize/deserialize roundtrip when the caller needs
-    /// the item as a Value or ResponseOutputItem.
-    pub fn into_item(self) -> Option<ResponseOutputItem> {
-        match self {
-            ToolCallResult::Success(item) => Some(item),
-            ToolCallResult::PendingApproval(_) => None,
-        }
-    }
-
-    /// Convert the result to a serialized output tuple.
-    ///
-    /// Returns `(output_str, is_error, error_message)` suitable for
-    /// recording in conversation history or emitting as events.
-    ///
-    /// This centralizes the result serialization logic that was previously
-    /// duplicated across all routers.
-    pub fn into_serialized(self) -> (String, bool, Option<String>) {
-        match self {
-            ToolCallResult::Success(item) => match serde_json::to_string(&item) {
-                Ok(s) => (s, false, None),
-                Err(e) => {
-                    let err = format!("Failed to serialize tool result: {e}");
-                    (
-                        serde_json::json!({"error": &err}).to_string(),
-                        true,
-                        Some(err),
-                    )
-                }
-            },
-            ToolCallResult::PendingApproval(_) => {
-                let err = "Tool requires approval (not supported in this context)".to_string();
-                (
-                    serde_json::json!({"error": &err}).to_string(),
-                    true,
-                    Some(err),
-                )
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -216,12 +157,10 @@ pub struct ToolExecutionInput {
 
 /// Output from batch tool execution.
 ///
-/// Contains all information needed by routers to build responses,
-/// record state, and emit events. The MCP crate handles:
-/// - Tool lookup and execution
-/// - Result serialization and transformation
-/// - Error handling
+/// `#[non_exhaustive]` so additive fields don't break consumers; only
+/// `smg-mcp` constructs this.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ToolExecutionOutput {
     /// The call_id from the input (for matching).
     pub call_id: String,
@@ -241,8 +180,6 @@ pub struct ToolExecutionOutput {
     pub is_error: bool,
     /// Error message if `is_error` is true.
     pub error_message: Option<String>,
-    /// Response format for transforming output to API-specific types.
-    pub response_format: ResponseFormat,
     /// Execution duration.
     pub duration: Duration,
 }
@@ -256,6 +193,7 @@ pub enum ToolExecutionResult {
 
 /// Pending approval from resolved tool execution.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PendingToolExecution {
     pub call_id: String,
     pub tool_name: String,
@@ -263,7 +201,6 @@ pub struct PendingToolExecution {
     pub server_label: String,
     pub arguments_str: String,
     pub approval_request: McpApprovalRequest,
-    pub response_format: ResponseFormat,
     pub duration: Duration,
 }
 
@@ -286,30 +223,9 @@ impl ToolExecutionResult {
                 error_message: Some(
                     "Tool requires approval (not supported in this context)".to_string(),
                 ),
-                response_format: pending.response_format,
                 duration: pending.duration,
             },
         }
-    }
-}
-
-impl ToolExecutionOutput {
-    /// Get the transformed ResponseOutputItem.
-    ///
-    /// Transforms the raw output to the appropriate ResponseOutputItem type
-    /// based on the tool's configured response format (WebSearchCall,
-    /// CodeInterpreterCall, FileSearchCall, or Passthrough/McpCall).
-    ///
-    /// Uses `server_label` (user-facing) for the output, not `server_key` (internal).
-    pub fn to_response_item(&self) -> ResponseOutputItem {
-        ResponseTransformer::transform(
-            &self.output,
-            &self.response_format,
-            &self.call_id,
-            &self.server_label,
-            &self.tool_name,
-            &self.arguments_str,
-        )
     }
 }
 
@@ -484,11 +400,7 @@ impl McpOrchestrator {
         // Load tools from server
         self.load_server_inventory(&config.name, &client).await;
 
-        // Apply tool configs (aliases, response formats)
         self.apply_tool_configs(config);
-
-        // Apply builtin response format if server has builtin_type configured
-        self.apply_builtin_response_format(config);
 
         // Store server entry with config for builtin lookups
         self.static_servers.insert(
@@ -505,7 +417,7 @@ impl McpOrchestrator {
         Ok(())
     }
 
-    /// Apply tool configurations from server config (aliases, response formats, arg mappings).
+    /// Apply tool configurations from server config (aliases and arg mappings).
     fn apply_tool_configs(&self, config: &McpServerConfig) {
         let Some(tools) = &config.tools else {
             return;
@@ -524,8 +436,6 @@ impl McpOrchestrator {
                 continue;
             }
 
-            // Get the existing entry to update or create alias
-            let response_format: ResponseFormat = tool_config.response_format.clone().into();
             let arg_mapping = tool_config.arg_mapping.as_ref().map(|cfg| {
                 let mut mapping = ArgMapping::new();
                 for (from, to) in &cfg.renames {
@@ -542,89 +452,26 @@ impl McpOrchestrator {
 
             // If there's an alias, register it
             if let Some(alias_name) = &tool_config.alias {
-                if let Err(e) = self.register_alias(
-                    alias_name,
-                    &config.name,
-                    tool_name,
-                    arg_mapping,
-                    response_format.clone(),
-                ) {
+                if let Err(e) =
+                    self.register_alias(alias_name, &config.name, tool_name, arg_mapping)
+                {
                     warn!(
                         "Failed to register alias '{}' for '{}:{}': {}",
                         alias_name, config.name, tool_name, e
                     );
                 } else {
                     info!(
-                        "Registered alias '{}' → '{}:{}' with format {:?}",
-                        alias_name, config.name, tool_name, response_format
+                        "Registered alias '{}' → '{}:{}'",
+                        alias_name, config.name, tool_name
                     );
                 }
-            } else if response_format != ResponseFormat::Passthrough {
-                // No alias, but has custom response format - update the entry directly
+            } else if let Some(mapping) = arg_mapping {
+                // No alias but has arg_mapping - update entry directly
                 if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
-                    entry.response_format = response_format.clone();
-                    entry.arg_mapping.clone_from(&arg_mapping);
+                    entry.arg_mapping = Some(mapping);
                     self.tool_inventory.insert_entry(entry);
-                    info!(
-                        "Set response format {:?} for '{}:{}'",
-                        response_format, config.name, tool_name
-                    );
                 }
             }
-        }
-    }
-
-    /// Apply builtin response format to the builtin_tool_name if not explicitly overridden.
-    ///
-    /// When a server is configured with `builtin_type` and `builtin_tool_name`, the
-    /// corresponding tool should use the response format associated with the builtin type
-    /// (e.g., WebSearchPreview -> WebSearchCall) unless explicitly overridden in the tools config.
-    fn apply_builtin_response_format(&self, config: &McpServerConfig) {
-        let Some(builtin_type) = &config.builtin_type else {
-            return;
-        };
-        let Some(tool_name) = &config.builtin_tool_name else {
-            return;
-        };
-
-        let has_explicit_config = config
-            .tools
-            .as_ref()
-            .is_some_and(|tools| tools.contains_key(tool_name));
-
-        if has_explicit_config {
-            debug!(
-                server = %config.name,
-                tool = %tool_name,
-                "Builtin tool has explicit config, skipping auto-apply of response_format"
-            );
-            return;
-        }
-
-        let response_format: ResponseFormat = builtin_type.response_format().into();
-
-        let updated = self
-            .tool_inventory
-            .update_entry(&config.name, tool_name, |entry| {
-                if entry.response_format != response_format {
-                    info!(
-                        server = %config.name,
-                        tool = %tool_name,
-                        builtin_type = %builtin_type,
-                        format = ?response_format,
-                        "Applied builtin response format"
-                    );
-                    entry.response_format = response_format.clone();
-                }
-            });
-
-        if !updated {
-            warn!(
-                server = %config.name,
-                tool = %tool_name,
-                builtin_type = %builtin_type,
-                "Builtin tool not found on server"
-            );
         }
     }
 
@@ -818,112 +665,19 @@ impl McpOrchestrator {
     // Tool Execution
     // ========================================================================
 
-    /// Call a tool with approval checking and response transformation.
-    ///
-    /// This is the main entry point for tool execution.
-    ///
-    /// # Arguments
-    /// * `server_key` - Internal server identifier (may be URL for dynamic servers)
-    /// * `tool_name` - The tool name to execute
-    /// * `arguments` - Tool arguments as JSON
-    /// * `server_label` - User-facing label for API responses
-    /// * `request_ctx` - Request context for approval
-    pub async fn call_tool(
-        &self,
-        server_key: &str,
-        tool_name: &str,
-        arguments: Value,
-        server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
-    ) -> McpResult<ToolCallResult> {
-        self.active_executions.fetch_add(1, Ordering::SeqCst);
-        let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
-            count.fetch_sub(1, Ordering::SeqCst);
-        });
-        let qualified = QualifiedToolName::new(server_key, tool_name);
-
-        // Get tool entry
-        let entry = self
-            .tool_inventory
-            .get_entry(server_key, tool_name)
-            .ok_or_else(|| McpError::ToolNotFound(qualified.to_string()))?;
-
-        // Record metrics start
-        self.metrics.record_call_start(&qualified);
-        let start_time = Instant::now();
-
-        // Execute with approval flow
-        let result = self
-            .execute_tool_with_approval(&entry, arguments, server_label, request_ctx)
-            .await;
-
-        // Record metrics end
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-        self.metrics
-            .record_call_end(&qualified, result.is_ok(), duration_ms);
-
-        result
-    }
-
     /// Find the MCP server configured to handle a built-in tool type.
     ///
-    /// When a request includes built-in tools like `{"type": "web_search_preview"}`,
-    /// routers can use this method to find which MCP server should handle it.
-    ///
-    /// # Arguments
-    /// * `builtin_type` - The built-in tool type to look up
-    ///
-    /// # Returns
-    /// If a server is configured for this built-in type, returns:
-    /// - `server_key` - Internal identifier for the server (used for `call_tool`)
-    /// - `tool_name` - The MCP tool to call on that server
-    /// - `response_format` - The format to use for response transformation
-    ///
-    /// Returns `None` if no server is configured for this built-in type.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Check if web_search_preview is configured
-    /// if let Some((server_key, tool_name, format)) =
-    ///     orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview)
-    /// {
-    ///     // Route to MCP server
-    ///     let result = orchestrator.call_tool(
-    ///         &server_key,
-    ///         &tool_name,
-    ///         arguments,
-    ///         "web-search",  // user-facing label
-    ///         &request_ctx,
-    ///     ).await?;
-    /// } else {
-    ///     // No MCP configured - handle differently
-    /// }
-    /// ```
-    pub fn find_builtin_server(
-        &self,
-        builtin_type: BuiltinToolType,
-    ) -> Option<(String, String, ResponseFormat)> {
-        // Helper to extract builtin info from a server config
+    /// Returns `(server_key, tool_name)` for the configured server, or
+    /// `None` if no server handles this builtin. Per-tool `ResponseFormat`
+    /// lives in the gateway's `FormatRegistry` — callers look it up there.
+    pub fn find_builtin_server(&self, builtin_type: BuiltinToolType) -> Option<(String, String)> {
         let extract_builtin = |server_config: &McpServerConfig| {
             if let (Some(cfg_type), Some(tool_name)) = (
                 &server_config.builtin_type,
                 &server_config.builtin_tool_name,
             ) {
                 if *cfg_type == builtin_type {
-                    // Determine response format from tool config or use builtin default
-                    let response_format = server_config
-                        .tools
-                        .as_ref()
-                        .and_then(|tools| tools.get(tool_name))
-                        .map(|tc| tc.response_format.clone().into())
-                        .unwrap_or_else(|| builtin_type.response_format().into());
-
-                    return Some((
-                        server_config.name.clone(),
-                        tool_name.clone(),
-                        response_format,
-                    ));
+                    return Some((server_config.name.clone(), tool_name.clone()));
                 }
             }
             None
@@ -1054,7 +808,6 @@ impl McpOrchestrator {
                     output: serde_json::json!({ "error": &err }),
                     is_error: true,
                     error_message: Some(err),
-                    response_format: ResponseFormat::Passthrough,
                     duration: start.elapsed(),
                 })
             }
@@ -1074,7 +827,6 @@ impl McpOrchestrator {
         });
         self.metrics.record_call_start(&qualified);
         let call_start_time = Instant::now();
-        let response_format = entry.response_format.clone();
 
         let result = match self
             .execute_tool_with_approval_raw_internal(entry, arguments, request_ctx)
@@ -1090,7 +842,6 @@ impl McpOrchestrator {
                     output: Self::call_result_to_json(&raw_result),
                     is_error: raw_result.is_error.unwrap_or(false),
                     error_message: None,
-                    response_format: response_format.clone(),
                     duration: call_start_time.elapsed(),
                 })
             }
@@ -1102,7 +853,6 @@ impl McpOrchestrator {
                     server_label: entry.server_key().to_string(),
                     arguments_str: String::new(),
                     approval_request,
-                    response_format,
                     duration: call_start_time.elapsed(),
                 })
             }
@@ -1117,7 +867,6 @@ impl McpOrchestrator {
                     output: serde_json::json!({ "error": &err }),
                     is_error: true,
                     error_message: Some(err),
-                    response_format,
                     duration: call_start_time.elapsed(),
                 })
             }
@@ -1131,48 +880,8 @@ impl McpOrchestrator {
         result
     }
 
-    /// Execute tool with approval checking.
-    ///
-    /// Returns a transformed `ToolCallResult` ready for API responses.
-    ///
-    /// # Arguments
-    /// * `entry` - Tool entry to execute
-    /// * `arguments` - Tool arguments
-    /// * `server_label` - User-facing server label for API responses
-    /// * `request_ctx` - Request context for approval
-    async fn execute_tool_with_approval(
-        &self,
-        entry: &ToolEntry,
-        arguments: Value,
-        server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
-    ) -> McpResult<ToolCallResult> {
-        // Delegate to raw implementation and transform result
-        match self
-            .execute_tool_with_approval_raw_internal(entry, arguments.clone(), request_ctx)
-            .await?
-        {
-            ApprovalExecutionResult::Success(result) => {
-                let output = Self::transform_result(
-                    &result,
-                    &entry.response_format,
-                    &request_ctx.request_id,
-                    server_label,
-                    entry.tool_name(),
-                    &arguments.to_string(),
-                );
-                Ok(ToolCallResult::Success(output))
-            }
-            ApprovalExecutionResult::PendingApproval(approval_request) => {
-                Ok(ToolCallResult::PendingApproval(approval_request))
-            }
-        }
-    }
-
     /// Internal implementation of approval-checked tool execution.
-    ///
-    /// Returns either the raw result or the pending approval request.
-    /// Both public methods delegate to this to avoid code duplication.
+    /// Returns either the raw `CallToolResult` or a pending approval request.
     async fn execute_tool_with_approval_raw_internal(
         &self,
         entry: &ToolEntry,
@@ -1401,28 +1110,6 @@ impl McpOrchestrator {
         args
     }
 
-    /// Transform MCP result to OpenAI format.
-    fn transform_result(
-        result: &CallToolResult,
-        format: &ResponseFormat,
-        tool_call_id: &str,
-        server_label: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> ResponseOutputItem {
-        // Convert CallToolResult content to JSON for transformation
-        let result_json = Self::call_result_to_json(result);
-
-        ResponseTransformer::transform(
-            &result_json,
-            format,
-            tool_call_id,
-            server_label,
-            tool_name,
-            arguments,
-        )
-    }
-
     /// Convert CallToolResult to JSON value.
     fn call_result_to_json(result: &CallToolResult) -> Value {
         // Serialize the CallToolResult content to JSON
@@ -1477,7 +1164,6 @@ impl McpOrchestrator {
         target_server: &str,
         target_tool: &str,
         arg_mapping: Option<ArgMapping>,
-        response_format: ResponseFormat,
     ) -> McpResult<()> {
         // Verify target exists
         let target_entry = self
@@ -1492,11 +1178,10 @@ impl McpOrchestrator {
         };
 
         let alias_entry = ToolEntry::new(
-            QualifiedToolName::new("alias", alias_name),
+            QualifiedToolName::new(ALIAS_SERVER_KEY, alias_name),
             target_entry.tool.clone(),
         )
-        .with_alias(alias_target)
-        .with_response_format(response_format);
+        .with_alias(alias_target);
 
         self.tool_inventory.insert_entry(alias_entry);
 
@@ -1825,39 +1510,6 @@ impl McpOrchestrator {
         }
     }
 
-    /// Call a tool and continue execution after approval (for continuing paused requests).
-    ///
-    /// This is called after the user approves a tool execution in interactive mode.
-    /// The approval should already be resolved via `resolve_approval()`.
-    pub async fn continue_tool_execution(
-        &self,
-        server_key: &str,
-        tool_name: &str,
-        arguments: Value,
-        request_ctx: &McpRequestContext<'_>,
-    ) -> McpResult<ToolCallResult> {
-        // Get tool entry
-        let entry = self
-            .tool_inventory
-            .get_entry(server_key, tool_name)
-            .ok_or_else(|| McpError::ToolNotFound(format!("{server_key}:{tool_name}")))?;
-
-        // Execute directly (approval already handled)
-        let result = self.execute_tool_impl(&entry, arguments.clone()).await?;
-
-        // Transform response
-        let output = Self::transform_result(
-            &result,
-            &entry.response_format,
-            &request_ctx.request_id,
-            entry.server_key(),
-            entry.tool_name(),
-            &arguments.to_string(),
-        );
-
-        Ok(ToolCallResult::Success(output))
-    }
-
     // ========================================================================
     // Lifecycle
     // ========================================================================
@@ -1971,80 +1623,6 @@ impl<'a> McpRequestContext<'a> {
 
         self.dynamic_clients.insert(config.name.clone(), client);
         Ok(())
-    }
-
-    /// Call a tool in this request context.
-    ///
-    /// # Arguments
-    /// * `server_key` - Internal server identifier
-    /// * `tool_name` - Tool name to execute
-    /// * `arguments` - Tool arguments as JSON
-    /// * `server_label` - User-facing label for API responses
-    pub async fn call_tool(
-        &self,
-        server_key: &str,
-        tool_name: &str,
-        arguments: Value,
-        server_label: &str,
-    ) -> McpResult<ToolCallResult> {
-        self.orchestrator
-            .active_executions
-            .fetch_add(1, Ordering::SeqCst);
-        let _guard = scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
-            count.fetch_sub(1, Ordering::SeqCst);
-        });
-        // Check dynamic tools first
-        let qualified = QualifiedToolName::new(server_key, tool_name);
-        if let Some(entry) = self.dynamic_tools.get(&qualified) {
-            return self
-                .execute_dynamic_tool(&entry, arguments, server_label)
-                .await;
-        }
-
-        // Fall back to orchestrator
-        self.orchestrator
-            .call_tool(server_key, tool_name, arguments, server_label, self)
-            .await
-    }
-
-    /// Execute a dynamic tool.
-    async fn execute_dynamic_tool(
-        &self,
-        entry: &ToolEntry,
-        arguments: Value,
-        server_label: &str,
-    ) -> McpResult<ToolCallResult> {
-        let client = self
-            .dynamic_clients
-            .get(entry.server_key())
-            .ok_or_else(|| McpError::ServerNotFound(entry.server_key().to_string()))?;
-
-        let args_map = if let Value::Object(map) = arguments.clone() {
-            Some(map)
-        } else {
-            None
-        };
-
-        let request = CallToolRequestParam {
-            name: Cow::Owned(entry.tool_name().to_string()),
-            arguments: args_map,
-        };
-
-        let result = client
-            .call_tool(request)
-            .await
-            .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {e}")))?;
-
-        let output = McpOrchestrator::transform_result(
-            &result,
-            &entry.response_format,
-            &self.request_id,
-            server_label,
-            entry.tool_name(),
-            &arguments.to_string(),
-        );
-
-        Ok(ToolCallResult::Success(output))
     }
 
     /// List all tools visible in this request context.
@@ -2288,13 +1866,7 @@ mod tests {
         orchestrator.tool_inventory.insert_entry(entry);
 
         // Register alias
-        let result = orchestrator.register_alias(
-            "web_search",
-            "brave",
-            "brave_web_search",
-            None,
-            ResponseFormat::WebSearchCall,
-        );
+        let result = orchestrator.register_alias("web_search", "brave", "brave_web_search", None);
 
         assert!(result.is_ok());
         assert!(orchestrator
@@ -2307,13 +1879,8 @@ mod tests {
     fn test_alias_registration_missing_target() {
         let orchestrator = McpOrchestrator::new_test();
 
-        let result = orchestrator.register_alias(
-            "web_search",
-            "missing_server",
-            "missing_tool",
-            None,
-            ResponseFormat::Passthrough,
-        );
+        let result =
+            orchestrator.register_alias("web_search", "missing_server", "missing_tool", None);
 
         assert!(result.is_err());
     }
@@ -2369,7 +1936,7 @@ mod tests {
             "search_web".to_string(),
             ToolConfig {
                 alias: None,
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 arg_mapping: Some(ArgMappingConfig {
                     renames: HashMap::new(),
                     defaults: HashMap::from([(
@@ -2414,7 +1981,6 @@ mod tests {
             mapping.overrides,
             vec![("enable_brave".to_string(), serde_json::json!(false))]
         );
-        assert_eq!(entry.response_format, ResponseFormat::WebSearchCall);
     }
 
     #[test]
@@ -2592,10 +2158,9 @@ mod tests {
         let result = orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview);
         assert!(result.is_some());
 
-        let (server_key, tool_name, response_format) = result.unwrap();
+        let (server_key, tool_name) = result.unwrap();
         assert_eq!(server_key, "brave");
         assert_eq!(tool_name, "brave_web_search");
-        assert_eq!(response_format, ResponseFormat::WebSearchCall);
 
         // Should NOT find a server for code_interpreter
         let result = orchestrator.find_builtin_server(BuiltinToolType::CodeInterpreter);
@@ -2617,7 +2182,7 @@ mod tests {
             "my_search".to_string(),
             ToolConfig {
                 alias: None,
-                response_format: ResponseFormatConfig::Passthrough, // Override default
+                response_format: Some(ResponseFormatConfig::Passthrough), // Override default
                 arg_mapping: None,
             },
         );
@@ -2661,11 +2226,9 @@ mod tests {
         let result = orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview);
         assert!(result.is_some());
 
-        let (server_key, tool_name, response_format) = result.unwrap();
+        let (server_key, tool_name) = result.unwrap();
         assert_eq!(server_key, "custom-search");
         assert_eq!(tool_name, "my_search");
-        // Should use the custom Passthrough format, not the default WebSearchCall
-        assert_eq!(response_format, ResponseFormat::Passthrough);
     }
 
     #[test]
@@ -2682,149 +2245,5 @@ mod tests {
         assert!(orchestrator
             .find_builtin_server(BuiltinToolType::FileSearch)
             .is_none());
-    }
-
-    #[test]
-    fn test_apply_builtin_response_format() {
-        use std::collections::HashMap;
-
-        use crate::{
-            approval::{audit::AuditLog, policy::PolicyEngine},
-            inventory::types::ToolEntry,
-        };
-
-        // Create config with builtin_type but no explicit response_format for the tool
-        let config = McpConfig {
-            servers: vec![McpServerConfig {
-                name: "brave".to_string(),
-                transport: McpTransport::Sse {
-                    url: "http://localhost:3000/sse".to_string(),
-                    token: None,
-                    headers: HashMap::new(),
-                },
-                proxy: None,
-                required: false,
-                tools: None, // No explicit tool config
-                builtin_type: Some(BuiltinToolType::WebSearchPreview),
-                builtin_tool_name: Some("brave_search".to_string()),
-                internal: false,
-            }],
-            ..Default::default()
-        };
-
-        let (refresh_tx, _) = mpsc::channel(10);
-        let audit_log = Arc::new(AuditLog::new());
-        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&audit_log)));
-        let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
-
-        let orchestrator = McpOrchestrator {
-            static_servers: DashMap::new(),
-            tool_inventory: Arc::new(ToolInventory::new()),
-            approval_manager,
-            connection_pool: Arc::new(McpConnectionPool::new()),
-            metrics: Arc::new(McpMetrics::new()),
-            refresh_tx,
-            active_executions: Arc::new(AtomicUsize::new(0)),
-            shutdown_token: CancellationToken::new(),
-            reconnection_locks: DashMap::new(),
-            config,
-        };
-
-        // Simulate tool discovery - tool is registered with default Passthrough
-        let tool = create_test_tool("brave_search");
-        let entry = ToolEntry::from_server_tool("brave", tool);
-        assert_eq!(entry.response_format, ResponseFormat::Passthrough); // Default
-        orchestrator.tool_inventory.insert_entry(entry);
-
-        // Apply builtin response format - should update to WebSearchCall
-        orchestrator.apply_builtin_response_format(&orchestrator.config.servers[0]);
-
-        // Verify the tool entry was updated
-        let entry = orchestrator
-            .tool_inventory
-            .get_entry("brave", "brave_search")
-            .expect("Tool should exist");
-        assert_eq!(
-            entry.response_format,
-            ResponseFormat::WebSearchCall,
-            "Builtin type should auto-apply WebSearchCall format"
-        );
-    }
-
-    #[test]
-    fn test_apply_builtin_response_format_with_explicit_override() {
-        use std::collections::HashMap;
-
-        use crate::{
-            approval::{audit::AuditLog, policy::PolicyEngine},
-            core::config::{ResponseFormatConfig, ToolConfig},
-            inventory::types::ToolEntry,
-        };
-
-        // Create config with builtin_type AND explicit response_format override
-        let mut tools = HashMap::new();
-        tools.insert(
-            "brave_search".to_string(),
-            ToolConfig {
-                alias: None,
-                response_format: ResponseFormatConfig::Passthrough, // Explicit override
-                arg_mapping: None,
-            },
-        );
-
-        let config = McpConfig {
-            servers: vec![McpServerConfig {
-                name: "brave".to_string(),
-                transport: McpTransport::Sse {
-                    url: "http://localhost:3000/sse".to_string(),
-                    token: None,
-                    headers: HashMap::new(),
-                },
-                proxy: None,
-                required: false,
-                tools: Some(tools),
-                builtin_type: Some(BuiltinToolType::WebSearchPreview),
-                builtin_tool_name: Some("brave_search".to_string()),
-                internal: false,
-            }],
-            ..Default::default()
-        };
-
-        let (refresh_tx, _) = mpsc::channel(10);
-        let audit_log = Arc::new(AuditLog::new());
-        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&audit_log)));
-        let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
-
-        let orchestrator = McpOrchestrator {
-            static_servers: DashMap::new(),
-            tool_inventory: Arc::new(ToolInventory::new()),
-            approval_manager,
-            connection_pool: Arc::new(McpConnectionPool::new()),
-            metrics: Arc::new(McpMetrics::new()),
-            refresh_tx,
-            active_executions: Arc::new(AtomicUsize::new(0)),
-            shutdown_token: CancellationToken::new(),
-            reconnection_locks: DashMap::new(),
-            config,
-        };
-
-        // Simulate tool discovery
-        let tool = create_test_tool("brave_search");
-        let entry = ToolEntry::from_server_tool("brave", tool);
-        orchestrator.tool_inventory.insert_entry(entry);
-
-        // Apply builtin response format - should NOT override because explicit config exists
-        orchestrator.apply_builtin_response_format(&orchestrator.config.servers[0]);
-
-        // Verify the tool entry kept Passthrough (explicit override)
-        let entry = orchestrator
-            .tool_inventory
-            .get_entry("brave", "brave_search")
-            .expect("Tool should exist");
-        assert_eq!(
-            entry.response_format,
-            ResponseFormat::Passthrough,
-            "Explicit override should be preserved"
-        );
     }
 }

@@ -24,7 +24,8 @@ use tracing::{debug, warn};
 use crate::{
     middleware::TenantRequestMeta,
     routers::{
-        common::persistence_utils::split_stored_message_content, error,
+        common::{openai_bridge, persistence_utils::split_stored_message_content},
+        error,
         grpc::common::responses::ResponsesContext,
     },
 };
@@ -154,7 +155,7 @@ pub(super) fn extract_all_tool_calls_from_chat(
 }
 
 pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> Vec<Tool> {
-    session.build_chat_function_tools()
+    openai_bridge::chat_function_tools(session)
 }
 
 // ============================================================================

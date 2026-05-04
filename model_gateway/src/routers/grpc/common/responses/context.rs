@@ -10,7 +10,10 @@ use smg_data_connector::{
 };
 use smg_mcp::McpOrchestrator;
 
-use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
+use crate::routers::{
+    common::openai_bridge::FormatRegistry,
+    grpc::{context::SharedComponents, pipeline::RequestPipeline},
+};
 
 /// Context for /v1/responses endpoint
 ///
@@ -39,6 +42,8 @@ pub(crate) struct ResponsesContext {
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
 
+    pub mcp_format_registry: FormatRegistry,
+
     /// Storage hook request context extracted from HTTP headers by middleware.
     pub request_context: Option<StorageRequestContext>,
 }
@@ -57,6 +62,7 @@ impl ResponsesContext {
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
         conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
         mcp_orchestrator: Arc<McpOrchestrator>,
+        mcp_format_registry: FormatRegistry,
         request_context: Option<StorageRequestContext>,
     ) -> Self {
         Self {
@@ -67,6 +73,7 @@ impl ResponsesContext {
             conversation_item_storage,
             conversation_memory_writer,
             mcp_orchestrator,
+            mcp_format_registry,
             request_context,
         }
     }
