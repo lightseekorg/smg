@@ -249,16 +249,13 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
 
 /// True if `tools` carries any MCP-routed entry (declared MCP server or a
 /// builtin family that the gateway intercepts via MCP).
+///
+/// Derived from [`extract_builtin_types`] so the predicate and the actual
+/// routing path can't drift — adding a new builtin to the routing path
+/// (e.g. `file_search`) makes this predicate cover it too.
 pub fn request_uses_mcp_routing(tools: &[ResponseTool]) -> bool {
-    tools.iter().any(|t| {
-        matches!(
-            t,
-            ResponseTool::Mcp(_)
-                | ResponseTool::WebSearchPreview(_)
-                | ResponseTool::CodeInterpreter(_)
-                | ResponseTool::ImageGeneration(_)
-        )
-    })
+    tools.iter().any(|t| matches!(t, ResponseTool::Mcp(_)))
+        || !extract_builtin_types(tools).is_empty()
 }
 
 /// Collect user-declared function tool names from a Responses request.
