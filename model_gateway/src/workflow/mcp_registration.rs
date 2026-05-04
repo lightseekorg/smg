@@ -77,6 +77,10 @@ impl StepExecutor<McpWorkflowData> for ConnectMcpServerStep {
                 ),
             })?;
 
+        app_context
+            .mcp_format_registry
+            .populate_from_server_config(&config_request.config);
+
         // Update active MCP servers metric
         Metrics::set_mcp_servers_active(mcp_orchestrator.list_servers().len());
 

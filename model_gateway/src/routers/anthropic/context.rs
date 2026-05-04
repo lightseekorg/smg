@@ -11,6 +11,7 @@ use smg_mcp::{McpOrchestrator, McpServerBinding};
 
 use crate::{
     middleware::TenantRequestMeta,
+    routers::common::openai_bridge::FormatRegistry,
     worker::{Worker, WorkerRegistry},
 };
 
@@ -18,6 +19,7 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct RouterContext {
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+    pub mcp_format_registry: FormatRegistry,
     pub http_client: reqwest::Client,
     pub worker_registry: Arc<WorkerRegistry>,
     pub request_timeout: Duration,

@@ -20,7 +20,7 @@ use openai_protocol::{
     },
 };
 use serde_json::json;
-use smg_mcp::{McpToolSession, ResponseFormat, DEFAULT_SERVER_LABEL};
+use smg_mcp::{McpToolSession, DEFAULT_SERVER_LABEL};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -30,17 +30,22 @@ use super::{
 };
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
-    routers::grpc::{
-        common::{
-            response_formatting::CompletionTokenTracker,
-            responses::{
-                build_sse_response,
-                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+    routers::{
+        common::openai_bridge::{self, descriptor, FormatRegistry, ResponseFormat},
+        grpc::{
+            common::{
+                response_formatting::CompletionTokenTracker,
+                responses::{
+                    build_sse_response,
+                    streaming::{
+                        attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
+                    },
+                },
             },
+            context,
+            proto_wrapper::{ProtoResponseVariant, ProtoStream},
+            utils,
         },
-        context,
-        proto_wrapper::{ProtoResponseVariant, ProtoStream},
-        utils,
     },
 };
 
@@ -59,13 +64,9 @@ use crate::{
 /// `None` (plain function tools) and `Some(Passthrough)` (MCP `mcp_call`)
 /// are the only formats that stream arguments through this router.
 fn streams_arguments(response_format: Option<&ResponseFormat>) -> bool {
-    match response_format {
-        None | Some(ResponseFormat::Passthrough) => true,
-        Some(ResponseFormat::WebSearchCall)
-        | Some(ResponseFormat::CodeInterpreterCall)
-        | Some(ResponseFormat::FileSearchCall)
-        | Some(ResponseFormat::ImageGenerationCall) => false,
-    }
+    response_format
+        .map(|f| descriptor(*f).streams_arguments)
+        .unwrap_or(true)
 }
 
 /// Processor for streaming Harmony responses
@@ -499,15 +500,24 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        format_registry: Option<&FormatRegistry>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(stream, emitter, tx, session, 0).await
+                Self::process_decode_stream(stream, emitter, tx, session, format_registry, 0).await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(prefill, *decode, emitter, tx, session).await
+                Self::process_responses_dual_stream(
+                    prefill,
+                    *decode,
+                    emitter,
+                    tx,
+                    session,
+                    format_registry,
+                )
+                .await
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
@@ -521,6 +531,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        format_registry: Option<&FormatRegistry>,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream, collecting cached_tokens from Complete messages
         let mut prefill_cached_tokens_by_index: HashMap<u32, u32> = HashMap::new();
@@ -534,9 +545,15 @@ impl HarmonyStreamingProcessor {
         let prefill_cached_tokens: u32 = prefill_cached_tokens_by_index.values().sum();
 
         // Phase 2: Process decode stream
-        let result =
-            Self::process_decode_stream(decode_stream, emitter, tx, session, prefill_cached_tokens)
-                .await;
+        let result = Self::process_decode_stream(
+            decode_stream,
+            emitter,
+            tx,
+            session,
+            format_registry,
+            prefill_cached_tokens,
+        )
+        .await;
 
         prefill_stream.mark_completed();
         result
@@ -548,6 +565,7 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
+        format_registry: Option<&FormatRegistry>,
         prefill_cached_tokens: u32,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
@@ -680,7 +698,9 @@ impl HarmonyStreamingProcessor {
                                 // Determine response_format based on MCP context.
                                 let response_format = session.and_then(|s| {
                                     if s.has_exposed_tool(tool_name) {
-                                        Some(s.tool_response_format(tool_name))
+                                        format_registry.map(|reg| {
+                                            openai_bridge::lookup_tool_format(s, reg, tool_name)
+                                        })
                                     } else {
                                         None
                                     }
@@ -700,7 +720,7 @@ impl HarmonyStreamingProcessor {
 
                                 tool_call_tracking.insert(
                                     call_index,
-                                    (output_index, item_id.clone(), response_format.clone()),
+                                    (output_index, item_id.clone(), response_format),
                                 );
 
                                 // Build output_item.added event
@@ -726,7 +746,7 @@ impl HarmonyStreamingProcessor {
                                 emitter.send_event_best_effort(&event, tx);
 
                                 // Emit in_progress event for MCP tools
-                                if let Some(ref fmt) = response_format {
+                                if let Some(fmt) = response_format {
                                     let event = emitter.emit_tool_call_in_progress(
                                         output_index,
                                         &item_id,
@@ -861,7 +881,7 @@ impl HarmonyStreamingProcessor {
                                 }
 
                                 // Emit completed event for MCP tools
-                                if let Some(ref fmt) = response_format {
+                                if let Some(fmt) = *response_format {
                                     let event = emitter.emit_tool_call_completed(
                                         *output_index,
                                         item_id,
@@ -998,7 +1018,7 @@ impl HarmonyStreamingProcessor {
                         }
 
                         // Emit completed event for MCP tools
-                        if let Some(ref fmt) = response_format {
+                        if let Some(fmt) = *response_format {
                             let event =
                                 emitter.emit_tool_call_completed(*output_index, item_id, fmt);
                             emitter.send_event_best_effort(&event, tx);
@@ -1113,7 +1133,7 @@ mod tests {
     /// the production classifier so a drift between the two is a separate
     /// failure (runtime assertion miss) from a missing variant (compile
     /// error here).
-    fn expected_streams_arguments(format: &ResponseFormat) -> bool {
+    fn expected_streams_arguments(format: ResponseFormat) -> bool {
         match format {
             ResponseFormat::Passthrough => true,
             ResponseFormat::WebSearchCall
@@ -1144,28 +1164,28 @@ mod tests {
             streams_arguments(Some(&passthrough)),
             "mcp_call (Passthrough) should stream args",
         );
-        assert!(expected_streams_arguments(&passthrough));
+        assert!(expected_streams_arguments(passthrough));
 
         // Hosted built-ins do *not* stream arguments — they surface
         // progress via structured `*.in_progress` / `*.searching` /
         // `*.generating` / `*.completed` events from the shared emitter.
         let web_search = ResponseFormat::WebSearchCall;
         assert!(!streams_arguments(Some(&web_search)));
-        assert!(!expected_streams_arguments(&web_search));
+        assert!(!expected_streams_arguments(web_search));
 
         let code_interpreter = ResponseFormat::CodeInterpreterCall;
         assert!(!streams_arguments(Some(&code_interpreter)));
-        assert!(!expected_streams_arguments(&code_interpreter));
+        assert!(!expected_streams_arguments(code_interpreter));
 
         let file_search = ResponseFormat::FileSearchCall;
         assert!(!streams_arguments(Some(&file_search)));
-        assert!(!expected_streams_arguments(&file_search));
+        assert!(!expected_streams_arguments(file_search));
 
         let image_generation = ResponseFormat::ImageGenerationCall;
         assert!(
             !streams_arguments(Some(&image_generation)),
             "image_generation_call must ride the structured-event path",
         );
-        assert!(!expected_streams_arguments(&image_generation));
+        assert!(!expected_streams_arguments(image_generation));
     }
 }
