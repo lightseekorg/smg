@@ -56,27 +56,13 @@ impl FormatRegistry {
         self.formats.remove(qualified);
     }
 
-    /// Populate from a server config: per-tool overrides + builtin defaults.
+    /// Populate from a server config. Safe to call repeatedly.
     ///
-    /// Safe to call repeatedly. Each affected key is unconditionally rewritten
-    /// (or removed for an explicit `Some(Passthrough)` downgrade) so a later
-    /// config that demotes a tool from a hosted format back to `Passthrough`
-    /// does not leave the previous entry behind in the map.
-    ///
-    /// Mirrors `McpOrchestrator::apply_tool_configs` *and* the dispatch shape
-    /// of `McpToolSession`. Two production lookup paths must resolve to the
-    /// same format:
-    /// - via the alias key `("alias", alias_name)` — what the session exposes
-    ///   when `collect_visible_mcp_tools` replaces the direct entry with its
-    ///   alias entry (see `crates/mcp/src/core/session.rs:565-571`).
-    /// - via the underlying `(server_key, tool_name)` — what direct dispatch
-    ///   uses when no alias hides the tool.
-    ///
-    /// So when a tool has an alias the format is mirrored on **both** keys.
-    /// Aliased builtin tools get the same treatment, and only when the
-    /// per-tool stanza omits `response_format` entirely (`None`) is the
-    /// builtin default applied; an explicit `Some(Passthrough)` is the
-    /// documented escape hatch for opting out of the hosted shape.
+    /// `McpToolSession::collect_visible_mcp_tools` replaces a direct tool
+    /// entry with its alias entry, so production session lookup of an
+    /// aliased tool resolves through `("alias", alias_name)`. Direct
+    /// dispatch still uses `(server_key, tool_name)`. Both keys must carry
+    /// the same format, so non-Passthrough formats are mirrored on both.
     pub fn populate_from_server_config(&self, config: &McpServerConfig) {
         if let Some(tools) = &config.tools {
             for (tool_name, tool_config) in tools {
@@ -87,16 +73,10 @@ impl FormatRegistry {
                     .map(|alias| QualifiedToolName::new(ALIAS_SERVER_KEY, alias));
 
                 let Some(format_config) = tool_config.response_format else {
-                    // `response_format` omitted: defer to the builtin-default
-                    // pass below. Don't touch existing entries here so a
-                    // direct-dispatch override placed by an earlier loop
-                    // iteration survives.
                     continue;
                 };
                 let format: ResponseFormat = format_config.into();
                 if format == ResponseFormat::Passthrough {
-                    // Explicit downgrade — clear any prior hosted-format entry
-                    // on every key the production lookup might consult.
                     self.remove(&direct_key);
                     if let Some(alias_key) = &alias_key {
                         self.remove(alias_key);
@@ -104,10 +84,6 @@ impl FormatRegistry {
                     continue;
                 }
 
-                // Mirror the format on every key production might query.
-                // Also write the direct key so that direct dispatch (which
-                // does not go through the alias rewrite) still gets the
-                // hosted shape.
                 self.insert(direct_key, format);
                 if let Some(alias_key) = alias_key {
                     self.insert(alias_key, format);
@@ -123,10 +99,6 @@ impl FormatRegistry {
             if !has_explicit_format {
                 let format: ResponseFormat = builtin_type.response_format().into();
                 self.insert(QualifiedToolName::new(&config.name, tool_name), format);
-                // `collect_visible_mcp_tools` exposes the alias entry instead
-                // of the direct entry, so the production lookup queries
-                // `("alias", alias)`. Without this mirror an alias-only stanza
-                // on a builtin tool silently degrades to `Passthrough`.
                 if let Some(alias) = stanza.and_then(|cfg| cfg.alias.as_deref()) {
                     self.insert(QualifiedToolName::new(ALIAS_SERVER_KEY, alias), format);
                 }
@@ -173,10 +145,6 @@ mod tests {
 
     #[test]
     fn alias_format_mirrored_on_both_keys() {
-        // The session lookup path goes through `("alias", alias_name)` because
-        // `collect_visible_mcp_tools` replaces the direct entry with its alias
-        // entry. Direct dispatch (no alias rewrite) still queries
-        // `(server_key, tool_name)`, so both keys must carry the format.
         let mut tools = HashMap::new();
         tools.insert(
             "brave_web_search".to_string(),
@@ -195,13 +163,10 @@ mod tests {
         assert_eq!(
             r.lookup_by_names("alias", "web_search"),
             ResponseFormat::WebSearchCall,
-            "alias entry must use the literal `alias` server_key prefix"
         );
         assert_eq!(
             r.lookup_by_names("brave", "brave_web_search"),
             ResponseFormat::WebSearchCall,
-            "direct (server_key, tool_name) entry must also carry the format \
-             so direct dispatch resolves the same shape as alias dispatch"
         );
     }
 
@@ -250,7 +215,6 @@ mod tests {
             "do_search".to_string(),
             ToolConfig {
                 alias: None,
-                // Explicit override differs from the builtin default.
                 response_format: Some(ResponseFormatConfig::Passthrough),
                 arg_mapping: None,
             },
@@ -263,8 +227,6 @@ mod tests {
         let r = FormatRegistry::new();
         r.populate_from_server_config(&cfg);
 
-        // Explicit Some(Passthrough) override means "no entry inserted" AND
-        // the builtin default is NOT applied on top.
         assert_eq!(
             r.lookup_by_names("search", "do_search"),
             ResponseFormat::Passthrough
@@ -273,14 +235,6 @@ mod tests {
 
     #[test]
     fn alias_only_stanza_preserves_builtin_default_on_both_keys() {
-        // Regression: a per-tool stanza that only aliases a builtin tool
-        // (or only sets arg_mapping) used to suppress the builtin default,
-        // collapsing the hosted format to plain mcp_call. The crucial
-        // production path is the alias key — `collect_visible_mcp_tools`
-        // exposes the alias entry, so `lookup_tool_format(session, …,
-        // "web_search")` resolves to `("alias", "web_search")`. If the
-        // builtin default only landed at the direct key, dispatch silently
-        // degrades to `Passthrough`.
         let mut tools = HashMap::new();
         tools.insert(
             "do_search".to_string(),
@@ -298,27 +252,20 @@ mod tests {
         let r = FormatRegistry::new();
         r.populate_from_server_config(&cfg);
 
-        // Alias key — what production session lookup actually hits.
+        // Alias key — what production session lookup hits.
         assert_eq!(
             r.lookup_by_names("alias", "web_search"),
             ResponseFormat::WebSearchCall,
-            "alias-only stanza on a builtin must mirror the hosted format on \
-             the alias key — that is the key production resolves through"
         );
         // Direct key — what direct dispatch hits.
         assert_eq!(
             r.lookup_by_names("search", "do_search"),
             ResponseFormat::WebSearchCall,
-            "direct (server, tool) lookup must still resolve the hosted format"
         );
     }
 
     #[test]
     fn explicit_passthrough_downgrade_clears_prior_hosted_entry() {
-        // `populate_from_server_config` is called every time a server
-        // (re)registers, so a config that flips a tool from a hosted format
-        // back to `Passthrough` must clear the stale entry — otherwise the
-        // registry keeps transforming outputs as the old hosted type.
         let r = FormatRegistry::new();
 
         let mut hosted = HashMap::new();
@@ -336,12 +283,10 @@ mod tests {
         assert_eq!(
             r.lookup_by_names("alias", "web_search"),
             ResponseFormat::WebSearchCall,
-            "precondition: alias key carries the hosted format"
         );
         assert_eq!(
             r.lookup_by_names("brave", "brave_web_search"),
             ResponseFormat::WebSearchCall,
-            "precondition: direct key carries the hosted format"
         );
 
         let mut downgraded = HashMap::new();
@@ -360,12 +305,10 @@ mod tests {
         assert_eq!(
             r.lookup_by_names("alias", "web_search"),
             ResponseFormat::Passthrough,
-            "explicit Passthrough must clear the previous alias entry"
         );
         assert_eq!(
             r.lookup_by_names("brave", "brave_web_search"),
             ResponseFormat::Passthrough,
-            "explicit Passthrough must clear the previous direct entry"
         );
     }
 }

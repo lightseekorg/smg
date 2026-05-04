@@ -248,9 +248,7 @@ pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
 }
 
 /// True if `tools` carries any MCP-routed entry (declared MCP server or a
-/// builtin family that the gateway intercepts via MCP). Used by the OpenAI
-/// router to decide whether the format-registry component is required for
-/// the request — plain-tool requests don't need it and must not 500.
+/// builtin family that the gateway intercepts via MCP).
 pub fn request_uses_mcp_routing(tools: &[ResponseTool]) -> bool {
     tools.iter().any(|t| {
         matches!(

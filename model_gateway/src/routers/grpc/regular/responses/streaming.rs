@@ -739,16 +739,6 @@ async fn execute_tool_loop_streaming_internal(
                 let success = !tool_output.is_error;
                 let output_str = tool_output.output.to_string();
 
-                // Build the typed output item once and reuse it for both the
-                // streamed `output_item.done` payload and the persisted state
-                // record. The previous code hand-rolled an ad-hoc envelope
-                // (`{name, status, arguments, output|error}`) for the wire
-                // payload — a shape that does not match the hosted-builtin
-                // variants (`web_search_call`/`code_interpreter_call`/
-                // `file_search_call`/`image_generation_call` have no `name`/
-                // `arguments`/`output` fields, and only `mcp_call` carries an
-                // `error` field) — so the streamed final item could diverge
-                // from the persisted one and leak invalid fields on failure.
                 let output_item =
                     openai_bridge::transform_tool_output(&tool_output, response_format);
                 let mut item_done = serde_json::to_value(&output_item).unwrap_or_else(|e| {
@@ -763,8 +753,8 @@ async fn execute_tool_loop_streaming_internal(
                         "status": if success { "completed" } else { "failed" },
                     })
                 });
-                // Preserve the streaming-allocated id so `output_item.done`
-                // matches the earlier `output_item.added`.
+                // Override the typed item's id so output_item.done matches the
+                // streaming-allocated id used by the earlier output_item.added.
                 if let Some(obj) = item_done.as_object_mut() {
                     obj.insert("id".to_string(), json!(&item_id));
                 }
@@ -775,7 +765,6 @@ async fn execute_tool_loop_streaming_internal(
                 );
 
                 if success {
-                    // Emit format-specific tool_call.completed event.
                     let event =
                         emitter.emit_tool_call_completed(output_index, &item_id, response_format);
                     emitter.send_event(&event, &tx)?;
@@ -786,11 +775,9 @@ async fn execute_tool_loop_streaming_internal(
                         .unwrap_or_else(|| output_str.clone());
                     warn!("Tool execution returned error: {}", err_text);
 
-                    // `mcp_call.failed` is the only `*.failed` event in the
-                    // Responses API event taxonomy — hosted-builtin families
-                    // close out via `*.completed` followed by `output_item.done`
-                    // carrying `status: "failed"` (no `error` field on those
-                    // variants).
+                    // `response.mcp_call.failed` is the only `*.failed` event
+                    // in the Responses API; hosted-builtin families close via
+                    // `*.completed` + `output_item.done` with status=failed.
                     if matches!(response_format, ResponseFormat::Passthrough) {
                         let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_text);
                         emitter.send_event(&event, &tx)?;
@@ -804,13 +791,10 @@ async fn execute_tool_loop_streaming_internal(
                     }
                 }
 
-                // Emit output_item.done with the transformed item (correct
-                // shape for both mcp_call and hosted-builtin variants).
                 let event = emitter.emit_output_item_done(output_index, &item_done);
                 emitter.send_event(&event, &tx)?;
                 emitter.complete_output_item(output_index);
 
-                // Record MCP tool metrics
                 Metrics::record_mcp_tool_duration(
                     &current_request.model,
                     &tool_output.tool_name,
@@ -826,8 +810,6 @@ async fn execute_tool_loop_streaming_internal(
                     },
                 );
 
-                // Record the call in state with the same transformed item we
-                // just emitted on the wire.
                 state.record_call(
                     tool_output.call_id,
                     tool_output.tool_name,

@@ -63,17 +63,10 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
-    // The format registry is the router-side source of truth for MCP
-    // builtin/alias format resolution; falling back to a default would
-    // silently mis-route hosted tools instead of failing fast. The check is
-    // scoped to MCP-laden requests — plain non-MCP requests must still
-    // succeed in deployments where the gateway runs without MCP wiring.
-    //
-    // A request with MCP tools but no registry component is a configuration
-    // error: route resolution would silently degrade to `Passthrough`, so we
-    // fail fast instead. Resolve `(mcp_servers, registry)` together so the
-    // typed result carries the registry into the MCP arm without a second
-    // option lookup.
+    // Only MCP-laden requests need the format registry; without this
+    // narrowing, plain non-MCP requests would 500 in deployments that run
+    // the gateway without MCP wiring. A registry-less MCP request still
+    // hard-fails — silent fallback would mis-route hosted tools.
     let mcp_routing = match original_body.tools.as_deref() {
         Some(tools) if request_uses_mcp_routing(tools) => {
             let Some(registry) = ctx.components.mcp_format_registry() else {

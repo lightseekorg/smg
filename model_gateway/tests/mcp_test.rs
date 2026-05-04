@@ -334,12 +334,6 @@ async fn test_web_search_transform_handles_openai_search_response_with_mock() {
 
     assert!(!output.is_error, "Tool execution should succeed");
 
-    // Route the actual `ToolExecutionOutput` through the production bridge
-    // helper so a regression in session-side rewrites (`call_id`,
-    // `server_label`, `tool_name`, `arguments_str` all live on `output`)
-    // would surface here too. Hardcoding those fields against
-    // `ResponseTransformer::transform` would let such a regression slip
-    // through with the test still green.
     let transformed = transform_tool_output(&output, ResponseFormat::WebSearchCall);
     match transformed {
         ResponseOutputItem::WebSearchCall { action, .. } => match action {
@@ -415,9 +409,6 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
 
     assert!(!output.is_error, "Tool execution should succeed");
 
-    // Same reasoning as the OpenAI variant above — feed the actual
-    // `ToolExecutionOutput` through the production bridge helper so any
-    // future regression in session-side field rewrites surfaces here.
     let transformed = transform_tool_output(&output, ResponseFormat::WebSearchCall);
     match transformed {
         ResponseOutputItem::WebSearchCall { action, .. } => match action {

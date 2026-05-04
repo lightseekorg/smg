@@ -158,8 +158,8 @@ pub struct ToolExecutionInput {
 /// Output from batch tool execution.
 ///
 /// `#[non_exhaustive]` so additive fields don't break consumers; only
-/// `smg-mcp` constructs this in production. External crates that need to
-/// fabricate one for tests should use [`ToolExecutionOutput::new_for_test`].
+/// `smg-mcp` constructs this in production. External tests use
+/// [`ToolExecutionOutput::new_for_test`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ToolExecutionOutput {
@@ -186,18 +186,12 @@ pub struct ToolExecutionOutput {
 }
 
 impl ToolExecutionOutput {
-    /// Construct an instance from explicit field values.
-    ///
-    /// `#[non_exhaustive]` blocks struct-literal syntax in downstream crates,
-    /// but those crates still need a way to fabricate fixtures (e.g. router
-    /// transformer tests that need a `is_error: true` output without spinning
-    /// up an MCP server). Adding a field to the struct doesn't break this
-    /// constructor — only adding a *required* field would, which is a
-    /// deliberate signal that all callers need to think about the new field.
+    /// Test-only constructor for downstream crates blocked by
+    /// `#[non_exhaustive]`. One positional arg per public field is
+    /// intentional so adding a field forces every test to consider it.
     #[expect(
         clippy::too_many_arguments,
-        reason = "Test fixture constructor; one positional arg per public field is intentional \
-                  so adding a field forces every test to consider it."
+        reason = "Test fixture constructor; one arg per field is intentional."
     )]
     pub fn new_for_test(
         call_id: impl Into<String>,

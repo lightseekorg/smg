@@ -86,13 +86,10 @@ pub fn response_tools(session: &McpToolSession<'_>) -> Vec<ResponseTool> {
 
 /// `McpToolInfo` records used inside `mcp_list_tools` output items.
 ///
-/// Wire-shape note: OpenAI's Responses API exposes only `{"read_only": …}`
-/// inside `mcp_list_tools[].tools[].annotations`. The richer SMG
-/// `ToolAnnotations` (which also carries `destructive`/`idempotent`/
-/// `open_world`) is intentionally narrowed here to match that shape — those
-/// extra hints are read directly off `ToolEntry::annotations` by the approval
-/// pipeline and would only confuse downstream OpenAI-compatible clients if
-/// emitted on the wire.
+/// `annotations` is narrowed to `{"read_only": …}` to match OpenAI's
+/// Responses API shape. The richer `ToolAnnotations` (with
+/// `destructive`/`idempotent`/`open_world`) is read internally off
+/// `ToolEntry::annotations` by the approval pipeline.
 pub fn build_mcp_tool_infos(entries: &[smg_mcp::ToolEntry]) -> Vec<McpToolInfo> {
     entries
         .iter()
@@ -342,11 +339,6 @@ mod tests {
 
     #[test]
     fn build_mcp_tool_infos_emits_only_read_only_annotation() {
-        // Wire-spec parity: OpenAI's `mcp_list_tools[].tools[].annotations`
-        // exposes `{"read_only": …}` only. The richer SMG `ToolAnnotations`
-        // carries `destructive`/`idempotent`/`open_world` that the approval
-        // pipeline reads internally; surfacing them on the wire would change
-        // the documented shape.
         let annotations = ToolAnnotations::default()
             .with_read_only(true)
             .with_destructive(true);

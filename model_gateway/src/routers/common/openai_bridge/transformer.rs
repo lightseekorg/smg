@@ -9,23 +9,18 @@ use tracing::warn;
 
 use super::ResponseFormat;
 
-/// Transform a `ToolExecutionOutput` to a `ResponseOutputItem` using a
+/// Transform a `ToolExecutionOutput` into a `ResponseOutputItem` using a
 /// pre-resolved `ResponseFormat`.
 ///
-/// The format MUST be resolved via the session's exposed-name map (e.g.
-/// [`super::lookup_tool_format`]). `output.tool_name` is the *invoked/exposed*
-/// name after `McpToolSession::execute_tool_result` rewrites it, so a registry
-/// lookup against `(output.server_key, output.tool_name)` would miss for
-/// disambiguated names like `mcp_<server>_<tool>` and silently degrade to
-/// `Passthrough`.
+/// `response_format` must be resolved via the session's exposed-name map
+/// (e.g. [`super::lookup_tool_format`]) — `output.tool_name` carries the
+/// *invoked/exposed* name after session-side rewriting, so a fresh
+/// registry lookup against `(output.server_key, output.tool_name)` would
+/// miss for disambiguated names like `mcp_<server>_<tool>`.
 ///
-/// Failure handling: when `output.is_error` is set, the success-path builders
-/// (which always stamp `status = "completed"` and `error = None`) would
-/// persist a failed call as a success and replay it as such on the next turn.
-/// We bypass them and emit a typed failure item — `status = "failed"` on every
-/// hosted-builtin variant; only the `mcp_call` variant carries an additional
-/// `error` field, matching the OpenAI Responses spec where the four
-/// hosted-builtin families convey failure via `status` alone.
+/// On `is_error`, the four hosted-builtin variants emit `status: "failed"`
+/// only (those wire shapes have no `error` field); `mcp_call` carries the
+/// `error_message` in its `error` field.
 pub fn transform_tool_output(
     output: &smg_mcp::ToolExecutionOutput,
     response_format: ResponseFormat,
@@ -43,9 +38,6 @@ pub fn transform_tool_output(
     )
 }
 
-/// Build a typed failure-state output item for a `ToolExecutionOutput` whose
-/// `is_error` is set. Centralizes the per-format failure shape so callers
-/// don't need to reach into the typed `ResponseOutputItem` enum.
 fn failed_output_item(
     output: &smg_mcp::ToolExecutionOutput,
     response_format: ResponseFormat,
@@ -68,8 +60,6 @@ fn failed_output_item(
         ResponseFormat::WebSearchCall => ResponseOutputItem::WebSearchCall {
             id: format!("ws_{}", output.call_id),
             status: WebSearchCallStatus::Failed,
-            // No query is recoverable from a failed dispatch; emit the
-            // empty `Search` action variant so the wire shape stays valid.
             action: WebSearchAction::Search {
                 query: None,
                 queries: Vec::new(),
@@ -1660,10 +1650,6 @@ mod tests {
 
     #[test]
     fn transform_tool_output_emits_hosted_failed_status_only() {
-        // Hosted-builtin variants must convey failure via `status: "failed"`
-        // alone; they have no `error` field on the wire. Using
-        // `transform_tool_output` against the success-path builders would
-        // stamp `status: "completed"` on a failed call — that is the bug.
         for fmt in [
             ResponseFormat::WebSearchCall,
             ResponseFormat::CodeInterpreterCall,
@@ -1672,15 +1658,8 @@ mod tests {
         ] {
             let item = transform_tool_output(&failed_tool_output("search"), fmt);
             let serialized = serde_json::to_value(&item).expect("serialize failed item");
-            assert_eq!(
-                serialized["status"],
-                serde_json::json!("failed"),
-                "{fmt:?} must serialize status=failed on error"
-            );
-            assert!(
-                serialized.get("error").is_none(),
-                "{fmt:?} must not carry an `error` field (hosted variants don't have one): {serialized}"
-            );
+            assert_eq!(serialized["status"], serde_json::json!("failed"), "{fmt:?}");
+            assert!(serialized.get("error").is_none(), "{fmt:?} {serialized}");
         }
     }
 

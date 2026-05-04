@@ -1086,14 +1086,8 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
-    // Scope the format-registry fail-fast to MCP-laden requests. Plain
-    // streaming requests must still pass through deployments that run
-    // without MCP wiring; only requests that actually need MCP routing
-    // require the registry.
-    //
-    // Resolve `(mcp_servers, registry)` as a single tuple so the cloned
-    // registry follows mcp_servers into the interception path without a
-    // second option lookup downstream.
+    // Only MCP-laden requests need the format registry; plain streaming
+    // requests must still pass through deployments without MCP wiring.
     let mcp_routing = match original_body.tools.as_deref() {
         Some(tools) if request_uses_mcp_routing(tools) => {
             let Some(registry) = ctx.components.mcp_format_registry() else {

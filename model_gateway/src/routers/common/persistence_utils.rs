@@ -327,15 +327,10 @@ fn item_to_new_conversation_item(
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
-    // Store the whole item for every non-message type, regardless of input vs
-    // output side. The previous input-side branch only treated
-    // `function_call` / `function_call_output` as whole-item, so a replayed
-    // structural item (e.g. `image_generation_call`, `web_search_call`,
-    // `mcp_call` carried back into a turn's input) fell through to the
-    // `content` extractor — but those items have no `content` field, so
-    // persistence would store an empty array and the next history load would
-    // lose the original item. Non-message items have no `content` field on
-    // the wire either way, so unifying the rule is safe.
+    // Non-message items carry their fields at the top level (no `content`
+    // field on the wire), so reading `content` on the input side would
+    // collapse replayed structural items (`image_generation_call`,
+    // `web_search_call`, …) to `[]`.
     let store_whole_item = item_type != "message";
 
     let content = if store_whole_item {
@@ -526,13 +521,6 @@ mod tests {
 
     #[test]
     fn replayed_image_generation_input_item_is_stored_whole() {
-        // Regression: structural input items (replayed `image_generation_call`
-        // and friends) carry their fields at the top level — not under
-        // `content`. The previous input-side branch only treated
-        // `function_call`/`function_call_output` as whole-item, so any other
-        // structural type fell through to `item_value.get("content")` which
-        // collapsed to `[]`, dropping the whole item from the next history
-        // load.
         let input_item = json!({
             "id": "ig_replay_1",
             "type": "image_generation_call",
@@ -542,15 +530,12 @@ mod tests {
 
         let new_item = item_to_new_conversation_item(&input_item, None, /* is_input */ true);
         assert_eq!(new_item.item_type, "image_generation_call");
-        // Whole-item content preserves all top-level fields, not just `content`.
         assert_eq!(
             new_item
                 .content
                 .get("revised_prompt")
                 .and_then(|v| v.as_str()),
             Some("cat"),
-            "structural input items must round-trip their top-level fields, \
-             not collapse to `content` (was bug for replayed hosted-tool items)"
         );
         assert_eq!(
             new_item.content.get("type").and_then(|v| v.as_str()),
@@ -560,9 +545,6 @@ mod tests {
 
     #[test]
     fn replayed_message_input_item_still_extracts_content() {
-        // The unification only changes non-message handling; message items
-        // continue to extract their `content` array (and may wrap with `phase`
-        // when present, exercised separately).
         let input_item = json!({
             "id": "msg_1",
             "type": "message",
