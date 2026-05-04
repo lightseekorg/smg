@@ -34,7 +34,7 @@ use tracing::warn;
 
 use super::{
     accumulator::StreamingResponseAccumulator,
-    common::{extract_output_index, get_event_type, parse_sse_block, ChunkProcessor},
+    common::{extract_output_index, parse_sse_block, ChunkProcessor},
     utils::{
         patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
         rewrite_streaming_block,
@@ -42,8 +42,9 @@ use super::{
 };
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
+use super::super::provider::{Provider, ProviderError};
 use crate::{
-    observability::metrics::Metrics,
+    observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
             header_utils::{
@@ -62,7 +63,37 @@ use crate::{
             },
         },
     },
+    worker::Endpoint,
 };
+
+fn maybe_transform_final_response_for_persistence(
+    response: &mut Value,
+    provider: Option<&dyn Provider>,
+    model_id: &str,
+) -> Result<(), ProviderError> {
+    if let Some(provider) =
+        provider.filter(|p| !p.is_openai_response_shape(response, Endpoint::Responses))
+    {
+        if let Err(err) = provider.transform_response(response, Endpoint::Responses) {
+            warn!(
+                model = %model_id,
+                provider = ?provider.provider_type(),
+                error = %err,
+                "Failed to transform final response for persistence"
+            );
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model_id,
+                metrics_labels::ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_INTERNAL,
+            );
+            return Err(err);
+        }
+    }
+    Ok(())
+}
 
 /// Apply all transformations to event data in-place (rewrite + transform)
 /// Optimized to parse JSON only once instead of multiple times
@@ -336,7 +367,7 @@ pub(super) fn forward_streaming_event(
     }
 
     // Use pre-parsed value or parse JSON data
-    let mut parsed_data: Value = match pre_parsed {
+    let parsed_data: Value = match pre_parsed {
         Some(v) => v,
         None => match serde_json::from_str(data) {
             Ok(v) => v,
@@ -347,71 +378,155 @@ pub(super) fn forward_streaming_event(
         },
     };
 
-    let event_type = get_event_type(event_name, &parsed_data);
-    if event_type == ResponseEvent::COMPLETED {
-        return true;
-    }
+    let transformed_events =
+        normalize_streaming_events_with_provider(&parsed_data, handler, ctx.provider.as_deref());
+    forward_normalized_streaming_events(
+        transformed_events,
+        event_name,
+        raw_block,
+        handler,
+        tx,
+        ctx,
+        sequence_number,
+    )
+}
 
-    // Handle function_call_arguments.done - send buffered args first
-    let mut mapped_output_index: Option<usize> = None;
-    if event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
-        && !send_buffered_arguments(
-            &mut parsed_data,
-            handler,
-            tx,
-            sequence_number,
-            &mut mapped_output_index,
-        )
-    {
-        return false;
-    }
-
-    if mapped_output_index.is_none() {
-        if let Some(idx) = extract_output_index(&parsed_data) {
-            mapped_output_index = handler.mapped_output_index(idx);
+fn normalize_streaming_events_with_provider(
+    parsed_data: &Value,
+    handler: &mut StreamingToolHandler,
+    provider: Option<&dyn Provider>,
+) -> Vec<Value> {
+    // Provider normalization comes first so downstream gateway rewrites
+    // operate on OpenAI-shaped events regardless of upstream provider format.
+    let mut transformed_events = vec![parsed_data.clone()];
+    if let Some(provider) = provider {
+        handler.ensure_provider_stream_state(provider);
+        let state = handler.provider_stream_state_mut();
+        match provider.transform_stream_event(&transformed_events[0], state, Endpoint::Responses) {
+            Ok(events) => {
+                if events.is_empty() {
+                    warn!(
+                        provider = ?provider.provider_type(),
+                        "Provider returned empty transformed stream event list; forwarding original event"
+                    );
+                } else {
+                    transformed_events = events;
+                }
+            }
+            Err(err) => {
+                warn!(
+                    provider = ?provider.provider_type(),
+                    error = %err,
+                    "Provider stream event transformation failed; forwarding original event"
+                );
+            }
         }
     }
-    if let Some(mapped) = mapped_output_index {
-        parsed_data["output_index"] = json!(mapped);
-    }
+    transformed_events
+}
 
-    apply_event_transformations_inplace(&mut parsed_data, ctx);
-
-    if let Some(response_obj) = parsed_data
-        .get_mut("response")
-        .and_then(|v| v.as_object_mut())
-    {
-        if let Some(original_id) = handler.original_response_id() {
-            response_obj.insert("id".to_string(), Value::String(original_id.to_string()));
+fn forward_normalized_streaming_events(
+    transformed_events: Vec<Value>,
+    event_name: Option<&str>,
+    raw_block: &str,
+    handler: &mut StreamingToolHandler,
+    tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    ctx: &StreamingEventContext<'_>,
+    sequence_number: &mut u64,
+) -> bool {
+    for mut parsed_data in transformed_events {
+        let transformed_event_type = parsed_data
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if transformed_event_type.as_deref() == Some(ResponseEvent::COMPLETED)
+            || event_name == Some(ResponseEvent::COMPLETED)
+        {
+            // Preserve transformed completion payload for synthetic-final emission
+            // and persistence paths, then suppress inline forwarding to keep one
+            // canonical completion event at stream end.
+            if let Ok(serialized) = serde_json::to_string(&parsed_data) {
+                let completed_block =
+                    format!("event: {}\ndata: {serialized}", ResponseEvent::COMPLETED);
+                handler.accumulator.ingest_block(&completed_block);
+            }
+            continue;
         }
-    }
 
-    if parsed_data.get("sequence_number").is_some() {
-        parsed_data["sequence_number"] = json!(*sequence_number);
-        *sequence_number += 1;
-    }
-
-    let final_data = match serde_json::to_string(&parsed_data) {
-        Ok(s) => s,
-        Err(_) => {
-            let chunk = format!("{raw_block}\n\n");
-            return tx.send(Ok(Bytes::from(chunk))).is_ok();
+        // Handle function_call_arguments.done - send buffered args first
+        let mut mapped_output_index: Option<usize> = None;
+        if (event_name == Some(FunctionCallEvent::ARGUMENTS_DONE)
+            || parsed_data
+                .get("type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t == FunctionCallEvent::ARGUMENTS_DONE))
+            && !send_buffered_arguments(
+                &mut parsed_data,
+                handler,
+                tx,
+                sequence_number,
+                &mut mapped_output_index,
+            )
+        {
+            return false;
         }
-    };
 
-    let final_block = match event_name {
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
-        None => format!("data: {final_data}\n\n"),
-    };
+        if mapped_output_index.is_none() {
+            if let Some(idx) = extract_output_index(&parsed_data) {
+                mapped_output_index = handler.mapped_output_index(idx);
+            }
+        }
+        if let Some(mapped) = mapped_output_index {
+            parsed_data["output_index"] = json!(mapped);
+        }
 
-    if tx.send(Ok(Bytes::from(final_block))).is_err() {
-        return false;
-    }
+        apply_event_transformations_inplace(&mut parsed_data, ctx);
 
-    if event_name == Some(OutputItemEvent::ADDED)
-        && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
-    {
-        return false;
+        if let Some(response_obj) = parsed_data
+            .get_mut("response")
+            .and_then(|v| v.as_object_mut())
+        {
+            if let Some(original_id) = handler.original_response_id() {
+                response_obj.insert("id".to_string(), Value::String(original_id.to_string()));
+            }
+        }
+
+        if parsed_data.get("sequence_number").is_some() {
+            parsed_data["sequence_number"] = json!(*sequence_number);
+            *sequence_number += 1;
+        }
+
+        let final_data = match serde_json::to_string(&parsed_data) {
+            Ok(s) => s,
+            Err(_) => {
+                let chunk = format!("{raw_block}\n\n");
+                return tx.send(Ok(Bytes::from(chunk))).is_ok();
+            }
+        };
+
+        let outgoing_event_name = parsed_data
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| event_name.map(str::to_string));
+        let final_block = match outgoing_event_name.as_deref() {
+            Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
+            None => format!("data: {final_data}\n\n"),
+        };
+
+        if tx.send(Ok(Bytes::from(final_block))).is_err() {
+            return false;
+        }
+
+        let is_output_item_added = event_name == Some(OutputItemEvent::ADDED)
+            || parsed_data
+                .get("type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t == OutputItemEvent::ADDED);
+        if is_output_item_added && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
+        {
+            return false;
+        }
     }
 
     true
@@ -469,13 +584,18 @@ pub(super) fn send_final_response_event(
     state: &ToolLoopState,
     ctx: &StreamingEventContext<'_>,
 ) -> bool {
-    let mut final_response = match handler.snapshot_final_response() {
-        Some(resp) => resp,
-        None => {
-            warn!("Final response snapshot unavailable; skipping synthetic completion event");
-            return true;
-        }
-    };
+    let mut final_response = handler.snapshot_final_response().unwrap_or_else(|| {
+        warn!("Final response snapshot unavailable; synthesizing minimal completion payload");
+        json!({
+            "id": handler
+                .original_response_id()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::now_v7())),
+            "object": "response",
+            "status": "completed",
+            "output": []
+        })
+    });
 
     if let Some(original_id) = handler.original_response_id() {
         if let Some(obj) = final_response.as_object_mut() {
@@ -487,7 +607,7 @@ pub(super) fn send_final_response_event(
         inject_mcp_metadata_streaming(&mut final_response, state, session);
     }
 
-    restore_original_tools(&mut final_response, ctx.original_request, None);
+    restore_original_tools(&mut final_response, ctx.original_request, ctx.session);
     patch_response_with_request_metadata(
         &mut final_response,
         ctx.original_request,
@@ -520,10 +640,14 @@ pub(super) async fn handle_simple_streaming_passthrough(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
 ) -> Response {
+    let provider_hook = req.provider.clone();
     let mut request_builder = client.post(&req.url).json(&req.payload);
-    let provider = ApiProvider::from_url(&req.url);
-    let auth_header = provider.extract_auth_header(headers, worker.api_key());
-    request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+    let api_provider = ApiProvider::from_url(&req.url);
+    let auth_header = api_provider.extract_auth_header(headers, worker.api_key());
+    request_builder = api_provider.apply_headers(request_builder, auth_header.as_ref());
+    if let Some(provider) = &provider_hook {
+        request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+    }
 
     request_builder = request_builder.header("Accept", "text/event-stream");
 
@@ -562,6 +686,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let should_store = req.original_body.store.unwrap_or(true);
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
+    let provider = req.provider;
     let storage = req.storage;
 
     #[expect(
@@ -573,6 +698,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
         let mut upstream_failed = false;
         let mut receiver_connected = true;
         let mut chunk_processor = ChunkProcessor::new();
+        let mut provider_stream_state = provider.as_ref().and_then(|p| p.new_stream_state());
 
         while let Some(chunk_result) = upstream_stream.next().await {
             match chunk_result {
@@ -580,6 +706,102 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     chunk_processor.push_chunk(&chunk);
 
                     while let Some(raw_block) = chunk_processor.next_block() {
+                        if let Some(provider_ref) = provider.as_deref() {
+                            let (event_name, data) = parse_sse_block(&raw_block);
+                            if !data.is_empty() {
+                                if let Ok(parsed_data) =
+                                    serde_json::from_str::<Value>(data.as_ref())
+                                {
+                                    let state = provider_stream_state
+                                        .as_deref_mut()
+                                        .map(|s| s as &mut (dyn std::any::Any + Send));
+                                    match provider_ref.transform_stream_event(
+                                        &parsed_data,
+                                        state,
+                                        Endpoint::Responses,
+                                    ) {
+                                        Ok(transformed_events) => {
+                                            if transformed_events.is_empty() {
+                                                warn!(
+                                                    provider = ?provider_ref.provider_type(),
+                                                    "Provider returned empty transformed stream event list in passthrough mode; forwarding original event"
+                                                );
+                                                // Fallback to original raw block flow below.
+                                            } else {
+                                                for transformed in transformed_events {
+                                                    match serde_json::to_string(&transformed) {
+                                                        Ok(serialized) => {
+                                                            let transformed_event_name = transformed
+                                                                .get("type")
+                                                                .and_then(|v| v.as_str())
+                                                                .map(str::to_string)
+                                                                .or_else(|| {
+                                                                    event_name.map(str::to_string)
+                                                                });
+                                                            let raw_transformed_block =
+                                                                match transformed_event_name
+                                                                    .as_deref()
+                                                                {
+                                                                    Some(evt) => {
+                                                                        format!(
+                                                                            "event: {}\ndata: {serialized}",
+                                                                            map_event_name(evt)
+                                                                        )
+                                                                    }
+                                                                    None => {
+                                                                        format!("data: {serialized}")
+                                                                    }
+                                                                };
+
+                                                            let chunk_to_send = match rewrite_streaming_block(
+                                                                &raw_transformed_block,
+                                                                &original_request,
+                                                                previous_response_id.as_deref(),
+                                                            ) {
+                                                                Some(modified) => format!("{modified}\n\n"),
+                                                                None => format!("{raw_transformed_block}\n\n"),
+                                                            };
+
+                                                            if should_store {
+                                                                accumulator.ingest_block(&chunk_to_send);
+                                                            }
+
+                                                            if receiver_connected
+                                                                && tx
+                                                                    .send(Ok(Bytes::from(chunk_to_send)))
+                                                                    .is_err()
+                                                            {
+                                                                receiver_connected = false;
+                                                            }
+                                                        }
+                                                        Err(err) => {
+                                                            warn!(
+                                                                "Failed to serialize transformed streaming event in passthrough mode: {}",
+                                                                err
+                                                            );
+                                                        }
+                                                    }
+
+                                                    if !receiver_connected && !should_store {
+                                                        break;
+                                                    }
+                                                }
+
+                                                if !receiver_connected && !should_store {
+                                                    break;
+                                                }
+                                                continue;
+                                            }
+                                        }
+                                        Err(err) => warn!(
+                                            "Failed to transform provider streaming event in passthrough mode: {}",
+                                            err
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+
                         let block_cow = match rewrite_streaming_block(
                             &raw_block,
                             &original_request,
@@ -624,6 +846,17 @@ pub(super) async fn handle_simple_streaming_passthrough(
             }
             let encountered_error = accumulator.encountered_error().cloned();
             if let Some(mut response_json) = accumulator.into_final_response() {
+                if let Err(err) = maybe_transform_final_response_for_persistence(
+                    &mut response_json,
+                    provider.as_deref(),
+                    &original_request.model,
+                ) {
+                    warn!(
+                        "Skipping persistence because final response transform failed: {}",
+                        err
+                    );
+                    return;
+                }
                 patch_response_with_request_metadata(
                     &mut response_json,
                     &original_request,
@@ -683,6 +916,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     let original_request = req.original_body;
     let previous_response_id = req.previous_response_id;
     let existing_mcp_list_tools_labels = req.existing_mcp_list_tools_labels;
+    let provider = req.provider.clone();
     let url = req.url;
     let storage = req.storage;
 
@@ -698,6 +932,18 @@ pub(super) fn handle_streaming_with_tool_interception(
         reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
     )]
     tokio::spawn(async move {
+        macro_rules! send_done_once {
+            () => {{
+                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+            }};
+        }
+        macro_rules! send_error_and_done {
+            ($message:expr) => {{
+                let _ = send_sse_event(&tx, "error", &json!({"error": {"message": $message}}));
+                send_done_once!();
+            }};
+        }
+
         let mut state = ToolLoopState::new(
             original_request.input.clone(),
             existing_mcp_list_tools_labels,
@@ -730,22 +976,31 @@ pub(super) fn handle_streaming_with_tool_interception(
             original_request: &original_request,
             previous_response_id: previous_response_id.as_deref(),
             session: Some(&session),
+            provider: provider.clone(),
         };
-        let provider = ApiProvider::from_url(&url_clone);
+        let forwarding_ctx = StreamingEventContext {
+            original_request: &original_request,
+            previous_response_id: previous_response_id.as_deref(),
+            session: Some(&session),
+            provider: None,
+        };
+        let api_provider = ApiProvider::from_url(&url_clone);
         let auth_header =
-            provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
+            api_provider.extract_auth_header(headers_opt.as_ref(), worker_api_key.as_ref());
 
         loop {
             // Make streaming request
             let mut request_builder = client_clone.post(&url_clone).json(&current_payload);
-            request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+            request_builder = api_provider.apply_headers(request_builder, auth_header.as_ref());
+            if let Some(provider) = &streaming_ctx.provider {
+                request_builder = provider.apply_headers(request_builder, auth_header.as_ref());
+            }
             request_builder = request_builder.header("Accept", "text/event-stream");
 
             let response = match request_builder.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ =
-                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
+                    send_error_and_done!(e.to_string());
                     return;
                 }
             };
@@ -754,11 +1009,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 let body = error::sanitize_error_body(&body);
-                let _ = send_sse_event(
-                    &tx,
-                    "error",
-                    &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
-                );
+                send_error_and_done!(format!("Upstream error {}: {}", status, body));
                 return;
             }
 
@@ -778,129 +1029,147 @@ pub(super) fn handle_streaming_with_tool_interception(
 
                         while let Some(raw_block) = chunk_processor.next_block() {
                             // Parse event
-                            let (event_name, data) = parse_sse_block(&raw_block);
+                            let (_event_name, data) = parse_sse_block(&raw_block);
 
                             if data.is_empty() {
                                 continue;
                             }
+                            // In interception mode we synthesize the terminal sentinel after
+                            // the final response payload; ignore upstream [DONE] to avoid
+                            // duplicate/misordered completion framing.
+                            if data.trim() == "[DONE]" {
+                                continue;
+                            }
 
-                            // Process through handler
-                            let action = handler.process_event(event_name, data.as_ref());
+                            let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+                            let Some(parsed) = parsed else {
+                                if tx
+                                    .send(Ok(Bytes::from(format!("{raw_block}\n\n"))))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            };
 
-                            match action {
-                                StreamAction::Forward => {
-                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
-                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+                            let normalized_events = normalize_streaming_events_with_provider(
+                                &parsed,
+                                &mut handler,
+                                streaming_ctx.provider.as_deref(),
+                            );
 
-                                    // Skip response.created and response.in_progress on subsequent iterations
-                                    let should_skip = if is_first_iteration {
-                                        false
-                                    } else {
-                                        parsed.as_ref().is_some_and(|v| {
-                                            matches!(
-                                                v.get("type").and_then(|t| t.as_str()),
-                                                Some(ResponseEvent::CREATED)
-                                                    | Some(ResponseEvent::IN_PROGRESS)
+                            for normalized_event in normalized_events {
+                                let serialized = match serde_json::to_string(&normalized_event) {
+                                    Ok(s) => s,
+                                    Err(_) => continue,
+                                };
+
+                                let action = handler.process_event(None, &serialized);
+                                let event_type =
+                                    normalized_event.get("type").and_then(|t| t.as_str());
+                                let should_skip = !is_first_iteration
+                                    && matches!(
+                                        event_type,
+                                        Some(ResponseEvent::CREATED)
+                                            | Some(ResponseEvent::IN_PROGRESS)
+                                    );
+                                let is_in_progress = !seen_in_progress
+                                    && event_type == Some(ResponseEvent::IN_PROGRESS);
+
+                                match action {
+                                    StreamAction::Forward => {
+                                        if !should_skip
+                                            && !forward_streaming_event(
+                                                SseEventData {
+                                                    raw_block: &raw_block,
+                                                    event_name: None,
+                                                    data: &serialized,
+                                                    pre_parsed: Some(normalized_event),
+                                                },
+                                                &mut handler,
+                                                &tx,
+                                                &forwarding_ctx,
+                                                &mut sequence_number,
                                             )
-                                        })
-                                    };
-
-                                    // Check in_progress before moving parsed into SseEventData
-                                    let is_in_progress = !seen_in_progress
-                                        && parsed.as_ref().is_some_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str())
-                                                == Some(ResponseEvent::IN_PROGRESS)
-                                        });
-
-                                    if !should_skip {
-                                        // Forward the event with pre-parsed value (moved, not cloned)
-                                        if !forward_streaming_event(
-                                            SseEventData {
-                                                raw_block: &raw_block,
-                                                event_name,
-                                                data: data.as_ref(),
-                                                pre_parsed: parsed,
-                                            },
-                                            &mut handler,
-                                            &tx,
-                                            &streaming_ctx,
-                                            &mut sequence_number,
-                                        ) {
+                                        {
                                             return;
                                         }
                                     }
-
-                                    if is_in_progress {
-                                        seen_in_progress = true;
-                                        if !mcp_list_tools_sent {
-                                            for (server_label, server_key) in &list_tools_bindings {
-                                                let list_tools_index =
-                                                    handler.allocate_synthetic_output_index();
-                                                if !send_mcp_list_tools_events(
-                                                    &tx,
-                                                    &session,
-                                                    server_label,
-                                                    list_tools_index,
-                                                    &mut sequence_number,
-                                                    server_key,
-                                                ) {
-                                                    // Client disconnected
-                                                    return;
-                                                }
-                                            }
-                                            mcp_list_tools_sent = true;
+                                    StreamAction::Buffer => {
+                                        // Don't forward, just buffer
+                                    }
+                                    StreamAction::Drop => {
+                                        // R6.7c native passthrough: upstream
+                                        // emitted an `output_item.done` for a
+                                        // hosted tool-call item that we did
+                                        // NOT wrap as a function_call (and so
+                                        // did not track in `pending_calls`).
+                                        // The upstream envelope arrives
+                                        // mis-ordered BEFORE
+                                        // `response.<type>.completed`, so we
+                                        // drop it here to preserve the wire
+                                        // invariant that `output_item.done`
+                                        // is the LAST event for a given item.
+                                        // Unlike `ExecuteTools`, this does NOT
+                                        // kick the tool loop — there is no
+                                        // dispatched call to finish.
+                                    }
+                                    StreamAction::ExecuteTools {
+                                        forward_triggering_event,
+                                    } => {
+                                        // When the upstream signals tool completion via
+                                        // `output_item.done` (instead of a preceding
+                                        // `function_call_arguments.done`), forwarding the
+                                        // event here would emit an umbrella
+                                        // `response.output_item.done` BEFORE
+                                        // `response.<tool>.completed`, violating spec
+                                        // sub-event ordering. The tool loop emits its own
+                                        // `output_item.done` at the correct position after
+                                        // the `.completed` sub-event; suppress here.
+                                        if forward_triggering_event
+                                            && !should_skip
+                                            && !forward_streaming_event(
+                                                SseEventData {
+                                                    raw_block: &raw_block,
+                                                    event_name: None,
+                                                    data: &serialized,
+                                                    pre_parsed: Some(normalized_event),
+                                                },
+                                                &mut handler,
+                                                &tx,
+                                                &forwarding_ctx,
+                                                &mut sequence_number,
+                                            )
+                                        {
+                                            return;
                                         }
+                                        tool_calls_detected = true;
                                     }
                                 }
-                                StreamAction::Buffer => {
-                                    // Don't forward, just buffer
-                                }
-                                StreamAction::Drop => {
-                                    // R6.7c native passthrough: upstream
-                                    // emitted an `output_item.done` for a
-                                    // hosted tool-call item that we did
-                                    // NOT wrap as a function_call (and so
-                                    // did not track in `pending_calls`).
-                                    // The upstream envelope arrives
-                                    // mis-ordered BEFORE
-                                    // `response.<type>.completed`, so we
-                                    // drop it here to preserve the wire
-                                    // invariant that `output_item.done`
-                                    // is the LAST event for a given item.
-                                    // Unlike `ExecuteTools`, this does NOT
-                                    // kick the tool loop — there is no
-                                    // dispatched call to finish.
-                                }
-                                StreamAction::ExecuteTools {
-                                    forward_triggering_event,
-                                } => {
-                                    // When the upstream signals tool completion via
-                                    // `output_item.done` (instead of a preceding
-                                    // `function_call_arguments.done`), forwarding the
-                                    // event here would emit an umbrella
-                                    // `response.output_item.done` BEFORE
-                                    // `response.<tool>.completed`, violating spec
-                                    // sub-event ordering. The tool loop emits its own
-                                    // `output_item.done` at the correct position after
-                                    // the `.completed` sub-event; suppress here.
-                                    if forward_triggering_event
-                                        && !forward_streaming_event(
-                                            SseEventData {
-                                                raw_block: &raw_block,
-                                                event_name,
-                                                data: data.as_ref(),
-                                                pre_parsed: None,
-                                            },
-                                            &mut handler,
-                                            &tx,
-                                            &streaming_ctx,
-                                            &mut sequence_number,
-                                        )
-                                    {
-                                        return;
+
+                                if is_in_progress {
+                                    seen_in_progress = true;
+                                    if !mcp_list_tools_sent {
+                                        for (server_label, server_key) in &list_tools_bindings {
+                                            let list_tools_index =
+                                                handler.allocate_synthetic_output_index();
+                                            if !send_mcp_list_tools_events(
+                                                &tx,
+                                                &session,
+                                                server_label,
+                                                list_tools_index,
+                                                &mut sequence_number,
+                                                server_key,
+                                            ) {
+                                                return;
+                                            }
+                                        }
+                                        mcp_list_tools_sent = true;
                                     }
-                                    tool_calls_detected = true;
-                                    break; // Exit stream processing to execute tools
+                                }
+
+                                if tool_calls_detected {
+                                    break;
                                 }
                             }
                         }
@@ -910,11 +1179,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         }
                     }
                     Err(e) => {
-                        let _ = send_sse_event(
-                            &tx,
-                            "error",
-                            &json!({"error": {"message": format!("Stream error: {}", e)}}),
-                        );
+                        send_error_and_done!(format!("Stream error: {}", e));
                         return;
                     }
                 }
@@ -944,6 +1209,18 @@ pub(super) fn handle_streaming_with_tool_interception(
                 };
 
                 if let Some(mut response_json) = final_response_json {
+                    if let Err(err) = maybe_transform_final_response_for_persistence(
+                        &mut response_json,
+                        streaming_ctx.provider.as_deref(),
+                        &original_request.model,
+                    ) {
+                        warn!(
+                            "Skipping persistence because final response transform failed: {}",
+                            err
+                        );
+                        let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                        return;
+                    }
                     if let Some(ref id) = preserved_response_id {
                         if let Some(obj) = response_json.as_object_mut() {
                             obj.insert("id".to_string(), Value::String(id.clone()));
@@ -1005,7 +1282,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     "error",
                     &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
                 );
-                let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                send_done_once!();
                 return;
             }
 
@@ -1037,16 +1314,23 @@ pub(super) fn handle_streaming_with_tool_interception(
                 true, // is_streaming = true
             ) {
                 Ok(resume_payload) => {
-                    current_payload = resume_payload;
+                    let mut next_payload = resume_payload;
+                    if let Some(provider_ref) = streaming_ctx.provider.as_deref() {
+                        if let Err(e) =
+                            provider_ref.transform_request(&mut next_payload, Endpoint::Responses)
+                        {
+                            send_error_and_done!(format!(
+                                "Failed to transform resume payload for provider: {}",
+                                e
+                            ));
+                            return;
+                        }
+                    }
+                    current_payload = next_payload;
                     is_first_iteration = false;
                 }
                 Err(e) => {
-                    send_sse_event(
-                        &tx,
-                        "error",
-                        &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
-                    );
-                    let _ = tx.send(Ok(Bytes::from_static(SSE_DONE.as_bytes())));
+                    send_error_and_done!(format!("Failed to build resume payload: {}", e));
                     return;
                 }
             }
@@ -1113,4 +1397,414 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &mcp_orchestrator,
         mcp_servers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use openai_protocol::responses::{ResponseInput, ResponsesRequest};
+    use serde_json::json;
+    use tokio::sync::{mpsc, mpsc::error::TryRecvError};
+
+    use super::*;
+    use crate::{routers::openai::provider::ProviderError, worker::ProviderType};
+
+    struct CountingProvider {
+        transform_calls: Arc<AtomicUsize>,
+    }
+
+    impl Provider for CountingProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_response(
+            &self,
+            _response: &mut Value,
+            _endpoint: Endpoint,
+        ) -> Result<(), ProviderError> {
+            self.transform_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_openai_response_shape(&self, response: &Value, _endpoint: Endpoint) -> bool {
+            !(response.get("candidates").is_some()
+                || response.get("modelVersion").is_some()
+                || response.get("responseId").is_some()
+                || response.get("usageMetadata").is_some())
+        }
+    }
+
+    #[test]
+    fn persistence_transform_runs_for_provider_native_final_response() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CountingProvider {
+            transform_calls: Arc::clone(&calls),
+        };
+
+        let mut native = json!({
+            "responseId": "resp_upstream",
+            "modelVersion": "gemini-2.5-flash",
+            "candidates": [{"finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 1}
+        });
+
+        maybe_transform_final_response_for_persistence(&mut native, Some(&provider), "test-model")
+            .expect("provider-native response should be transformed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn persistence_transform_skips_openai_shaped_final_response() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CountingProvider {
+            transform_calls: Arc::clone(&calls),
+        };
+
+        let mut openai_shaped = json!({
+            "id": "resp_123",
+            "object": "response",
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]
+        });
+
+        maybe_transform_final_response_for_persistence(
+            &mut openai_shaped,
+            Some(&provider),
+            "test-model",
+        )
+        .expect("openai-shaped response should skip transform");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct FailingTransformProvider;
+
+    impl Provider for FailingTransformProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_response(
+            &self,
+            _response: &mut Value,
+            _endpoint: Endpoint,
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::TransformError("boom".to_string()))
+        }
+
+        fn is_openai_response_shape(&self, _response: &Value, _endpoint: Endpoint) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn persistence_transform_propagates_transform_failure() {
+        let provider = FailingTransformProvider;
+        let mut native = json!({
+            "responseId": "resp_upstream",
+            "candidates": [{"finishReason": "STOP"}]
+        });
+
+        let result =
+            maybe_transform_final_response_for_persistence(&mut native, Some(&provider), "test");
+        assert!(result.is_err(), "transform failures must propagate");
+    }
+
+    struct CreatedEventProvider;
+
+    impl Provider for CreatedEventProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_stream_event(
+            &self,
+            _event: &Value,
+            _state: Option<&mut (dyn std::any::Any + Send)>,
+            _endpoint: Endpoint,
+        ) -> Result<Vec<Value>, ProviderError> {
+            Ok(vec![json!({
+                "type": ResponseEvent::CREATED,
+                "response": {
+                    "id": "resp_provider"
+                }
+            })])
+        }
+    }
+
+    #[test]
+    fn forward_streaming_event_applies_rewrites_after_provider_normalization() {
+        let provider: Arc<dyn Provider> = Arc::new(CreatedEventProvider);
+        let request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hi".to_string()),
+            store: Some(false),
+            ..Default::default()
+        };
+        let ctx = StreamingEventContext {
+            original_request: &request,
+            previous_response_id: Some("resp_prev"),
+            session: None,
+            provider: Some(provider),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut sequence_number = 0;
+
+        let forwarded = forward_streaming_event(
+            SseEventData {
+                raw_block: "data: {\"native\": true}",
+                event_name: None,
+                data: "{\"native\": true}",
+                pre_parsed: None,
+            },
+            &mut handler,
+            &tx,
+            &ctx,
+            &mut sequence_number,
+        );
+
+        assert!(forwarded);
+        let chunk = rx
+            .try_recv()
+            .expect("expected forwarded event")
+            .expect("event should be Ok");
+        let payload = String::from_utf8(chunk.to_vec()).expect("valid UTF-8");
+        assert!(
+            payload.contains("\"store\":false"),
+            "provider-created response.created should be patched with request store flag: {payload}"
+        );
+        assert!(
+            payload.contains("\"previous_response_id\":\"resp_prev\""),
+            "provider-created response.created should be patched with previous_response_id: {payload}"
+        );
+    }
+
+    struct CompletedEventProvider;
+
+    impl Provider for CompletedEventProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_stream_event(
+            &self,
+            _event: &Value,
+            _state: Option<&mut (dyn std::any::Any + Send)>,
+            _endpoint: Endpoint,
+        ) -> Result<Vec<Value>, ProviderError> {
+            Ok(vec![json!({
+                "type": ResponseEvent::COMPLETED,
+                "response": {"id": "resp_provider_done"}
+            })])
+        }
+    }
+
+    #[test]
+    fn forward_streaming_event_skips_provider_generated_response_completed() {
+        let provider: Arc<dyn Provider> = Arc::new(CompletedEventProvider);
+        let request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hi".to_string()),
+            ..Default::default()
+        };
+        let ctx = StreamingEventContext {
+            original_request: &request,
+            previous_response_id: None,
+            session: None,
+            provider: Some(provider),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut sequence_number = 0;
+
+        let forwarded = forward_streaming_event(
+            SseEventData {
+                raw_block: "data: {\"native\": true}",
+                event_name: None,
+                data: "{\"native\": true}",
+                pre_parsed: None,
+            },
+            &mut handler,
+            &tx,
+            &ctx,
+            &mut sequence_number,
+        );
+
+        assert!(forwarded);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "response.completed events should be suppressed and synthesized once at stream end"
+        );
+    }
+
+    #[test]
+    fn forward_streaming_event_skips_provider_completed_even_with_mismatched_event_name() {
+        let provider: Arc<dyn Provider> = Arc::new(CompletedEventProvider);
+        let request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hi".to_string()),
+            ..Default::default()
+        };
+        let ctx = StreamingEventContext {
+            original_request: &request,
+            previous_response_id: None,
+            session: None,
+            provider: Some(provider),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut sequence_number = 0;
+
+        let forwarded = forward_streaming_event(
+            SseEventData {
+                raw_block: "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\"}",
+                event_name: Some("response.output_item.done"),
+                data: "{\"type\":\"response.output_item.done\"}",
+                pre_parsed: None,
+            },
+            &mut handler,
+            &tx,
+            &ctx,
+            &mut sequence_number,
+        );
+
+        assert!(forwarded);
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "provider-transformed response.completed must be suppressed even if incoming event name differs"
+        );
+    }
+
+    struct EmptyEventsProvider;
+
+    impl Provider for EmptyEventsProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_stream_event(
+            &self,
+            _event: &Value,
+            _state: Option<&mut (dyn std::any::Any + Send)>,
+            _endpoint: Endpoint,
+        ) -> Result<Vec<Value>, ProviderError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn forward_streaming_event_falls_back_when_provider_returns_empty_events() {
+        let provider: Arc<dyn Provider> = Arc::new(EmptyEventsProvider);
+        let request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            input: ResponseInput::Text("hi".to_string()),
+            store: Some(false),
+            ..Default::default()
+        };
+        let ctx = StreamingEventContext {
+            original_request: &request,
+            previous_response_id: Some("resp_prev"),
+            session: None,
+            provider: Some(provider),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let mut sequence_number = 0;
+
+        let forwarded = forward_streaming_event(
+            SseEventData {
+                raw_block: "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_upstream\"}}",
+                event_name: Some("response.created"),
+                data: "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_upstream\"}}",
+                pre_parsed: None,
+            },
+            &mut handler,
+            &tx,
+            &ctx,
+            &mut sequence_number,
+        );
+
+        assert!(forwarded);
+        let chunk = rx
+            .try_recv()
+            .expect("expected forwarded fallback event")
+            .expect("event should be Ok");
+        let payload = String::from_utf8(chunk.to_vec()).expect("valid UTF-8");
+        assert!(
+            payload.contains("\"type\":\"response.created\""),
+            "fallback should forward original event type: {payload}"
+        );
+        assert!(
+            payload.contains("\"store\":false"),
+            "fallback path should still patch response metadata: {payload}"
+        );
+    }
+
+    struct NativeToolDoneProvider;
+
+    impl Provider for NativeToolDoneProvider {
+        fn provider_type(&self) -> ProviderType {
+            ProviderType::Gemini
+        }
+
+        fn transform_stream_event(
+            &self,
+            _event: &Value,
+            _state: Option<&mut (dyn std::any::Any + Send)>,
+            _endpoint: Endpoint,
+        ) -> Result<Vec<Value>, ProviderError> {
+            Ok(vec![
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "my_tool"
+                    }
+                }),
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": 0,
+                    "delta": "{\"x\":"
+                }),
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "output_index": 0
+                }),
+            ])
+        }
+    }
+
+    #[test]
+    fn normalized_provider_events_drive_tool_loop_decisions() {
+        let mut handler = StreamingToolHandler::with_starting_index(0);
+        let provider = NativeToolDoneProvider;
+        let native_event = json!({"candidates": [{"content": {"parts": [{"text": "native"}]}}]});
+
+        let normalized =
+            normalize_streaming_events_with_provider(&native_event, &mut handler, Some(&provider));
+
+        let mut saw_execute_tools = false;
+        for event in normalized {
+            let serialized = serde_json::to_string(&event).expect("serializable normalized event");
+            if let StreamAction::ExecuteTools { .. } = handler.process_event(None, &serialized) {
+                saw_execute_tools = true;
+                break;
+            }
+        }
+
+        assert!(
+            saw_execute_tools,
+            "provider-normalized function-call events should trigger ExecuteTools"
+        );
+    }
 }

@@ -1,6 +1,9 @@
 //! Streaming tool call handling for MCP interception.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+};
 
 use openai_protocol::event_types::{
     is_function_call_type, FunctionCallEvent, ItemType, OutputItemEvent, ResponseEvent,
@@ -8,8 +11,9 @@ use openai_protocol::event_types::{
 use serde_json::Value;
 use tracing::warn;
 
-use crate::routers::openai::responses::{
-    extract_output_index, get_event_type, StreamingResponseAccumulator,
+use crate::routers::openai::{
+    provider::Provider,
+    responses::{extract_output_index, get_event_type, StreamingResponseAccumulator},
 };
 
 /// Item-type discriminators for output items that the streaming tool loop
@@ -161,6 +165,8 @@ pub(crate) struct StreamingToolHandler {
     output_index_mapper: OutputIndexMapper,
     /// Original response id captured from the first response.created event
     pub original_response_id: Option<String>,
+    /// Optional provider-specific stream state scoped to this request.
+    provider_stream_state: Option<Box<dyn Any + Send>>,
     /// Output indices whose `output_item.added` carried a known tool-call
     /// item type that the MCP-dispatch registry does NOT track (i.e. upstream
     /// emitted a native hosted-tool item directly — `image_generation_call`,
@@ -180,6 +186,7 @@ impl StreamingToolHandler {
             pending_calls: Vec::new(),
             output_index_mapper: OutputIndexMapper::with_start(start),
             original_response_id: None,
+            provider_stream_state: None,
             native_passthrough_tool_call_indices: HashSet::new(),
         }
     }
@@ -208,6 +215,18 @@ impl StreamingToolHandler {
 
     pub fn snapshot_final_response(&self) -> Option<Value> {
         self.accumulator.snapshot_final_response()
+    }
+
+    pub fn ensure_provider_stream_state(&mut self, provider: &dyn Provider) {
+        if self.provider_stream_state.is_none() {
+            self.provider_stream_state = provider.new_stream_state();
+        }
+    }
+
+    pub fn provider_stream_state_mut(&mut self) -> Option<&mut (dyn Any + Send)> {
+        self.provider_stream_state
+            .as_deref_mut()
+            .map(|state| state as &mut (dyn Any + Send))
     }
 
     /// Process an SSE event and determine what action to take

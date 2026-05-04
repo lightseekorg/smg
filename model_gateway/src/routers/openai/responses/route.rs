@@ -7,8 +7,13 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::{http::HeaderMap, response::Response};
-use openai_protocol::responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest};
+use openai_protocol::{
+    model_card::ModelCard,
+    responses::{ResponseInput, ResponseInputOutputItem, ResponsesRequest},
+    worker::{RuntimeType, WorkerModels, WorkerSpec},
+};
 use serde_json::to_value;
+use url::Url;
 
 use super::{
     super::{
@@ -26,13 +31,272 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     routers::{
         common::{
-            header_utils::extract_conversation_memory_config,
+            header_utils::{
+                extract_conversation_memory_config, extract_model_provider,
+                extract_provider_endpoint,
+            },
             worker_selection::{SelectWorkerRequest, WorkerSelector},
         },
         error,
     },
-    worker::{Endpoint, ProviderType, WorkerRegistry},
+    worker::{BasicWorkerBuilder, Endpoint, ProviderType, WorkerRegistry},
 };
+
+fn parse_provider_hint(headers: Option<&HeaderMap>, model: &str) -> ProviderType {
+    if let Some(raw) = extract_model_provider(headers) {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "openai" | "gpt" | "gpt-oss" => return ProviderType::OpenAI,
+            "xai" | "grok" => return ProviderType::XAI,
+            "gemini" | "google" => return ProviderType::Gemini,
+            "anthropic" | "claude" => return ProviderType::Anthropic,
+            _ => {
+                tracing::warn!(
+                    model,
+                    header_value = raw,
+                    "Invalid x-model-provider hint; falling back to model-name inference"
+                );
+            }
+        }
+    }
+
+    ProviderType::from_model_name(model).unwrap_or(ProviderType::OpenAI)
+}
+
+fn normalize_override_base_url(override_url: &str) -> Option<String> {
+    let mut parsed = Url::parse(override_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.set_path("");
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Some(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn build_ephemeral_external_worker(
+    base_url: &str,
+    model: &str,
+    provider: ProviderType,
+    disable_health_check: bool,
+) -> Arc<dyn crate::worker::Worker> {
+    let mut spec = WorkerSpec::new(base_url.to_string());
+    spec.runtime_type = RuntimeType::External;
+    spec.provider = Some(provider);
+    spec.health.disable_health_check = Some(disable_health_check);
+    spec.models = WorkerModels::from(vec![ModelCard::new(model)]);
+    Arc::new(BasicWorkerBuilder::from_spec(spec).build())
+}
+
+fn parse_endpoint_override(headers: Option<&HeaderMap>) -> Option<String> {
+    extract_provider_endpoint(headers).and_then(|endpoint| {
+        let trimmed = endpoint.trim();
+        Url::parse(trimmed)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .map(|_| trimmed.to_string())
+    })
+}
+
+fn endpoint_override_for_provider(
+    headers: Option<&HeaderMap>,
+    provider_hint: &ProviderType,
+    _model: &str,
+) -> Option<String> {
+    if provider_hint == &ProviderType::Gemini {
+        return parse_endpoint_override(headers);
+    }
+
+    None
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "routing helpers use shared axum Response error contracts across router code"
+)]
+fn validated_endpoint_override_for_provider(
+    headers: Option<&HeaderMap>,
+    provider_hint: &ProviderType,
+    model: &str,
+) -> Result<Option<String>, Response> {
+    if provider_hint != &ProviderType::Gemini {
+        return Ok(None);
+    }
+
+    let provided_override = extract_provider_endpoint(headers)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let parsed_override = endpoint_override_for_provider(headers, provider_hint, model);
+
+    if provided_override && parsed_override.is_none() {
+        tracing::warn!(
+            model,
+            provider_hint = ?provider_hint,
+            "Invalid x-provider-endpoint header: expected a valid http/https URL"
+        );
+        return Err(error::bad_request(
+            "invalid_request",
+            "Invalid x-provider-endpoint header: expected a valid http/https URL".to_string(),
+        ));
+    }
+
+    Ok(parsed_override)
+}
+
+async fn select_worker_with_metrics(
+    deps: &ResponsesRouterContext<'_>,
+    headers: Option<&HeaderMap>,
+    model: &str,
+    provider_hint: &ProviderType,
+) -> Result<Arc<dyn crate::worker::Worker>, Response> {
+    match WorkerSelector::new(
+        deps.worker_registry,
+        &deps.responses_components.shared.client,
+    )
+    .select_worker(&SelectWorkerRequest {
+        model_id: model,
+        headers,
+        provider: Some(provider_hint.clone()),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(worker) => Ok(worker),
+        Err(response) => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model,
+                metrics_labels::ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_NO_WORKERS,
+            );
+            Err(response)
+        }
+    }
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "routing helpers use shared axum Response error contracts across router code"
+)]
+fn validate_endpoint_worker_provider(
+    worker: &Arc<dyn crate::worker::Worker>,
+    provider_hint: &ProviderType,
+    model: &str,
+    endpoint: &str,
+    base_url: &str,
+) -> Result<(), Response> {
+    match worker.default_provider() {
+        Some(existing_provider) if existing_provider == provider_hint => Ok(()),
+        Some(existing_provider) => {
+            tracing::warn!(
+                model,
+                endpoint_override = %endpoint,
+                endpoint_base_url = %base_url,
+                existing_provider = ?existing_provider,
+                requested_provider = ?provider_hint,
+                "responses: endpoint override resolved to provider-mismatched worker"
+            );
+            Err(error::bad_request(
+                "invalid_request",
+                "Endpoint override worker provider does not match requested model provider"
+                    .to_string(),
+            ))
+        }
+        None => {
+            tracing::warn!(
+                model,
+                endpoint_override = %endpoint,
+                endpoint_base_url = %base_url,
+                requested_provider = ?provider_hint,
+                "responses: endpoint override resolved to worker without provider metadata"
+            );
+            Err(error::bad_request(
+                "invalid_request",
+                "Endpoint override worker has no provider metadata; explicit provider match is required"
+                    .to_string(),
+            ))
+        }
+    }
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "routing helpers use shared axum Response error contracts across router code"
+)]
+fn resolve_or_register_gemini_endpoint_worker(
+    deps: &ResponsesRouterContext<'_>,
+    endpoint: &str,
+    base_url: &str,
+    model: &str,
+    provider_hint: &ProviderType,
+) -> Result<Arc<dyn crate::worker::Worker>, Response> {
+    if let Some(found) = deps.worker_registry.get_by_url(base_url) {
+        validate_endpoint_worker_provider(&found, provider_hint, model, endpoint, base_url)?;
+        return Ok(found);
+    }
+
+    if provider_hint == &ProviderType::Gemini {
+        tracing::warn!(
+            model,
+            endpoint_override = %endpoint,
+            endpoint_base_url = %base_url,
+            provider_hint = ?provider_hint,
+            "responses: endpoint override worker not found; using transient external worker for this request"
+        );
+
+        let ephemeral =
+            build_ephemeral_external_worker(base_url, model, provider_hint.clone(), true);
+        Ok(ephemeral)
+    } else {
+        tracing::warn!(
+            model,
+            endpoint_override = %endpoint,
+            endpoint_base_url = %base_url,
+            provider_hint = ?provider_hint,
+            "responses: endpoint override worker not found; ephemeral registration is Gemini-only"
+        );
+        Err(error::bad_request(
+            "invalid_request",
+            "Endpoint override worker not found; dynamic worker registration is only supported for Gemini"
+                .to_string(),
+        ))
+    }
+}
+
+async fn resolve_responses_worker(
+    deps: &ResponsesRouterContext<'_>,
+    headers: Option<&HeaderMap>,
+    model: &str,
+    provider_hint: &ProviderType,
+    endpoint_override: Option<&String>,
+) -> Result<Arc<dyn crate::worker::Worker>, Response> {
+    if provider_hint != &ProviderType::Gemini {
+        return select_worker_with_metrics(deps, headers, model, provider_hint).await;
+    }
+
+    if let Some(endpoint) = endpoint_override {
+        let Some(base_url) = normalize_override_base_url(endpoint) else {
+            tracing::warn!(
+                model,
+                endpoint_override = %endpoint,
+                "responses: invalid endpoint override; falling back to normal worker selection"
+            );
+            return select_worker_with_metrics(deps, headers, model, provider_hint).await;
+        };
+
+        return resolve_or_register_gemini_endpoint_worker(
+            deps,
+            endpoint,
+            &base_url,
+            model,
+            provider_hint,
+        );
+    }
+
+    select_worker_with_metrics(deps, headers, model, provider_hint).await
+}
 
 /// Shared context passed to responses routing functions.
 pub(in crate::routers::openai) struct ResponsesRouterContext<'a> {
@@ -52,6 +316,7 @@ pub(in crate::routers::openai) async fn route_responses(
     let start = Instant::now();
     let model = model_id;
     let streaming = body.stream.unwrap_or(false);
+    let provider_hint = parse_provider_hint(headers, model);
 
     Metrics::record_router_request(
         metrics_labels::ROUTER_OPENAI,
@@ -62,36 +327,35 @@ pub(in crate::routers::openai) async fn route_responses(
         bool_to_static_str(streaming),
     );
 
-    let worker = match WorkerSelector::new(
-        deps.worker_registry,
-        &deps.responses_components.shared.client,
-    )
-    .select_worker(&SelectWorkerRequest {
-        model_id: model,
+    let endpoint_override =
+        match validated_endpoint_override_for_provider(headers, &provider_hint, model) {
+            Ok(override_url) => override_url,
+            Err(response) => return response,
+        };
+    let worker = match resolve_responses_worker(
+        deps,
         headers,
-        provider: Some(ProviderType::OpenAI),
-        ..Default::default()
-    })
+        model,
+        &provider_hint,
+        endpoint_override.as_ref(),
+    )
     .await
     {
-        Ok(w) => w,
+        Ok(worker) => worker,
         Err(response) => {
-            Metrics::record_router_error(
-                metrics_labels::ROUTER_OPENAI,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
+            tracing::warn!(
                 model,
-                metrics_labels::ENDPOINT_RESPONSES,
-                metrics_labels::ERROR_NO_WORKERS,
+                provider_hint = ?provider_hint,
+                endpoint_override = ?endpoint_override,
+                status = %response.status(),
+                "responses: worker resolution failed"
             );
             return response;
         }
     };
 
     // Validate mutual exclusivity of conversation and previous_response_id
-    // Treat empty strings as unset to match other metadata paths. The
-    // `conversation` field is a `Option<ConversationRef>` union (bare string
-    // or `{ id }` object); `ConversationRef::is_empty` covers both shapes.
+    // Treat empty strings as unset to match other metadata paths
     let conversation = body.conversation.as_ref().filter(|c| !c.is_empty());
     let has_previous_response = body
         .previous_response_id
@@ -182,9 +446,27 @@ pub(in crate::routers::openai) async fn route_responses(
         provider: Arc::clone(&provider),
     });
 
+    let upstream_url = match provider.upstream_url(worker.url(), endpoint_override.as_deref()) {
+        Ok(url) => url,
+        Err(e) => {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model,
+                metrics_labels::ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_VALIDATION,
+            );
+            return error::bad_request(
+                "invalid_request",
+                format!("Provider upstream URL error: {e}"),
+            );
+        }
+    };
+
     ctx.state.payload = Some(PayloadState {
         json: payload,
-        url: format!("{}/v1/responses", worker.url()),
+        url: upstream_url,
     });
     ctx.state.responses_payload = Some(ResponsesPayloadState {
         previous_response_id: loaded_history.previous_response_id,
@@ -219,6 +501,7 @@ mod tests {
     //! `to_value(&request_body)` site). These tests lock the shape that the
     //! post-P1 content-part variants produce, so any future change to the
     //! serde layer surfaces here before it reaches an upstream.
+    use axum::http::HeaderMap;
     use openai_protocol::{
         common::Detail,
         responses::{
@@ -227,6 +510,8 @@ mod tests {
         },
     };
     use serde_json::{json, to_value};
+
+    use super::*;
 
     fn build_request_with_mixed_content() -> ResponsesRequest {
         ResponsesRequest {
@@ -393,5 +678,104 @@ mod tests {
         assert_eq!(annotations[1]["start_index"], json!(10));
         assert_eq!(annotations[2]["type"], json!("file_path"));
         assert_eq!(annotations[2]["index"], json!(2));
+    }
+
+    #[test]
+    fn endpoint_override_used_for_gemini_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-provider-endpoint",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                .parse()
+                .expect("valid header"),
+        );
+
+        let gemini_override = endpoint_override_for_provider(
+            Some(&headers),
+            &ProviderType::Gemini,
+            "gemini-2.5-flash",
+        );
+        let openai_override =
+            endpoint_override_for_provider(Some(&headers), &ProviderType::OpenAI, "openai.gpt-4.1");
+
+        assert!(
+            gemini_override.is_some(),
+            "Gemini must honor endpoint override"
+        );
+        assert!(
+            openai_override.is_none(),
+            "Non-Gemini providers must ignore endpoint override"
+        );
+    }
+
+    #[test]
+    fn endpoint_override_invalid_url_is_rejected_even_for_gemini() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-provider-endpoint",
+            "notaurl".parse().expect("valid header"),
+        );
+
+        let gemini_override = endpoint_override_for_provider(
+            Some(&headers),
+            &ProviderType::Gemini,
+            "gemini-2.5-flash",
+        );
+
+        assert!(
+            gemini_override.is_none(),
+            "Invalid URL must not be used as endpoint override"
+        );
+    }
+
+    #[test]
+    fn invalid_gemini_endpoint_override_is_rejected_before_worker_selection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-provider-endpoint",
+            "notaurl".parse().expect("valid header"),
+        );
+
+        let result = validated_endpoint_override_for_provider(
+            Some(&headers),
+            &ProviderType::Gemini,
+            "gemini-2.5-flash",
+        );
+
+        assert!(
+            result.is_err(),
+            "invalid override should return 400 response"
+        );
+    }
+
+    #[test]
+    fn missing_gemini_endpoint_override_is_not_rejected_upfront() {
+        let result = validated_endpoint_override_for_provider(
+            None,
+            &ProviderType::Gemini,
+            "gemini-2.5-flash",
+        );
+
+        assert!(
+            result.is_ok(),
+            "missing override should continue to downstream validation/selection"
+        );
+        assert_eq!(result.ok().flatten(), None);
+    }
+
+    #[test]
+    fn ephemeral_google_worker_keeps_health_checks_enabled() {
+        let worker = build_ephemeral_external_worker(
+            "https://generativelanguage.googleapis.com",
+            "google.gemini-2.5-flash",
+            ProviderType::Gemini,
+            true,
+        );
+
+        assert_eq!(
+            worker.metadata().spec.health.disable_health_check,
+            Some(true),
+            "Google ephemeral worker should keep health checks enabled"
+        );
     }
 }
