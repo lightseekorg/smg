@@ -30,7 +30,7 @@ pub struct ResponsesResponseBuilder {
     store: bool,
     temperature: Option<f32>,
     text: Option<TextConfig>,
-    tool_choice: String,
+    tool_choice: Value,
     tools: Vec<ResponseTool>,
     top_p: Option<f32>,
     truncation: Option<String>,
@@ -64,7 +64,7 @@ impl ResponsesResponseBuilder {
             store: true,
             temperature: None,
             text: None,
-            tool_choice: "auto".to_string(),
+            tool_choice: serde_json::json!("auto"),
             tools: Vec::new(),
             top_p: None,
             truncation: None,
@@ -91,11 +91,11 @@ impl ResponsesResponseBuilder {
             .clone_from(&request.previous_response_id);
         self.store = request.store.unwrap_or(true);
         self.temperature = request.temperature;
-        self.tool_choice = if let Some(ref tc) = request.tool_choice {
-            serde_json::to_string(tc).unwrap_or_else(|_| "auto".to_string())
-        } else {
-            "auto".to_string()
-        };
+        self.tool_choice = request
+            .tool_choice
+            .as_ref()
+            .map(responses_tool_choice_value)
+            .unwrap_or_else(|| serde_json::json!("auto"));
         self.tools = request.tools.clone().unwrap_or_default();
         self.top_p = request.top_p;
         self.user.clone_from(&request.user);
@@ -196,7 +196,7 @@ impl ResponsesResponseBuilder {
     }
 
     /// Set tool choice setting
-    pub fn tool_choice(mut self, tool_choice: impl Into<String>) -> Self {
+    pub fn tool_choice(mut self, tool_choice: impl Into<Value>) -> Self {
         self.tool_choice = tool_choice.into();
         self
     }

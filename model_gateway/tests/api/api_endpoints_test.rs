@@ -689,6 +689,61 @@ mod responses_endpoint_tests {
     }
 
     #[tokio::test]
+    async fn test_v1_responses_accepts_flat_forced_function_tool_choice() {
+        let ctx = AppTestContext::new(vec![MockWorkerConfig {
+            port: 0,
+            worker_type: WorkerType::Regular,
+            health_status: HealthStatus::Healthy,
+            response_delay_ms: 0,
+            fail_rate: 0.0,
+        }])
+        .await;
+
+        let app = ctx.create_app();
+
+        let payload = json!({
+            "input": "Run lookup_city.",
+            "model": "mock-model",
+            "stream": false,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup_city",
+                    "description": "Look up a city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" }
+                        },
+                        "required": ["city"]
+                    }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "name": "lookup_city"
+            }
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Responses flat function tool_choice should not be rejected by request validation"
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        ctx.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_v1_responses_streaming() {
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18951,

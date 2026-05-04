@@ -11,7 +11,8 @@ use openai_protocol::{
         McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
     },
     responses::{
-        ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        responses_tool_choice_value, ResponseOutputItem, ResponseStatus, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::json;
@@ -340,7 +341,7 @@ impl ResponseStreamEventEmitter {
 
             // tool_choice: serialize if present, otherwise use "auto"
             if let Some(ref tc) = req.tool_choice {
-                response_obj["tool_choice"] = json!(tc);
+                response_obj["tool_choice"] = responses_tool_choice_value(tc);
             } else {
                 response_obj["tool_choice"] = json!("auto");
             }
@@ -1008,5 +1009,49 @@ pub(crate) fn attach_mcp_server_label(
 ) {
     if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
         item["server_label"] = json!(label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_protocol::{
+        common::{Function, FunctionChoice, ToolChoice},
+        responses::{FunctionTool, ResponseInput, ResponseTool},
+    };
+
+    use super::*;
+
+    #[test]
+    fn completed_event_serializes_flat_responses_function_tool_choice() {
+        let mut emitter =
+            ResponseStreamEventEmitter::new("resp_test".to_string(), "mock-model".to_string(), 1);
+        emitter.set_original_request(ResponsesRequest {
+            input: ResponseInput::Text("test".to_string()),
+            tools: Some(vec![ResponseTool::Function(FunctionTool {
+                function: Function {
+                    name: "lookup_city".to_string(),
+                    description: None,
+                    parameters: json!({}),
+                    strict: None,
+                },
+            })]),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: FunctionChoice {
+                    name: "lookup_city".to_string(),
+                },
+            }),
+            ..Default::default()
+        });
+
+        let event = emitter.emit_completed(None);
+
+        assert_eq!(
+            event["response"]["tool_choice"],
+            json!({
+                "type": "function",
+                "name": "lookup_city"
+            })
+        );
     }
 }

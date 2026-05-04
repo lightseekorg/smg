@@ -2,7 +2,7 @@ use openai_protocol::{
     common::{Function, StringOrArray, ToolChoice, ToolChoiceValue},
     responses::{
         FunctionTool, IncludeField, McpTool, ResponseInput, ResponseInputOutputItem, ResponseTool,
-        ResponsesRequest, StringOrContentParts, TextConfig, TextFormat,
+        ResponsesRequest, ResponsesResponse, StringOrContentParts, TextConfig, TextFormat,
     },
 };
 use serde_json::json;
@@ -816,6 +816,166 @@ fn test_validate_tool_choice_requires_tools() {
         assert!(
             error_msg.contains("tool_choice") && error_msg.contains("tools"),
             "Error should mention tool_choice requires tools"
+        );
+    }
+}
+
+#[test]
+fn test_deserialize_responses_flat_function_tool_choice() {
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "input": "test",
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup_city",
+                "parameters": {}
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "name": "lookup_city"
+        }
+    }))
+    .expect("Responses flat function tool_choice should deserialize");
+
+    assert!(
+        matches!(
+            request.tool_choice,
+            Some(ToolChoice::Function { ref function, .. }) if function.name == "lookup_city"
+        ),
+        "flat Responses tool_choice should normalize to internal function choice"
+    );
+    assert!(
+        request.validate().is_ok(),
+        "flat Responses tool_choice should validate when the function exists"
+    );
+
+    let serialized = serde_json::to_value(&request).expect("ResponsesRequest should serialize");
+    assert_eq!(
+        serialized["tool_choice"],
+        json!({
+            "type": "function",
+            "name": "lookup_city"
+        }),
+        "Responses function tool_choice should serialize in flat Responses shape"
+    );
+}
+
+#[test]
+fn test_responses_response_builder_serializes_flat_function_tool_choice() {
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "input": "test",
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup_city",
+                "parameters": {}
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "name": "lookup_city"
+        }
+    }))
+    .expect("Responses flat function tool_choice should deserialize");
+
+    let response = ResponsesResponse::builder("resp_test", "mock-model")
+        .copy_from_request(&request)
+        .build();
+    let serialized = serde_json::to_value(response).expect("ResponsesResponse should serialize");
+
+    assert_eq!(
+        serialized["tool_choice"],
+        json!({
+            "type": "function",
+            "name": "lookup_city"
+        }),
+        "Responses response should echo function tool_choice in flat Responses shape"
+    );
+}
+
+#[test]
+fn test_deserialize_responses_flat_function_tool_choice_validates_tool_name() {
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "input": "test",
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup_city",
+                "parameters": {}
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "name": "missing_tool"
+        }
+    }))
+    .expect("Responses flat function tool_choice should deserialize before validation");
+
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "flat Responses tool_choice should still reject unknown functions"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("function 'missing_tool' not found"),
+        "Error should mention the missing function: {err}"
+    );
+}
+
+#[test]
+fn test_deserialize_responses_chat_style_function_tool_choice_backcompat() {
+    let request: ResponsesRequest = serde_json::from_value(json!({
+        "input": "test",
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup_city",
+                "parameters": {}
+            }
+        ],
+        "tool_choice": {
+            "type": "function",
+            "function": {
+                "name": "lookup_city"
+            }
+        }
+    }))
+    .expect("Chat-style function tool_choice should remain accepted");
+
+    assert!(
+        matches!(
+            request.tool_choice,
+            Some(ToolChoice::Function { ref function, .. }) if function.name == "lookup_city"
+        ),
+        "Chat-style tool_choice should keep using the internal function choice"
+    );
+    assert!(
+        request.validate().is_ok(),
+        "Chat-style function tool_choice should still validate"
+    );
+}
+
+#[test]
+fn test_deserialize_responses_string_tool_choice_backcompat() {
+    for value in ["auto", "required", "none"] {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": "test",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup_city",
+                    "parameters": {}
+                }
+            ],
+            "tool_choice": value
+        }))
+        .expect("string tool_choice should remain accepted");
+
+        assert!(
+            request.tool_choice.is_some(),
+            "string tool_choice should deserialize"
         );
     }
 }

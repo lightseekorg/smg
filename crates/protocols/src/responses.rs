@@ -9,8 +9,9 @@ use validator::{Validate, ValidationError};
 
 use super::{
     common::{
-        default_model, default_true, validate_stop, ChatLogProbs, Function, GenerationRequest,
-        PromptTokenUsageInfo, StringOrArray, ToolChoice, ToolChoiceValue, ToolReference, UsageInfo,
+        default_model, default_true, validate_stop, ChatLogProbs, Function, FunctionChoice,
+        GenerationRequest, PromptTokenUsageInfo, StringOrArray, ToolChoice, ToolChoiceValue,
+        ToolReference, UsageInfo,
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
@@ -708,7 +709,12 @@ pub struct ResponsesRequest {
     pub temperature: Option<f32>,
 
     /// Tool choice behavior
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_responses_tool_choice",
+        serialize_with = "serialize_responses_tool_choice",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tool_choice: Option<ToolChoice>,
 
     /// Available tools
@@ -932,6 +938,65 @@ impl GenerationRequest for ResponsesRequest {
                 .join(" "),
         }
     }
+}
+
+pub fn responses_tool_choice_value(tool_choice: &ToolChoice) -> Value {
+    match tool_choice {
+        ToolChoice::Function { function, .. } => serde_json::json!({
+            "type": "function",
+            "name": function.name,
+        }),
+        _ => serde_json::to_value(tool_choice).unwrap_or_else(|_| serde_json::json!("auto")),
+    }
+}
+
+#[expect(
+    clippy::ref_option,
+    reason = "serde serialize_with passes the field as &Option<T>"
+)]
+fn serialize_responses_tool_choice<S>(
+    tool_choice: &Option<ToolChoice>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match tool_choice {
+        Some(tool_choice) => responses_tool_choice_value(tool_choice).serialize(serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_responses_tool_choice<'de, D>(
+    deserializer: D,
+) -> Result<Option<ToolChoice>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    if let Some(name) = value
+        .as_object()
+        .filter(|obj| obj.get("type").and_then(Value::as_str) == Some("function"))
+        .and_then(|obj| obj.get("name").and_then(Value::as_str))
+    {
+        return Ok(Some(ToolChoice::Function {
+            tool_type: "function".to_string(),
+            function: FunctionChoice {
+                name: name.to_string(),
+            },
+        }));
+    }
+
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 /// Validate conversation ID format
@@ -1338,7 +1403,7 @@ pub struct ResponsesResponse {
 
     /// Tool choice setting
     #[serde(default = "default_tool_choice")]
-    pub tool_choice: String,
+    pub tool_choice: Value,
 
     /// Available tools
     #[serde(default)]
@@ -1368,8 +1433,8 @@ fn default_object_type() -> String {
     "response".to_string()
 }
 
-fn default_tool_choice() -> String {
-    "auto".to_string()
+fn default_tool_choice() -> Value {
+    serde_json::json!("auto")
 }
 
 impl ResponsesResponse {
