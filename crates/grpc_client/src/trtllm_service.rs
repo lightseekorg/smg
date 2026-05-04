@@ -529,7 +529,11 @@ impl TrtllmServiceClient {
 
         match &request.response_format {
             Some(ResponseFormat::JsonObject) => {
-                let schema = serde_json::json!({"type": "object"});
+                let schema = request
+                    .json_object_schema
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"}));
                 let schema_str = serde_json::to_string(&schema)
                     .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
                 guided = Some(proto::GuidedDecodingParams {
