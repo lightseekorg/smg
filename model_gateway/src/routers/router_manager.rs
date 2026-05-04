@@ -49,7 +49,9 @@ use crate::{
     config::RoutingMode,
     middleware::TenantRequestMeta,
     routers::{
-        common::header_utils::apply_provider_headers,
+        common::header_utils::{
+            apply_provider_headers, extract_model_provider, extract_provider_endpoint,
+        },
         error as route_error,
         factory::{router_ids, RouterId},
         RouterFactory, RouterTrait,
@@ -70,6 +72,14 @@ pub struct RouterManager {
 }
 
 impl RouterManager {
+    #[inline]
+    fn provider_hint_is_google(provider_hint: &str) -> bool {
+        matches!(
+            provider_hint.trim().to_ascii_lowercase().as_str(),
+            "gemini" | "google"
+        )
+    }
+
     pub fn new(worker_registry: Arc<WorkerRegistry>, client: reqwest::Client) -> Self {
         Self {
             worker_registry,
@@ -321,7 +331,65 @@ impl RouterManager {
             }
         }
 
+        if best_router.is_none() {
+            info!(
+                model_id = ?model_id,
+                prefer_pd,
+                num_regular_workers,
+                num_pd_workers,
+                "RouterManager could not select a router for request"
+            );
+        }
+
         best_router
+    }
+
+    /// Responses API routing selection.
+    ///
+    /// For provider-aware /v1/responses requests, the OpenAI-compatible router
+    /// owns provider transformations and endpoint-override handling.
+    /// If provider hints are present, route directly there; otherwise fall back
+    /// to generic model-based selection.
+    fn select_router_for_responses(
+        &self,
+        headers: Option<&HeaderMap>,
+        model_id: &str,
+    ) -> Option<Arc<dyn RouterTrait>> {
+        let provider_hint = extract_model_provider(headers).map(str::trim);
+        let endpoint_override = extract_provider_endpoint(headers).map(str::trim);
+
+        if Self::should_force_openai_responses_router(provider_hint, endpoint_override, model_id) {
+            if let Some(router) = self
+                .routers
+                .get(&router_ids::HTTP_OPENAI)
+                .map(|r| r.clone())
+            {
+                return Some(router);
+            }
+            return None;
+        }
+
+        self.select_router_for_request(headers, Some(model_id))
+    }
+
+    fn should_force_openai_responses_router(
+        provider_hint: Option<&str>,
+        endpoint_override: Option<&str>,
+        model_id: &str,
+    ) -> bool {
+        let has_endpoint_override = endpoint_override.is_some_and(|v| !v.trim().is_empty());
+        if !has_endpoint_override {
+            return false;
+        }
+
+        if provider_hint.is_some_and(Self::provider_hint_is_google) {
+            return true;
+        }
+
+        matches!(
+            ProviderType::from_model_name(model_id),
+            Some(ProviderType::Gemini)
+        )
     }
 
     /// Build a response from self-hosted registry models (excludes external workers).
@@ -646,7 +714,7 @@ impl RouterTrait for RouterManager {
             return route_error::reserved_skill_tool_name(error);
         }
 
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_responses(headers, model_id);
         if let Some(router) = router {
             let skill_manifest = match resolve_responses_skill_manifest(
                 self.skill_service.as_deref(),
@@ -667,6 +735,15 @@ impl RouterTrait for RouterManager {
                 .route_responses(headers, &tenant_meta, body, model_id)
                 .await
         } else {
+            let provider_header = extract_model_provider(headers).unwrap_or("<none>");
+            let endpoint_header = extract_provider_endpoint(headers).unwrap_or("<none>");
+
+            warn!(
+                model = model_id,
+                provider_header,
+                endpoint_header,
+                "Responses request rejected before provider router: no router available"
+            );
             (
                 StatusCode::NOT_FOUND,
                 "No router available to handle responses request",
@@ -905,7 +982,7 @@ impl std::fmt::Debug for RouterManager {
 mod tests {
     use async_trait::async_trait;
 
-    use super::*;
+    use super::{RouterManager, *};
     use crate::{
         middleware::{RouteRequestMeta, TenantKey},
         routers::factory::router_ids,
@@ -983,5 +1060,36 @@ mod tests {
             .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn forces_openai_responses_router_for_gemini_header_and_endpoint_override() {
+        assert!(RouterManager::should_force_openai_responses_router(
+            Some("gemini"),
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ),
+            "gpt-5.4",
+        ));
+    }
+
+    #[test]
+    fn forces_openai_responses_router_for_gemini_model_inference_and_endpoint_override() {
+        assert!(RouterManager::should_force_openai_responses_router(
+            None,
+            Some(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            ),
+            "gemini-2.5-flash",
+        ));
+    }
+
+    #[test]
+    fn does_not_force_openai_responses_router_without_endpoint_override() {
+        assert!(!RouterManager::should_force_openai_responses_router(
+            Some("gemini"),
+            None,
+            "google.gemini-2.5-flash",
+        ));
     }
 }
