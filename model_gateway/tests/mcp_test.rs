@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use common::mock_mcp_server::{MockMCPServer, MockSearchResponseMCPServer, MockSearchResponseMode};
 use openai_protocol::responses::{ResponseOutputItem, WebSearchAction};
 use serde_json::json;
-use smg::routers::common::openai_bridge::{ResponseFormat, ResponseTransformer};
+use smg::routers::common::openai_bridge::{transform_tool_output, ResponseFormat};
 use smg_mcp::{
     core::config::{ResponseFormatConfig, ToolConfig},
     McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession, McpTransport,
@@ -334,17 +334,13 @@ async fn test_web_search_transform_handles_openai_search_response_with_mock() {
 
     assert!(!output.is_error, "Tool execution should succeed");
 
-    // The session returns the raw `output` Value from the MCP call. Re-transform
-    // with WebSearchCall format to verify serialization (end-to-end source
-    // extraction is covered by the gateway bridge's own tests).
-    let transformed = ResponseTransformer::transform(
-        &output.output,
-        ResponseFormat::WebSearchCall,
-        "test-request-openai-search",
-        "openai_search_server",
-        "brave_web_search",
-        "{\"query\":\"rust openai search\"}",
-    );
+    // Route the actual `ToolExecutionOutput` through the production bridge
+    // helper so a regression in session-side rewrites (`call_id`,
+    // `server_label`, `tool_name`, `arguments_str` all live on `output`)
+    // would surface here too. Hardcoding those fields against
+    // `ResponseTransformer::transform` would let such a regression slip
+    // through with the test still green.
+    let transformed = transform_tool_output(&output, ResponseFormat::WebSearchCall);
     match transformed {
         ResponseOutputItem::WebSearchCall { action, .. } => match action {
             WebSearchAction::Search {
@@ -419,14 +415,10 @@ async fn test_web_search_transform_sets_action_query_for_brave_search_with_mock(
 
     assert!(!output.is_error, "Tool execution should succeed");
 
-    let transformed = ResponseTransformer::transform(
-        &output.output,
-        ResponseFormat::WebSearchCall,
-        "test-request-brave",
-        "brave_response_server",
-        "brave_web_search",
-        "{\"query\":\"rust brave query\"}",
-    );
+    // Same reasoning as the OpenAI variant above — feed the actual
+    // `ToolExecutionOutput` through the production bridge helper so any
+    // future regression in session-side field rewrites surfaces here.
+    let transformed = transform_tool_output(&output, ResponseFormat::WebSearchCall);
     match transformed {
         ResponseOutputItem::WebSearchCall { action, .. } => match action {
             WebSearchAction::Search {
