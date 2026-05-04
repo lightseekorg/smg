@@ -18,10 +18,21 @@ use super::ResponseFormat;
 /// lookup against `(output.server_key, output.tool_name)` would miss for
 /// disambiguated names like `mcp_<server>_<tool>` and silently degrade to
 /// `Passthrough`.
+///
+/// Failure handling: when `output.is_error` is set, the success-path builders
+/// (which always stamp `status = "completed"` and `error = None`) would
+/// persist a failed call as a success and replay it as such on the next turn.
+/// We bypass them and emit a typed failure item — `status = "failed"` on every
+/// hosted-builtin variant; only the `mcp_call` variant carries an additional
+/// `error` field, matching the OpenAI Responses spec where the four
+/// hosted-builtin families convey failure via `status` alone.
 pub fn transform_tool_output(
     output: &smg_mcp::ToolExecutionOutput,
     response_format: ResponseFormat,
 ) -> ResponseOutputItem {
+    if output.is_error {
+        return failed_output_item(output, response_format);
+    }
     ResponseTransformer::transform(
         &output.output,
         response_format,
@@ -30,6 +41,67 @@ pub fn transform_tool_output(
         &output.tool_name,
         &output.arguments_str,
     )
+}
+
+/// Build a typed failure-state output item for a `ToolExecutionOutput` whose
+/// `is_error` is set. Centralizes the per-format failure shape so callers
+/// don't need to reach into the typed `ResponseOutputItem` enum.
+fn failed_output_item(
+    output: &smg_mcp::ToolExecutionOutput,
+    response_format: ResponseFormat,
+) -> ResponseOutputItem {
+    let err_msg = output
+        .error_message
+        .clone()
+        .unwrap_or_else(|| "Tool execution failed".to_string());
+    match response_format {
+        ResponseFormat::Passthrough => ResponseOutputItem::McpCall {
+            id: mcp_response_item_id(&output.call_id),
+            status: "failed".to_string(),
+            approval_request_id: None,
+            arguments: output.arguments_str.clone(),
+            error: Some(err_msg),
+            name: output.tool_name.clone(),
+            output: String::new(),
+            server_label: output.server_label.clone(),
+        },
+        ResponseFormat::WebSearchCall => ResponseOutputItem::WebSearchCall {
+            id: format!("ws_{}", output.call_id),
+            status: WebSearchCallStatus::Failed,
+            // No query is recoverable from a failed dispatch; emit the
+            // empty `Search` action variant so the wire shape stays valid.
+            action: WebSearchAction::Search {
+                query: None,
+                queries: Vec::new(),
+                sources: Vec::new(),
+            },
+            results: None,
+        },
+        ResponseFormat::CodeInterpreterCall => ResponseOutputItem::CodeInterpreterCall {
+            id: format!("ci_{}", output.call_id),
+            status: CodeInterpreterCallStatus::Failed,
+            container_id: String::new(),
+            code: None,
+            outputs: None,
+        },
+        ResponseFormat::FileSearchCall => ResponseOutputItem::FileSearchCall {
+            id: format!("fs_{}", output.call_id),
+            status: FileSearchCallStatus::Failed,
+            queries: Vec::new(),
+            results: None,
+        },
+        ResponseFormat::ImageGenerationCall => ResponseOutputItem::ImageGenerationCall {
+            id: format!("ig_{}", output.call_id),
+            action: None,
+            background: None,
+            output_format: None,
+            quality: None,
+            result: String::new(),
+            revised_prompt: None,
+            size: None,
+            status: ImageGenerationCallStatus::Failed,
+        },
+    }
 }
 
 /// Normalize an MCP response item id source into an external `mcp_call.id`.
@@ -1544,6 +1616,71 @@ mod tests {
         match item {
             ResponseOutputItem::WebSearchCall { id, .. } => assert_eq!(id, "ws_xyz"),
             _ => panic!("Expected WebSearchCall"),
+        }
+    }
+
+    fn failed_tool_output(tool_name: &str) -> smg_mcp::ToolExecutionOutput {
+        smg_mcp::ToolExecutionOutput::new_for_test(
+            "call_xyz",
+            tool_name,
+            "srv",
+            "srv-label",
+            "{\"q\":\"v\"}",
+            serde_json::json!({}),
+            /* is_error */ true,
+            Some("upstream broke".to_string()),
+            std::time::Duration::default(),
+        )
+    }
+
+    #[test]
+    fn transform_tool_output_emits_mcp_call_failed_with_error_message() {
+        let item = transform_tool_output(
+            &failed_tool_output("brave_web_search"),
+            ResponseFormat::Passthrough,
+        );
+        match item {
+            ResponseOutputItem::McpCall {
+                status,
+                error,
+                output,
+                arguments,
+                name,
+                ..
+            } => {
+                assert_eq!(status, "failed");
+                assert_eq!(error.as_deref(), Some("upstream broke"));
+                assert_eq!(output, "");
+                assert_eq!(arguments, "{\"q\":\"v\"}");
+                assert_eq!(name, "brave_web_search");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn transform_tool_output_emits_hosted_failed_status_only() {
+        // Hosted-builtin variants must convey failure via `status: "failed"`
+        // alone; they have no `error` field on the wire. Using
+        // `transform_tool_output` against the success-path builders would
+        // stamp `status: "completed"` on a failed call — that is the bug.
+        for fmt in [
+            ResponseFormat::WebSearchCall,
+            ResponseFormat::CodeInterpreterCall,
+            ResponseFormat::FileSearchCall,
+            ResponseFormat::ImageGenerationCall,
+        ] {
+            let item = transform_tool_output(&failed_tool_output("search"), fmt);
+            let serialized = serde_json::to_value(&item).expect("serialize failed item");
+            assert_eq!(
+                serialized["status"],
+                serde_json::json!("failed"),
+                "{fmt:?} must serialize status=failed on error"
+            );
+            assert!(
+                serialized.get("error").is_none(),
+                "{fmt:?} must not carry an `error` field (hosted variants don't have one): {serialized}"
+            );
         }
     }
 

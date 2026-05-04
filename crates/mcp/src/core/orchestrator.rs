@@ -158,7 +158,8 @@ pub struct ToolExecutionInput {
 /// Output from batch tool execution.
 ///
 /// `#[non_exhaustive]` so additive fields don't break consumers; only
-/// `smg-mcp` constructs this.
+/// `smg-mcp` constructs this in production. External crates that need to
+/// fabricate one for tests should use [`ToolExecutionOutput::new_for_test`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ToolExecutionOutput {
@@ -182,6 +183,45 @@ pub struct ToolExecutionOutput {
     pub error_message: Option<String>,
     /// Execution duration.
     pub duration: Duration,
+}
+
+impl ToolExecutionOutput {
+    /// Construct an instance from explicit field values.
+    ///
+    /// `#[non_exhaustive]` blocks struct-literal syntax in downstream crates,
+    /// but those crates still need a way to fabricate fixtures (e.g. router
+    /// transformer tests that need a `is_error: true` output without spinning
+    /// up an MCP server). Adding a field to the struct doesn't break this
+    /// constructor — only adding a *required* field would, which is a
+    /// deliberate signal that all callers need to think about the new field.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Test fixture constructor; one positional arg per public field is intentional \
+                  so adding a field forces every test to consider it."
+    )]
+    pub fn new_for_test(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        server_key: impl Into<String>,
+        server_label: impl Into<String>,
+        arguments_str: impl Into<String>,
+        output: Value,
+        is_error: bool,
+        error_message: Option<String>,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            server_key: server_key.into(),
+            server_label: server_label.into(),
+            arguments_str: arguments_str.into(),
+            output,
+            is_error,
+            error_message,
+            duration,
+        }
+    }
 }
 
 /// Result from resolved tool execution that preserves interactive approval state.
