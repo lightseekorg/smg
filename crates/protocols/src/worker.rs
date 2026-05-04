@@ -197,6 +197,14 @@ pub enum RuntimeType {
     Trtllm,
     /// MLX runtime (Apple Silicon).
     Mlx,
+    /// TokenSpeed runtime. Speaks the dedicated
+    /// `tokenspeed.grpc.scheduler.TokenSpeedScheduler` service on the
+    /// wire (see `crates/grpc_client/proto/tokenspeed_scheduler.proto`);
+    /// the gRPC client dispatch routes this variant through
+    /// `TokenSpeedSchedulerClient`, which translates the SGLang-shaped
+    /// request/response types the router operates on to TokenSpeed's
+    /// slimmer wire format at the boundary.
+    TokenSpeed,
     /// External OpenAI-compatible API (not local inference).
     External,
 }
@@ -216,6 +224,7 @@ impl std::fmt::Display for RuntimeType {
             RuntimeType::Vllm => write!(f, "vllm"),
             RuntimeType::Trtllm => write!(f, "trtllm"),
             RuntimeType::Mlx => write!(f, "mlx"),
+            RuntimeType::TokenSpeed => write!(f, "tokenspeed"),
             RuntimeType::External => write!(f, "external"),
         }
     }
@@ -235,6 +244,8 @@ impl std::str::FromStr for RuntimeType {
             Ok(RuntimeType::Trtllm)
         } else if s.eq_ignore_ascii_case("mlx") {
             Ok(RuntimeType::Mlx)
+        } else if s.eq_ignore_ascii_case("tokenspeed") {
+            Ok(RuntimeType::TokenSpeed)
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {

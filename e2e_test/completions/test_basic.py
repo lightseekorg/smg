@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
@@ -161,7 +161,7 @@ class TestCompletionBasic:
         assert response.usage.completion_tokens == 0
 
 
-@pytest.mark.engine("sglang", "vllm")
+@pytest.mark.engine("sglang", "vllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

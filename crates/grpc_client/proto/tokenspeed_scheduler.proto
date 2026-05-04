@@ -1,0 +1,293 @@
+syntax = "proto3";
+
+package tokenspeed.grpc.scheduler;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Service definition for TokenSpeed scheduler communication.
+//
+// TokenSpeed has its own service identity AND its own message shapes — wire
+// definition is fully self-contained, with zero dependencies on
+// ``sglang_scheduler.proto``. The message catalog is intentionally minimal:
+// it covers what TokenSpeed's top-tier LLMs (Kimi K2, MiniMax M2, Qwen 3,
+// gpt-oss, DeepSeek V4) actually need today, and nothing more. Anything
+// SGLang-specific (PD-disaggregated serving, LoRA hot-swap, multimodal,
+// classifier outputs, hidden-state forwarding, embeddings) is deliberately
+// out of scope and lands here only when an explicit TokenSpeed use case
+// shows up.
+service TokenSpeedScheduler {
+  // Submit a generation request (server-streaming for token-by-token).
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+
+  // Liveness + readiness probe.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Cancel a running request.
+  rpc Abort(AbortRequest) returns (AbortResponse);
+
+  // Static info about the loaded model.
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+
+  // Runtime info about the server.
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Per-DP-rank load metrics (used by router for least-load).
+  rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
+}
+
+// =====================
+// Sampling
+// =====================
+
+// IMPORTANT: proto3 numeric defaults (0) do NOT match semantic defaults
+// (temperature=1.0, top_p=1.0, top_k=-1). The router/servicer must construct
+// with explicit values — never rely on Default::default().
+message SamplingParams {
+  float temperature = 1;
+  float top_p = 2;
+  int32 top_k = 3;
+  float min_p = 4;
+  float frequency_penalty = 5;
+  float presence_penalty = 6;
+  float repetition_penalty = 7;
+
+  optional uint32 max_new_tokens = 8;
+  uint32 min_new_tokens = 9;
+
+  repeated string stop = 10;
+  repeated uint32 stop_token_ids = 11;
+  bool ignore_eos = 12;
+
+  bool skip_special_tokens = 13;
+  bool spaces_between_special_tokens = 14;
+
+  // Number of samples (n in OpenAI API).
+  uint32 n = 15;
+
+  // Per-token logit bias.
+  map<string, float> logit_bias = 16;
+
+  // Structured generation. Currently xfailed in e2e (tokenspeed#361),
+  // but the wire shape stays so wiring it later doesn't bump the proto.
+  oneof constraint {
+    string regex = 17;
+    string json_schema = 18;
+    string ebnf_grammar = 19;
+    string structural_tag = 20;
+  }
+
+  // When true, generation does not strip the trailing matched stop token
+  // from ``output_ids`` (matches SGLang's ``no_stop_trim``). Combined with
+  // ``skip_special_tokens=False`` it lets the gateway-side detokenizer
+  // render the EOS marker in the visible response — required for the
+  // ``test_no_stop_trim_with_skip_special_false`` e2e check and for any
+  // downstream logic that needs the raw stop token in the output stream.
+  bool no_stop_trim = 22;
+
+  // Escape hatch for backend-specific knobs without bumping the proto.
+  google.protobuf.Struct custom_params = 21;
+}
+
+// =====================
+// Generate
+// =====================
+
+message GenerateRequest {
+  string request_id = 1;
+
+  // Tokenized input (router does its own tokenization).
+  TokenizedInput tokenized = 2;
+
+  SamplingParams sampling_params = 3;
+
+  // Logprob options.
+  bool return_logprob = 4;
+  // Optional so the servicer can distinguish "client omitted" (use SGLang's
+  // ``-1`` default = no input logprobs) from an explicit value like 0.
+  optional int32 logprob_start_len = 5;
+  int32 top_logprobs_num = 6;
+  repeated uint32 token_ids_logprob = 7;
+
+  // Whether the client wants stream chunks (otherwise: complete-only).
+  bool stream = 8;
+}
+
+message TokenizedInput {
+  repeated uint32 input_ids = 1;
+  // Original text — purely cosmetic; the tokenizer pass is skipped because
+  // input_ids is set. Used in worker logs for traceability.
+  string original_text = 2;
+}
+
+message GenerateResponse {
+  string request_id = 1;
+
+  oneof response {
+    GenerateStreamChunk chunk = 2;
+    GenerateComplete complete = 3;
+  }
+}
+
+message GenerateStreamChunk {
+  // Generated tokens since the previous chunk.
+  repeated uint32 token_ids = 1;
+
+  uint32 prompt_tokens = 2;
+  uint32 completion_tokens = 3;
+  uint32 cached_tokens = 4;
+
+  OutputLogProbs output_logprobs = 5;
+
+  // For ordering when n>1.
+  uint32 index = 6;
+}
+
+message GenerateComplete {
+  repeated uint32 output_ids = 1;
+
+  // OpenAI-compatible: "stop", "length", "abort", "tool_calls".
+  string finish_reason = 2;
+
+  uint32 prompt_tokens = 3;
+  uint32 completion_tokens = 4;
+  uint32 cached_tokens = 5;
+
+  OutputLogProbs output_logprobs = 6;
+
+  // Which stop matched (for clients that care which `stop` triggered).
+  oneof matched_stop {
+    uint32 matched_token_id = 7;
+    string matched_stop_str = 8;
+  }
+
+  uint32 index = 9;
+}
+
+message OutputLogProbs {
+  repeated float token_logprobs = 1;
+  repeated uint32 token_ids = 2;
+  repeated TopLogProbs top_logprobs = 3;
+}
+
+message TopLogProbs {
+  repeated float values = 1;
+  repeated uint32 token_ids = 2;
+}
+
+// =====================
+// Management
+// =====================
+
+message HealthCheckRequest {}
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
+
+message AbortRequest {
+  string request_id = 1;
+  string reason = 2;
+}
+message AbortResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// =====================
+// Model & Server Info
+// =====================
+
+message GetModelInfoRequest {}
+message GetModelInfoResponse {
+  string model_path = 1;
+  string tokenizer_path = 2;
+  string served_model_name = 3;
+  string model_type = 4;
+  repeated string architectures = 5;
+
+  int32 max_context_length = 6;
+  int32 max_req_input_len = 7;
+  int32 vocab_size = 8;
+
+  repeated int32 eos_token_ids = 9;
+  int32 pad_token_id = 10;
+  int32 bos_token_id = 11;
+
+  string weight_version = 12;
+  string preferred_sampling_params = 13;  // JSON string or empty
+}
+
+message GetServerInfoRequest {}
+message GetServerInfoResponse {
+  google.protobuf.Struct server_args = 1;
+  google.protobuf.Struct scheduler_info = 2;
+
+  int32 active_requests = 3;
+  bool is_paused = 4;
+  double uptime_seconds = 5;
+  int32 max_total_num_tokens = 6;
+
+  string tokenspeed_version = 7;
+  google.protobuf.Timestamp start_time = 8;
+}
+
+// =====================
+// Loads
+// =====================
+
+message GetLoadsRequest {
+  optional int32 dp_rank = 1;
+  // Sections: "core" (default), "memory", "queues". Pass "all" for everything.
+  repeated string include = 2;
+}
+
+message GetLoadsResponse {
+  string timestamp = 1;
+  string version = 2;
+  int32 dp_rank_count = 3;
+  repeated SchedulerLoad loads = 4;
+  AggregateMetrics aggregate = 5;
+}
+
+message SchedulerLoad {
+  int32 dp_rank = 1;
+
+  int32 num_running_reqs = 2;
+  int32 num_waiting_reqs = 3;
+  int32 num_total_reqs = 4;
+  int32 num_used_tokens = 5;
+  int32 max_total_num_tokens = 6;
+  int32 max_running_requests = 7;
+
+  double token_usage = 8;
+  double gen_throughput = 9;
+  double cache_hit_rate = 10;
+  double utilization = 11;
+
+  optional MemoryMetrics memory = 12;
+  optional QueueMetrics queues = 13;
+}
+
+message MemoryMetrics {
+  double weight_gb = 1;
+  double kv_cache_gb = 2;
+  double graph_gb = 3;
+  int32 token_capacity = 4;
+}
+
+message QueueMetrics {
+  int32 waiting = 1;
+  int32 grammar = 2;
+  int32 paused = 3;
+  int32 retracted = 4;
+}
+
+message AggregateMetrics {
+  int32 total_running_reqs = 1;
+  int32 total_waiting_reqs = 2;
+  int32 total_reqs = 3;
+  double avg_token_usage = 4;
+  double avg_throughput = 5;
+  double avg_utilization = 6;
+}

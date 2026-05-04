@@ -434,7 +434,7 @@ impl SglangSchedulerClient {
     }
 
     /// Build gRPC SamplingParams from ChatCompletionRequest
-    fn build_grpc_sampling_params_from_chat(
+    pub(crate) fn build_grpc_sampling_params_from_chat(
         request: &ChatCompletionRequest,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<proto::SamplingParams, String> {
@@ -542,7 +542,7 @@ impl SglangSchedulerClient {
     }
 
     /// Build gRPC SamplingParams from ResponsesRequest
-    fn build_grpc_sampling_params_from_responses(
+    pub(crate) fn build_grpc_sampling_params_from_responses(
         request: &ResponsesRequest,
         constraint: Option<(String, String)>,
     ) -> Result<proto::SamplingParams, String> {
@@ -635,7 +635,7 @@ impl SglangSchedulerClient {
     }
 
     /// Build gRPC SamplingParams from CreateMessageRequest
-    fn build_grpc_sampling_params_from_messages(
+    pub(crate) fn build_grpc_sampling_params_from_messages(
         request: &CreateMessageRequest,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<proto::SamplingParams, String> {
@@ -698,7 +698,7 @@ impl SglangSchedulerClient {
         Ok(grpc_request)
     }
 
-    fn build_grpc_sampling_params_from_completion(
+    pub(crate) fn build_grpc_sampling_params_from_completion(
         request: &CompletionRequest,
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = match &request.stop {
@@ -781,7 +781,7 @@ impl SglangSchedulerClient {
         }
     }
 
-    fn build_sampling_params_from_plain(
+    pub(crate) fn build_sampling_params_from_plain(
         params: Option<&GenerateSamplingParams>,
     ) -> Result<proto::SamplingParams, String> {
         let mut sampling = proto::SamplingParams {

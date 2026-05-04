@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -33,7 +33,23 @@ class TestChatCompletion:
     # Harmony (gpt-oss) does not trim because its detokenization is not channel-aware.
     STOP_SEQUENCE_TRIMMED = True
 
-    @pytest.mark.parametrize("logprobs", [None, 5])
+    @pytest.mark.parametrize(
+        "logprobs",
+        [
+            None,
+            pytest.param(
+                5,
+                marks=pytest.mark.skip_for_runtime(
+                    "tokenspeed",
+                    reason=(
+                        "tokenspeed's --enable-top-logprobs is not yet implemented "
+                        "(raises at startup); base output logprobs work via "
+                        "--enable-output-logprobs but the test requires top_logprobs=5"
+                    ),
+                ),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, model, api_client, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
@@ -73,7 +89,23 @@ class TestChatCompletion:
         assert response.usage.completion_tokens > 0
         assert response.usage.total_tokens > 0
 
-    @pytest.mark.parametrize("logprobs", [None, 5])
+    @pytest.mark.parametrize(
+        "logprobs",
+        [
+            None,
+            pytest.param(
+                5,
+                marks=pytest.mark.skip_for_runtime(
+                    "tokenspeed",
+                    reason=(
+                        "tokenspeed's --enable-top-logprobs is not yet implemented "
+                        "(raises at startup); base output logprobs work via "
+                        "--enable-output-logprobs but the test requires top_logprobs=5"
+                    ),
+                ),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, model, api_client, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
@@ -359,7 +391,7 @@ convenient hands-free control to your smart devices.
         return delta.content or getattr(delta, "reasoning_content", "") or ""
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(2)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -375,13 +407,45 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     STOP_SEQUENCE_TRIMMED = False
 
-    @pytest.mark.parametrize("logprobs", [None, 5])
+    @pytest.mark.parametrize(
+        "logprobs",
+        [
+            None,
+            pytest.param(
+                5,
+                marks=pytest.mark.skip_for_runtime(
+                    "tokenspeed",
+                    reason=(
+                        "tokenspeed's --enable-top-logprobs is not yet implemented "
+                        "(raises at startup); base output logprobs work via "
+                        "--enable-output-logprobs but the test requires top_logprobs=5"
+                    ),
+                ),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, model, api_client, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
         super().test_chat_completion(model, api_client, logprobs, parallel_sample_num)
 
-    @pytest.mark.parametrize("logprobs", [None, 5])
+    @pytest.mark.parametrize(
+        "logprobs",
+        [
+            None,
+            pytest.param(
+                5,
+                marks=pytest.mark.skip_for_runtime(
+                    "tokenspeed",
+                    reason=(
+                        "tokenspeed's --enable-top-logprobs is not yet implemented "
+                        "(raises at startup); base output logprobs work via "
+                        "--enable-output-logprobs but the test requires top_logprobs=5"
+                    ),
+                ),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     @pytest.mark.skip_for_runtime(
         "trtllm", reason="trtllm may return more top_logprobs than requested in streaming"
@@ -402,7 +466,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
         pass
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(4)
 @pytest.mark.model("openai/gpt-oss-120b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])

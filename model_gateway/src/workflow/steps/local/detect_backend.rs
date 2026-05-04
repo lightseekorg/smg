@@ -1,8 +1,15 @@
 //! Backend runtime detection step.
 //!
-//! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
-//! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
-//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
+//! Detects the runtime type for local workers.
+//! - HTTP: detects sglang/vllm via `/v1/models` (owned_by field), falls back
+//!   to unique endpoints. TokenSpeed has no HTTP frontend in this repo and is
+//!   gRPC-only.
+//! - gRPC: tries each backend's health endpoint sequentially, ordered by
+//!   expected frequency (sglang → vllm → trtllm → tokenspeed → mlx). Each
+//!   backend speaks its own gRPC service (e.g. TokenSpeed uses
+//!   `tokenspeed.grpc.scheduler`, see `proto/tokenspeed_scheduler.proto`),
+//!   so the order is a latency optimisation only — correctness does not
+//!   depend on it.
 
 use std::time::Duration;
 
@@ -43,8 +50,11 @@ async fn detect_grpc_backend(
         }
     }
 
-    // Try each runtime sequentially (most common first), skipping the hint we already tried
-    for runtime in &["sglang", "vllm", "trtllm", "mlx"] {
+    // Try each runtime sequentially, ordered by expected frequency so the
+    // common case finishes after one probe. Each backend speaks its own
+    // gRPC service, so order is purely a latency optimisation, not a
+    // correctness condition.
+    for runtime in &["sglang", "vllm", "trtllm", "tokenspeed", "mlx"] {
         if Some(*runtime) == runtime_hint {
             continue;
         }
@@ -57,7 +67,7 @@ async fn detect_grpc_backend(
     }
 
     Err(format!(
-        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, mlx)"
+        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, tokenspeed, mlx)"
     ))
 }
 

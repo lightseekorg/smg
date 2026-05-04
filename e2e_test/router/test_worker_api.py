@@ -219,6 +219,11 @@ class TestIGWMultiWorker:
 
 
 @pytest.mark.e2e
+# TokenSpeed deliberately excluded: this test class spins up its worker
+# via ``ConnectionMode.HTTP``, and ``Worker._build_tokenspeed_grpc_cmd``
+# rejects HTTP mode — TokenSpeed has no HTTP frontend in this repo.
+# Including ``tokenspeed`` here would fail deterministically on every
+# run rather than validate health-check behaviour.
 @pytest.mark.engine("sglang", "vllm")
 @pytest.mark.gpu(1)
 class TestDisableHealthCheck:

@@ -390,6 +390,7 @@ jobs:
               - 'scripts/ci_setup_python_venv.sh'
               - 'scripts/ci_install_sglang.sh'
               - 'scripts/ci_install_vllm.sh'
+              - 'scripts/ci_install_tokenspeed.sh'
               - 'scripts/ci_install_e2e_deps.sh'
               - 'scripts/ci_killall_sglang.sh'
               - 'scripts/ci_build_wheel.sh'
@@ -404,6 +405,7 @@ jobs:
               - 'e2e_test/router/**'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
+              - 'scripts/ci_install_tokenspeed.sh'
             agentic:
               - 'crates/mcp/**'
               - 'crates/data_connector/**'
@@ -445,6 +447,10 @@ jobs:
             timeout: 20
           - engine: trtllm
             timeout: 90
+          # TokenSpeed builds kernel (CUDA) + scheduler (C++/CMake) from
+          # source, so first run takes ~30 min; cached runs are faster.
+          - engine: tokenspeed
+            timeout: 60
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -555,6 +561,11 @@ jobs:
             timeout: 20
           - engine: trtllm
             timeout: 30
+          # Picks up TestChatCompletionGptOss (gpt-oss-20b, ``@pytest.mark.gpu(2)``)
+          # on the tokenspeed engine; the 1-GPU job collected the test class but
+          # pytest skipped it at collection because the runner only had 1 GPU.
+          - engine: tokenspeed
+            timeout: 60
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}

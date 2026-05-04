@@ -6,7 +6,7 @@ on:
       engine:
         required: true
         type: string
-        description: "Engine to test: sglang, vllm, or trtllm"
+        description: "Engine to test: sglang, vllm, trtllm, or tokenspeed"
       gpu_tier:
         required: true
         type: string
@@ -42,6 +42,16 @@ on:
 
 jobs:
   run:
+    # TokenSpeed lanes need ``TOKENSPEED_GITHUB_TOKEN`` to clone the
+    # private lightseekorg/tokenspeed repo, but GitHub does not pass
+    # secrets to workflows triggered by forked-PR events. Skip the
+    # tokenspeed engine on fork PRs so the job is reported as ``skipped``
+    # rather than failing inside ``setup-tokenspeed`` with a 404. Same-
+    # repo PRs and pushes still run normally.
+    if: >-
+      inputs.engine != 'tokenspeed'
+      || github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout }}
     permissions:
@@ -67,6 +77,14 @@ jobs:
       - name: Setup TRT-LLM backend
         if: inputs.engine == 'trtllm'
         uses: ./.github/actions/setup-trtllm
+
+      - name: Setup TokenSpeed backend
+        if: inputs.engine == 'tokenspeed'
+        uses: ./.github/actions/setup-tokenspeed
+        with:
+          # lightseekorg/tokenspeed is private; ``secrets: inherit`` on the
+          # caller (pr-test-rust.yml) makes this secret available here.
+          github-token: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
 
       # Artifact downloads
       - name: Download wheel artifact

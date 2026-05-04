@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "smg-grpc-servicer"
 version = "0.5.2"
-description = "SMG gRPC servicer implementations for LLM inference engines (vLLM, SGLang, MLX)"
+description = "SMG gRPC servicer implementations for LLM inference engines (vLLM, SGLang, MLX, TokenSpeed)"
 requires-python = ">=3.10"
 dependencies = [
     "smg-grpc-proto>=0.4.6",
@@ -36,6 +36,23 @@ sglang = ["sglang>=0.5.10"]
 # without this floor, installing [mlx] against an older proto build would
 # crash at import time when smg_grpc_servicer.mlx.server runs.
 mlx = ["smg-grpc-proto>=0.4.7", "mlx>=0.22.0", "mlx-lm>=0.22.0"]
+# Note: there is intentionally no ``tokenspeed`` extra. TokenSpeed is not
+# published to PyPI; it is installed out-of-tree from the lightseekorg
+# checkout via ``scripts/ci_install_tokenspeed.sh`` (CI) or a manual
+# ``pip install -e ./tokenspeed/python`` (local dev). An extra named
+# ``tokenspeed`` would imply ``pip install smg-grpc-servicer[tokenspeed]``
+# yields a working tokenspeed setup; it does not.
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "tokenspeed: tests that require TokenSpeed",
+]
 
 [project.urls]
 Homepage = "https://github.com/lightseekorg/smg"

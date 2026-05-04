@@ -61,6 +61,16 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "reasoning"],
     },
+    # Qwen3 instruct (non-thinking variant) — emits the same
+    # `<tool_call>\n{"name": ..., "arguments": ...}\n</tool_call>` format as
+    # Qwen 2.5, so the gateway's ``qwen`` tool-call parser applies. Used by
+    # ``TestToolChoiceQwen`` and ``TestMultiTurnToolCall``: a Qwen3 model is
+    # required because the Qwen2 family is not in TokenSpeed's model registry.
+    "Qwen/Qwen3-4B-Instruct-2507": {
+        "model": _resolve_model_path("Qwen/Qwen3-4B-Instruct-2507"),
+        "tp": 1,
+        "features": ["chat", "streaming", "function_calling", "tool_choice"],
+    },
     # Thinking/reasoning model (larger)
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
