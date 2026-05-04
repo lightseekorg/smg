@@ -12,7 +12,7 @@ pub use chat_utils::{create_stop_decoder, process_chat_messages};
 pub(crate) use chat_utils::{
     filter_chat_request_by_tool_choice, filter_tools_by_tool_choice, generate_tool_call_id,
     get_history_tool_calls_count, parse_finish_reason, parse_json_schema_response,
-    resolve_tokenizer, send_error_sse,
+    resolve_mlx_matched_stop_json, resolve_mlx_stop_ids, resolve_tokenizer, send_error_sse,
 };
 pub(crate) use logprobs::{
     convert_generate_input_logprobs, convert_generate_output_logprobs, convert_proto_logprobs,
