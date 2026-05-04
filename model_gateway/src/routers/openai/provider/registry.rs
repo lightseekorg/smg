@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    AnthropicProvider, GeminiProvider, OpenAIProvider, Provider, SGLangProvider, XAIProvider,
+    anthropic::AnthropicProvider, google::GoogleProvider, openai::OpenAIProvider,
+    sglang::SGLangProvider, xai::XAIProvider, Provider,
 };
 use crate::worker::ProviderType;
 
@@ -19,7 +20,6 @@ impl Default for ProviderRegistry {
 impl ProviderRegistry {
     pub fn new() -> Self {
         let mut providers = HashMap::new();
-
         providers.insert(
             ProviderType::OpenAI,
             Arc::new(OpenAIProvider) as Arc<dyn Provider>,
@@ -30,13 +30,12 @@ impl ProviderRegistry {
         );
         providers.insert(
             ProviderType::Gemini,
-            Arc::new(GeminiProvider) as Arc<dyn Provider>,
+            Arc::new(GoogleProvider) as Arc<dyn Provider>,
         );
         providers.insert(
             ProviderType::Anthropic,
             Arc::new(AnthropicProvider) as Arc<dyn Provider>,
         );
-
         Self {
             providers,
             default_provider: Arc::new(SGLangProvider),
