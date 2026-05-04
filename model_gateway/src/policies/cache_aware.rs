@@ -85,11 +85,18 @@ pub struct CacheAwarePolicy {
     /// Spec §7.1 mandates model scoping: the same hash can refer
     /// to different prefixes in different models, so a global
     /// index mis-routes multi-model deployments. Bounded by
-    /// eviction at `max_tree_size` total entries and by per-entry
-    /// payload size: every populate site stores the prior shared
-    /// prefix from a pre-insert match, never the full input. A
-    /// 32K-token request therefore costs O(matched-prefix), not
-    /// O(input), keeping the worst-case bytes/entry small.
+    /// eviction at `max_tree_size` total entries.
+    ///
+    /// Per-entry value semantics differ by populate site:
+    /// - `select_worker_*` (request hot paths) store the prior
+    ///   shared prefix from a pre-insert match. Bytes/entry is
+    ///   bounded by tree depth, not input size — a 32K-token
+    ///   request costs O(matched-prefix), not O(input).
+    /// - `apply_insert_to_trees` (snapshot/restore replay) stores
+    ///   the full inserted path because `apply_tenant_delta`
+    ///   re-inserts whatever value is stored, and the canonical
+    ///   path is required to attach tenants at the right node.
+    ///   This path runs at replay frequency, not request rate.
     hash_index: Arc<DashMap<String, PerModelHashIndex>>,
 }
 
@@ -375,31 +382,33 @@ impl CacheAwarePolicy {
         token_tree: &Arc<TokenTree>,
         insert_op: &TreeInsertOp,
     ) {
+        // Replay/restore path: store the FULL inserted path, not a
+        // matched prefix. `apply_tenant_delta` re-inserts whatever
+        // value is stored (line 460), so the canonical path is
+        // required to attach remote tenants at the correct node.
+        // On cold start the local tree is empty → a pre-insert
+        // `match_prefix_with_counts` would return 0 → storing ""
+        // would later cause `insert_text("", remote_worker)`,
+        // attaching the worker at root and tainting routing for
+        // every request to this model. This path runs at replay
+        // frequency (cold start, snapshot reconciliation), not per
+        // request, so the unbounded value cost is acceptable.
         match &insert_op.key {
             TreeKey::Text(text) => {
-                // Match BEFORE insert: post-insert the tree contains
-                // a full path for `text`, so the match would return
-                // the entire input length and we'd store the full
-                // prompt — exactly the memory bloat we avoid on the
-                // local cache-aware paths.
-                let result = string_tree.match_prefix_with_counts(text);
-                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
                 string_tree.insert_text(text, &insert_op.tenant);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .string_tree
-                    .insert(smg_mesh::hash_node_path(text), matched_prefix);
+                    .insert(smg_mesh::hash_node_path(text), text.clone());
             }
             TreeKey::Tokens(tokens) => {
-                let result = token_tree.match_prefix_with_counts(tokens);
-                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
                 token_tree.insert_tokens(tokens, &insert_op.tenant);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
+                    .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
             }
         }
     }
