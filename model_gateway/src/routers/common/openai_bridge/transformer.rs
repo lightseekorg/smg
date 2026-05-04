@@ -42,9 +42,18 @@ fn failed_output_item(
     output: &smg_mcp::ToolExecutionOutput,
     response_format: ResponseFormat,
 ) -> ResponseOutputItem {
+    // The MCP `CallToolResult { is_error: true, .. }` path can leave
+    // `error_message` unset while carrying the real failure text inside
+    // `output.output` (typed text blocks). Fall back to that before the
+    // generic placeholder so client-visible mcp_call.error stays useful.
     let err_msg = output
         .error_message
         .clone()
+        .filter(|msg| !msg.is_empty())
+        .or_else(|| {
+            let text = ResponseTransformer::flatten_mcp_output(&output.output);
+            (!text.is_empty()).then_some(text)
+        })
         .unwrap_or_else(|| "Tool execution failed".to_string());
     match response_format {
         ResponseFormat::Passthrough => ResponseOutputItem::McpCall {
@@ -1643,6 +1652,25 @@ mod tests {
                 assert_eq!(output, "");
                 assert_eq!(arguments, "{\"q\":\"v\"}");
                 assert_eq!(name, "brave_web_search");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn transform_tool_output_falls_back_to_output_text_when_error_message_missing() {
+        // MCP `CallToolResult { is_error: true }` can leave error_message
+        // unset and put the failure text inside the result blocks.
+        let mut output = failed_tool_output("brave_web_search");
+        output.error_message = None;
+        output.output = serde_json::json!([
+            {"type": "text", "text": "rate limited"}
+        ]);
+
+        let item = transform_tool_output(&output, ResponseFormat::Passthrough);
+        match item {
+            ResponseOutputItem::McpCall { error, .. } => {
+                assert_eq!(error.as_deref(), Some("rate limited"));
             }
             _ => panic!("Expected McpCall"),
         }
