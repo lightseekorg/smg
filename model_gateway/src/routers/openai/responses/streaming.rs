@@ -1080,16 +1080,17 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
-    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP orchestrator required");
-        }
-    };
-    // Only MCP-laden requests need the format registry; plain streaming
-    // requests must still pass through deployments without MCP wiring.
+    // Only MCP-laden requests need the orchestrator and format registry;
+    // plain streaming requests must still pass through deployments without
+    // MCP wiring.
     let mcp_routing = match original_body.tools.as_deref() {
         Some(tools) if request_uses_mcp_routing(tools) => {
+            let Some(mcp_orchestrator) = ctx.components.mcp_orchestrator().cloned() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP orchestrator required for requests carrying MCP/builtin tools",
+                );
+            };
             let Some(registry) = ctx.components.mcp_format_registry() else {
                 return error::internal_error(
                     "internal_error",
@@ -1099,7 +1100,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             let registry = registry.clone();
             ensure_request_mcp_client(&mcp_orchestrator, &registry, tools)
                 .await
-                .map(|servers| (servers, registry))
+                .map(|servers| (servers, mcp_orchestrator, registry))
         }
         _ => None,
     };
@@ -1112,7 +1113,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         }
     };
 
-    let Some((mcp_servers, mcp_format_registry)) = mcp_routing else {
+    let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing else {
         return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
     };
 

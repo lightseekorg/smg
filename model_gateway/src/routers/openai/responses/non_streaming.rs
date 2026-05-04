@@ -56,19 +56,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "Worker not selected");
         }
     };
-    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m,
-        None => {
-            return error::internal_error("internal_error", "MCP orchestrator required");
-        }
-    };
-
-    // Only MCP-laden requests need the format registry; without this
-    // narrowing, plain non-MCP requests would 500 in deployments that run
-    // the gateway without MCP wiring. A registry-less MCP request still
-    // hard-fails — silent fallback would mis-route hosted tools.
+    // Only MCP-laden requests need the orchestrator and format registry;
+    // without this narrowing, plain non-MCP requests would 500 in
+    // deployments that run the gateway without MCP wiring. A registry-less
+    // MCP request still hard-fails — silent fallback would mis-route
+    // hosted tools.
     let mcp_routing = match original_body.tools.as_deref() {
         Some(tools) if request_uses_mcp_routing(tools) => {
+            let Some(mcp_orchestrator) = ctx.components.mcp_orchestrator() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP orchestrator required for requests carrying MCP/builtin tools",
+                );
+            };
             let Some(registry) = ctx.components.mcp_format_registry() else {
                 return error::internal_error(
                     "internal_error",
@@ -77,21 +77,21 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             };
             ensure_request_mcp_client(mcp_orchestrator, registry, tools)
                 .await
-                .map(|servers| (servers, registry.clone()))
+                .map(|servers| (servers, mcp_orchestrator.clone(), registry.clone()))
         }
         _ => None,
     };
 
     let mut response_json: Value;
 
-    if let Some((mcp_servers, mcp_format_registry)) = mcp_routing {
+    if let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing {
         let session_request_id = original_body
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
         let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
         let mut session = McpToolSession::new_with_headers(
-            mcp_orchestrator,
+            &mcp_orchestrator,
             mcp_servers,
             &session_request_id,
             forwarded_headers,
