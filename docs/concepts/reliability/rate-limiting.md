@@ -66,7 +66,7 @@ Rate limiting ensures **fair access** and **predictable performance**.
 SMG uses a **token bucket** algorithm:
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/rate-limiting.svg" alt="Token Bucket Rate Limiting">
+  <img src="../../assets/images/rate-limiting.svg" alt="Token Bucket Rate Limiting">
 </div>
 
 ### Token Bucket

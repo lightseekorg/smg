@@ -51,7 +51,7 @@ Separate discovery for prefill and decode workers in disaggregated deployments.
 ## How It Works
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/service-discovery.svg" alt="Service Discovery Architecture">
+  <img src="../../assets/images/service-discovery.svg" alt="Service Discovery Architecture">
 </div>
 
 ### Discovery Flow
