@@ -52,7 +52,9 @@ Python frameworks (vLLM, SGLang, TokenSpeed-HTTP) load the tokenizer through `tr
 
 ## Approach
 
-Approach A from brainstorming: extend the existing `Renderer` enum pattern. Add a new variant `Renderer::KimiK25Tools` to `huggingface.rs` and introduce the same enum to `tiktoken.rs` (which has no `Renderer` today). The variant dispatches to a thin renderer wrapper that:
+Approach A from brainstorming: extend the existing `Renderer` enum pattern. Introduce a `Renderer` enum to `tiktoken.rs` (which has none today) with two variants — `Jinja` and `KimiK25Tools`. `huggingface.rs` is **not touched** for this change: Kimi-K2.5 ships a Tiktoken tokenizer in practice, and DeepSeek (the existing precedent) has no parallel defensive branch in `tiktoken.rs` either — each tokenizer file owns dispatch only for the models that actually load through it. If Kimi-K2.5 ever gets wired through HF tokenizer.json, we add the variant to `huggingface.rs` then.
+
+The new `KimiK25Tools` variant dispatches to a thin renderer wrapper that:
 
 1. Computes `tools_ts_str` via a hand-ported encoder.
 2. Merges it into `template_kwargs`.
@@ -71,8 +73,9 @@ crates/tokenizer/src/
     mod.rs                      add `pub(crate) mod kimi_k25_tools;`
   tiktoken.rs                   ADD: enum Renderer { Jinja, KimiK25Tools }, renderer field,
                                      detect_renderer_from_config(dir), match in apply_chat_template
-  huggingface.rs                EXTEND: add Renderer::KimiK25Tools to existing enum,
-                                     extend detect_renderer_from_config with one branch (defensive)
+  huggingface.rs                UNTOUCHED — Kimi-K2.5 loads via the Tiktoken path; no HF branch
+                                     needed. Mirrors how DeepSeek lives only in huggingface.rs
+                                     with no defensive Tiktoken branch.
 
 crates/tokenizer/tests/
   kimi_k25_tools_encoder.rs     NEW — golden tests for the TS encoder
@@ -132,7 +135,7 @@ Internally split into private helpers (`encode_tool`, `encode_schema`, `encode_o
 ### Dispatch
 
 ```rust
-// tiktoken.rs (and parallel structure in huggingface.rs)
+// tiktoken.rs only
 match self.renderer {
     Renderer::Jinja => self.chat_template.apply(messages, params_with_tokens),
     Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params_with_tokens),
@@ -141,7 +144,7 @@ match self.renderer {
 
 ## Detection
 
-Both `tiktoken.rs` and `huggingface.rs` consult `config.json::architectures`. If the array contains `"KimiK25ForConditionalGeneration"`, the tokenizer is constructed with `Renderer::KimiK25Tools`; otherwise `Renderer::Jinja`.
+`tiktoken.rs` consults `config.json::architectures`. If the array contains `"KimiK25ForConditionalGeneration"`, the tokenizer is constructed with `Renderer::KimiK25Tools`; otherwise `Renderer::Jinja`.
 
 ```rust
 fn detect_renderer_from_config(dir: &Path) -> Renderer {
@@ -154,7 +157,7 @@ fn detect_renderer_from_config(dir: &Path) -> Renderer {
 }
 ```
 
-The branch is added to `huggingface.rs` defensively even though Kimi-K2.5 ships a Tiktoken tokenizer in practice — if a future build wires it via HF tokenizer.json, the same enricher kicks in.
+`huggingface.rs::detect_renderer_from_config` is **not modified**. Kimi-K2.5 loads through the Tiktoken path; if that ever changes, we add the variant then.
 
 ## Error handling and observability
 
@@ -230,7 +233,7 @@ Validation matrix (~25 fixtures during development; **prune to ~5-8 for merge** 
 
 ### Layer 3 — Detection
 
-Extend `crates/tokenizer/tests/deepseek_renderer_detection.rs` (or split into a new file) with cases for `Renderer::KimiK25Tools`. **Prune to merge**: at minimum one positive (architecture matches → `KimiK25Tools`) and one negative (missing `config.json` → `Jinja`, no panic). The remaining variants (malformed JSON, missing `architectures` array, unknown architecture) all share the same fall-through code path; a single representative test covers them.
+New file `crates/tokenizer/tests/kimi_k25_renderer_detection.rs` (parallels the existing `deepseek_renderer_detection.rs`) with cases for `Renderer::KimiK25Tools` selection in the Tiktoken path. **Prune to merge**: at minimum one positive (architecture matches → `KimiK25Tools`) and one negative (missing `config.json` → `Jinja`, no panic). The remaining variants (malformed JSON, missing `architectures` array, unknown architecture) all share the same fall-through code path; a single representative test covers them.
 
 ### What's NOT tested in CI
 
