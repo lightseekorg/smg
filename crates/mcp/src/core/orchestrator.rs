@@ -1146,8 +1146,13 @@ impl McpOrchestrator {
 
     /// Convert CallToolResult to JSON value.
     fn call_result_to_json(result: &CallToolResult) -> Value {
-        // Serialize the CallToolResult content to JSON
-        // The content is a Vec of annotated content items
+        // Prefer structured payloads when available: hosted tools and newer
+        // MCP servers may return canonical JSON in `structured_content`.
+        // Fall back to legacy annotated `content` blocks for compatibility.
+        if let Some(structured) = &result.structured_content {
+            return structured.clone();
+        }
+
         serde_json::to_value(&result.content).unwrap_or_else(|e| {
             warn!(
                 "Failed to serialize CallToolResult to JSON: {}. Falling back to empty object.",
@@ -1875,6 +1880,34 @@ mod tests {
         assert_eq!(handler_ctx.request_id, "req-1");
         assert_eq!(handler_ctx.approval_mode, ApprovalMode::Interactive);
         assert!(handler_ctx.forwarded_headers.is_empty());
+    }
+
+    #[test]
+    fn test_call_result_to_json_prefers_structured_content() {
+        let structured = serde_json::json!({
+            "query": "rust async await",
+            "results": [{"file_id": "file_1", "filename": "guide.md"}]
+        });
+
+        let result = CallToolResult {
+            content: Vec::new(),
+            structured_content: Some(structured.clone()),
+            is_error: Some(false),
+            meta: None,
+        };
+
+        let serialized = McpOrchestrator::call_result_to_json(&result);
+        assert_eq!(serialized, structured);
+    }
+
+    #[test]
+    fn test_call_result_to_json_falls_back_to_content_when_unstructured() {
+        let mut result = CallToolResult::structured(serde_json::json!({"message": "fallback"}));
+        result.structured_content = None;
+
+        let serialized = McpOrchestrator::call_result_to_json(&result);
+        assert!(serialized.is_array());
+        assert!(!serialized.as_array().unwrap_or(&Vec::new()).is_empty());
     }
 
     #[test]

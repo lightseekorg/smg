@@ -2522,7 +2522,9 @@ pub struct FileSearchResult {
     pub filename: String,
     pub text: Option<String>,
     pub score: Option<f32>,
+    pub vector_store_id: Option<String>,
     pub attributes: Option<Value>,
+    pub additional_properties: Option<Value>,
 }
 
 /// Status for `local_shell` tool calls.
