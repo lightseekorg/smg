@@ -44,6 +44,23 @@ pub fn format_from_type_str(type_str: &str) -> Option<ResponseFormat> {
     }
 }
 
+/// True iff `item_type` names a *hosted* tool-call item (web_search_call,
+/// code_interpreter_call, file_search_call, image_generation_call) — i.e.
+/// any item the bridge maps to a non-Passthrough `ResponseFormat`.
+///
+/// `mcp_call` and non-format types (`function_call`, `message`, …) return
+/// false. The streaming router uses this to decide whether the upstream
+/// `output_item.done` for a hosted tool item must be suppressed (the tool
+/// loop emits its own correctly-ordered umbrella).
+///
+/// Sourced from [`format_from_type_str`] + [`ResponseFormat::to_builtin_tool_type`]
+/// so the descriptor table remains the single source of truth — adding a
+/// new hosted format flips this predicate automatically with no router
+/// edit required.
+pub fn is_hosted_tool_call_item_type(item_type: &str) -> bool {
+    format_from_type_str(item_type).is_some_and(|f| f.to_builtin_tool_type().is_some())
+}
+
 pub const fn descriptor(format: ResponseFormat) -> FormatDescriptor {
     match format {
         ResponseFormat::WebSearchCall => FormatDescriptor {

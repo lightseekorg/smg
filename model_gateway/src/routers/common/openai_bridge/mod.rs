@@ -10,7 +10,9 @@ pub mod response_format;
 pub mod tool_descriptors;
 pub mod transformer;
 
-pub use format_descriptor::{descriptor, format_from_type_str, FormatDescriptor};
+pub use format_descriptor::{
+    descriptor, format_from_type_str, is_hosted_tool_call_item_type, FormatDescriptor,
+};
 pub use format_registry::{lookup_tool_format, FormatRegistry};
 pub use overrides::{apply_hosted_tool_overrides, extract_hosted_tool_overrides};
 pub use response_format::ResponseFormat;
