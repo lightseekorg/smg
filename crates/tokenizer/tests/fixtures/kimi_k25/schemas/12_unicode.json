@@ -1,0 +1,14 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "translate",
+      "description": "翻译 text into 中文.",
+      "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"]
+      }
+    }
+  }
+]

@@ -1,0 +1,12 @@
+# Tools
+
+## functions
+namespace functions {
+interface Node {
+  id: string,
+  label?: string
+}
+type create_node = (_: {
+  node: Node
+}) => any;
+}

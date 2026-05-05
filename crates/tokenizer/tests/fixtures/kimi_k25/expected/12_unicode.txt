@@ -1,0 +1,9 @@
+# Tools
+
+## functions
+namespace functions {
+// 翻译 text into 中文.
+type translate = (_: {
+  text: string
+}) => any;
+}
