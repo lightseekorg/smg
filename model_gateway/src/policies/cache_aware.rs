@@ -749,8 +749,18 @@ impl TreeHandle for CacheAwarePolicy {
                     return false;
                 };
                 let Some(tree) = self.string_trees.get(model_id) else {
-                    // Hash index entry without a tree is a
-                    // populate-site bug; nothing to apply against.
+                    // Hash index entry without a corresponding
+                    // tree means a populate site mutated
+                    // `hash_index` without creating the tree
+                    // (or eviction dropped the tree but left the
+                    // index). Returning false here masks the
+                    // invariant violation as a spurious repair
+                    // request, so log loudly.
+                    warn!(
+                        model_id,
+                        node_hash,
+                        "string hash_index entry without matching string_trees entry; populate-site invariant violated",
+                    );
                     return false;
                 };
                 tree.insert_text(path.value(), worker_url);
@@ -761,6 +771,11 @@ impl TreeHandle for CacheAwarePolicy {
                     return false;
                 };
                 let Some(tree) = self.token_trees.get(model_id) else {
+                    warn!(
+                        model_id,
+                        node_hash,
+                        "token hash_index entry without matching token_trees entry; populate-site invariant violated",
+                    );
                     return false;
                 };
                 tree.insert_tokens(tokens.value(), worker_url);
