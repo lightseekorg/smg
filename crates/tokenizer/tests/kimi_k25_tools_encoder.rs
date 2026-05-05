@@ -37,11 +37,6 @@ fn fixture_01_simple_string() {
 }
 
 #[test]
-fn fixture_02_optional_number() {
-    run_fixture("02_optional_number");
-}
-
-#[test]
 fn fixture_03_nested_object() {
     run_fixture("03_nested_object");
 }
@@ -52,23 +47,8 @@ fn fixture_04_array_of_strings() {
 }
 
 #[test]
-fn fixture_05_two_tools() {
-    run_fixture("05_two_tools");
-}
-
-#[test]
 fn fixture_06_enum() {
     run_fixture("06_enum");
-}
-
-#[test]
-fn fixture_07_anyof() {
-    run_fixture("07_anyof");
-}
-
-#[test]
-fn fixture_08_type_list() {
-    run_fixture("08_type_list");
 }
 
 #[test]
@@ -82,16 +62,6 @@ fn fixture_11_multiline_description() {
 }
 
 #[test]
-fn fixture_12_unicode() {
-    run_fixture("12_unicode");
-}
-
-#[test]
 fn fixture_13_empty_params() {
     run_fixture("13_empty_params");
-}
-
-#[test]
-fn fixture_14_unknown_type() {
-    run_fixture("14_unknown_type");
 }

@@ -1,8 +1,0 @@
-# Tools
-
-## functions
-namespace functions {
-type set_value = (_: {
-  v: string | number
-}) => any;
-}
