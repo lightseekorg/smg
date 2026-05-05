@@ -70,3 +70,18 @@ fn fixture_07_anyof() {
 fn fixture_08_type_list() {
     run_fixture("08_type_list");
 }
+
+#[test]
+fn fixture_09_ref_local() {
+    run_fixture("09_ref_local");
+}
+
+#[test]
+fn fixture_11_multiline_description() {
+    run_fixture("11_multiline_description");
+}
+
+#[test]
+fn fixture_12_unicode() {
+    run_fixture("12_unicode");
+}
