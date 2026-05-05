@@ -620,7 +620,7 @@ fn non_streaming_tool_item_id_source(item_id: &str, response_format: ResponseFor
 }
 
 fn approval_request_item_id_source(item_id: &str) -> String {
-    normalize_tool_item_id_with_prefix(item_id, "mcpr_")
+    normalize_tool_item_id_with_prefix(item_id, "mcpr")
 }
 
 pub(crate) fn mcp_list_tools_bindings_to_emit(
@@ -1884,6 +1884,27 @@ mod tests {
         assert_eq!(
             done_count, 1,
             "exactly one `output_item.done` expected, got {done_count}: {types:?}"
+        );
+    }
+
+    #[test]
+    fn approval_request_item_id_source_uses_single_underscore() {
+        // Regression: `normalize_tool_item_id_with_prefix` appends `_`
+        // internally, so the prefix argument must be the bare token. A
+        // prior version passed `"mcpr_"` here and emitted `mcpr__...` ids,
+        // breaking the approval wire format.
+        assert_eq!(super::approval_request_item_id_source("fc_abc"), "mcpr_abc");
+        assert_eq!(
+            super::approval_request_item_id_source("call_xyz"),
+            "mcpr_xyz"
+        );
+        assert_eq!(
+            super::approval_request_item_id_source("mcpr_already"),
+            "mcpr_already"
+        );
+        assert_eq!(
+            super::approval_request_item_id_source("raw_id"),
+            "mcpr_raw_id"
         );
     }
 }
