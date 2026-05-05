@@ -85,3 +85,13 @@ fn fixture_11_multiline_description() {
 fn fixture_12_unicode() {
     run_fixture("12_unicode");
 }
+
+#[test]
+fn fixture_13_empty_params() {
+    run_fixture("13_empty_params");
+}
+
+#[test]
+fn fixture_14_unknown_type() {
+    run_fixture("14_unknown_type");
+}

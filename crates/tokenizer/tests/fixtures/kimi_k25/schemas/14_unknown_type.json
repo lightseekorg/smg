@@ -1,0 +1,13 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "weird",
+      "parameters": {
+        "type": "object",
+        "properties": {"x": {"type": "uuid"}},
+        "required": ["x"]
+      }
+    }
+  }
+]

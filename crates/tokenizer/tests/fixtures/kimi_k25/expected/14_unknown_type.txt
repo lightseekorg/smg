@@ -1,0 +1,8 @@
+# Tools
+
+## functions
+namespace functions {
+type weird = (_: {
+  x: uuid
+}) => any;
+}

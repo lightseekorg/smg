@@ -1,0 +1,6 @@
+[
+  {
+    "type": "function",
+    "function": {"name": "noop", "parameters": {"type": "object", "properties": {}}}
+  }
+]
