@@ -120,9 +120,6 @@ pub async fn connect_mcp_servers(
 
             let server_key = McpOrchestrator::server_key(&server_config);
 
-            // Use the bridge wrapper so the orchestrator + FormatRegistry
-            // can never be left out of sync. See
-            // openai_bridge/connect.rs.
             match openai_bridge::connect_dynamic_server(
                 mcp_orchestrator,
                 format_registry,

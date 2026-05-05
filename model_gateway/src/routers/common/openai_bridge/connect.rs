@@ -14,8 +14,6 @@ use smg_mcp::{McpOrchestrator, McpResult, McpServerConfig};
 
 use super::FormatRegistry;
 
-/// Connect a static MCP server and mirror its tool-format config into
-/// `registry`.
 pub async fn connect_static_server(
     orchestrator: &McpOrchestrator,
     registry: &FormatRegistry,
@@ -26,8 +24,7 @@ pub async fn connect_static_server(
     Ok(())
 }
 
-/// Connect a dynamic MCP server and mirror its tool-format config into
-/// `registry`. Returns the assigned server key.
+/// Returns the assigned server key.
 pub async fn connect_dynamic_server(
     orchestrator: &McpOrchestrator,
     registry: &FormatRegistry,

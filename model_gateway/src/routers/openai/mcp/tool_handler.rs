@@ -13,18 +13,12 @@ use crate::routers::{
     openai::responses::{extract_output_index, get_event_type, StreamingResponseAccumulator},
 };
 
-/// True for item types whose umbrella `output_item.done` is re-emitted by
-/// the streaming tool loop and therefore must be suppressed when the
-/// upstream forwards its own duplicate (which would land BEFORE the
-/// structured `<type>.completed` sub-event and break the spec invariant
-/// that `output_item.done` is the LAST event for a given item — see
-/// `.claude/_audit/openai-responses-api-spec.md` §streaming).
-///
-/// Covers function-call variants (`function_call`, `function_tool_call`)
-/// and the four hosted tool-call families. `mcp_call` is excluded — those
-/// umbrellas are emitted by the tool loop directly, not forwarded from
-/// upstream. Sourcing the hosted set from `openai_bridge` means a new
-/// hosted format flips this check automatically with no edit here.
+/// True for item types whose upstream `output_item.done` must be suppressed
+/// — the tool loop emits its own umbrella AFTER `<type>.completed` to
+/// satisfy the spec invariant that the umbrella is the LAST event for a
+/// given item (see `.claude/_audit/openai-responses-api-spec.md`
+/// §streaming). `mcp_call` is excluded; that umbrella is synthesized
+/// here, not forwarded.
 fn is_tool_call_item_type(item_type: &str) -> bool {
     is_function_call_type(item_type) || openai_bridge::is_hosted_tool_call_item_type(item_type)
 }

@@ -67,11 +67,6 @@ impl StepExecutor<McpWorkflowData> for ConnectMcpServerStep {
                     message: "MCP orchestrator not initialized".to_string(),
                 })?;
 
-        // Connect via the bridge wrapper so the orchestrator's tool inventory
-        // and the gateway-side FormatRegistry move atomically — the bare
-        // `connect_static_server` + `populate_from_server_config` sequence
-        // would silently downgrade hosted-tool dispatch if a future caller
-        // forgot the second call.
         openai_bridge::connect_static_server(
             mcp_orchestrator,
             &app_context.mcp_format_registry,
