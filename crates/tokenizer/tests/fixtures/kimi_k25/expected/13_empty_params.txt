@@ -1,0 +1,6 @@
+# Tools
+
+## functions
+namespace functions {
+type noop = (_: {}) => any;
+}
