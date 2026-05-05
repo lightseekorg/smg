@@ -55,14 +55,8 @@ pub(crate) async fn ensure_mcp_connection(
     // dispatches.
     let has_builtin_tools = tools
         .map(|t| {
-            t.iter().any(|tool| {
-                matches!(
-                    tool,
-                    ResponseTool::WebSearchPreview(_)
-                        | ResponseTool::CodeInterpreter(_)
-                        | ResponseTool::ImageGeneration(_)
-                )
-            })
+            t.iter()
+                .any(|tool| openai_bridge::builtin_type_for_response_tool(tool).is_some())
         })
         .unwrap_or(false);
 
