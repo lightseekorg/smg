@@ -415,8 +415,8 @@ mod tests {
     use openai_protocol::{
         common::Function,
         responses::{
-            CodeInterpreterTool, FunctionTool, ImageGenerationTool, McpTool, ResponseTool,
-            WebSearchPreviewTool,
+            CodeInterpreterTool, FileSearchTool, FunctionTool, ImageGenerationTool, McpTool,
+            ResponseTool, WebSearchPreviewTool,
         },
     };
     use serde_json::json;
@@ -699,6 +699,59 @@ mod tests {
             routing[0].response_format,
             ResponseFormat::ImageGenerationCall
         );
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_and_extract_builtin_types_file_search() {
+        let mut file_search_tools = HashMap::new();
+        file_search_tools.insert(
+            "file_search".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::FileSearchCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "file-search-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9996/file-search".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(file_search_tools),
+                builtin_type: Some(BuiltinToolType::FileSearch),
+                builtin_tool_name: Some("file_search".to_string()),
+                internal: false,
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+
+        let tools = vec![ResponseTool::FileSearch(FileSearchTool {
+            vector_store_ids: vec![],
+            filters: None,
+            max_num_results: None,
+            ranking_options: None,
+        })];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::FileSearch);
+        assert_eq!(routing[0].server_name, "file-search-server");
+        assert_eq!(routing[0].tool_name, "file_search");
+        assert_eq!(routing[0].response_format, ResponseFormat::FileSearchCall);
+
+        let builtin_types = extract_builtin_types(&tools);
+        assert_eq!(builtin_types, vec![BuiltinToolType::FileSearch]);
     }
 
     // =========================================================================
