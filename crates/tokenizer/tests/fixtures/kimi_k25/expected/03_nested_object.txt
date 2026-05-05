@@ -1,0 +1,12 @@
+# Tools
+
+## functions
+namespace functions {
+// Create a new user record.
+type create_user = (_: {
+  user: {
+    name: string,
+    age?: number
+  }
+}) => any;
+}

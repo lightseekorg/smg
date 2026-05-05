@@ -1,0 +1,4 @@
+[
+  {"type": "function", "function": {"name": "ping", "parameters": {"type": "object", "properties": {}}}},
+  {"type": "function", "function": {"name": "pong", "parameters": {"type": "object", "properties": {}}}}
+]

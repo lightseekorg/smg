@@ -1,0 +1,23 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "create_user",
+      "description": "Create a new user record.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "age": {"type": "integer"}
+            },
+            "required": ["name"]
+          }
+        },
+        "required": ["user"]
+      }
+    }
+  }
+]
