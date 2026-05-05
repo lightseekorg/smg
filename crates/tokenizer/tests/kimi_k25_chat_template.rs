@@ -42,18 +42,27 @@ mod tests {
         let tok = TiktokenTokenizer::from_dir(dir.path()).expect("tokenizer should load");
 
         let messages = vec![json!({"role": "user", "content": "what's 2+2?"})];
-        let tools = vec![json!({
-            "type": "function",
-            "function": {
-                "name": "calc",
-                "description": "Compute an expression.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"expr": {"type": "string"}},
-                    "required": ["expr"]
+        let tools = vec![
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "calc",
+                    "description": "Compute an expression.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"expr": {"type": "string"}},
+                        "required": ["expr"]
+                    }
                 }
-            }
-        })];
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }),
+        ];
         let rendered = tok
             .apply_chat_template(
                 &messages,
@@ -71,7 +80,11 @@ mod tests {
         );
         assert!(
             rendered.contains("type calc = (_:"),
-            "expected TS function declaration, got:\n{rendered}"
+            "expected calc declaration, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("type ping = (_:"),
+            "expected ping declaration, got:\n{rendered}"
         );
         assert!(
             !rendered.contains(r#"[{"function":"#),
