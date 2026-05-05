@@ -101,27 +101,25 @@ impl HarmonyPreparationStage {
         // Step 1: Filter tools if needed
         let mut body_ref = utils::filter_chat_request_by_tool_choice(request);
 
-        // Step 2: Build structural tag constraint
-        let tool_constraint = if let Some(tools) = body_ref.tools.as_ref() {
-            Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
-                .map_err(|e| *e)?
-        } else {
-            None
-        };
+        // Step 2: Build constraint. Skip the tool-call structural tag on the
+        // ChatCompletion Harmony path. Direct gRPC probes confirmed that under
+        // `tool_choice=required` or `tool_choice={type:"function",...}` with a
+        // prompt that conflicts with calling the named tool, vLLM guided
+        // decoding satisfies the structural tag at the byte level by emitting
+        // ASCII text matching the Harmony commentary header into the final
+        // channel — leaking raw control markup like
+        // `<|channel|>commentary to=functions.X<|message|>{...}` into
+        // `message.content` with empty `tool_calls`. Harmony tool descriptions
+        // already advertise the available tools, so leaving the constraint off
+        // matches the HTTP path's behavior. Keep `response_format_constraint`
+        // for the JSON-schema enforcement path; the Responses path is handled
+        // by `prepare_responses` and is not affected by this change.
         let response_format_constraint =
             Self::generate_response_format_constraint(body_ref.response_format.as_ref())
                 .map_err(|e| *e)?;
 
-        // Reject requests that specify both tool call and response_format constraints
-        if tool_constraint.is_some() && response_format_constraint.is_some() {
-            return Err(error::bad_request(
-                "invalid_request_parameters",
-                "Constrained decoding (response_format) is not compatible with tool calls",
-            ));
-        }
-
         let has_response_format_constraint = response_format_constraint.is_some();
-        let constraint = tool_constraint.or(response_format_constraint);
+        let constraint = response_format_constraint;
 
         // If response_format was converted to a structural tag, clear it from the request
         // so the backend builder doesn't also try to add a json_schema constraint from it.
