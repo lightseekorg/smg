@@ -35,3 +35,23 @@ fn run_fixture(name: &str) {
 fn fixture_01_simple_string() {
     run_fixture("01_simple_string");
 }
+
+#[test]
+fn fixture_02_optional_number() {
+    run_fixture("02_optional_number");
+}
+
+#[test]
+fn fixture_03_nested_object() {
+    run_fixture("03_nested_object");
+}
+
+#[test]
+fn fixture_04_array_of_strings() {
+    run_fixture("04_array_of_strings");
+}
+
+#[test]
+fn fixture_05_two_tools() {
+    run_fixture("05_two_tools");
+}

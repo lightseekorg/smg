@@ -1,0 +1,9 @@
+# Tools
+
+## functions
+namespace functions {
+// Apply tags.
+type tag_items = (_: {
+  tags: Array<string>
+}) => any;
+}

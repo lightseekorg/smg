@@ -1,0 +1,7 @@
+# Tools
+
+## functions
+namespace functions {
+type ping = (_: {}) => any;
+type pong = (_: {}) => any;
+}
