@@ -1,8 +1,0 @@
-# Tools
-
-## functions
-namespace functions {
-type store = (_: {
-  x: string | null
-}) => any;
-}
