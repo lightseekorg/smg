@@ -5,6 +5,8 @@ use pyo3::prelude::*;
 use smg::*;
 use smg_auth as auth;
 
+mod serving;
+
 // Define the enums with PyO3 bindings
 #[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
@@ -1274,5 +1276,6 @@ fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_reasoning_parsers, m)?)?;
+    serving::register(m)?;
     Ok(())
 }
