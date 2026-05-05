@@ -55,3 +55,18 @@ fn fixture_04_array_of_strings() {
 fn fixture_05_two_tools() {
     run_fixture("05_two_tools");
 }
+
+#[test]
+fn fixture_06_enum() {
+    run_fixture("06_enum");
+}
+
+#[test]
+fn fixture_07_anyof() {
+    run_fixture("07_anyof");
+}
+
+#[test]
+fn fixture_08_type_list() {
+    run_fixture("08_type_list");
+}

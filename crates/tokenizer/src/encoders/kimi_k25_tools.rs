@@ -171,6 +171,9 @@ enum ParameterType {
     Scalar(ParameterTypeScalar),
     Object(ParameterTypeObject),
     Array(ParameterTypeArray),
+    Enum(ParameterTypeEnum),
+    AnyOf(ParameterTypeAnyOf),
+    Union(ParameterTypeUnion),
 }
 
 impl ParameterType {
@@ -179,6 +182,9 @@ impl ParameterType {
             ParameterType::Scalar(s) => s.base.format_docstring(indent),
             ParameterType::Object(o) => o.base.format_docstring(indent),
             ParameterType::Array(a) => a.base.format_docstring(indent),
+            ParameterType::Enum(e) => e.base.format_docstring(indent),
+            ParameterType::AnyOf(a) => a.base.format_docstring(indent),
+            ParameterType::Union(u) => u.base.format_docstring(indent),
         }
     }
 
@@ -187,6 +193,9 @@ impl ParameterType {
             ParameterType::Scalar(s) => s.to_typescript(),
             ParameterType::Object(o) => o.to_typescript(indent, registry),
             ParameterType::Array(a) => a.to_typescript(indent, registry),
+            ParameterType::Enum(e) => e.to_typescript(),
+            ParameterType::AnyOf(a) => a.to_typescript(indent, registry),
+            ParameterType::Union(u) => u.to_typescript(),
         }
     }
 }
@@ -426,6 +435,104 @@ impl ParameterTypeArray {
     }
 }
 
+struct ParameterTypeEnum {
+    base: BaseType,
+    values: Vec<Value>,
+}
+
+impl ParameterTypeEnum {
+    fn parse(schema: &Value) -> Self {
+        let values = schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Self {
+            base: BaseType::from_extra_props(schema, &[]),
+            values,
+        }
+    }
+
+    fn to_typescript(&self) -> String {
+        self.values
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+                Value::Null => "null".to_string(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+struct ParameterTypeAnyOf {
+    base: BaseType,
+    branches: Vec<ParameterType>,
+}
+
+impl ParameterTypeAnyOf {
+    fn parse(schema: &Value, registry: &mut SchemaRegistry) -> Self {
+        let branches = schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|s| parse_parameter_type(s, registry))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            base: BaseType::from_extra_props(schema, &[]),
+            branches,
+        }
+    }
+
+    fn to_typescript(&self, indent: &str, registry: &SchemaRegistry) -> String {
+        self.branches
+            .iter()
+            .map(|b| b.to_typescript(indent, registry))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+struct ParameterTypeUnion {
+    base: BaseType,
+    types: Vec<String>,
+}
+
+impl ParameterTypeUnion {
+    fn parse(schema: &Value) -> Self {
+        let raw_types = schema
+            .get("type")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let types = raw_types
+            .into_iter()
+            .map(|t| match t {
+                "string" => "string".to_string(),
+                "number" => "number".to_string(),
+                "integer" => "number".to_string(),
+                "boolean" => "boolean".to_string(),
+                "null" => "null".to_string(),
+                "object" => "{}".to_string(),
+                "array" => "Array<any>".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        Self {
+            base: BaseType::from_extra_props(schema, &[]),
+            types,
+        }
+    }
+
+    fn to_typescript(&self) -> String {
+        self.types.join(" | ")
+    }
+}
+
 fn parse_parameter_type(schema: &Value, registry: &mut SchemaRegistry) -> ParameterType {
     if schema.is_boolean() {
         return ParameterType::Scalar(ParameterTypeScalar {
@@ -443,18 +550,30 @@ fn parse_parameter_type(schema: &Value, registry: &mut SchemaRegistry) -> Parame
         None => return ParameterType::Scalar(ParameterTypeScalar::any()),
     };
 
-    if let Some(typ) = obj.get("type").and_then(Value::as_str) {
-        return match typ {
-            "object" => ParameterType::Object(ParameterTypeObject::parse(schema, registry)),
-            "array" => ParameterType::Array(ParameterTypeArray::parse(schema, registry)),
-            other => ParameterType::Scalar(ParameterTypeScalar::parse(other, schema)),
-        };
+    if obj.contains_key("anyOf") {
+        return ParameterType::AnyOf(ParameterTypeAnyOf::parse(schema, registry));
+    }
+    if obj.contains_key("enum") {
+        return ParameterType::Enum(ParameterTypeEnum::parse(schema));
+    }
+
+    if let Some(typ_value) = obj.get("type") {
+        if typ_value.is_array() {
+            return ParameterType::Union(ParameterTypeUnion::parse(schema));
+        }
+        if let Some(typ) = typ_value.as_str() {
+            return match typ {
+                "object" => ParameterType::Object(ParameterTypeObject::parse(schema, registry)),
+                "array" => ParameterType::Array(ParameterTypeArray::parse(schema, registry)),
+                other => ParameterType::Scalar(ParameterTypeScalar::parse(other, schema)),
+            };
+        }
     }
     if obj.is_empty() {
         return ParameterType::Scalar(ParameterTypeScalar::any());
     }
-    // Fall-through for shapes covered in later tasks (anyOf, enum, type-list,
-    // $ref). For now, degrade to `any` to keep the encoder permissive.
+    // Fall-through for shapes covered in later tasks ($ref). For now, degrade
+    // to `any` to keep the encoder permissive.
     ParameterType::Scalar(ParameterTypeScalar::any())
 }
 

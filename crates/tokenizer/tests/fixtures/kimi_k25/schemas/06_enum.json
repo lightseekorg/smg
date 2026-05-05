@@ -1,0 +1,13 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "set_status",
+      "parameters": {
+        "type": "object",
+        "properties": {"status": {"enum": ["active", "paused", "done"]}},
+        "required": ["status"]
+      }
+    }
+  }
+]
