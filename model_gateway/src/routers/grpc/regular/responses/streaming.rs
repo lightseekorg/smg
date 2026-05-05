@@ -776,8 +776,10 @@ async fn execute_tool_loop_streaming_internal(
                     warn!("Tool execution returned error: {}", err_text);
 
                     // `response.mcp_call.failed` is the only `*.failed` event
-                    // in the Responses API; hosted-builtin families close via
-                    // `*.completed` + `output_item.done` with status=failed.
+                    // in the Responses API. Hosted-builtin families close via
+                    // `*.completed` to mirror OpenAI cloud's wire shape;
+                    // the failure context (when present) lives in the item
+                    // content.
                     if matches!(response_format, ResponseFormat::Passthrough) {
                         let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_text);
                         emitter.send_event(&event, &tx)?;

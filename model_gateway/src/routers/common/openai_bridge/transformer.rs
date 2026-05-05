@@ -18,15 +18,19 @@ use super::ResponseFormat;
 /// registry lookup against `(output.server_key, output.tool_name)` would
 /// miss for disambiguated names like `mcp_<server>_<tool>`.
 ///
-/// On `is_error`, the four hosted-builtin variants emit `status: "failed"`
-/// only (those wire shapes have no `error` field); `mcp_call` carries the
-/// `error_message` in its `error` field.
+/// On `is_error`: only `mcp_call` surfaces the failure (`status: "failed"`,
+/// `error: Some(msg)`). The four hosted-builtin variants always emit
+/// `status: "completed"` — that matches OpenAI cloud's de-facto behavior
+/// (the cloud's native `web_search_call`/`code_interpreter_call`/etc.
+/// don't emit `Failed` for soft failures like empty results or rate
+/// limits, and many MCP servers set `isError: true` for those very cases).
+/// The error context lives in the item's content, not in `status`.
 pub fn transform_tool_output(
     output: &smg_mcp::ToolExecutionOutput,
     response_format: ResponseFormat,
 ) -> ResponseOutputItem {
-    if output.is_error {
-        return failed_output_item(output, response_format);
+    if output.is_error && response_format == ResponseFormat::Passthrough {
+        return failed_mcp_call(output);
     }
     ResponseTransformer::transform(
         &output.output,
@@ -38,10 +42,7 @@ pub fn transform_tool_output(
     )
 }
 
-fn failed_output_item(
-    output: &smg_mcp::ToolExecutionOutput,
-    response_format: ResponseFormat,
-) -> ResponseOutputItem {
+fn failed_mcp_call(output: &smg_mcp::ToolExecutionOutput) -> ResponseOutputItem {
     // The MCP `CallToolResult { is_error: true, .. }` path can leave
     // `error_message` unset while carrying the real failure text inside
     // `output.output` (typed text blocks). Fall back to that before the
@@ -55,51 +56,15 @@ fn failed_output_item(
             (!text.is_empty()).then_some(text)
         })
         .unwrap_or_else(|| "Tool execution failed".to_string());
-    match response_format {
-        ResponseFormat::Passthrough => ResponseOutputItem::McpCall {
-            id: mcp_response_item_id(&output.call_id),
-            status: "failed".to_string(),
-            approval_request_id: None,
-            arguments: output.arguments_str.clone(),
-            error: Some(err_msg),
-            name: output.tool_name.clone(),
-            output: String::new(),
-            server_label: output.server_label.clone(),
-        },
-        ResponseFormat::WebSearchCall => ResponseOutputItem::WebSearchCall {
-            id: format!("ws_{}", output.call_id),
-            status: WebSearchCallStatus::Failed,
-            action: WebSearchAction::Search {
-                query: None,
-                queries: Vec::new(),
-                sources: Vec::new(),
-            },
-            results: None,
-        },
-        ResponseFormat::CodeInterpreterCall => ResponseOutputItem::CodeInterpreterCall {
-            id: format!("ci_{}", output.call_id),
-            status: CodeInterpreterCallStatus::Failed,
-            container_id: String::new(),
-            code: None,
-            outputs: None,
-        },
-        ResponseFormat::FileSearchCall => ResponseOutputItem::FileSearchCall {
-            id: format!("fs_{}", output.call_id),
-            status: FileSearchCallStatus::Failed,
-            queries: Vec::new(),
-            results: None,
-        },
-        ResponseFormat::ImageGenerationCall => ResponseOutputItem::ImageGenerationCall {
-            id: format!("ig_{}", output.call_id),
-            action: None,
-            background: None,
-            output_format: None,
-            quality: None,
-            result: String::new(),
-            revised_prompt: None,
-            size: None,
-            status: ImageGenerationCallStatus::Failed,
-        },
+    ResponseOutputItem::McpCall {
+        id: mcp_response_item_id(&output.call_id),
+        status: "failed".to_string(),
+        approval_request_id: None,
+        arguments: output.arguments_str.clone(),
+        error: Some(err_msg),
+        name: output.tool_name.clone(),
+        output: String::new(),
+        server_label: output.server_label.clone(),
     }
 }
 
@@ -1677,7 +1642,13 @@ mod tests {
     }
 
     #[test]
-    fn transform_tool_output_emits_hosted_failed_status_only() {
+    fn transform_tool_output_emits_hosted_completed_even_on_is_error() {
+        // Hosted-builtin variants always emit status=completed regardless of
+        // upstream is_error. Real OpenAI cloud doesn't emit Failed for soft
+        // failures (rate-limited search, no results, etc.) and many MCP
+        // servers set isError=true for those exact cases — propagating it
+        // would break clients that expect cloud-parity wire shape. The
+        // failure context lives in the item content, not in `status`.
         for fmt in [
             ResponseFormat::WebSearchCall,
             ResponseFormat::CodeInterpreterCall,
@@ -1686,8 +1657,11 @@ mod tests {
         ] {
             let item = transform_tool_output(&failed_tool_output("search"), fmt);
             let serialized = serde_json::to_value(&item).expect("serialize failed item");
-            assert_eq!(serialized["status"], serde_json::json!("failed"), "{fmt:?}");
-            assert!(serialized.get("error").is_none(), "{fmt:?} {serialized}");
+            assert_eq!(
+                serialized["status"],
+                serde_json::json!("completed"),
+                "{fmt:?}"
+            );
         }
     }
 
