@@ -18,6 +18,8 @@
 //!   coupling to the `Worker` trait — it lived in `worker/` for
 //!   historical reasons before this extraction.
 //! - [`background`] — background-mode response scaffolding.
+//! - [`sse`] — shared SSE codec (encoder + decoder) for streaming
+//!   responses to clients and parsing upstream SSE byte streams
 
 pub mod background;
 pub mod header_utils;
@@ -25,4 +27,5 @@ pub mod mcp_utils;
 pub mod openai_bridge;
 pub mod persistence_utils;
 pub mod retry;
+pub mod sse;
 pub mod worker_selection;
