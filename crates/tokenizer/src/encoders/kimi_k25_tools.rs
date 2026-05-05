@@ -4,12 +4,7 @@
 //! function-by-function. Output must be byte-equal to the Python reference;
 //! gated by golden tests in `tests/kimi_k25_tools_encoder.rs`.
 
-#![allow(
-    unused_imports,
-    clippy::todo,
-    clippy::disallowed_macros,
-    clippy::unwrap_used
-)]
+#![allow(clippy::unwrap_used)]
 
 use std::{collections::HashMap, fmt::Write};
 
@@ -52,8 +47,29 @@ pub fn apply_kimi_k25_tools(
     messages: &[Value],
     params: ChatTemplateParams,
 ) -> Result<String> {
-    let _ = (chat_template, messages, params);
-    todo!("apply_kimi_k25_tools — implemented in Task 7")
+    let ts_str = params.tools.and_then(encode_tools_to_typescript);
+
+    // Build owned kwargs only when we have something to inject; otherwise
+    // delegate without allocating.
+    let owned: Option<HashMap<String, Value>> = match (params.template_kwargs, ts_str.as_ref()) {
+        (Some(existing), Some(ts)) => {
+            let mut m = existing.clone();
+            m.insert("tools_ts_str".to_string(), Value::String(ts.clone()));
+            Some(m)
+        }
+        (None, Some(ts)) => {
+            let mut m = HashMap::with_capacity(1);
+            m.insert("tools_ts_str".to_string(), Value::String(ts.clone()));
+            Some(m)
+        }
+        _ => None, // No tools → leave tools_ts_str undefined
+    };
+
+    let new_params = ChatTemplateParams {
+        template_kwargs: owned.as_ref().or(params.template_kwargs),
+        ..params
+    };
+    chat_template.apply(messages, new_params)
 }
 
 // ---------------------------------------------------------------------------
