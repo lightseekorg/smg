@@ -1,0 +1,258 @@
+name: Nightly MLX Two-Way Benchmark
+
+on:
+  schedule:
+    # 09:17 UTC = ~02:17 PT — off-peak, off the round hour to dodge fleet load
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model id. CI default is Gemma 3 4B QAT (~3 GB) — known-working with the mlx-lm pip pin. Gemma 4's e2b/e4b variants are multimodal-only and don't load through mlx_lm.server today; revisit when upstream adds multimodal-text-only support."
+        required: false
+        default: "mlx-community/gemma-3-4b-it-qat-4bit"
+      phases:
+        description: "Phases to run (space-separated subset of 'mlx grpc vllm'). vllm is local-only — vllm-metal's Metal backend doesn't run reliably on macos-latest GitHub runners. Set this to 'mlx grpc vllm' on a self-hosted Apple Silicon runner."
+        required: false
+        default: "mlx grpc"
+      concurrencies:
+        description: "Space-separated concurrencies"
+        required: false
+        default: "1 4 16 64"
+      scenarios:
+        description: "Space-separated scenarios (chat agent)"
+        required: false
+        default: "chat agent"
+      duration_min:
+        description: "Minutes per cell"
+        required: false
+        default: "5"
+  # TEMPORARY: enable PR trigger so this workflow can be smoke-tested before
+  # merge. Path-filtered so unrelated PRs don't fire it, and the matrix is
+  # reduced via the env block below to keep PR runs short. REMOVE this block
+  # before merging — once the harness is validated, only schedule +
+  # workflow_dispatch should remain.
+  pull_request:
+    branches: [main]
+    paths:
+      - "benchmarks/mlx_grpc_vs_http/**"
+      - ".github/workflows/nightly-mlx-bench.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-mlx-bench-${{ github.event_name }}-${{ github.ref }}
+  # PR pushes: cancel the previous PR run so the newest code runs ASAP.
+  # Scheduled / dispatched runs: never cancel each other.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bench:
+    name: MLX two-way (mlx-lm vs SMG+gRPC; vllm-metal local-only)
+    runs-on: macos-latest
+    # 4 concurrencies × 2 scenarios × 2 backends × 5 min ≈ 1.4 h, plus
+    # build and model download. Cap at 4 h for safety.
+    timeout-minutes: 240
+    env:
+      # Model default is Gemma 3 4B QAT (~3 GB on disk). Same as the
+      # local run.sh default — keeps CI vs local apples-to-apples and
+      # produces meaningful 4B numbers in the runner's 7 GB RAM (mlx
+      # and grpc phases are sequential, so each gets the full RAM).
+      #
+      # Why not Gemma 4: mlx-lm 0.31.x added Gemma 4 support, but only
+      # for the *dense* 26B/31B text variants. The Gemma 4 e2b/e4b
+      # checkpoints are multimodal-only (text + vision + audio tower
+      # in one safetensors), and mlx_lm.server's `load()` only knows
+      # text-only CausalLM classes — it can't bind the `language_model.*`
+      # weight namespace from a multimodal checkpoint. Bridging
+      # mlx_lm.server to mlx-vlm's multimodal loader is a separate
+      # workstream; until then, Gemma 3 4B QAT is the fresher MLX
+      # checkpoint that loads cleanly via mlx_lm.server today.
+      MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
+      # CI default is two-way (mlx + grpc). vllm-metal is dropped from
+      # the default because the macos-latest VM doesn't reliably expose
+      # Metal GPU access — vllm-metal silently falls back to a PyTorch
+      # CPU/fp32 path that OOMs at startup on the 7 GB runner. To run
+      # the three-way comparison, use `local_three_way` via
+      # benchmarks/mlx_grpc_vs_http/run.sh on real Apple Silicon
+      # hardware (≥16 GB unified RAM), or trigger via workflow_dispatch
+      # on a self-hosted M-series runner with PHASES=mlx grpc vllm.
+      PHASES: >-
+        ${{ github.event.inputs.phases || 'mlx grpc' }}
+      CONCURRENCIES: >-
+        ${{ github.event.inputs.concurrencies
+        || (github.event_name == 'pull_request' && '1 4'
+        || '1 4 16 64') }}
+      SCENARIOS: >-
+        ${{ github.event.inputs.scenarios || 'chat agent' }}
+      # PR runs use 4 min/cell so agent prompts (~2.5k token prefill at
+      # concurrency 4) have time to complete at least one request and
+      # produce metrics. Scheduled runs use 5.
+      DURATION_MIN: >-
+        ${{ github.event.inputs.duration_min
+        || (github.event_name == 'pull_request' && '4' || '5') }}
+      RESULTS_DIR: bench-results
+      # Match the path that vllm-metal's install.sh uses when run via
+      # curl | bash (it hard-codes $HOME/.venv-vllm-metal in that branch).
+      VLLM_VENV: /Users/runner/.venv-vllm-metal
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mlx-bench
+          cache-on-failure: true
+
+      - name: Build smg (release)
+        run: cargo build --release --bin smg
+
+      - name: Build smg-grpc-proto Python package
+        run: pip install -e ./crates/grpc_client/python
+
+      - name: Install grpc_servicer with MLX extra
+        run: pip install -e "./grpc_servicer[mlx]"
+
+      - name: Install mlx-lm CLI (for the direct-HTTP baseline)
+        # Pinned to an exact version so nightly bench runs aren't
+        # influenced by upstream mlx-lm changes that would shift the
+        # baseline independently of any SMG-side changes. Bump
+        # deliberately in its own commit so trend breaks are explicit.
+        run: pip install "mlx-lm==0.31.3"
+
+      - name: Install genai-bench (driver)
+        # Bench driver — same CLI as the rest of the SMG nightly suite.
+        # `oci_openai` is a transitive dep that genai-bench's CLI imports
+        # eagerly even when the OCI backend is unused; pin it explicitly so
+        # `genai-bench --help` doesn't crash on a clean wheel install.
+        run: pip install genai-bench oci_openai
+
+      - name: Patch genai-bench streaming chunk size
+        # genai-bench's openai_user.py calls
+        # `response.iter_lines(chunk_size=None)`. Under the hood that
+        # becomes `urllib3.HTTPResponse.read(amt=None)`, whose framing
+        # rule is "read to EOF" when the response has neither
+        # Content-Length nor Transfer-Encoding: chunked. The bug class
+        # is "no length-delimiting framing on the response" — HTTP/1.0
+        # is just one way to land in it. mlx-lm.server hits exactly
+        # this case: it uses stdlib BaseHTTPRequestHandler, which
+        # defaults to HTTP/1.0 and emits no chunked encoding, so the
+        # streaming path closes the socket at end-of-message. Result:
+        # every SSE frame the server flushed during generation arrives
+        # at the bench client in one batch at stream close — TTFT
+        # inflates to e2e latency and TPOT collapses to ~0. Wire-level
+        # captures confirm the server *is* writing per-token at ~18 ms;
+        # the buffering is entirely client-side in urllib3's read loop.
+        #
+        # Fix: pass chunk_size=1. The name is misleading — urllib3's
+        # read(amt=N) returns whatever is currently buffered up to N
+        # bytes (it does not wait for N), so chunk_size=1 effectively
+        # means "yield per recv()", which on loopback aligns with each
+        # per-token flush. Any small positive value works identically;
+        # 1 just makes the intent obvious.
+        #
+        # No-op for the smg → mlx-grpc and vllm-metal phases: both
+        # serve HTTP/1.1 with Transfer-Encoding: chunked. urllib3
+        # decodes chunk boundaries from the wire before the buffer the
+        # iterator reads from, so chunk_size has no observable effect
+        # on read granularity there.
+        #
+        # Tested against urllib3 2.x (read(amt=N) semantics have been
+        # stable across 1.x and 2.x).
+        run: |
+          target=$(python3 -c "import genai_bench, os; print(os.path.dirname(genai_bench.__file__) + '/user/openai_user.py')")
+          echo "Patching $target"
+          sed -i.bak 's/response.iter_lines(chunk_size=None)/response.iter_lines(chunk_size=1)/g' "$target"
+          if ! grep -q "iter_lines(chunk_size=1)" "$target"; then
+            echo "Patch did not apply — pattern not found" >&2
+            exit 1
+          fi
+
+      - name: Install vllm-metal (best effort, only when vllm phase is requested)
+        # Only fires if someone explicitly opted into the vllm phase via
+        # workflow_dispatch (PHASES contains 'vllm'). The default CI run
+        # is two-way (mlx + grpc) on the macos-latest runner because the
+        # VM doesn't reliably expose Metal GPU access — vllm-metal
+        # silently falls back to a PyTorch CPU/fp32 path that OOMs at
+        # startup on 7 GB. Real Apple Silicon hardware (≥16 GB) is needed
+        # for the three-way comparison; use `local_three_way` (run.sh)
+        # locally, or trigger via workflow_dispatch with an override on
+        # a self-hosted M-series runner.
+        if: contains(env.PHASES, 'vllm')
+        continue-on-error: true
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/install.sh | bash \
+            || echo "vllm-metal install failed — vllm phase will be skipped"
+          if [ -x "$VLLM_VENV/bin/vllm" ]; then
+            echo "vllm-metal installed at $VLLM_VENV"
+            "$VLLM_VENV/bin/vllm" --help | head -3 || true
+          else
+            echo "vllm-metal not installed — vllm phase will skip"
+          fi
+
+      - name: Verify components
+        run: |
+          ./target/release/smg --help | head -5
+          python3 -c "from smg_grpc_servicer.mlx.server import main; print('servicer OK')"
+          genai-bench --help | head -3
+
+      - name: Run benchmark — Phase 1 (mlx-lm.server, direct HTTP)
+        if: contains(env.PHASES, 'mlx')
+        run: PHASES=mlx ./benchmarks/mlx_grpc_vs_http/run.sh
+
+      - name: Run benchmark — Phase 2 (SMG router + MLX gRPC servicer)
+        # Always run phase 2 even if phase 1 failed — phases are independent
+        # and the gRPC numbers are the most interesting half.
+        if: always() && contains(env.PHASES, 'grpc')
+        run: PHASES=grpc ./benchmarks/mlx_grpc_vs_http/run.sh
+
+      - name: Run benchmark — Phase 3 (vllm-metal serve)
+        # Best-effort: the run.sh phase auto-skips if $VLLM_VENV is missing,
+        # so this step won't fail the job when vllm-metal install errored.
+        if: always() && contains(env.PHASES, 'vllm')
+        run: PHASES=vllm ./benchmarks/mlx_grpc_vs_http/run.sh
+
+      - name: Aggregate results
+        if: always()
+        run: |
+          python3 benchmarks/mlx_grpc_vs_http/aggregate.py \
+            --results-dir "$RESULTS_DIR" \
+            --model "$MODEL" \
+            --out "$RESULTS_DIR/SUMMARY.md"
+          # Mirror to the job summary so it's visible in the run UI without
+          # downloading artifacts.
+          cat "$RESULTS_DIR/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw genai-bench output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-mlx-bench-${{ github.run_id }}
+          path: bench-results/
+          retention-days: 30
+
+      - name: Upload server logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-mlx-bench-logs-${{ github.run_id }}
+          path: |
+            bench-results/mlx-lm.log
+            bench-results/mlx-grpc.log
+            bench-results/smg-router.log
+            bench-results/vllm-metal.log
+          retention-days: 14
+          if-no-files-found: ignore
