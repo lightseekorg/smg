@@ -201,12 +201,12 @@ impl StreamingProcessor {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
 
-        // Extract request parameters — skip reasoning parsing for structured output
+        // Extract request parameters
         let has_structured_output = matches!(
             original_request.response_format,
-            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+            Some(ResponseFormat::JsonObject { .. } | ResponseFormat::JsonSchema { .. })
         );
-        let separate_reasoning = original_request.separate_reasoning && !has_structured_output;
+        let separate_reasoning = original_request.separate_reasoning;
         let tool_choice = &original_request.tool_choice;
         let tools = &original_request.tools;
         let history_tool_calls_count = utils::get_history_tool_calls_count(&original_request);
@@ -228,6 +228,7 @@ impl StreamingProcessor {
         type PooledToolParser = Arc<tokio::sync::Mutex<Box<dyn ToolParser>>>;
         let mut tool_parsers: HashMap<u32, PooledToolParser> = HashMap::new();
         let mut has_tool_calls: HashMap<u32, bool> = HashMap::new();
+        let mut content_emitted: HashMap<u32, bool> = HashMap::new();
 
         // Per-index stop decoders (each index needs its own state for n>1 support)
         let mut stop_decoders: HashMap<u32, StopSequenceDecoder> = HashMap::new();
@@ -506,6 +507,7 @@ impl StreamingProcessor {
                     }
 
                     if !delta.is_empty() {
+                        content_emitted.insert(index, true);
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
                                 .created(created)
@@ -594,6 +596,29 @@ impl StreamingProcessor {
                         .map_err(|e| format!("Failed to serialize tool chunk: {e}"))?;
                     tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
                         .map_err(|_| "Failed to send unstreamed tool args".to_string())?;
+                }
+            }
+        }
+
+        // Phase 3b: Structured output content recovery
+        // If structured output was requested but reasoning parser consumed all
+        // content (no content deltas emitted), the model emitted constrained JSON
+        // without closing </think> (K2.5 behavior). Recover by emitting the full
+        // accumulated buffer as a content chunk.
+        if has_structured_output && separate_reasoning {
+            for (index, buffer) in &stream_buffers {
+                if !content_emitted.get(index).copied().unwrap_or(false)
+                    && !buffer.trim().is_empty()
+                {
+                    let recovery_chunk =
+                        ChatCompletionStreamResponse::builder(request_id, model)
+                            .created(created)
+                            .add_choice_content(*index, "assistant", buffer.clone())
+                            .maybe_system_fingerprint(system_fingerprint)
+                            .build();
+                    Self::format_sse_chunk_into(&mut sse_buffer, &recovery_chunk);
+                    tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                        .map_err(|_| "Failed to send recovery content chunk".to_string())?;
                 }
             }
         }
