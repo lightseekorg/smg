@@ -13,6 +13,7 @@ use crate::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
         ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
+    encoders::kimi_k25_tools::apply_kimi_k25_tools,
     factory::discover_chat_template_in_dir,
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
@@ -137,7 +138,6 @@ pub struct TiktokenTokenizer {
     vocab_size: usize,
     chat_template: ChatTemplateState,
     eos_token_ids: Vec<TokenIdType>,
-    #[expect(dead_code, reason = "Read by apply_chat_template in Task 9")]
     renderer: Renderer,
 }
 
@@ -531,14 +531,18 @@ impl TokenizerTrait for TiktokenTokenizer {
         params: ChatTemplateParams,
     ) -> Result<String> {
         // Inject special tokens if the caller didn't provide them
-        if params.special_tokens.is_some() {
-            return self.chat_template.apply(messages, params);
-        }
-        let params = ChatTemplateParams {
-            special_tokens: Some(&self.special_tokens),
-            ..params
+        let params = if params.special_tokens.is_some() {
+            params
+        } else {
+            ChatTemplateParams {
+                special_tokens: Some(&self.special_tokens),
+                ..params
+            }
         };
-        self.chat_template.apply(messages, params)
+        match self.renderer {
+            Renderer::Jinja => self.chat_template.apply(messages, params),
+            Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params),
+        }
     }
 
     fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
