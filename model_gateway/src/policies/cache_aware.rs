@@ -367,13 +367,13 @@ impl CacheAwarePolicy {
     /// Apply a tree insert and populate the model-scoped hash
     /// index alongside it. Remote-replay paths
     /// (`apply_remote_tree_operation`, `restore_tree_state_from_mesh`)
-    /// funnel here, so `TreeHandle::contains_hash` reflects nodes
-    /// learned from gossip — not just locally-routed inserts.
-    /// Without this, replayed prefixes would be misclassified as
-    /// unknown and trigger unnecessary repair once the adapter is
-    /// wired up. The string-side value is the full `text` (not a
-    /// matched prefix) because remote apply doesn't compute a
-    /// match; `apply_tenant_delta` re-inserts whatever string is
+    /// funnel here, so `TreeHandle::apply_known_remote_insert`
+    /// can find these nodes when a peer broadcasts a delta that
+    /// references them. Without this, replayed prefixes would be
+    /// misclassified as unknown and trigger unnecessary repair.
+    /// The string-side value is the full `text` (not a matched
+    /// prefix) because remote apply doesn't compute a match;
+    /// `apply_known_remote_insert` re-inserts whatever string is
     /// stored.
     fn apply_insert_to_trees(
         &self,
@@ -704,25 +704,69 @@ pub enum TreeKind {
     Token,
 }
 
-/// Read-only handle the policy exposes so mesh-adjacent consumers
-/// can answer "is this hash known locally?" without reaching into
-/// private fields. Defined here (not in the adapter) to keep the
-/// dependency direction `adapter → policy`.
+/// Handle the policy exposes so mesh-adjacent consumers can apply
+/// remote tenant inserts against the local tree without reaching
+/// into private fields. Defined here (not in the adapter) to keep
+/// the dependency direction `adapter → policy`.
 pub trait TreeHandle: Send + Sync + std::fmt::Debug {
-    fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool;
+    /// If `node_hash` is known locally (resolvable to a stored
+    /// matched-prefix), record `worker_url` as a tenant of the
+    /// matched node and return `true`. Returns `false` if the
+    /// hash isn't known — the caller is expected to request
+    /// repair so the path can be reconstructed from a peer.
+    ///
+    /// This subsumes "is the hash known?" plus "apply the
+    /// insert": the adapter doesn't need separate read+write
+    /// trips, and we never expose the matched value across the
+    /// trait boundary (it stays inside the policy where
+    /// eviction owns its lifecycle).
+    fn apply_known_remote_insert(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+        node_hash: u64,
+        worker_url: &str,
+    ) -> bool;
 }
 
 impl TreeHandle for CacheAwarePolicy {
-    fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool {
+    fn apply_known_remote_insert(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+        node_hash: u64,
+        worker_url: &str,
+    ) -> bool {
         // Normalize empty → UNKNOWN_MODEL_ID so lookups match the
         // key shape every populate site already uses.
         let model_id = normalize_model_key(model_id);
-        self.hash_index
-            .get(model_id)
-            .is_some_and(|entry| match tree_kind {
-                TreeKind::String => entry.string_tree.contains_key(&node_hash),
-                TreeKind::Token => entry.token_tree.contains_key(&node_hash),
-            })
+        let Some(model_entry) = self.hash_index.get(model_id) else {
+            return false;
+        };
+        match tree_kind {
+            TreeKind::String => {
+                let Some(path) = model_entry.string_tree.get(&node_hash) else {
+                    return false;
+                };
+                let Some(tree) = self.string_trees.get(model_id) else {
+                    // Hash index entry without a tree is a
+                    // populate-site bug; nothing to apply against.
+                    return false;
+                };
+                tree.insert_text(path.value(), worker_url);
+                true
+            }
+            TreeKind::Token => {
+                let Some(tokens) = model_entry.token_tree.get(&node_hash) else {
+                    return false;
+                };
+                let Some(tree) = self.token_trees.get(model_id) else {
+                    return false;
+                };
+                tree.insert_tokens(tokens.value(), worker_url);
+                true
+            }
+        }
     }
 }
 
@@ -1380,6 +1424,79 @@ mod tests {
 
         let tree = policy.token_trees.get("model1");
         assert!(tree.is_some());
+    }
+
+    #[test]
+    fn test_apply_known_remote_insert_round_trip() {
+        // Populate via apply_remote_tree_operation (which goes
+        // through apply_insert_to_trees and seeds hash_index for
+        // both kinds), then verify apply_known_remote_insert
+        // resolves the hash and returns true. Unknown hashes
+        // return false. Wrong-kind lookups against the same
+        // hash return false (model + kind scope the index).
+        use smg_mesh::{TreeInsertOp, TreeKey, TreeOperation};
+
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+
+        let text = "remote_text";
+        let tokens = vec![1u32, 2, 3, 4];
+        policy.apply_remote_tree_operation(
+            "model1",
+            &TreeOperation::Insert(TreeInsertOp {
+                key: TreeKey::Text(text.to_string()),
+                tenant: "http://w1".to_string(),
+            }),
+        );
+        policy.apply_remote_tree_operation(
+            "model1",
+            &TreeOperation::Insert(TreeInsertOp {
+                key: TreeKey::Tokens(tokens.clone()),
+                tenant: "http://w1".to_string(),
+            }),
+        );
+
+        let text_hash = smg_mesh::hash_node_path(text);
+        let token_hash = smg_mesh::hash_token_path(&tokens);
+
+        // Known hashes apply for the matching kind.
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::String,
+            text_hash,
+            "http://w2",
+        ));
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::Token,
+            token_hash,
+            "http://w2",
+        ));
+
+        // Same hash but wrong kind doesn't alias.
+        assert!(!policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::Token,
+            text_hash,
+            "http://w2",
+        ));
+
+        // Unknown hash, unknown model → false.
+        assert!(!policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::String,
+            0xDEAD_BEEF,
+            "http://w2",
+        ));
+        assert!(!policy.apply_known_remote_insert(
+            "unknown_model",
+            TreeKind::String,
+            text_hash,
+            "http://w2",
+        ));
     }
 
     #[test]

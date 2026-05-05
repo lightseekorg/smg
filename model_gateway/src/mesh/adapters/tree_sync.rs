@@ -1,17 +1,16 @@
 //! `td:` stream adapter: gateway ↔ mesh bridge for the distributed
-//! prefix tree. Scope so far: tenant-delta fast path, inbound
-//! hash resolution via [`TreeHandle`], and repair-request issuance
-//! on unknown hashes via [`PeerList`].
+//! prefix tree.
 //!
 //! - Outbound: `on_local_insert` buffers per-model `TreeDelta`s;
 //!   the drain callback batches each model into one
 //!   `td:{model_id}` stream entry per gossip round.
 //! - Inbound: a spawned task subscribes to `td:`, decodes each
-//!   batch, and asks the [`TreeHandle`] whether each delta's hash
-//!   is locally known. Known → trace (apply sink lands next
-//!   slice). Unknown → publish a `tree:req:` repair request
+//!   batch, and hands every delta to [`TreeHandle`] which either
+//!   applies it (the matched prefix is already known locally and
+//!   the worker becomes a tenant of that node) or returns false.
+//!   On false, the adapter publishes a `tree:req:` repair request
 //!   targeted at a random ALIVE peer; the response (`tree:page:`)
-//!   is consumed in the next slice.
+//!   is consumed in a later slice.
 //!
 //! The adapter holds no tree-membership state. The tree owner
 //! (`CacheAwarePolicy` in production) implements [`TreeHandle`];
@@ -290,18 +289,19 @@ impl TreeSyncAdapter {
             "remote tenant-delta batch received"
         );
         for delta in &batch {
-            if self
-                .tree
-                .contains_hash(model_id, delta.tree_kind, delta.node_hash)
-            {
-                // Known locally; actual apply sink lands next slice.
+            if self.tree.apply_known_remote_insert(
+                model_id,
+                delta.tree_kind,
+                delta.node_hash,
+                &delta.worker_url,
+            ) {
                 trace!(
                     model_id,
                     kind = ?delta.tree_kind,
                     hash = delta.node_hash,
                     worker_url = %delta.worker_url,
                     epoch = delta.epoch,
-                    "resolved remote tenant delta against local tree handle",
+                    "applied remote tenant delta against local tree",
                 );
             } else {
                 debug!(
@@ -421,27 +421,48 @@ mod tests {
         }
     }
 
-    /// Test-only [`TreeHandle`]: keyed by `(model_id, TreeKind)`
-    /// with a set of known hashes.
+    /// Test-only [`TreeHandle`]: a set of known `(model, kind,
+    /// hash)` tuples plus a log of every applied call so tests
+    /// can assert on apply-side effects. Apply succeeds (returns
+    /// `true`) iff the hash is in the known set.
     #[derive(Debug, Default)]
     struct MockTreeHandle {
-        known: DashMap<(String, TreeKind), DashMap<u64, ()>>,
+        known: DashMap<(String, TreeKind, u64), ()>,
+        applied: parking_lot::Mutex<Vec<(String, TreeKind, u64, String)>>,
     }
 
     impl MockTreeHandle {
-        fn insert(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) {
+        fn mark_known(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) {
             self.known
-                .entry((model_id.to_string(), tree_kind))
-                .or_default()
-                .insert(node_hash, ());
+                .insert((model_id.to_string(), tree_kind, node_hash), ());
+        }
+
+        fn applied_calls(&self) -> Vec<(String, TreeKind, u64, String)> {
+            self.applied.lock().clone()
         }
     }
 
     impl TreeHandle for MockTreeHandle {
-        fn contains_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) -> bool {
-            self.known
-                .get(&(model_id.to_string(), tree_kind))
-                .is_some_and(|entry| entry.contains_key(&node_hash))
+        fn apply_known_remote_insert(
+            &self,
+            model_id: &str,
+            tree_kind: TreeKind,
+            node_hash: u64,
+            worker_url: &str,
+        ) -> bool {
+            if !self
+                .known
+                .contains_key(&(model_id.to_string(), tree_kind, node_hash))
+            {
+                return false;
+            }
+            self.applied.lock().push((
+                model_id.to_string(),
+                tree_kind,
+                node_hash,
+                worker_url.to_string(),
+            ));
+            true
         }
     }
 
@@ -600,15 +621,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_incoming_batch_consults_tree() {
-        // Deltas must be classified via the injected handle; kinds
-        // must not alias (same hash, different kind ≠ match).
-        // `handle_incoming_batch` is read-only on membership.
+    async fn handle_incoming_batch_applies_known_and_skips_unknown() {
+        // Known deltas hit `apply_known_remote_insert`; unknown
+        // ones don't (and trigger repair, exercised in dedicated
+        // tests below). Kinds must not alias: same hash on a
+        // different `TreeKind` is a different (model, kind, hash)
+        // tuple and stays unknown.
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
         let tree = Arc::new(MockTreeHandle::default());
-        tree.insert("model-1", TreeKind::String, 42);
+        tree.mark_known("model-1", TreeKind::String, 42);
         let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
         let adapter = TreeSyncAdapter::new(td, req, adapter_tree, peers, "node-a".into());
@@ -636,9 +659,17 @@ mod tests {
         let bytes = Bytes::from(bincode::serialize(&batch).unwrap());
         adapter.handle_incoming_batch("model-1", &[bytes]);
 
-        assert!(tree.contains_hash("model-1", TreeKind::String, 42));
-        assert!(!tree.contains_hash("model-1", TreeKind::String, 99));
-        assert!(!tree.contains_hash("model-1", TreeKind::Token, 42));
+        let applied = tree.applied_calls();
+        assert_eq!(
+            applied,
+            vec![(
+                "model-1".to_string(),
+                TreeKind::String,
+                42,
+                "http://w1".to_string(),
+            )],
+            "only the (String, 42) delta applied; unknown String:99 and Token:42 did not",
+        );
     }
 
     #[tokio::test]
@@ -848,7 +879,7 @@ mod tests {
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
         let tree = Arc::new(MockTreeHandle::default());
-        tree.insert("model-1", TreeKind::String, 42);
+        tree.mark_known("model-1", TreeKind::String, 42);
         let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
         let adapter = TreeSyncAdapter::new(td, req, adapter_tree, peers, "node-a".into());
