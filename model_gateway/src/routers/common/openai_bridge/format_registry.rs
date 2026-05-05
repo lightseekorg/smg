@@ -135,8 +135,10 @@ impl FormatRegistry {
 mod tests {
     use std::collections::HashMap;
 
+    use serde_json::json;
     use smg_mcp::{
-        BuiltinToolType, McpServerConfig, McpTransport, ResponseFormatConfig, ToolConfig,
+        BuiltinToolType, McpConfig, McpOrchestrator, McpServerBinding, McpServerConfig,
+        McpToolSession, McpTransport, ResponseFormatConfig, Tool, ToolConfig, ToolEntry,
     };
 
     use super::*;
@@ -155,6 +157,21 @@ mod tests {
             builtin_type: None,
             builtin_tool_name: None,
             internal: false,
+        }
+    }
+
+    fn test_tool(name: &str) -> Tool {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert("properties".to_string(), json!({}));
+        Tool {
+            name: name.to_string().into(),
+            title: None,
+            description: Some("test".into()),
+            input_schema: schema.into(),
+            output_schema: None,
+            icons: None,
+            annotations: None,
         }
     }
 
@@ -333,6 +350,84 @@ mod tests {
         assert_eq!(
             r.lookup_by_names("brave", "brave_web_search"),
             ResponseFormat::Passthrough,
+        );
+    }
+
+    async fn orchestrator_with_tool(server_name: &str, tool_name: &str) -> McpOrchestrator {
+        let orchestrator = McpOrchestrator::new(McpConfig {
+            servers: vec![server(server_name)],
+            ..Default::default()
+        })
+        .await
+        .expect("orchestrator");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                server_name,
+                test_tool(tool_name),
+            ));
+        orchestrator
+    }
+
+    fn binding(server_name: &str) -> Vec<McpServerBinding> {
+        vec![McpServerBinding {
+            label: server_name.to_string(),
+            server_key: server_name.to_string(),
+            allowed_tools: None,
+        }]
+    }
+
+    #[tokio::test]
+    async fn lookup_tool_format_returns_passthrough_when_session_unknown() {
+        let orchestrator = orchestrator_with_tool("brave", "brave_web_search").await;
+        let session = McpToolSession::new(&orchestrator, binding("brave"), "test-request");
+        let registry = FormatRegistry::new();
+        // `not_a_tool` was never registered with the session, so the lookup
+        // short-circuits at `qualified_name_for_exposed`.
+        assert_eq!(
+            lookup_tool_format(&session, &registry, "not_a_tool"),
+            ResponseFormat::Passthrough
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_tool_format_returns_passthrough_for_session_known_but_registry_missing() {
+        // Asymmetric-miss branch: the session exposes the tool but the
+        // registry has no entry — production fingerprint of a server whose
+        // `populate_from_server_config` was skipped. Must dispatch as
+        // Passthrough rather than panicking or making up a hosted format.
+        let orchestrator = orchestrator_with_tool("brave", "brave_web_search").await;
+        let session = McpToolSession::new(&orchestrator, binding("brave"), "test-request");
+        let registry = FormatRegistry::new();
+        assert_eq!(
+            lookup_tool_format(&session, &registry, "brave_web_search"),
+            ResponseFormat::Passthrough
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_tool_format_returns_registry_value_for_session_known_and_registered() {
+        // Happy path: session knows the tool AND registry has a hosted entry —
+        // composed lookup returns the hosted format.
+        let orchestrator = orchestrator_with_tool("brave", "brave_web_search").await;
+        let session = McpToolSession::new(&orchestrator, binding("brave"), "test-request");
+        let mut tools = HashMap::new();
+        tools.insert(
+            "brave_web_search".to_string(),
+            ToolConfig {
+                alias: None,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
+                arg_mapping: None,
+            },
+        );
+        let mut cfg = server("brave");
+        cfg.tools = Some(tools);
+        let registry = FormatRegistry::new();
+        registry.populate_from_server_config(&cfg);
+
+        assert_eq!(
+            lookup_tool_format(&session, &registry, "brave_web_search"),
+            ResponseFormat::WebSearchCall
         );
     }
 }
