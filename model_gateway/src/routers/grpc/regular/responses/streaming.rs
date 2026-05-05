@@ -57,7 +57,7 @@ use crate::{
         grpc::{
             common::responses::{
                 build_sse_response, persist_response_if_needed,
-                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+                streaming::{attach_mcp_server_label, OutputItemKind, ResponseStreamEventEmitter},
                 ResponsesContext,
             },
             utils,
@@ -649,12 +649,12 @@ async fn execute_tool_loop_streaming_internal(
                 // Use emitter helpers to determine correct type and allocate index
                 let item_type =
                     ResponseStreamEventEmitter::type_str_for_format(Some(&response_format));
-                let output_item_type =
-                    ResponseStreamEventEmitter::output_item_type_for_format(Some(&response_format));
                 let resolved_label = session.resolve_tool_server_label(&tool_call.name);
 
-                // Allocate output_index with correct type (generates appropriate item_id prefix)
-                let (output_index, item_id) = emitter.allocate_output_index(output_item_type);
+                // Allocate output_index with the format's id-prefix discriminator
+                // (e.g. `ws_…` for web_search_call); see FormatDescriptor.
+                let (output_index, item_id) =
+                    emitter.allocate_output_index_for_format(Some(response_format));
 
                 // Build initial tool call item
                 let mut item = json!({
@@ -833,7 +833,7 @@ async fn execute_tool_loop_streaming_internal(
                 for tool_call in function_tool_calls {
                     // Allocate output_index for this function_tool_call item
                     let (output_index, item_id) =
-                        emitter.allocate_output_index(OutputItemType::FunctionCall);
+                        emitter.allocate_output_index(OutputItemKind::FunctionCall);
 
                     // Build initial function_call item
                     let item = json!({

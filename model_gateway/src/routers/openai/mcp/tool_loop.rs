@@ -13,10 +13,7 @@ use std::{collections::HashSet, io};
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use openai_protocol::{
-    event_types::{
-        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent,
-        ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
-    },
+    event_types::{is_function_call_type, ItemType, McpEvent, OutputItemEvent},
     responses::{generate_id, ResponseInput, ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, to_value, Value};
@@ -502,18 +499,9 @@ fn send_tool_call_intermediate_event(
     response_format: ResponseFormat,
     sequence_number: &mut u64,
 ) -> bool {
-    // Determine event type and ID prefix based on response format
-    let event_type = match response_format {
-        ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
-        ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
-        ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
-        // `generating` is the intermediate event for image_generation_call, on
-        // par with `searching` for web/file search and `interpreting` for code.
-        // `partial_image` events are emitted inline by the underlying tool when
-        // it streams preview chunks; the tool_loop path only emits the coarse
-        // in_progress → generating → completed sequence.
-        ResponseFormat::ImageGenerationCall => ImageGenerationCallEvent::GENERATING,
-        ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
+    // mcp_call has no intermediate event (descriptor.searching_event = None).
+    let Some(event_type) = openai_bridge::descriptor(response_format).searching_event else {
+        return true;
     };
 
     let effective_output_index = call.effective_output_index();
@@ -546,19 +534,16 @@ fn send_tool_call_completion_events(
     let effective_output_index = call.effective_output_index();
     let item_id = stable_streaming_tool_item_id(call, response_format);
 
-    // Determine the completion event type based on item type
+    // Resolve the completion event from the item's `type` (the typed
+    // `tool_call_item` may have been re-tagged after dispatch); fall back
+    // to the format-derived event for unknown types.
     let item_type = tool_call_item
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-
-    let completed_event_type: &str = match item_type {
-        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
-        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
-        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
-        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::COMPLETED,
-        _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
-    };
+    let completed_event_type: &str = openai_bridge::format_from_type_str(item_type)
+        .map(|f| openai_bridge::descriptor(f).completed_event)
+        .unwrap_or_else(|| openai_bridge::descriptor(response_format).completed_event);
 
     // Event 1: response.<type>.completed
     let completed_payload = json!({
@@ -597,46 +582,45 @@ fn stable_streaming_tool_item_id(
 ) -> String {
     let source_id = call.item_id.as_deref().unwrap_or(call.call_id.as_str());
 
-    match response_format {
-        ResponseFormat::Passthrough => mcp_response_item_id(source_id),
-        ResponseFormat::WebSearchCall => normalize_tool_item_id_with_prefix(source_id, "ws_"),
-        ResponseFormat::CodeInterpreterCall => normalize_tool_item_id_with_prefix(source_id, "ci_"),
-        ResponseFormat::FileSearchCall => normalize_tool_item_id_with_prefix(source_id, "fs_"),
-        // `ig_` prefix mirrors the shared transformer's output item id
-        // (`to_image_generation_call`) and the 2-letter convention used by
-        // the other hosted tool formats.
-        ResponseFormat::ImageGenerationCall => normalize_tool_item_id_with_prefix(source_id, "ig_"),
+    if response_format == ResponseFormat::Passthrough {
+        // mcp_response_item_id encodes the `mcp_*` rewrite rules
+        // (preserving an existing `mcp_` prefix instead of double-prefixing).
+        mcp_response_item_id(source_id)
+    } else {
+        let prefix = openai_bridge::descriptor(response_format).id_prefix;
+        normalize_tool_item_id_with_prefix(source_id, prefix)
     }
 }
 
-fn normalize_tool_item_id_with_prefix(source_id: &str, target_prefix: &str) -> String {
-    if source_id.starts_with(target_prefix) {
+fn normalize_tool_item_id_with_prefix(source_id: &str, prefix: &str) -> String {
+    let prefix_with_underscore = format!("{prefix}_");
+    if source_id.starts_with(&prefix_with_underscore) {
         return source_id.to_string();
     }
 
     source_id
         .strip_prefix("fc_")
         .or_else(|| source_id.strip_prefix("call_"))
-        .map(|stripped| format!("{target_prefix}{stripped}"))
-        .unwrap_or_else(|| format!("{target_prefix}{source_id}"))
+        .map(|stripped| format!("{prefix_with_underscore}{stripped}"))
+        .unwrap_or_else(|| format!("{prefix_with_underscore}{source_id}"))
 }
 
 fn non_streaming_tool_item_id_source(item_id: &str, response_format: ResponseFormat) -> String {
-    match response_format {
-        ResponseFormat::Passthrough => item_id.to_string(),
-        ResponseFormat::WebSearchCall
-        | ResponseFormat::CodeInterpreterCall
-        | ResponseFormat::FileSearchCall
-        | ResponseFormat::ImageGenerationCall => item_id
+    if response_format == ResponseFormat::Passthrough {
+        item_id.to_string()
+    } else {
+        // Hosted-builtin formats strip the upstream function-call prefix; the
+        // bridge's success builders re-add the format-specific prefix.
+        item_id
             .strip_prefix("fc_")
             .or_else(|| item_id.strip_prefix("call_"))
             .unwrap_or(item_id)
-            .to_string(),
+            .to_string()
     }
 }
 
 fn approval_request_item_id_source(item_id: &str) -> String {
-    normalize_tool_item_id_with_prefix(item_id, "mcpr_")
+    normalize_tool_item_id_with_prefix(item_id, "mcpr")
 }
 
 pub(crate) fn mcp_list_tools_bindings_to_emit(
@@ -1900,6 +1884,27 @@ mod tests {
         assert_eq!(
             done_count, 1,
             "exactly one `output_item.done` expected, got {done_count}: {types:?}"
+        );
+    }
+
+    #[test]
+    fn approval_request_item_id_source_uses_single_underscore() {
+        // Regression: `normalize_tool_item_id_with_prefix` appends `_`
+        // internally, so the prefix argument must be the bare token. A
+        // prior version passed `"mcpr_"` here and emitted `mcpr__...` ids,
+        // breaking the approval wire format.
+        assert_eq!(super::approval_request_item_id_source("fc_abc"), "mcpr_abc");
+        assert_eq!(
+            super::approval_request_item_id_source("call_xyz"),
+            "mcpr_xyz"
+        );
+        assert_eq!(
+            super::approval_request_item_id_source("mcpr_already"),
+            "mcpr_already"
+        );
+        assert_eq!(
+            super::approval_request_item_id_source("raw_id"),
+            "mcpr_raw_id"
         );
     }
 }

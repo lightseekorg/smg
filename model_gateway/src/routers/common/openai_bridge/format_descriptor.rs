@@ -14,6 +14,10 @@ use super::ResponseFormat;
 #[derive(Debug, Clone, Copy)]
 pub struct FormatDescriptor {
     pub type_str: &'static str,
+    /// Item-id kind without trailing `_` (e.g. `"ws"`, `"mcp"`). Joined to a
+    /// suffix at construction sites: `format!("{kind}_{rest}")`. Stored
+    /// without the underscore so callers that just need the discriminator
+    /// (allocator prefix, log labels) don't have to trim.
     pub id_prefix: &'static str,
     pub in_progress_event: &'static str,
     /// `None` for formats with no intermediate phase (e.g. Passthrough).
@@ -24,11 +28,27 @@ pub struct FormatDescriptor {
     pub partial_image_event: Option<&'static str>,
 }
 
+/// Reverse lookup for routers that have already received an item-type
+/// string (`mcp_call`, `web_search_call`, …) from the upstream wire and
+/// need to recover the matching `ResponseFormat` to consult the
+/// descriptor. Returns `None` for non-format item types like
+/// `function_call` or `message`.
+pub fn format_from_type_str(type_str: &str) -> Option<ResponseFormat> {
+    match type_str {
+        ItemType::MCP_CALL => Some(ResponseFormat::Passthrough),
+        ItemType::WEB_SEARCH_CALL => Some(ResponseFormat::WebSearchCall),
+        ItemType::CODE_INTERPRETER_CALL => Some(ResponseFormat::CodeInterpreterCall),
+        ItemType::FILE_SEARCH_CALL => Some(ResponseFormat::FileSearchCall),
+        ItemType::IMAGE_GENERATION_CALL => Some(ResponseFormat::ImageGenerationCall),
+        _ => None,
+    }
+}
+
 pub const fn descriptor(format: ResponseFormat) -> FormatDescriptor {
     match format {
         ResponseFormat::WebSearchCall => FormatDescriptor {
             type_str: ItemType::WEB_SEARCH_CALL,
-            id_prefix: "ws_",
+            id_prefix: "ws",
             in_progress_event: WebSearchCallEvent::IN_PROGRESS,
             searching_event: Some(WebSearchCallEvent::SEARCHING),
             completed_event: WebSearchCallEvent::COMPLETED,
@@ -37,7 +57,7 @@ pub const fn descriptor(format: ResponseFormat) -> FormatDescriptor {
         },
         ResponseFormat::CodeInterpreterCall => FormatDescriptor {
             type_str: ItemType::CODE_INTERPRETER_CALL,
-            id_prefix: "ci_",
+            id_prefix: "ci",
             in_progress_event: CodeInterpreterCallEvent::IN_PROGRESS,
             searching_event: Some(CodeInterpreterCallEvent::INTERPRETING),
             completed_event: CodeInterpreterCallEvent::COMPLETED,
@@ -46,7 +66,7 @@ pub const fn descriptor(format: ResponseFormat) -> FormatDescriptor {
         },
         ResponseFormat::FileSearchCall => FormatDescriptor {
             type_str: ItemType::FILE_SEARCH_CALL,
-            id_prefix: "fs_",
+            id_prefix: "fs",
             in_progress_event: FileSearchCallEvent::IN_PROGRESS,
             searching_event: Some(FileSearchCallEvent::SEARCHING),
             completed_event: FileSearchCallEvent::COMPLETED,
@@ -55,7 +75,7 @@ pub const fn descriptor(format: ResponseFormat) -> FormatDescriptor {
         },
         ResponseFormat::ImageGenerationCall => FormatDescriptor {
             type_str: ItemType::IMAGE_GENERATION_CALL,
-            id_prefix: "ig_",
+            id_prefix: "ig",
             in_progress_event: ImageGenerationCallEvent::IN_PROGRESS,
             searching_event: Some(ImageGenerationCallEvent::GENERATING),
             completed_event: ImageGenerationCallEvent::COMPLETED,
@@ -64,7 +84,7 @@ pub const fn descriptor(format: ResponseFormat) -> FormatDescriptor {
         },
         ResponseFormat::Passthrough => FormatDescriptor {
             type_str: ItemType::MCP_CALL,
-            id_prefix: "mcp_",
+            id_prefix: "mcp",
             in_progress_event: McpEvent::CALL_IN_PROGRESS,
             searching_event: None,
             completed_event: McpEvent::CALL_COMPLETED,

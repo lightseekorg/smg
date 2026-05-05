@@ -26,16 +26,25 @@ use crate::routers::{
     grpc::harmony::responses::ToolResult,
 };
 
-pub(crate) enum OutputItemType {
+/// Item-id-prefix discriminator for non-format kinds. Format-driven items
+/// derive their prefix from `descriptor(format).id_prefix` instead — keeping
+/// the wire-shape mapping in one place.
+pub(crate) enum OutputItemKind {
     Message,
     McpListTools,
-    McpCall,
     FunctionCall,
     Reasoning,
-    WebSearchCall,
-    CodeInterpreterCall,
-    FileSearchCall,
-    ImageGenerationCall,
+}
+
+impl OutputItemKind {
+    fn id_prefix(&self) -> &'static str {
+        match self {
+            Self::Message => "msg",
+            Self::McpListTools => "mcpl",
+            Self::FunctionCall => "fc",
+            Self::Reasoning => "rs",
+        }
+    }
 }
 
 /// Status of an output item
@@ -531,18 +540,6 @@ impl ResponseStreamEventEmitter {
         }
     }
 
-    /// Map a `ResponseFormat` to the grpc-router-private `OutputItemType` enum.
-    pub fn output_item_type_for_format(response_format: Option<&ResponseFormat>) -> OutputItemType {
-        match response_format {
-            Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
-            Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
-            Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
-            Some(ResponseFormat::ImageGenerationCall) => OutputItemType::ImageGenerationCall,
-            Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
-            None => OutputItemType::FunctionCall,
-        }
-    }
-
     // ========================================================================
     // Function Call Event Emission Methods
     // ========================================================================
@@ -617,22 +614,11 @@ impl ResponseStreamEventEmitter {
         format!("{}_{}", prefix, Uuid::now_v7().simple())
     }
 
-    /// Allocate next output index and track item
-    pub fn allocate_output_index(&mut self, item_type: OutputItemType) -> (usize, String) {
+    /// Allocate next output index and track item, deriving the item-id from
+    /// `id_prefix` (e.g. `"msg"`, `"mcp"`, `"ws"` — without trailing `_`).
+    pub fn allocate_output_index_with_prefix(&mut self, id_prefix: &str) -> (usize, String) {
         let index = self.next_output_index;
         self.next_output_index += 1;
-
-        let id_prefix = match &item_type {
-            OutputItemType::McpListTools => "mcpl",
-            OutputItemType::McpCall => "mcp",
-            OutputItemType::FunctionCall => "fc",
-            OutputItemType::Message => "msg",
-            OutputItemType::Reasoning => "rs",
-            OutputItemType::WebSearchCall => "ws",
-            OutputItemType::CodeInterpreterCall => "ci",
-            OutputItemType::FileSearchCall => "fs",
-            OutputItemType::ImageGenerationCall => "ig",
-        };
 
         let id = Self::generate_item_id(id_prefix);
 
@@ -643,6 +629,25 @@ impl ResponseStreamEventEmitter {
         });
 
         (index, id)
+    }
+
+    /// Convenience: allocate for a non-format kind.
+    pub fn allocate_output_index(&mut self, kind: OutputItemKind) -> (usize, String) {
+        self.allocate_output_index_with_prefix(kind.id_prefix())
+    }
+
+    /// Convenience: allocate for a `ResponseFormat`-driven item, falling back
+    /// to `function_call` (`"fc"`) when no format applies. Mirrors the prior
+    /// `output_item_type_for_format` mapping but reads the prefix straight
+    /// off the format descriptor.
+    pub fn allocate_output_index_for_format(
+        &mut self,
+        response_format: Option<ResponseFormat>,
+    ) -> (usize, String) {
+        let prefix = response_format
+            .map(|f| descriptor(f).id_prefix)
+            .unwrap_or("fc");
+        self.allocate_output_index_with_prefix(prefix)
     }
 
     /// Mark output item as completed and store its data
@@ -719,7 +724,7 @@ impl ResponseStreamEventEmitter {
         reasoning_content: Option<String>,
     ) -> Result<(), String> {
         // Allocate output index and generate ID
-        let (output_index, item_id) = self.allocate_output_index(OutputItemType::Reasoning);
+        let (output_index, item_id) = self.allocate_output_index(OutputItemKind::Reasoning);
 
         // Build reasoning item structure
         let item = json!({
@@ -758,7 +763,7 @@ impl ResponseStreamEventEmitter {
                     // Allocate output_index and item_id for this message item (once per message)
                     if self.current_item_id.is_none() {
                         let (output_index, item_id) =
-                            self.allocate_output_index(OutputItemType::Message);
+                            self.allocate_output_index(OutputItemKind::Message);
 
                         // Build message item structure
                         let item = json!({
@@ -931,7 +936,7 @@ impl ResponseStreamEventEmitter {
         tools: &[mcp::ToolEntry],
         tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
     ) -> Result<(), String> {
-        let (output_index, item_id) = self.allocate_output_index(OutputItemType::McpListTools);
+        let (output_index, item_id) = self.allocate_output_index(OutputItemKind::McpListTools);
 
         // Build per-tool JSON items
         let tool_items = Self::tool_entries_to_json(tools).unwrap_or_else(|e| {

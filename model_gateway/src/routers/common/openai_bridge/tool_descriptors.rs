@@ -14,7 +14,24 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, Value};
-use smg_mcp::{ApprovalMode, McpToolSession};
+use smg_mcp::{ApprovalMode, BuiltinToolType, McpToolSession};
+
+/// Map a single `ResponseTool` variant to the `BuiltinToolType` the MCP
+/// router uses for resolution. `None` for non-builtin tool kinds (e.g.
+/// `Function`, `Mcp`, `Computer`). Centralizing here keeps the four
+/// hosted families (web_search_preview / code_interpreter / file_search /
+/// image_generation) in lockstep — every caller that previously matched
+/// on `ResponseTool::*` independently was at risk of forgetting a variant
+/// when a new builtin lands.
+pub fn builtin_type_for_response_tool(tool: &ResponseTool) -> Option<BuiltinToolType> {
+    match tool {
+        ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
+        ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
+        ResponseTool::FileSearch(_) => Some(BuiltinToolType::FileSearch),
+        ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
+        _ => None,
+    }
+}
 
 #[inline]
 fn schema_to_value(schema: &serde_json::Map<String, Value>) -> Value {

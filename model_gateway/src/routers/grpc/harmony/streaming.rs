@@ -38,7 +38,7 @@ use crate::{
                 responses::{
                     build_sse_response,
                     streaming::{
-                        attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
+                        attach_mcp_server_label, OutputItemKind, ResponseStreamEventEmitter,
                     },
                 },
             },
@@ -633,7 +633,7 @@ impl HarmonyStreamingProcessor {
                                 // Allocate message item if needed
                                 if message_output_index.is_none() {
                                     let (output_index, item_id) =
-                                        emitter.allocate_output_index(OutputItemType::Message);
+                                        emitter.allocate_output_index(OutputItemKind::Message);
                                     message_output_index = Some(output_index);
                                     message_item_id = Some(item_id.clone());
 
@@ -706,17 +706,12 @@ impl HarmonyStreamingProcessor {
                                     }
                                 });
 
-                                // Determine output item type and JSON type string
-                                let output_item_type =
-                                    ResponseStreamEventEmitter::output_item_type_for_format(
-                                        response_format.as_ref(),
-                                    );
                                 let type_str = ResponseStreamEventEmitter::type_str_for_format(
                                     response_format.as_ref(),
                                 );
 
                                 let (output_index, item_id) =
-                                    emitter.allocate_output_index(output_item_type);
+                                    emitter.allocate_output_index_for_format(response_format);
 
                                 tool_call_tracking.insert(
                                     call_index,
