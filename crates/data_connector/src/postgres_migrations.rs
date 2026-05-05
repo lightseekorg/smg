@@ -62,14 +62,19 @@ const POSTGRES_V11: Migration = Migration {
     description: "Create response_stream_chunks table",
     up: pg_v11_up,
 };
+const POSTGRES_V12: Migration = Migration {
+    version: 12,
+    description: "Add item_json column and link_id sequence for canonical payloads and ordering",
+    up: pg_v12_up,
+};
 
 /// Core history-backend migrations required by the SQL response/conversation
 /// storage path during normal gateway startup.
-pub(crate) static POSTGRES_HISTORY_MIGRATIONS: [Migration; 3] =
-    [POSTGRES_V1, POSTGRES_V2, POSTGRES_V3];
+pub(crate) static POSTGRES_HISTORY_MIGRATIONS: [Migration; 4] =
+    [POSTGRES_V1, POSTGRES_V2, POSTGRES_V3, POSTGRES_V12];
 
 /// Postgres migration list. Append new migrations here.
-pub(crate) static POSTGRES_MIGRATIONS: [Migration; 11] = [
+pub(crate) static POSTGRES_MIGRATIONS: [Migration; 12] = [
     POSTGRES_V1,
     POSTGRES_V2,
     POSTGRES_V3,
@@ -81,6 +86,7 @@ pub(crate) static POSTGRES_MIGRATIONS: [Migration; 11] = [
     POSTGRES_V9,
     POSTGRES_V10,
     POSTGRES_V11,
+    POSTGRES_V12,
 ];
 
 fn pg_v1_up(schema: &SchemaConfig) -> Vec<String> {
@@ -404,6 +410,52 @@ fn pg_v11_up(schema: &SchemaConfig) -> Vec<String> {
     ]
 }
 
+/// Add `item_json` column to `conversation_items` and `link_id` column +
+/// monotonic sequence to `conversation_item_links`.
+///
+/// `item_json` (JSONB) holds the whole canonical OpenAI item payload so reads
+/// can return the correct shape without per-type reconstruction. `link_id`
+/// (BIGINT, populated via `conv_item_link_id_seq`) is a strictly increasing
+/// per-link key that gives `/v1/conversations/{id}/items` deterministic
+/// ordering (replacing `added_at, item_id` which is not unique).
+///
+/// Both columns are added as nullable so the migration is non-blocking on
+/// large tables.
+fn pg_v12_up(schema: &SchemaConfig) -> Vec<String> {
+    let si = &schema.conversation_items;
+    let sl = &schema.conversation_item_links;
+    let si_table = si.qualified_table(schema.owner.as_deref());
+    let sl_table = sl.qualified_table(schema.owner.as_deref());
+
+    let mut stmts: Vec<String> = Vec::new();
+
+    if !si.is_skipped("item_json") {
+        let item_json_col = si.col("item_json");
+        stmts.push(format!(
+            "ALTER TABLE {si_table} ADD COLUMN IF NOT EXISTS {item_json_col} JSONB"
+        ));
+    }
+
+    if !sl.is_skipped("link_id") {
+        let link_id_col = sl.col("link_id");
+        let seq = pg_qualified_table(schema, "conv_item_link_id_seq");
+        stmts.push(format!(
+            "CREATE SEQUENCE IF NOT EXISTS {seq} INCREMENT BY 1 START WITH 1"
+        ));
+        stmts.push(format!(
+            "ALTER TABLE {sl_table} ADD COLUMN IF NOT EXISTS {link_id_col} BIGINT"
+        ));
+        // The UNIQUE INDEX on (conversation_id, link_id) is intentionally NOT
+        // created here. Creating it while link_id is universally NULL caused
+        // every link_item INSERT past the first per-conversation to fail in
+        // e2e (only the first input message survived). It will be added in
+        // PR 3 immediately after backfilling link_id with sequence values
+        // and promoting the column to NOT NULL.
+    }
+
+    stmts
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -417,7 +469,7 @@ mod tests {
             .iter()
             .map(|migration| migration.version)
             .collect();
-        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(versions, vec![1, 2, 3, 12]);
     }
 
     #[test]
@@ -762,5 +814,46 @@ mod tests {
         );
         assert!(stmts[0].contains("ON DELETE CASCADE"));
         assert!(stmts[1].contains("stream_chunks_cleanup_idx"));
+    }
+
+    // ── v12: add item_json column and link_id sequence ─────────────────────
+
+    #[test]
+    fn pg_v12_up_adds_item_json_column_and_link_id_sequence() {
+        let schema = SchemaConfig {
+            owner: Some("owner".to_string()),
+            ..Default::default()
+        };
+        let stmts = pg_v12_up(&schema);
+        assert_eq!(stmts.len(), 3, "got: {stmts:?}");
+        assert!(
+            stmts[0].contains("ADD COLUMN IF NOT EXISTS item_json JSONB"),
+            "got: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains("CREATE SEQUENCE IF NOT EXISTS owner.conv_item_link_id_seq"),
+            "got: {}",
+            stmts[1]
+        );
+        assert!(
+            stmts[2].contains("ADD COLUMN IF NOT EXISTS link_id BIGINT"),
+            "got: {}",
+            stmts[2]
+        );
+    }
+
+    #[test]
+    fn pg_v12_up_respects_skip_columns() {
+        let mut schema = SchemaConfig::default();
+        schema
+            .conversation_items
+            .skip_columns
+            .insert("item_json".to_string());
+        schema
+            .conversation_item_links
+            .skip_columns
+            .insert("link_id".to_string());
+        assert!(pg_v12_up(&schema).is_empty());
     }
 }

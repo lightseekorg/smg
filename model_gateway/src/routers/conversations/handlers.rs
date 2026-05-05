@@ -641,6 +641,7 @@ fn parse_item_from_value(
             role,
             content,
             status,
+            item_json: None,
         },
         warning,
     ))
