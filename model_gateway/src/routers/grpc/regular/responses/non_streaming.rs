@@ -26,7 +26,7 @@ use crate::{
     routers::{
         common::{
             mcp_utils::{prepare_hosted_dispatch_args, DEFAULT_MAX_ITERATIONS},
-            openai_bridge,
+            openai_bridge::{self, ResponseFormat},
         },
         error,
         grpc::common::responses::{
@@ -350,7 +350,11 @@ pub(super) async fn execute_tool_loop(
             // request-level `user` is also forwarded into hosted-tool args.
             let request_tools = original_request.tools.as_deref().unwrap_or(&[]);
             let request_user = original_request.user.as_deref();
-            let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
+            // Resolve `response_format` once per call here and zip it through
+            // to the output processing pass — looking it up twice (once for
+            // arg prep, once for transform) allocates two extra `Arc<str>`s
+            // per call. `session.execute_tools` preserves input ordering.
+            let prepared: Vec<(ToolExecutionInput, ResponseFormat)> = mcp_tool_calls
                 .into_iter()
                 .map(|tc| {
                     let mut arguments =
@@ -369,19 +373,19 @@ pub(super) async fn execute_tool_loop(
                         request_tools,
                         request_user,
                     );
-                    ToolExecutionInput {
+                    let input = ToolExecutionInput {
                         call_id: tc.call_id,
                         tool_name: tc.name,
                         arguments,
-                    }
+                    };
+                    (input, response_format)
                 })
                 .collect();
+            let (inputs, formats): (Vec<_>, Vec<_>) = prepared.into_iter().unzip();
 
-            // Execute all MCP tools via session
             let results = session.execute_tools(inputs).await;
 
-            // Process results: record metrics and state
-            for result in results {
+            for (result, response_format) in results.into_iter().zip(formats) {
                 trace!(
                     "Tool '{}' (call_id: {}) completed in {:?}, success={}",
                     result.tool_name,
@@ -390,7 +394,6 @@ pub(super) async fn execute_tool_loop(
                     !result.is_error
                 );
 
-                // Record MCP tool metrics
                 Metrics::record_mcp_tool_duration(
                     &current_request.model,
                     &result.tool_name,
@@ -406,12 +409,6 @@ pub(super) async fn execute_tool_loop(
                     },
                 );
 
-                // Record the call in state with transformed output item
-                let response_format = openai_bridge::lookup_tool_format(
-                    &session,
-                    &ctx.mcp_format_registry,
-                    &result.tool_name,
-                );
                 let output_item = openai_bridge::transform_tool_output(&result, response_format);
                 let output_str = result.output.to_string();
                 state.record_call(

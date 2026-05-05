@@ -14,7 +14,7 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::common::{
         mcp_utils::prepare_hosted_dispatch_args,
-        openai_bridge::{self, FormatRegistry},
+        openai_bridge::{self, FormatRegistry, ResponseFormat},
     },
 };
 
@@ -33,12 +33,11 @@ pub(crate) struct ToolResult {
     pub is_error: bool,
 
     /// Correctly-typed output item for the Responses API, produced by
-    /// `ResponseTransformer::transform` (via
-    /// `ToolExecutionOutput::to_response_item`). Carries the per-tool
-    /// shape — e.g. `McpCall { output }`, `WebSearchCall { .. }`,
-    /// `ImageGenerationCall { result }` — so downstream code can
-    /// serialize the authoritative item rather than re-deriving fields
-    /// from `output`.
+    /// `openai_bridge::transform_tool_output(&output, response_format)`.
+    /// Carries the per-tool shape — e.g. `McpCall { output }`,
+    /// `WebSearchCall { .. }`, `ImageGenerationCall { result }` — so
+    /// downstream code can serialize the authoritative item rather than
+    /// re-deriving fields from `output`.
     pub output_item: ResponseOutputItem,
 }
 
@@ -68,7 +67,12 @@ pub(super) async fn execute_mcp_tools(
     // For non-hosted-tool calls (Passthrough format), no override lookup runs.
     // Non-object model payloads coerce to `{}` so the override merge actually
     // applies rather than silently dropping the caller's declared config.
-    let inputs: Vec<ToolExecutionInput> = tool_calls
+    //
+    // Resolve `response_format` ONCE per tool call here and zip it through to
+    // the output-handling pass below — the previous code looked it up twice
+    // per call (each lookup allocates two `Arc<str>`s for the qualified
+    // name).
+    let prepared: Vec<(ToolExecutionInput, ResponseFormat)> = tool_calls
         .iter()
         .map(|tc| {
             let args_str = tc.function.arguments.as_deref().unwrap_or("{}");
@@ -97,28 +101,30 @@ pub(super) async fn execute_mcp_tools(
             let response_format =
                 openai_bridge::lookup_tool_format(session, format_registry, &tc.function.name);
             prepare_hosted_dispatch_args(&mut args, response_format, request_tools, request_user);
-            ToolExecutionInput {
+            let input = ToolExecutionInput {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
                 arguments: args,
-            }
+            };
+            (input, response_format)
         })
         .collect();
+
+    let (inputs, formats): (Vec<_>, Vec<_>) = prepared.into_iter().unzip();
 
     debug!(
         tool_count = inputs.len(),
         "Executing MCP tools via unified API"
     );
 
-    // Execute all tools via unified batch API
+    // `session.execute_tools` is `buffered()` and preserves input order, so
+    // `formats[i]` matches `outputs[i]`.
     let outputs = session.execute_tools(inputs).await;
 
-    // Convert outputs to ToolResults and record metrics/tracking
     let results: Vec<ToolResult> = outputs
         .into_iter()
-        .map(|output| {
-            let response_format =
-                openai_bridge::lookup_tool_format(session, format_registry, &output.tool_name);
+        .zip(formats)
+        .map(|(output, response_format)| {
             let output_item = openai_bridge::transform_tool_output(&output, response_format);
 
             // Record this call in tracking
