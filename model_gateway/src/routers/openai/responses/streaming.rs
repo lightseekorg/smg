@@ -18,9 +18,8 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
-        ResponseEvent, WebSearchCallEvent,
+        is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
+        OutputItemEvent, ResponseEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
@@ -167,7 +166,7 @@ pub(super) fn apply_event_transformations_inplace(
                                 if new_type == ItemType::MCP_CALL {
                                     item["id"] = json!(mcp_response_item_id(id));
                                 } else if let Some(stripped) = id.strip_prefix("fc_") {
-                                    let new_id = format!("{id_prefix}{stripped}");
+                                    let new_id = format!("{id_prefix}_{stripped}");
                                     item["id"] = json!(new_id);
                                 }
                             }
@@ -430,15 +429,10 @@ fn maybe_inject_tool_in_progress(
 
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Determine the in_progress event type based on item type
-    let event_type = match item_type {
-        ItemType::MCP_CALL => McpEvent::CALL_IN_PROGRESS,
-        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
-        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
-        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
-        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
-        _ => return true, // Not a tool call item, nothing to inject
+    let Some(format) = openai_bridge::format_from_type_str(item_type) else {
+        return true; // Not a tool call item, nothing to inject
     };
+    let event_type = openai_bridge::descriptor(format).in_progress_event;
 
     let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
         return true;
