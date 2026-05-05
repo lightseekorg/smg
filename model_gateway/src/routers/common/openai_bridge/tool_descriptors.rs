@@ -85,18 +85,30 @@ pub fn response_tools(session: &McpToolSession<'_>) -> Vec<ResponseTool> {
 }
 
 /// `McpToolInfo` records used inside `mcp_list_tools` output items.
+///
+/// `annotations` is narrowed to `{"read_only": …}` to match OpenAI's
+/// Responses API shape. The hint is read straight off the rmcp tool
+/// (`tool.annotations.read_only_hint`) rather than the SMG
+/// `ToolAnnotations` wrapper — the wrapper applies conservative policy
+/// defaults (destructive=true on absent hint) that are intended for the
+/// approval pipeline, not the wire surface, and reading them here would
+/// surface the wrong `read_only` for tools the server didn't annotate.
 pub fn build_mcp_tool_infos(entries: &[smg_mcp::ToolEntry]) -> Vec<McpToolInfo> {
     entries
         .iter()
-        .map(|entry| McpToolInfo {
-            name: entry.tool_name().to_string(),
-            description: entry.tool.description.as_ref().map(|d| d.to_string()),
-            input_schema: schema_to_value(&entry.tool.input_schema),
-            annotations: entry
+        .map(|entry| {
+            let read_only = entry
                 .tool
                 .annotations
                 .as_ref()
-                .and_then(|a| serde_json::to_value(a).ok()),
+                .and_then(|a| a.read_only_hint)
+                .unwrap_or(false);
+            McpToolInfo {
+                name: entry.tool_name().to_string(),
+                description: entry.tool.description.as_ref().map(|d| d.to_string()),
+                input_schema: schema_to_value(&entry.tool.input_schema),
+                annotations: Some(json!({ "read_only": read_only })),
+            }
         })
         .collect()
 }
@@ -309,5 +321,62 @@ fn is_client_visible_output_item(
         | ResponseOutputItem::Compaction { .. }
         | ResponseOutputItem::LocalShellCall { .. }
         | ResponseOutputItem::LocalShellCallOutput { .. } => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, sync::Arc};
+
+    use rmcp::model::{Tool, ToolAnnotations as RmcpToolAnnotations};
+    use smg_mcp::ToolEntry;
+
+    use super::*;
+
+    fn entry_with_rmcp_annotations(annotations: Option<RmcpToolAnnotations>) -> ToolEntry {
+        let tool = Tool {
+            name: Cow::Owned("widget".to_string()),
+            title: None,
+            description: Some(Cow::Owned("widget description".to_string())),
+            input_schema: Arc::new(serde_json::Map::new()),
+            output_schema: None,
+            annotations,
+            icons: None,
+        };
+        ToolEntry::from_server_tool("srv", tool)
+    }
+
+    fn read_only_hint(value: bool) -> RmcpToolAnnotations {
+        RmcpToolAnnotations {
+            title: None,
+            read_only_hint: Some(value),
+            destructive_hint: None,
+            idempotent_hint: None,
+            open_world_hint: None,
+        }
+    }
+
+    #[test]
+    fn build_mcp_tool_infos_surfaces_rmcp_read_only_hint() {
+        let entries = vec![entry_with_rmcp_annotations(Some(read_only_hint(true)))];
+        let infos = build_mcp_tool_infos(&entries);
+        let serialized = serde_json::to_value(&infos[0])
+            .expect("McpToolInfo must serialize")
+            .get("annotations")
+            .cloned()
+            .expect("annotations must serialize");
+        assert_eq!(serialized, json!({ "read_only": true }));
+    }
+
+    #[test]
+    fn build_mcp_tool_infos_defaults_to_false_when_hint_absent() {
+        let entries = vec![entry_with_rmcp_annotations(None)];
+        let infos = build_mcp_tool_infos(&entries);
+        let serialized = serde_json::to_value(&infos[0])
+            .expect("McpToolInfo must serialize")
+            .get("annotations")
+            .cloned()
+            .expect("annotations must serialize");
+        assert_eq!(serialized, json!({ "read_only": false }));
     }
 }

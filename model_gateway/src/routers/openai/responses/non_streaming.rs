@@ -15,7 +15,7 @@ use super::utils::{patch_response_with_request_metadata, restore_original_tools}
 use crate::routers::{
     common::{
         header_utils::{extract_forwardable_request_headers, ApiProvider},
-        mcp_utils::ensure_request_mcp_client,
+        mcp_utils::{ensure_request_mcp_client, request_uses_mcp_routing},
         openai_bridge,
         persistence_utils::persist_conversation_items,
     },
@@ -56,40 +56,42 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return error::internal_error("internal_error", "Worker not selected");
         }
     };
-    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m,
-        None => {
-            return error::internal_error("internal_error", "MCP orchestrator required");
+    // Only MCP-laden requests need the orchestrator and format registry;
+    // without this narrowing, plain non-MCP requests would 500 in
+    // deployments that run the gateway without MCP wiring. A registry-less
+    // MCP request still hard-fails — silent fallback would mis-route
+    // hosted tools.
+    let mcp_routing = match original_body.tools.as_deref() {
+        Some(tools) if request_uses_mcp_routing(tools) => {
+            let Some(mcp_orchestrator) = ctx.components.mcp_orchestrator() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP orchestrator required for requests carrying MCP/builtin tools",
+                );
+            };
+            let Some(registry) = ctx.components.mcp_format_registry() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP format registry required for requests carrying MCP/builtin tools",
+                );
+            };
+            ensure_request_mcp_client(mcp_orchestrator, registry, tools)
+                .await
+                .map(|servers| (servers, mcp_orchestrator.clone(), registry.clone()))
         }
-    };
-
-    // The format registry is the router-side source of truth for MCP
-    // builtin/alias format resolution; falling back to a default would
-    // silently mis-route hosted tools instead of failing fast.
-    let mcp_format_registry = match ctx.components.mcp_format_registry() {
-        Some(r) => r.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP format registry required");
-        }
-    };
-
-    // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, &mcp_format_registry, tools).await
-    } else {
-        None
+        _ => None,
     };
 
     let mut response_json: Value;
 
-    if let Some(mcp_servers) = mcp_servers {
+    if let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing {
         let session_request_id = original_body
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
         let forwarded_headers = extract_forwardable_request_headers(ctx.headers());
         let mut session = McpToolSession::new_with_headers(
-            mcp_orchestrator,
+            &mcp_orchestrator,
             mcp_servers,
             &session_request_id,
             forwarded_headers,

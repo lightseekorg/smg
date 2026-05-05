@@ -1065,7 +1065,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::common::mcp_utils::ensure_request_mcp_client;
+    use crate::routers::common::mcp_utils::{ensure_request_mcp_client, request_uses_mcp_routing};
 
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
@@ -1080,26 +1080,29 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
-    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP orchestrator required");
+    // Only MCP-laden requests need the orchestrator and format registry;
+    // plain streaming requests must still pass through deployments without
+    // MCP wiring.
+    let mcp_routing = match original_body.tools.as_deref() {
+        Some(tools) if request_uses_mcp_routing(tools) => {
+            let Some(mcp_orchestrator) = ctx.components.mcp_orchestrator().cloned() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP orchestrator required for requests carrying MCP/builtin tools",
+                );
+            };
+            let Some(registry) = ctx.components.mcp_format_registry() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP format registry required for requests carrying MCP/builtin tools",
+                );
+            };
+            let registry = registry.clone();
+            ensure_request_mcp_client(&mcp_orchestrator, &registry, tools)
+                .await
+                .map(|servers| (servers, mcp_orchestrator, registry))
         }
-    };
-    // Same fail-fast contract as the non-streaming path: a missing format
-    // registry means MCP routing decisions would be silently wrong.
-    let mcp_format_registry = match ctx.components.mcp_format_registry() {
-        Some(r) => r.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP format registry required");
-        }
-    };
-
-    // Check for MCP tools and create request context if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(&mcp_orchestrator, &mcp_format_registry, tools).await
-    } else {
-        None
+        _ => None,
     };
 
     let client = ctx.components.client().clone();
@@ -1110,7 +1113,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         }
     };
 
-    let Some(mcp_servers) = mcp_servers else {
+    let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing else {
         return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
     };
 

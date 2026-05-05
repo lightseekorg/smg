@@ -9,19 +9,29 @@ use tracing::warn;
 
 use super::ResponseFormat;
 
-/// Transform a `ToolExecutionOutput` to a `ResponseOutputItem` using a
+/// Transform a `ToolExecutionOutput` into a `ResponseOutputItem` using a
 /// pre-resolved `ResponseFormat`.
 ///
-/// The format MUST be resolved via the session's exposed-name map (e.g.
-/// [`super::lookup_tool_format`]). `output.tool_name` is the *invoked/exposed*
-/// name after `McpToolSession::execute_tool_result` rewrites it, so a registry
-/// lookup against `(output.server_key, output.tool_name)` would miss for
-/// disambiguated names like `mcp_<server>_<tool>` and silently degrade to
-/// `Passthrough`.
+/// `response_format` must be resolved via the session's exposed-name map
+/// (e.g. [`super::lookup_tool_format`]) — `output.tool_name` carries the
+/// *invoked/exposed* name after session-side rewriting, so a fresh
+/// registry lookup against `(output.server_key, output.tool_name)` would
+/// miss for disambiguated names like `mcp_<server>_<tool>`.
+///
+/// On `is_error`: only `mcp_call` surfaces the failure (`status: "failed"`,
+/// `error: Some(msg)`). The four hosted-builtin variants always emit
+/// `status: "completed"` — that matches OpenAI cloud's de-facto behavior
+/// (the cloud's native `web_search_call`/`code_interpreter_call`/etc.
+/// don't emit `Failed` for soft failures like empty results or rate
+/// limits, and many MCP servers set `isError: true` for those very cases).
+/// The error context lives in the item's content, not in `status`.
 pub fn transform_tool_output(
     output: &smg_mcp::ToolExecutionOutput,
     response_format: ResponseFormat,
 ) -> ResponseOutputItem {
+    if output.is_error && response_format == ResponseFormat::Passthrough {
+        return failed_mcp_call(output);
+    }
     ResponseTransformer::transform(
         &output.output,
         response_format,
@@ -30,6 +40,32 @@ pub fn transform_tool_output(
         &output.tool_name,
         &output.arguments_str,
     )
+}
+
+fn failed_mcp_call(output: &smg_mcp::ToolExecutionOutput) -> ResponseOutputItem {
+    // The MCP `CallToolResult { is_error: true, .. }` path can leave
+    // `error_message` unset while carrying the real failure text inside
+    // `output.output` (typed text blocks). Fall back to that before the
+    // generic placeholder so client-visible mcp_call.error stays useful.
+    let err_msg = output
+        .error_message
+        .clone()
+        .filter(|msg| !msg.is_empty())
+        .or_else(|| {
+            let text = ResponseTransformer::flatten_mcp_output(&output.output);
+            (!text.is_empty()).then_some(text)
+        })
+        .unwrap_or_else(|| "Tool execution failed".to_string());
+    ResponseOutputItem::McpCall {
+        id: mcp_response_item_id(&output.call_id),
+        status: "failed".to_string(),
+        approval_request_id: None,
+        arguments: output.arguments_str.clone(),
+        error: Some(err_msg),
+        name: output.tool_name.clone(),
+        output: String::new(),
+        server_label: output.server_label.clone(),
+    }
 }
 
 /// Normalize an MCP response item id source into an external `mcp_call.id`.
@@ -1544,6 +1580,88 @@ mod tests {
         match item {
             ResponseOutputItem::WebSearchCall { id, .. } => assert_eq!(id, "ws_xyz"),
             _ => panic!("Expected WebSearchCall"),
+        }
+    }
+
+    fn failed_tool_output(tool_name: &str) -> smg_mcp::ToolExecutionOutput {
+        smg_mcp::ToolExecutionOutput::new_for_test(
+            "call_xyz",
+            tool_name,
+            "srv",
+            "srv-label",
+            "{\"q\":\"v\"}",
+            serde_json::json!({}),
+            /* is_error */ true,
+            Some("upstream broke".to_string()),
+            std::time::Duration::default(),
+        )
+    }
+
+    #[test]
+    fn transform_tool_output_emits_mcp_call_failed_with_error_message() {
+        let item = transform_tool_output(
+            &failed_tool_output("brave_web_search"),
+            ResponseFormat::Passthrough,
+        );
+        match item {
+            ResponseOutputItem::McpCall {
+                status,
+                error,
+                output,
+                arguments,
+                name,
+                ..
+            } => {
+                assert_eq!(status, "failed");
+                assert_eq!(error.as_deref(), Some("upstream broke"));
+                assert_eq!(output, "");
+                assert_eq!(arguments, "{\"q\":\"v\"}");
+                assert_eq!(name, "brave_web_search");
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn transform_tool_output_falls_back_to_output_text_when_error_message_missing() {
+        // MCP `CallToolResult { is_error: true }` can leave error_message
+        // unset and put the failure text inside the result blocks.
+        let mut output = failed_tool_output("brave_web_search");
+        output.error_message = None;
+        output.output = serde_json::json!([
+            {"type": "text", "text": "rate limited"}
+        ]);
+
+        let item = transform_tool_output(&output, ResponseFormat::Passthrough);
+        match item {
+            ResponseOutputItem::McpCall { error, .. } => {
+                assert_eq!(error.as_deref(), Some("rate limited"));
+            }
+            _ => panic!("Expected McpCall"),
+        }
+    }
+
+    #[test]
+    fn transform_tool_output_emits_hosted_completed_even_on_is_error() {
+        // Hosted-builtin variants always emit status=completed regardless of
+        // upstream is_error. Real OpenAI cloud doesn't emit Failed for soft
+        // failures (rate-limited search, no results, etc.) and many MCP
+        // servers set isError=true for those exact cases — propagating it
+        // would break clients that expect cloud-parity wire shape. The
+        // failure context lives in the item content, not in `status`.
+        for fmt in [
+            ResponseFormat::WebSearchCall,
+            ResponseFormat::CodeInterpreterCall,
+            ResponseFormat::FileSearchCall,
+            ResponseFormat::ImageGenerationCall,
+        ] {
+            let item = transform_tool_output(&failed_tool_output("search"), fmt);
+            let serialized = serde_json::to_value(&item).expect("serialize failed item");
+            assert_eq!(
+                serialized["status"],
+                serde_json::json!("completed"),
+                "{fmt:?}"
+            );
         }
     }
 

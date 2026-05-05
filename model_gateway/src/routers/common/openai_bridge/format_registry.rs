@@ -52,39 +52,41 @@ impl FormatRegistry {
         self.formats.insert(qualified, format);
     }
 
-    /// Populate from a server config: per-tool overrides + builtin defaults.
-    /// Safe to call repeatedly — entries for non-Passthrough formats are
-    /// overwritten. Downgrading a format back to `Passthrough` requires a
-    /// separate registry rebuild (no production caller mutates configs in
-    /// place today).
+    fn remove(&self, qualified: &QualifiedToolName) {
+        self.formats.remove(qualified);
+    }
+
+    /// Populate from a server config. Safe to call repeatedly.
     ///
-    /// Mirrors `McpOrchestrator::apply_tool_configs`:
-    /// - When a tool has an `alias`, the format is attached **only** to the
-    ///   alias entry (under `("alias", alias_name)`), matching the orchestrator's
-    ///   `register_alias` qualified-name shape. The underlying `(server, tool)`
-    ///   stays at the `Passthrough` default so direct calls aren't transformed.
-    /// - When a tool has no alias but a non-default format, attach to
-    ///   `(server, tool)` directly.
-    /// - When the per-tool stanza omits `response_format` entirely
-    ///   (`None`), the builtin default still applies. This lets users add an
-    ///   `alias` or `arg_mapping` to a builtin tool without disabling its
-    ///   hosted-format wire shape. An explicit `Some(Passthrough)` *does*
-    ///   block the builtin default — that is the documented escape hatch
-    ///   for opting out of the hosted shape.
+    /// `McpToolSession::collect_visible_mcp_tools` replaces a direct tool
+    /// entry with its alias entry, so production session lookup of an
+    /// aliased tool resolves through `("alias", alias_name)`. Direct
+    /// dispatch still uses `(server_key, tool_name)`. Both keys must carry
+    /// the same format, so non-Passthrough formats are mirrored on both.
     pub fn populate_from_server_config(&self, config: &McpServerConfig) {
         if let Some(tools) = &config.tools {
             for (tool_name, tool_config) in tools {
+                let direct_key = QualifiedToolName::new(&config.name, tool_name);
+                let alias_key = tool_config
+                    .alias
+                    .as_deref()
+                    .map(|alias| QualifiedToolName::new(ALIAS_SERVER_KEY, alias));
+
                 let Some(format_config) = tool_config.response_format else {
                     continue;
                 };
                 let format: ResponseFormat = format_config.into();
                 if format == ResponseFormat::Passthrough {
+                    self.remove(&direct_key);
+                    if let Some(alias_key) = &alias_key {
+                        self.remove(alias_key);
+                    }
                     continue;
                 }
-                if let Some(alias) = &tool_config.alias {
-                    self.insert(QualifiedToolName::new(ALIAS_SERVER_KEY, alias), format);
-                } else {
-                    self.insert(QualifiedToolName::new(&config.name, tool_name), format);
+
+                self.insert(direct_key, format);
+                if let Some(alias_key) = alias_key {
+                    self.insert(alias_key, format);
                 }
             }
         }
@@ -92,14 +94,14 @@ impl FormatRegistry {
         if let (Some(builtin_type), Some(tool_name)) =
             (&config.builtin_type, &config.builtin_tool_name)
         {
-            let has_explicit_format = config
-                .tools
-                .as_ref()
-                .and_then(|tools| tools.get(tool_name))
-                .is_some_and(|cfg| cfg.response_format.is_some());
+            let stanza = config.tools.as_ref().and_then(|tools| tools.get(tool_name));
+            let has_explicit_format = stanza.is_some_and(|cfg| cfg.response_format.is_some());
             if !has_explicit_format {
                 let format: ResponseFormat = builtin_type.response_format().into();
                 self.insert(QualifiedToolName::new(&config.name, tool_name), format);
+                if let Some(alias) = stanza.and_then(|cfg| cfg.alias.as_deref()) {
+                    self.insert(QualifiedToolName::new(ALIAS_SERVER_KEY, alias), format);
+                }
             }
         }
     }
@@ -142,9 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_format_stored_under_alias_server_key() {
-        // Mirrors orchestrator::register_alias which uses
-        // QualifiedToolName::new("alias", alias_name).
+    fn alias_format_mirrored_on_both_keys() {
         let mut tools = HashMap::new();
         tools.insert(
             "brave_web_search".to_string(),
@@ -163,12 +163,10 @@ mod tests {
         assert_eq!(
             r.lookup_by_names("alias", "web_search"),
             ResponseFormat::WebSearchCall,
-            "alias entry must use the literal `alias` server_key prefix"
         );
         assert_eq!(
             r.lookup_by_names("brave", "brave_web_search"),
-            ResponseFormat::Passthrough,
-            "underlying tool entry must NOT receive the format when an alias exists"
+            ResponseFormat::WebSearchCall,
         );
     }
 
@@ -217,7 +215,6 @@ mod tests {
             "do_search".to_string(),
             ToolConfig {
                 alias: None,
-                // Explicit override differs from the builtin default.
                 response_format: Some(ResponseFormatConfig::Passthrough),
                 arg_mapping: None,
             },
@@ -230,8 +227,6 @@ mod tests {
         let r = FormatRegistry::new();
         r.populate_from_server_config(&cfg);
 
-        // Explicit Some(Passthrough) override means "no entry inserted" AND
-        // the builtin default is NOT applied on top.
         assert_eq!(
             r.lookup_by_names("search", "do_search"),
             ResponseFormat::Passthrough
@@ -239,12 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_only_stanza_preserves_builtin_default() {
-        // Regression: a per-tool stanza that only aliases a builtin tool
-        // (or only sets arg_mapping) used to suppress the builtin default,
-        // collapsing the hosted format to plain mcp_call. With
-        // `response_format: None` meaning "inherit context", the builtin
-        // default must still apply.
+    fn alias_only_stanza_preserves_builtin_default_on_both_keys() {
         let mut tools = HashMap::new();
         tools.insert(
             "do_search".to_string(),
@@ -262,10 +252,63 @@ mod tests {
         let r = FormatRegistry::new();
         r.populate_from_server_config(&cfg);
 
+        // Alias key — what production session lookup hits.
+        assert_eq!(
+            r.lookup_by_names("alias", "web_search"),
+            ResponseFormat::WebSearchCall,
+        );
+        // Direct key — what direct dispatch hits.
         assert_eq!(
             r.lookup_by_names("search", "do_search"),
             ResponseFormat::WebSearchCall,
-            "alias-only stanza must not disable the builtin's hosted format"
+        );
+    }
+
+    #[test]
+    fn explicit_passthrough_downgrade_clears_prior_hosted_entry() {
+        let r = FormatRegistry::new();
+
+        let mut hosted = HashMap::new();
+        hosted.insert(
+            "brave_web_search".to_string(),
+            ToolConfig {
+                alias: Some("web_search".to_string()),
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
+                arg_mapping: None,
+            },
+        );
+        let mut hosted_cfg = server("brave");
+        hosted_cfg.tools = Some(hosted);
+        r.populate_from_server_config(&hosted_cfg);
+        assert_eq!(
+            r.lookup_by_names("alias", "web_search"),
+            ResponseFormat::WebSearchCall,
+        );
+        assert_eq!(
+            r.lookup_by_names("brave", "brave_web_search"),
+            ResponseFormat::WebSearchCall,
+        );
+
+        let mut downgraded = HashMap::new();
+        downgraded.insert(
+            "brave_web_search".to_string(),
+            ToolConfig {
+                alias: Some("web_search".to_string()),
+                response_format: Some(ResponseFormatConfig::Passthrough),
+                arg_mapping: None,
+            },
+        );
+        let mut downgraded_cfg = server("brave");
+        downgraded_cfg.tools = Some(downgraded);
+        r.populate_from_server_config(&downgraded_cfg);
+
+        assert_eq!(
+            r.lookup_by_names("alias", "web_search"),
+            ResponseFormat::Passthrough,
+        );
+        assert_eq!(
+            r.lookup_by_names("brave", "brave_web_search"),
+            ResponseFormat::Passthrough,
         );
     }
 }

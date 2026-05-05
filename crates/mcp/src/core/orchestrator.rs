@@ -158,7 +158,8 @@ pub struct ToolExecutionInput {
 /// Output from batch tool execution.
 ///
 /// `#[non_exhaustive]` so additive fields don't break consumers; only
-/// `smg-mcp` constructs this.
+/// `smg-mcp` constructs this in production. External tests use
+/// [`ToolExecutionOutput::new_for_test`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ToolExecutionOutput {
@@ -182,6 +183,39 @@ pub struct ToolExecutionOutput {
     pub error_message: Option<String>,
     /// Execution duration.
     pub duration: Duration,
+}
+
+impl ToolExecutionOutput {
+    /// Test-only constructor for downstream crates blocked by
+    /// `#[non_exhaustive]`. One positional arg per public field is
+    /// intentional so adding a field forces every test to consider it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Test fixture constructor; one arg per field is intentional."
+    )]
+    pub fn new_for_test(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        server_key: impl Into<String>,
+        server_label: impl Into<String>,
+        arguments_str: impl Into<String>,
+        output: Value,
+        is_error: bool,
+        error_message: Option<String>,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            server_key: server_key.into(),
+            server_label: server_label.into(),
+            arguments_str: arguments_str.into(),
+            output,
+            is_error,
+            error_message,
+            duration,
+        }
+    }
 }
 
 /// Result from resolved tool execution that preserves interactive approval state.
