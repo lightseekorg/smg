@@ -621,29 +621,8 @@ impl ResponseTransformer {
 
     /// Extract file search results from MCP result.
     fn extract_file_results(result: &serde_json::Value) -> Vec<FileSearchResult> {
-        let mut parsed = Vec::new();
-
-        // 1) Embedded OpenAI-style payloads inside MCP text blocks:
-        //    [{"type":"text","text":"{\"openai_response\": {...}}"}]
-        //    Accept both openai_response.results[] and openai_response.data[].
-        if result.is_array() {
-            for openai_response in extract_embedded_openai_responses(result) {
-                let Some(items) = openai_response
-                    .get("results")
-                    .and_then(|v| v.as_array())
-                    .or_else(|| openai_response.get("data").and_then(|v| v.as_array()))
-                else {
-                    continue;
-                };
-                parsed.extend(items.iter().filter_map(Self::parse_file_result));
-            }
-            if !parsed.is_empty() {
-                return parsed;
-            }
-        }
-
-        // 2) Direct tool-result payloads from MCP servers.
-        //    Accept top-level results[] and data[] (genai-data-plane shape).
+        // Direct tool-result payloads from MCP servers.
+        // Accept top-level results[] and a top-level array for backward compatibility.
         let fallback_items = result
             .as_array()
             .or_else(|| {
@@ -651,52 +630,62 @@ impl ResponseTransformer {
                     .as_object()
                     .and_then(|obj| obj.get("results").and_then(|v| v.as_array()))
             })
-            .or_else(|| {
-                result
-                    .as_object()
-                    .and_then(|obj| obj.get("data").and_then(|v| v.as_array()))
-            })
             .map(|items| items.as_slice())
             .unwrap_or_default();
 
-        parsed.extend(fallback_items.iter().filter_map(Self::parse_file_result));
-        parsed
+        fallback_items
+            .iter()
+            .filter_map(Self::parse_file_result)
+            .collect()
     }
 
     /// Parse a file search result from JSON.
     fn parse_file_result(item: &serde_json::Value) -> Option<FileSearchResult> {
         let obj = item.as_object()?;
-        let file_id = obj
-            .get("file_id")
-            .or_else(|| obj.get("fileId"))
-            .and_then(|v| v.as_str())?
-            .to_string();
-        let filename = obj
-            .get("filename")
-            .or_else(|| obj.get("file_name"))
-            .or_else(|| obj.get("fileName"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| file_id.clone());
+        let file_id = Self::first_non_empty_str(obj, &["file_id", "fileId", "id"])?;
+        let filename =
+            Self::first_non_empty_str(obj, &["filename", "file_name", "fileName", "name"])
+                .or_else(|| {
+                    obj.get("attributes")
+                        .and_then(|v| v.as_object())
+                        .and_then(|attrs| {
+                            Self::first_non_empty_str(
+                                attrs,
+                                &["filename", "file_name", "fileName", "name"],
+                            )
+                        })
+                })
+                .unwrap_or_else(|| file_id.clone());
         let text = obj
             .get("text")
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| Self::extract_file_result_text_from_content(item));
         let score = obj.get("score").and_then(|v| v.as_f64()).map(|f| f as f32);
+        let vector_store_id = Self::first_non_empty_str(obj, &["vector_store_id", "vectorStoreId"]);
+        let additional_properties = obj
+            .get("additional_properties")
+            .cloned()
+            .or_else(|| obj.get("additionalProperties").cloned());
 
         Some(FileSearchResult {
             file_id,
             filename,
             text,
             score,
+            vector_store_id,
             attributes: obj.get("attributes").cloned(),
+            additional_properties,
         })
     }
 
     /// Extract text from a file-search `content` array.
     ///
+    /// Unstructured string items are accepted for backward compatibility.
+    /// Typed non-text blocks (e.g. image/table) are ignored.
+    ///
     /// Accepted item shapes:
+    /// - `"..."`
     /// - `{ "text": "..." }`
     /// - `{ "text": { "value": "..." } }`
     /// - `{ "type": "text", "value": "..." }`
@@ -705,32 +694,57 @@ impl ResponseTransformer {
         let mut parts: Vec<String> = Vec::new();
 
         for node in content {
-            let Some(obj) = node.as_object() else {
-                continue;
-            };
-            let text = obj
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .or_else(|| {
-                    obj.get("text")
-                        .and_then(|v| v.get("value"))
+            match node {
+                serde_json::Value::String(text) => {
+                    if !text.is_empty() {
+                        parts.push(text.clone());
+                    }
+                }
+                serde_json::Value::Object(obj) => {
+                    let node_type = obj.get("type").and_then(|v| v.as_str());
+                    if node_type.is_some_and(|t| t != "text") {
+                        continue;
+                    }
+
+                    let text = obj
+                        .get("text")
                         .and_then(|v| v.as_str())
                         .map(String::from)
-                })
-                .or_else(|| {
-                    if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        obj.get("value").and_then(|v| v.as_str()).map(String::from)
-                    } else {
-                        None
+                        .or_else(|| {
+                            obj.get("text")
+                                .and_then(|v| v.get("value"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .or_else(|| {
+                            if node_type == Some("text") {
+                                obj.get("value").and_then(|v| v.as_str()).map(String::from)
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(text) = text.filter(|s| !s.is_empty()) {
+                        parts.push(text);
                     }
-                });
-            if let Some(text) = text.filter(|s| !s.is_empty()) {
-                parts.push(text);
+                }
+                _ => {}
             }
         }
 
         (!parts.is_empty()).then(|| parts.join("\n"))
+    }
+
+    fn first_non_empty_str(
+        obj: &serde_json::Map<String, serde_json::Value>,
+        keys: &[&str],
+    ) -> Option<String> {
+        keys.iter().find_map(|key| {
+            obj.get(*key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
     }
 }
 
@@ -1262,65 +1276,26 @@ mod tests {
                 assert_eq!(id, "fs_req-fs-embedded-results");
                 assert_eq!(status, FileSearchCallStatus::Completed);
                 assert_eq!(queries, vec!["rust async await"]);
-                let results = results.expect("expected embedded results");
-                assert_eq!(results.len(), 1);
-                assert_eq!(results[0].file_id, "file_emb_1");
-                assert_eq!(results[0].filename, "async_book.md");
-                assert_eq!(results[0].text.as_deref(), Some("executor notes"));
-                assert_eq!(results[0].score, Some(0.91));
+                // `extract_file_results` now keeps only direct top-level
+                // `results[]` / `data[]` payloads (or top-level arrays) and
+                // no longer reads nested `openai_response` payloads from text
+                // blocks.
+                assert!(results.is_none());
             }
             _ => panic!("Expected FileSearchCall"),
         }
     }
 
     #[test]
-    fn test_file_search_transform_embedded_openai_response_data() {
-        let result = json!([
-            {
-                "type": "text",
-                "text": r#"{
-                  "openai_response": {
-                    "data": [
-                      {
-                        "file_id": "file_emb_data",
-                        "filename": "guide.md",
-                        "text": "from data alias"
-                      }
-                    ]
-                  }
-                }"#
-            }
-        ]);
-
-        let transformed = ResponseTransformer::transform(
-            &result,
-            &ResponseFormat::FileSearchCall,
-            "req-fs-embedded-data",
-            "server",
-            "file_search",
-            "{}",
-        );
-
-        match transformed {
-            ResponseOutputItem::FileSearchCall { results, .. } => {
-                let results = results.expect("expected embedded data[] results");
-                assert_eq!(results.len(), 1);
-                assert_eq!(results[0].file_id, "file_emb_data");
-                assert_eq!(results[0].filename, "guide.md");
-                assert_eq!(results[0].text.as_deref(), Some("from data alias"));
-            }
-            _ => panic!("Expected FileSearchCall"),
-        }
-    }
-
-    #[test]
-    fn test_file_search_transform_top_level_data_with_aliases_and_content_text() {
+    fn test_file_search_transform_top_level_results_with_aliases_and_content_text() {
         let result = json!({
             "query": "mock mcp",
-            "data": [
+            "results": [
                 {
                     "fileId": "file_alias_1",
                     "file_name": "mock.md",
+                    "vector_store_id": "vs_123",
+                    "additional_properties": {"chunk_id": "c1"},
                     "score": 0.77,
                     "attributes": {"section": "intro"},
                     "content": [
@@ -1346,7 +1321,7 @@ mod tests {
                 queries, results, ..
             } => {
                 assert_eq!(queries, vec!["mock mcp"]);
-                let results = results.expect("expected data[] results");
+                let results = results.expect("expected results[] results");
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0].file_id, "file_alias_1");
                 assert_eq!(results[0].filename, "mock.md");
@@ -1355,7 +1330,118 @@ mod tests {
                     Some("first line\nsecond line\nthird line")
                 );
                 assert_eq!(results[0].score, Some(0.77));
+                assert_eq!(results[0].vector_store_id.as_deref(), Some("vs_123"));
                 assert_eq!(results[0].attributes, Some(json!({"section": "intro"})));
+                assert_eq!(
+                    results[0].additional_properties,
+                    Some(json!({"chunk_id": "c1"}))
+                );
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_accepts_id_and_name_aliases() {
+        let result = json!({
+            "results": [
+                {
+                    "id": "file_alias_id",
+                    "name": "alias-name.md",
+                    "text": "alias body"
+                }
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-id-name-aliases",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall { results, .. } => {
+                let results = results.expect("expected results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_alias_id");
+                assert_eq!(results[0].filename, "alias-name.md");
+                assert_eq!(results[0].text.as_deref(), Some("alias body"));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_filename_falls_back_to_attributes_aliases() {
+        let result = json!({
+            "results": [
+                {
+                    "file_id": "file_with_attrs_name",
+                    "attributes": { "name": "attrs-name.md" },
+                    "text": "attrs fallback body"
+                }
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-attrs-fallback-name",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall { results, .. } => {
+                let results = results.expect("expected results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].file_id, "file_with_attrs_name");
+                assert_eq!(results[0].filename, "attrs-name.md");
+                assert_eq!(results[0].text.as_deref(), Some("attrs fallback body"));
+            }
+            _ => panic!("Expected FileSearchCall"),
+        }
+    }
+
+    #[test]
+    fn test_file_search_transform_content_ignores_non_text_typed_nodes() {
+        let result = json!({
+            "results": [
+                {
+                    "file_id": "file_mixed_content",
+                    "filename": "mixed.md",
+                    "content": [
+                        {"text": "first text", "type": "text"},
+                        {"text": "image payload", "type": "image"},
+                        {"text": "table payload", "type": "table"},
+                        {"text": "untyped text is kept"},
+                        "plain string node is kept"
+                    ]
+                }
+            ]
+        });
+
+        let transformed = ResponseTransformer::transform(
+            &result,
+            &ResponseFormat::FileSearchCall,
+            "req-fs-content-filtering",
+            "server",
+            "file_search",
+            "{}",
+        );
+
+        match transformed {
+            ResponseOutputItem::FileSearchCall { results, .. } => {
+                let results = results.expect("expected results");
+                assert_eq!(results.len(), 1);
+                assert_eq!(
+                    results[0].text.as_deref(),
+                    Some("first text\nuntyped text is kept\nplain string node is kept")
+                );
             }
             _ => panic!("Expected FileSearchCall"),
         }
