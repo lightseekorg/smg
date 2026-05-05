@@ -1201,10 +1201,9 @@ mod tests {
                 assert_eq!(id, "fs_req-fs-embedded-results");
                 assert_eq!(status, FileSearchCallStatus::Completed);
                 assert_eq!(queries, vec!["rust async await"]);
-                // `extract_file_results` now keeps only direct top-level
-                // `results[]` / `data[]` payloads (or top-level arrays) and
-                // no longer reads nested `openai_response` payloads from text
-                // blocks.
+                // `extract_file_results` keeps only direct top-level
+                // `results[]` payloads (or top-level arrays) and no longer
+                // reads nested `openai_response` payloads from text blocks.
                 assert!(results.is_none());
             }
             _ => panic!("Expected FileSearchCall"),
