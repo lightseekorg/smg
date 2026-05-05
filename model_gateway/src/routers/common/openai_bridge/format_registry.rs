@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use smg_mcp::{inventory::ALIAS_SERVER_KEY, McpServerConfig, QualifiedToolName};
+use tracing::debug;
 
 use super::ResponseFormat;
 
@@ -16,6 +17,12 @@ use super::ResponseFormat;
 /// `QualifiedToolName` returned by `qualified_name_for_exposed` rather than
 /// rebuilding one, so we pay the two `Arc<str>` allocations once instead of
 /// twice per call.
+///
+/// Telemetry: when the session knows the tool but the registry doesn't, we
+/// log a `debug` event with the qualified name. That asymmetric miss is the
+/// fingerprint of a registration-path bug (the orchestrator added the tool
+/// but `populate_from_server_config` was never called for the same server),
+/// and would otherwise dispatch silently as `mcp_call`.
 pub fn lookup_tool_format(
     session: &smg_mcp::McpToolSession<'_>,
     registry: &FormatRegistry,
@@ -24,7 +31,17 @@ pub fn lookup_tool_format(
     let Some(qn) = session.qualified_name_for_exposed(exposed_name) else {
         return ResponseFormat::Passthrough;
     };
-    registry.lookup(&qn)
+    let format = registry.lookup(&qn);
+    if format == ResponseFormat::Passthrough && !registry.contains(&qn) {
+        debug!(
+            exposed_name = %exposed_name,
+            server_key = %qn.server_key(),
+            tool_name = %qn.tool_name(),
+            "FormatRegistry miss for session-exposed tool — dispatching as Passthrough; \
+             check that populate_from_server_config ran for this server"
+        );
+    }
+    format
 }
 
 #[derive(Default, Debug, Clone)]
@@ -46,6 +63,13 @@ impl FormatRegistry {
 
     pub fn lookup_by_names(&self, server_key: &str, tool_name: &str) -> ResponseFormat {
         self.lookup(&QualifiedToolName::new(server_key, tool_name))
+    }
+
+    /// True iff the registry has an explicit entry for `qualified`. Used by
+    /// [`lookup_tool_format`] to distinguish a registered Passthrough entry
+    /// from a missing entry that defaulted to Passthrough.
+    pub fn contains(&self, qualified: &QualifiedToolName) -> bool {
+        self.formats.contains_key(qualified)
     }
 
     fn insert(&self, qualified: QualifiedToolName, format: ResponseFormat) {
