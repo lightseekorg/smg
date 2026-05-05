@@ -9,7 +9,9 @@ use wfaas::{
 };
 
 use super::data::McpWorkflowData;
-use crate::{app_context::AppContext, observability::metrics::Metrics};
+use crate::{
+    app_context::AppContext, observability::metrics::Metrics, routers::common::openai_bridge,
+};
 
 /// MCP server connection configuration
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -65,21 +67,24 @@ impl StepExecutor<McpWorkflowData> for ConnectMcpServerStep {
                     message: "MCP orchestrator not initialized".to_string(),
                 })?;
 
-        // Connect to MCP server (orchestrator handles everything)
-        mcp_orchestrator
-            .connect_static_server(&config_request.config)
-            .await
-            .map_err(|e| WorkflowError::StepFailed {
-                step_id: StepId::new("connect_mcp_server"),
-                message: format!(
-                    "Failed to connect to MCP server {}: {}",
-                    config_request.name, e
-                ),
-            })?;
-
-        app_context
-            .mcp_format_registry
-            .populate_from_server_config(&config_request.config);
+        // Connect via the bridge wrapper so the orchestrator's tool inventory
+        // and the gateway-side FormatRegistry move atomically — the bare
+        // `connect_static_server` + `populate_from_server_config` sequence
+        // would silently downgrade hosted-tool dispatch if a future caller
+        // forgot the second call.
+        openai_bridge::connect_static_server(
+            mcp_orchestrator,
+            &app_context.mcp_format_registry,
+            &config_request.config,
+        )
+        .await
+        .map_err(|e| WorkflowError::StepFailed {
+            step_id: StepId::new("connect_mcp_server"),
+            message: format!(
+                "Failed to connect to MCP server {}: {}",
+                config_request.name, e
+            ),
+        })?;
 
         // Update active MCP servers metric
         Metrics::set_mcp_servers_active(mcp_orchestrator.list_servers().len());

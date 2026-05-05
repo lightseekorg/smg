@@ -120,15 +120,17 @@ pub async fn connect_mcp_servers(
 
             let server_key = McpOrchestrator::server_key(&server_config);
 
-            match mcp_orchestrator
-                .connect_dynamic_server(server_config.clone())
-                .await
+            // Use the bridge wrapper so the orchestrator + FormatRegistry
+            // can never be left out of sync. See
+            // openai_bridge/connect.rs.
+            match openai_bridge::connect_dynamic_server(
+                mcp_orchestrator,
+                format_registry,
+                server_config,
+            )
+            .await
             {
                 Ok(_) => {
-                    // Mirror the orchestrator's tool-config + builtin-format passes
-                    // into the gateway-side FormatRegistry. See
-                    // routers/common/openai_bridge/format_registry.rs.
-                    format_registry.populate_from_server_config(&server_config);
                     if !mcp_servers.iter().any(|b| b.server_key == server_key) {
                         mcp_servers.push(McpServerBinding {
                             label: input.label.clone(),

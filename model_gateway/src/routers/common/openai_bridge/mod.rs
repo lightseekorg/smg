@@ -3,6 +3,7 @@
 //! Conversion logic between MCP protocol types and OpenAI Responses API
 //! shapes. Gateway-internal — `smg-mcp` does not depend on OpenAI vocabulary.
 
+pub mod connect;
 pub mod format_descriptor;
 pub mod format_registry;
 pub mod overrides;
@@ -10,6 +11,7 @@ pub mod response_format;
 pub mod tool_descriptors;
 pub mod transformer;
 
+pub use connect::{connect_dynamic_server, connect_static_server};
 pub use format_descriptor::{
     descriptor, format_from_type_str, is_hosted_tool_call_item_type, FormatDescriptor,
 };
