@@ -1,0 +1,16 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "echo",
+      "description": "Echo a string back to the caller.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"}
+        },
+        "required": ["text"]
+      }
+    }
+  }
+]
