@@ -6,7 +6,6 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::{
     body::Body,
@@ -55,7 +54,7 @@ use crate::{
         RouterFactory, RouterTrait,
     },
     server::ServerConfig,
-    worker::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},
+    worker::{ConnectionMode, ProviderType, RuntimeType, Worker, WorkerRegistry, WorkerType},
 };
 
 pub struct RouterManager {
@@ -63,7 +62,6 @@ pub struct RouterManager {
     client: reqwest::Client,
     gateway_api_key: Option<String>,
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
-    routers_snapshot: ArcSwap<Vec<Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
     skill_service: Option<Arc<SkillService>>,
     enable_igw: bool,
@@ -76,10 +74,9 @@ impl RouterManager {
             client,
             gateway_api_key: None,
             routers: Arc::new(DashMap::new()),
-            routers_snapshot: ArcSwap::from_pointee(Vec::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
             skill_service: None,
-            enable_igw: false, // Will be set properly in from_config
+            enable_igw: false,
         }
     }
 
@@ -172,10 +169,6 @@ impl RouterManager {
     pub fn register_router(&self, id: RouterId, router: Arc<dyn RouterTrait>) {
         self.routers.insert(id.clone(), router);
 
-        // Update the lock-free snapshot for fast per-request iteration
-        let new_snapshot: Vec<_> = self.routers.iter().map(|e| e.value().clone()).collect();
-        self.routers_snapshot.store(Arc::new(new_snapshot));
-
         let mut default_router = self
             .default_router
             .write()
@@ -198,54 +191,93 @@ impl RouterManager {
         self.routers.len()
     }
 
-    pub fn get_router_for_model(&self, model_id: &str) -> Option<Arc<dyn RouterTrait>> {
-        let workers = self.worker_registry.get_by_model(model_id);
+    /// Selects a router by weighting all four router types (grpc-pd, http-pd, grpc-regular,
+    /// http-regular) by their worker counts. PD routers only receive weight when both prefill
+    /// and decode workers are present on the same protocol; an incomplete pair contributes 0.
+    ///
+    /// Weighting the router selection lets operators gradually migrate traffic between
+    /// HTTP / gRPC and regular / prefill-decode disaggregation workers.
+    fn pick_router_by_weights(
+        &self,
+        grpc_pd: usize,
+        http_pd: usize,
+        grpc_regular: usize,
+        http_regular: usize,
+    ) -> Option<Arc<dyn RouterTrait>> {
+        let options: [(usize, &RouterId); 4] = [
+            (grpc_pd, &router_ids::GRPC_PD),
+            (http_pd, &router_ids::HTTP_PD),
+            (grpc_regular, &router_ids::GRPC_REGULAR),
+            (http_regular, &router_ids::HTTP_REGULAR),
+        ];
 
-        // Find the best router ID based on worker capabilities
-        // Priority: external (provider-specific) > grpc-pd > http-pd > grpc-regular > http-regular
-        let best_router_id = workers
-            .iter()
-            .map(|w| {
-                let is_pd = matches!(w.worker_type(), WorkerType::Prefill | WorkerType::Decode);
-                let is_grpc = matches!(w.connection_mode(), ConnectionMode::Grpc);
-                let is_external = matches!(w.metadata().spec.runtime_type, RuntimeType::External);
+        let total: usize = options.iter().map(|(w, _)| w).sum();
+        if total == 0 {
+            return None;
+        }
 
-                if is_external {
-                    // Route external workers to the correct provider-specific router
-                    let router_id = match w.provider_for_model(model_id) {
+        let pick = ((rand::random::<f64>() * total as f64) as usize).min(total - 1);
+        let mut cum = 0usize;
+        for (weight, router_id) in &options {
+            cum += weight;
+            if pick < cum {
+                return self.routers.get(*router_id).map(|r| r.clone());
+            }
+        }
+        None
+    }
+
+    fn select_router_for_workers(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        model_id: Option<&str>,
+    ) -> Option<Arc<dyn RouterTrait>> {
+        // External workers take highest priority when a model is known.
+        if let Some(model) = model_id {
+            for w in workers {
+                if matches!(w.metadata().spec.runtime_type, RuntimeType::External) {
+                    let router_id = match w.provider_for_model(model) {
                         Some(ProviderType::Gemini) => &router_ids::HTTP_GEMINI,
                         Some(ProviderType::Anthropic) => &router_ids::HTTP_ANTHROPIC,
                         _ => &router_ids::HTTP_OPENAI,
                     };
-                    return (4, router_id);
+                    return self.routers.get(router_id).map(|r| r.clone());
                 }
-
-                match (is_grpc, is_pd) {
-                    (true, true) => (3, &router_ids::GRPC_PD),
-                    (false, true) => (2, &router_ids::HTTP_PD),
-                    (true, false) => (1, &router_ids::GRPC_REGULAR),
-                    (false, false) => (0, &router_ids::HTTP_REGULAR),
-                }
-            })
-            .max_by_key(|(score, _)| *score)
-            .map(|(_, id)| id);
-
-        if let Some(router_id) = best_router_id {
-            if let Some(router) = self.routers.get(router_id) {
-                return Some(router.clone());
             }
         }
 
-        // Fallback to default router
-        let default_router = self
-            .default_router
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(ref default_id) = *default_router {
-            self.routers.get(default_id).map(|r| r.clone())
-        } else {
-            None
+        let mut grpc_prefill = 0;
+        let mut http_prefill = 0;
+        let mut grpc_decode = 0;
+        let mut http_decode = 0;
+        let mut grpc_regular = 0;
+        let mut http_regular = 0;
+
+        for w in workers {
+            match (w.worker_type(), w.connection_mode()) {
+                (WorkerType::Prefill, ConnectionMode::Grpc) => grpc_prefill += 1,
+                (WorkerType::Prefill, ConnectionMode::Http) => http_prefill += 1,
+                (WorkerType::Decode, ConnectionMode::Grpc) => grpc_decode += 1,
+                (WorkerType::Decode, ConnectionMode::Http) => http_decode += 1,
+                (WorkerType::Regular, ConnectionMode::Grpc) => grpc_regular += 1,
+                (WorkerType::Regular, ConnectionMode::Http) => http_regular += 1,
+            }
         }
+
+        // We need at least one prefill and one decode worker to handle requests
+        // in PD disaggregation mode.
+        let grpc_pd = if grpc_prefill > 0 && grpc_decode > 0 {
+            grpc_prefill + grpc_decode
+        } else {
+            0
+        };
+        let http_pd = if http_prefill > 0 && http_decode > 0 {
+            http_prefill + http_decode
+        } else {
+            0
+        };
+
+        self.pick_router_by_weights(grpc_pd, http_pd, grpc_regular, http_regular)
     }
 
     fn requires_explicit_generate_model(&self, model_id: &str) -> bool {
@@ -254,7 +286,6 @@ impl RouterManager {
 
     pub fn select_router_for_request(
         &self,
-        headers: Option<&HeaderMap>,
         model_id: Option<&str>,
     ) -> Option<Arc<dyn RouterTrait>> {
         // In single-router mode (enable_igw=false), always use the default router
@@ -273,55 +304,22 @@ impl RouterManager {
             }
         }
 
-        let prefer_pd = headers
-            .and_then(|h| {
-                h.get("x-prefer-pd")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s == "true" || s == "1")
-            })
-            .unwrap_or(false);
-
-        let (num_regular_workers, num_pd_workers) = self.worker_registry.get_worker_distribution();
-        let mut best_router = None;
-        let mut best_score = -1.0;
-
-        // Extract router validity check into a closure to reduce redundancy
-        let is_router_valid =
-            |is_pd: bool| (is_pd && num_pd_workers > 0) || (!is_pd && num_regular_workers > 0);
-
-        if let Some(model) = model_id {
-            // Efficient Single Lookup for Specific Model
-            if let Some(router) = self.get_router_for_model(model) {
-                if is_router_valid(router.is_pd_mode()) {
-                    return Some(router);
-                }
-            }
+        let workers = if let Some(model) = model_id {
+            self.worker_registry.get_by_model(model).to_vec()
         } else {
-            // ZERO-ALLOCATION Snapshot Iteration (Hot Path Optimization)
-            // Atomic load avoids heap allocations and DashMap shard locks per-request
-            let routers_snapshot = self.routers_snapshot.load();
-            for router in routers_snapshot.iter() {
-                let mut score = 1.0;
+            self.worker_registry.get_all()
+        };
 
-                let is_pd = router.is_pd_mode();
-                if prefer_pd && is_pd {
-                    score += 2.0;
-                } else if !prefer_pd && !is_pd {
-                    score += 1.0;
-                }
-                // TODO: Once routers expose worker stats, we can evaluate:
-                // - Average worker priority vs priority_threshold
-                // - Average worker cost vs max_cost
-                // - Current load and health status
-
-                if score > best_score && is_router_valid(is_pd) {
-                    best_score = score;
-                    best_router = Some(Arc::clone(router));
-                }
-            }
-        }
-
-        best_router
+        self.select_router_for_workers(&workers, model_id)
+            .or_else(|| {
+                let default = self
+                    .default_router
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                default
+                    .as_ref()
+                    .and_then(|id| self.routers.get(id).map(|r| r.clone()))
+            })
     }
 
     /// Build a response from self-hosted registry models (excludes external workers).
@@ -436,7 +434,7 @@ impl RouterTrait for RouterManager {
     }
 
     async fn health_generate(&self, _req: Request<Body>) -> Response {
-        let router = self.select_router_for_request(None, None);
+        let router = self.select_router_for_request(None);
         if let Some(router) = router {
             router.health_generate(_req).await
         } else {
@@ -449,7 +447,7 @@ impl RouterTrait for RouterManager {
     }
 
     async fn get_server_info(&self, req: Request<Body>) -> Response {
-        let router = self.select_router_for_request(None, None);
+        let router = self.select_router_for_request(None);
         if let Some(router) = router {
             router.get_server_info(req).await
         } else {
@@ -536,7 +534,7 @@ impl RouterTrait for RouterManager {
             );
         }
 
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -558,7 +556,7 @@ impl RouterTrait for RouterManager {
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -580,7 +578,7 @@ impl RouterTrait for RouterManager {
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -606,7 +604,7 @@ impl RouterTrait for RouterManager {
             return route_error::reserved_skill_tool_name(error);
         }
 
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
         if let Some(router) = router {
             let skill_manifest = match resolve_messages_skill_manifest(
                 self.skill_service.as_deref(),
@@ -646,7 +644,7 @@ impl RouterTrait for RouterManager {
             return route_error::reserved_skill_tool_name(error);
         }
 
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
         if let Some(router) = router {
             let skill_manifest = match resolve_responses_skill_manifest(
                 self.skill_service.as_deref(),
@@ -683,7 +681,7 @@ impl RouterTrait for RouterManager {
         model_id: Option<&str>,
     ) -> Response {
         let selected_model = model_id.or(body.model.as_deref()).or(body.agent.as_deref());
-        let router = self.select_router_for_request(headers, selected_model);
+        let router = self.select_router_for_request(selected_model);
 
         if let Some(router) = router {
             router
@@ -699,7 +697,7 @@ impl RouterTrait for RouterManager {
     }
 
     async fn cancel_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
-        let router = self.select_router_for_request(headers, None);
+        let router = self.select_router_for_request(None);
         if let Some(router) = router {
             router.cancel_response(headers, response_id).await
         } else {
@@ -718,7 +716,7 @@ impl RouterTrait for RouterManager {
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -740,7 +738,7 @@ impl RouterTrait for RouterManager {
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -763,7 +761,7 @@ impl RouterTrait for RouterManager {
         audio: AudioFile,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -785,7 +783,7 @@ impl RouterTrait for RouterManager {
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {
-        let router = self.select_router_for_request(headers, Some(model_id));
+        let router = self.select_router_for_request(Some(model_id));
 
         if let Some(router) = router {
             router
@@ -806,7 +804,7 @@ impl RouterTrait for RouterManager {
         body: &RealtimeSessionCreateRequest,
     ) -> Response {
         let model = body.model.as_deref();
-        let router = self.select_router_for_request(headers, model);
+        let router = self.select_router_for_request(model);
         if let Some(router) = router {
             router.route_realtime_session(headers, body).await
         } else {
@@ -824,7 +822,7 @@ impl RouterTrait for RouterManager {
         body: &RealtimeClientSecretCreateRequest,
     ) -> Response {
         let model = body.session.model.as_deref();
-        let router = self.select_router_for_request(headers, model);
+        let router = self.select_router_for_request(model);
         if let Some(router) = router {
             router.route_realtime_client_secret(headers, body).await
         } else {
@@ -842,7 +840,7 @@ impl RouterTrait for RouterManager {
         body: &RealtimeTranscriptionSessionCreateRequest,
     ) -> Response {
         let model = body.model.as_deref();
-        let router = self.select_router_for_request(headers, model);
+        let router = self.select_router_for_request(model);
         if let Some(router) = router {
             router
                 .route_realtime_transcription_session(headers, body)
@@ -857,7 +855,7 @@ impl RouterTrait for RouterManager {
     }
 
     async fn route_realtime_ws(&self, req: Request<Body>, model: &str) -> Response {
-        let router = self.select_router_for_request(None, Some(model));
+        let router = self.select_router_for_request(Some(model));
         if let Some(router) = router {
             router.route_realtime_ws(req, model).await
         } else {
@@ -870,7 +868,7 @@ impl RouterTrait for RouterManager {
     }
 
     async fn route_realtime_webrtc(&self, req: Request<Body>, model: &str) -> Response {
-        let router = self.select_router_for_request(None, Some(model));
+        let router = self.select_router_for_request(Some(model));
         if let Some(router) = router {
             router.route_realtime_webrtc(req, model).await
         } else {
@@ -903,13 +901,15 @@ impl std::fmt::Debug for RouterManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use async_trait::async_trait;
 
     use super::*;
     use crate::{
         middleware::{RouteRequestMeta, TenantKey},
         routers::factory::router_ids,
-        worker::WorkerRegistry,
+        worker::{BasicWorkerBuilder, CircuitBreakerConfig, WorkerRegistry},
     };
 
     #[derive(Debug)]
@@ -933,6 +933,30 @@ mod tests {
 
         fn router_type(&self) -> &'static str {
             "stub"
+        }
+    }
+
+    #[derive(Debug)]
+    struct PdStubRouter;
+
+    #[async_trait]
+    impl RouterTrait for PdStubRouter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn route_generate(
+            &self,
+            _headers: Option<&HeaderMap>,
+            _tenant_meta: &TenantRequestMeta,
+            _body: &GenerateRequest,
+            _model_id: &str,
+        ) -> Response {
+            (StatusCode::OK, "pd-routed").into_response()
+        }
+
+        fn router_type(&self) -> &'static str {
+            "pd"
         }
     }
 
@@ -983,5 +1007,56 @@ mod tests {
             .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn weighted_routing_splits_40_pd_60_regular() {
+        let registry = Arc::new(WorkerRegistry::new());
+
+        let mut url_idx = 0;
+        let mut add_workers = |wtype: WorkerType, count: usize| {
+            for _ in 0..count {
+                let mut labels = HashMap::new();
+                labels.insert("model_id".to_string(), "model-x".to_string());
+                let worker = BasicWorkerBuilder::new(format!("http://w{url_idx}:8080"))
+                    .worker_type(wtype)
+                    .connection_mode(ConnectionMode::Http)
+                    .labels(labels)
+                    .circuit_breaker_config(CircuitBreakerConfig::default())
+                    .build();
+                registry.register(Arc::new(worker)).unwrap();
+                url_idx += 1;
+            }
+        };
+
+        // Try adding 2 prefill, 2 decode workers, and 6 regular workers.
+        // We should send 40% of traffic to PD and 60% to regular.
+        add_workers(WorkerType::Prefill, 2);
+        add_workers(WorkerType::Decode, 2);
+        add_workers(WorkerType::Regular, 6);
+
+        let mut manager = RouterManager::new(registry, reqwest::Client::new());
+        manager.enable_igw = true;
+        let manager = Arc::new(manager);
+        manager.register_router(router_ids::HTTP_PD, Arc::new(PdStubRouter));
+        manager.register_router(router_ids::HTTP_REGULAR, Arc::new(StubRouter));
+
+        let n = 10_000;
+        let pd_count = (0..n)
+            .filter(|_| {
+                manager
+                    .select_router_for_request(Some("model-x"))
+                    .map(|r| r.router_type() == "pd")
+                    .unwrap_or(false)
+            })
+            .count();
+
+        let pd_ratio = pd_count as f64 / n as f64;
+        let expected = 0.4; // 4 PD workers / 10 total
+        let tolerance = 0.05;
+        assert!(
+            (pd_ratio - expected).abs() < tolerance,
+            "PD ratio {pd_ratio:.3} was outside expected {expected} ± {tolerance}",
+        );
     }
 }
