@@ -283,7 +283,9 @@ impl Parameter {
         let mut out = self.typ.format_docstring(indent);
         if let Some(d) = &self.default {
             let repr = match d {
-                Value::Bool(_) | Value::Number(_) => d.to_string(),
+                Value::Bool(true) => "True".to_string(),
+                Value::Bool(false) => "False".to_string(),
+                Value::Number(_) => d.to_string(),
                 _ => serde_json::to_string(d).unwrap_or_else(|_| "null".to_string()),
             };
             writeln!(out, "{indent}// Default: {repr}").unwrap();
@@ -415,7 +417,7 @@ impl ParameterTypeArray {
     fn to_typescript(&self, indent: &str, registry: &SchemaRegistry) -> String {
         let inner_indent = format!("{indent}{TS_INDENT}");
         let item_doc = self.item.format_docstring(&inner_indent);
-        let item_ts = self.item.to_typescript(indent, registry);
+        let item_ts = self.item.to_typescript(&inner_indent, registry);
         if item_doc.is_empty() {
             format!("Array<{item_ts}>")
         } else {
