@@ -11,6 +11,7 @@ pub struct MockTokenizer {
     vocab: HashMap<String, u32>,
     reverse_vocab: HashMap<u32, String>,
     special_tokens: SpecialTokens,
+    fail_encode: bool,
 }
 
 impl Default for MockTokenizer {
@@ -62,19 +63,29 @@ impl MockTokenizer {
             vocab,
             reverse_vocab,
             special_tokens,
+            fail_encode: false,
+        }
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            fail_encode: true,
+            ..Self::new()
         }
     }
 }
 
 impl Encoder for MockTokenizer {
     fn encode(&self, input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+        if self.fail_encode {
+            return Err(anyhow::anyhow!("test encode error"));
+        }
         // Simple word-based tokenization using the vocab
         // Split by whitespace and look up each word (decoder adds spaces back)
         let tokens: Vec<u32> = input
             .split_whitespace()
             .filter_map(|word| self.vocab.get(word).copied())
             .collect();
-
         Ok(Encoding::Plain(tokens))
     }
 

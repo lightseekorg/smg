@@ -143,6 +143,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
 kv-index.workspace = true
+test-case = { workspace = true }
 wasmtime-wasi = { workspace = true }
 lru = { workspace = true }
 wat = "1.244"

@@ -492,7 +492,19 @@ impl StreamingProcessor {
                     cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
-                    matched_stops.insert(index, complete.matched_stop_json());
+                    matched_stops.insert(
+                        index,
+                        if complete.is_mlx() {
+                            utils::resolve_mlx_matched_stop_json(
+                                complete.mlx_matched_stop_token_id(),
+                                original_request.stop.as_ref(),
+                                original_request.stop_token_ids.as_ref(),
+                                tokenizer.as_ref(),
+                            )
+                        } else {
+                            complete.matched_stop_json()
+                        },
+                    );
 
                     // Don't break - continue reading all Complete messages for n>1
                 }
@@ -2407,6 +2419,7 @@ impl StreamingProcessor {
                                 index,
                                 logprobs: None,
                                 finish_reason: None,
+                                matched_stop: None,
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2434,6 +2447,7 @@ impl StreamingProcessor {
                                     index,
                                     logprobs: None,
                                     finish_reason: None,
+                                    matched_stop: None,
                                 }],
                                 model: model.clone(),
                                 system_fingerprint: system_fingerprint.map(String::from),
@@ -2453,6 +2467,7 @@ impl StreamingProcessor {
                                 index,
                                 logprobs: None,
                                 finish_reason: Some("stop".to_string()),
+                                matched_stop: None,
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2487,6 +2502,7 @@ impl StreamingProcessor {
                                 index,
                                 logprobs: None,
                                 finish_reason: None,
+                                matched_stop: None,
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2510,6 +2526,7 @@ impl StreamingProcessor {
                                         index,
                                         logprobs: None,
                                         finish_reason: None,
+                                        matched_stop: None,
                                     }],
                                     model: model.clone(),
                                     system_fingerprint: system_fingerprint.map(String::from),
@@ -2532,6 +2549,7 @@ impl StreamingProcessor {
                                 index,
                                 logprobs: None,
                                 finish_reason: None,
+                                matched_stop: None,
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2568,6 +2586,17 @@ impl StreamingProcessor {
                         }
                     };
 
+                    let matched_stop = if complete.is_mlx() {
+                        utils::resolve_mlx_matched_stop_json(
+                            complete.mlx_matched_stop_token_id(),
+                            completion_request.stop.as_ref(),
+                            completion_request.stop_token_ids.as_ref(),
+                            tokenizer.as_ref(),
+                        )
+                    } else {
+                        complete.matched_stop_json()
+                    };
+
                     let final_chunk = CompletionStreamResponse {
                         id: request_id.clone(),
                         object: "text_completion".to_string(),
@@ -2577,6 +2606,7 @@ impl StreamingProcessor {
                             index,
                             logprobs: None,
                             finish_reason,
+                            matched_stop,
                         }],
                         model: model.clone(),
                         system_fingerprint: system_fingerprint.map(String::from),

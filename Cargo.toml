@@ -60,6 +60,7 @@ str0m = { version = "0.18", default-features = false, features = ["openssl"] }
 scopeguard = "1.2"
 bitflags = "2.10.0"
 schemars = "0.8"
+test-case = "3.3.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

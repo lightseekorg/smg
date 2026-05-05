@@ -184,7 +184,16 @@ impl ResponseProcessor {
             finish_reason_str
         };
 
-        let matched_stop = complete.matched_stop_json();
+        let matched_stop = if complete.is_mlx() {
+            utils::resolve_mlx_matched_stop_json(
+                complete.mlx_matched_stop_token_id(),
+                original_request.stop.as_ref(),
+                original_request.stop_token_ids.as_ref(),
+                tokenizer.as_ref(),
+            )
+        } else {
+            complete.matched_stop_json()
+        };
 
         // Step 4: Convert output logprobs if present
         let logprobs = complete.output_logprobs().map(|ref proto_logprobs| {
@@ -760,7 +769,7 @@ impl ResponseProcessor {
         execution_result: ExecutionResult,
         completion_req: Arc<CompletionRequest>,
         dispatch: DispatchMetadata,
-        _tokenizer: Arc<dyn Tokenizer>,
+        tokenizer: Arc<dyn Tokenizer>,
         stop_decoder: &mut StopSequenceDecoder,
         prompt_text: &str,
     ) -> Result<CompletionResponse, axum::response::Response> {
@@ -822,7 +831,16 @@ impl ResponseProcessor {
                 }
             };
 
-            let matched_stop = complete.matched_stop_json();
+            let matched_stop = if complete.is_mlx() {
+                utils::resolve_mlx_matched_stop_json(
+                    complete.mlx_matched_stop_token_id(),
+                    completion_req.stop.as_ref(),
+                    completion_req.stop_token_ids.as_ref(),
+                    tokenizer.as_ref(),
+                )
+            } else {
+                complete.matched_stop_json()
+            };
 
             let suffix_len = completion_req.suffix.as_ref().map_or(0, |s| s.len());
             let echo_len = if completion_req.echo {

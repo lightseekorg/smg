@@ -17,7 +17,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::routers::{
@@ -419,6 +419,94 @@ pub fn create_stop_decoder(
     builder.build()
 }
 
+/// Tokenizes stop strings into token IDs for the MLX backend.
+///
+/// Returns `Err` if any string encodes to more than one token — the caller
+/// should surface this as an HTTP 400 so the client knows the stop condition
+/// was not honored rather than silently ignoring it.
+/// Strings that encode to zero tokens (unknown vocab) are skipped with a warning.
+pub(crate) fn stop_strings_to_token_ids<'a>(
+    stop: impl IntoIterator<Item = &'a str>,
+    tokenizer: &dyn Tokenizer,
+) -> Result<Vec<u32>, String> {
+    let mut ids = Vec::new();
+    for s in stop {
+        match tokenizer.encode(s, false) {
+            Ok(enc) => match enc.token_ids() {
+                [id] => ids.push(*id),
+                tokens if !tokens.is_empty() => {
+                    return Err(format!(
+                        "stop string {s:?} encodes to {} tokens; \
+                         MLX backend only supports single-token stop strings",
+                        tokens.len()
+                    ));
+                }
+                _ => warn!(
+                    stop_string = s,
+                    "stop string produced no tokens for MLX, skipping"
+                ),
+            },
+            Err(e) => warn!(stop_string = s, error = %e, "failed to tokenize stop string for MLX"),
+        }
+    }
+    Ok(ids)
+}
+
+/// Resolve the `matched_stop` JSON value for an MLX response.
+///
+/// MLX only returns a token ID; this reverses the mapping back to the user-facing form:
+/// - If the token ID was tokenized from a user stop string → return the string.
+/// - If the token ID was an explicit user stop_token_id → return the integer.
+/// - Otherwise (EOS or other internal stop) → return None.
+pub(crate) fn resolve_mlx_matched_stop_json(
+    matched_token_id: Option<u32>,
+    stop: Option<&StringOrArray>,
+    stop_token_ids: Option<&Vec<u32>>,
+    tokenizer: &dyn Tokenizer,
+) -> Option<Value> {
+    let id = matched_token_id?;
+
+    // Check stop strings first: find the string that tokenizes to this single token.
+    if let Some(stop_strings) = stop {
+        for s in stop_strings.iter() {
+            if let Ok(enc) = tokenizer.encode(s, false) {
+                if enc.token_ids() == [id] {
+                    return Some(Value::String(s.to_string()));
+                }
+            }
+        }
+    }
+
+    // Check explicit stop_token_ids provided by the user.
+    if stop_token_ids.is_some_and(|ids| ids.contains(&id)) {
+        return Some(Value::Number(id.into()));
+    }
+
+    // EOS or other internal stop condition — don't surface to the caller.
+    None
+}
+
+/// For MLX: tokenize string stop sequences and merge with existing token IDs.
+/// Returns an HTTP error response if the tokenizer is missing or a stop string encodes
+/// to more than one token (propagate with `?` from a pipeline stage).
+#[expect(
+    clippy::result_large_err,
+    reason = "Response is the standard error type in the pipeline stage pattern"
+)]
+pub(crate) fn resolve_mlx_stop_ids(
+    stop_strings: &StringOrArray,
+    tokenizer: Option<&dyn Tokenizer>,
+) -> Result<Vec<u32>, Response> {
+    let tok = tokenizer.ok_or_else(|| {
+        error::bad_request(
+            "tokenizer_unavailable",
+            "MLX backend requires a tokenizer to convert string stop sequences",
+        )
+    })?;
+    stop_strings_to_token_ids(stop_strings.iter(), tok)
+        .map_err(|e| error::bad_request("unsupported_stop_string", e))
+}
+
 /// Parse tool calls from JSON schema constrained response
 pub(crate) fn parse_json_schema_response(
     processed_text: &str,
@@ -582,12 +670,13 @@ pub(crate) fn parse_finish_reason(
 
 #[cfg(test)]
 mod tests {
-    use llm_tokenizer::chat_template::ChatTemplateContentFormat;
+    use llm_tokenizer::{chat_template::ChatTemplateContentFormat, MockTokenizer};
     use openai_protocol::{
         chat::{ChatMessage, MessageContent},
         common::{ContentPart, ImageUrl},
     };
     use serde_json::json;
+    use test_case::test_case;
 
     use super::*;
 
@@ -779,5 +868,50 @@ mod tests {
         assert_eq!(content_array.len(), 2);
         assert_eq!(content_array[0]["type"], "text");
         assert_eq!(content_array[1], json!({"type": "image"}));
+    }
+    // MockTokenizer vocab used below: "Hello"→1, "world"→2, "test"→3,
+    // "<|im_end|>"→1002. expected = None means the call should return Err.
+    #[test_case(&["Hello"],                Some(&[1u32]) ; "single token regular")]
+    #[test_case(&["world"],                Some(&[2])    ; "single token another regular")]
+    #[test_case(&["<|im_end|>"],           Some(&[1002]) ; "single token special")]
+    #[test_case(&["Hello world"],          None          ; "multi token returns err")]
+    #[test_case(&["zzzunknown"],           Some(&[])     ; "unknown vocab skipped")]
+    #[test_case(&["Hello", "Hello world"], None          ; "array with multi token err")]
+    #[test_case(&["Hello", "test"],        Some(&[1, 3]) ; "array all single token")]
+    #[test_case(&[],                       Some(&[])     ; "empty array")]
+    fn test_stop_strings_to_token_ids(inputs: &[&str], expected: Option<&[u32]>) {
+        let tok = MockTokenizer::new();
+        let result = stop_strings_to_token_ids(inputs.iter().copied(), &tok);
+        match expected {
+            Some(ids) => assert_eq!(result.unwrap(), ids),
+            None => assert!(result.is_err()),
+        }
+    }
+
+    #[test]
+    fn test_stop_encode_error_skipped() {
+        // Tokenizer errors are silently skipped; the function returns Ok(empty).
+        let tok = MockTokenizer::failing();
+        let result = stop_strings_to_token_ids(["Hello", "test"].iter().copied(), &tok);
+        assert!(result.unwrap().is_empty());
+    }
+
+    // MockTokenizer vocab: "Hello"→1, "world"→2, "test"→3, "<|im_end|>"→1002.
+    // stop_ids=&[] is treated as None (no user stop_token_ids supplied).
+    #[test_case(None,      None,          &[]   => None                                    ; "no id returns none")]
+    #[test_case(Some(1),   Some("Hello"), &[]   => Some(Value::String("Hello".to_string())) ; "string match")]
+    #[test_case(Some(42),  None,          &[42] => Some(Value::Number(42u32.into()))        ; "token id match")]
+    #[test_case(Some(1),   Some("Hello"), &[1]  => Some(Value::String("Hello".to_string())) ; "string wins over token id")]
+    #[test_case(Some(999), None,          &[]   => None                                    ; "eos returns none")]
+    fn test_resolve_mlx_matched_stop(
+        id: Option<u32>,
+        stop_str: Option<&str>,
+        stop_ids: &[u32],
+    ) -> Option<Value> {
+        let tok = MockTokenizer::new();
+        let stop = stop_str.map(|s| StringOrArray::String(s.to_string()));
+        let ids: Vec<u32> = stop_ids.to_vec();
+        let ids_opt = if ids.is_empty() { None } else { Some(&ids) };
+        resolve_mlx_matched_stop_json(id, stop.as_ref(), ids_opt, &tok)
     }
 }
