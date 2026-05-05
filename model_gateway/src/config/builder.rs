@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 
 use smg_mcp::McpConfig;
 
@@ -580,6 +580,59 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn multi_tenant_rate_limit_enabled(mut self, enabled: bool) -> Self {
+        self.config.multi_tenant_rate_limit.enabled = enabled;
+        self
+    }
+
+    pub fn default_tokens_per_minute(mut self, limit: u32) -> Self {
+        self.config
+            .multi_tenant_rate_limit
+            .default_tokens_per_minute = limit;
+        self
+    }
+
+    pub fn default_requests_per_minute(mut self, limit: u32) -> Self {
+        self.config
+            .multi_tenant_rate_limit
+            .default_requests_per_minute = limit;
+        self
+    }
+
+    pub fn tenant_rate_limit<S: Into<String>>(
+        mut self,
+        tenant_key: S,
+        tokens_per_minute: u32,
+        requests_per_minute: u32,
+    ) -> Self {
+        let tenant_key = tenant_key.into();
+        let new_policy = crate::rate_limit::TenantTokenPolicy {
+            tokens_per_minute,
+            requests_per_minute,
+        };
+
+        match self
+            .config
+            .multi_tenant_rate_limit
+            .tenants
+            .entry(tenant_key.clone())
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(new_policy);
+            }
+            Entry::Occupied(mut entry) => {
+                tracing::warn!(
+                    tenant_key = %tenant_key,
+                    previous_policy = ?entry.get(),
+                    new_policy = ?new_policy,
+                    "overwriting duplicate tenant rate limit policy"
+                );
+                entry.insert(new_policy);
+            }
+        }
+        self
+    }
+
     pub fn maybe_model_path(mut self, path: Option<impl Into<String>>) -> Self {
         self.config.model_path = path.map(|p| p.into());
         self
@@ -928,6 +981,56 @@ mod tests {
         assert_eq!(modified.port, 4000);
         assert!(modified.metrics.is_some());
         assert!(modified.trace_config.is_some());
+    }
+
+    #[test]
+    fn test_builder_multi_tenant_rate_limit_round_trip() {
+        let config = RouterConfigBuilder::new()
+            .regular_mode(vec!["http://worker1:8000".to_string()])
+            .multi_tenant_rate_limit_enabled(true)
+            .default_tokens_per_minute(10_000)
+            .default_requests_per_minute(60)
+            .tenant_rate_limit("team-a", 50_000, 600)
+            .tenant_rate_limit("team-b", 100_000, 1_200)
+            .build()
+            .unwrap();
+
+        assert!(config.multi_tenant_rate_limit.enabled);
+        assert_eq!(
+            config.multi_tenant_rate_limit.default_tokens_per_minute,
+            10_000
+        );
+        assert_eq!(
+            config.multi_tenant_rate_limit.default_requests_per_minute,
+            60
+        );
+        let team_a = config
+            .multi_tenant_rate_limit
+            .tenants
+            .get("team-a")
+            .expect("team-a override registered");
+        assert_eq!(team_a.tokens_per_minute, 50_000);
+        assert_eq!(team_a.requests_per_minute, 600);
+        assert_eq!(config.multi_tenant_rate_limit.tenants.len(), 2);
+    }
+
+    #[test]
+    fn test_builder_duplicate_tenant_rate_limit_overwrites_latest_policy() {
+        let config = RouterConfigBuilder::new()
+            .regular_mode(vec!["http://worker1:8000".to_string()])
+            .tenant_rate_limit("team-a", 50_000, 600)
+            .tenant_rate_limit("team-a", 100_000, 1_200)
+            .build()
+            .unwrap();
+
+        let team_a = config
+            .multi_tenant_rate_limit
+            .tenants
+            .get("team-a")
+            .expect("team-a override registered");
+        assert_eq!(team_a.tokens_per_minute, 100_000);
+        assert_eq!(team_a.requests_per_minute, 1_200);
+        assert_eq!(config.multi_tenant_rate_limit.tenants.len(), 1);
     }
 
     /// Test complex routing mode helper method

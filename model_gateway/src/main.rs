@@ -355,6 +355,22 @@ struct CliArgs {
     #[arg(long, help_heading = "Rate Limiting")]
     rate_limit_tokens_per_second: Option<i32>,
 
+    /// Enable tenant-aware token rate limiting.
+    #[arg(long, default_value_t = false, help_heading = "Rate Limiting")]
+    multi_tenant_rate_limit_enabled: bool,
+
+    /// Default token budget per minute for tenants without an explicit override.
+    #[arg(long, default_value_t = 0, help_heading = "Rate Limiting")]
+    default_tokens_per_minute: u32,
+
+    /// Default request budget per minute for tenants without an explicit override.
+    #[arg(long, default_value_t = 0, help_heading = "Rate Limiting")]
+    default_requests_per_minute: u32,
+
+    /// Per-tenant override in the form tenant_key:tpm:rpm, e.g. header:team-a:1000:10
+    #[arg(long = "tenant-rate-limit", num_args = 0.., help_heading = "Rate Limiting")]
+    tenant_rate_limits: Vec<String>,
+
     // ==================== Retry Configuration ====================
     /// Maximum number of retry attempts
     #[arg(long, default_value_t = 5, help_heading = "Retry Configuration")]
@@ -1249,6 +1265,9 @@ impl CliArgs {
             .trust_tenant_header(self.trust_tenant_header)
             .tenant_header_name(&self.tenant_header_name)
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
+            .multi_tenant_rate_limit_enabled(self.multi_tenant_rate_limit_enabled)
+            .default_tokens_per_minute(self.default_tokens_per_minute)
+            .default_requests_per_minute(self.default_requests_per_minute)
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
@@ -1268,6 +1287,30 @@ impl CliArgs {
             .igw(self.enable_igw)
             .dp_minimum_tokens_scheduler(self.dp_minimum_tokens_scheduler)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref());
+
+        let mut builder = builder;
+        for spec in &self.tenant_rate_limits {
+            let mut parts = spec.rsplitn(3, ':');
+            let rpm = parts.next().and_then(|s| s.parse::<u32>().ok());
+            let tpm = parts.next().and_then(|s| s.parse::<u32>().ok());
+            let tenant_key = parts.next();
+            if let (Some(tenant_key), Some(tpm), Some(rpm)) = (tenant_key, tpm, rpm) {
+                if tenant_key.is_empty() {
+                    return Err(ConfigError::ValidationFailed {
+                        reason: format!(
+                            "invalid --tenant-rate-limit '{spec}'; expected tenant_key:tpm:rpm"
+                        ),
+                    });
+                }
+                builder = builder.tenant_rate_limit(tenant_key, tpm, rpm);
+            } else {
+                return Err(ConfigError::ValidationFailed {
+                    reason: format!(
+                        "invalid --tenant-rate-limit '{spec}'; expected tenant_key:tpm:rpm"
+                    ),
+                });
+            }
+        }
 
         builder.build()
     }
