@@ -42,7 +42,7 @@ pub fn encode_tools_to_typescript(tools: &[Value]) -> Option<String> {
 
 /// Renderer for `Renderer::KimiK25Tools`. Computes `tools_ts_str` and merges
 /// it into `template_kwargs`, then delegates to the standard minijinja path.
-pub fn apply_kimi_k25_tools(
+pub(crate) fn apply_kimi_k25_tools(
     chat_template: &ChatTemplateState,
     messages: &[Value],
     params: ChatTemplateParams,
@@ -103,11 +103,12 @@ fn openai_function_to_typescript(function: &Value) -> String {
         interfaces.push(format!("interface parameters {{{body}}}"));
     }
 
-    let defs_clone: Vec<(String, Value)> = registry
+    let mut defs_clone: Vec<(String, Value)> = registry
         .definitions
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    defs_clone.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, schema) in defs_clone {
         let obj_type = parse_parameter_type(&schema, &mut registry);
         let body = obj_type.to_typescript("", &registry);
@@ -476,7 +477,9 @@ impl ParameterTypeEnum {
             .iter()
             .map(|v| match v {
                 Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-                Value::Null => "null".to_string(),
+                Value::Null => "None".to_string(),
+                Value::Bool(true) => "True".to_string(),
+                Value::Bool(false) => "False".to_string(),
                 other => other.to_string(),
             })
             .collect::<Vec<_>>()
@@ -621,8 +624,8 @@ fn parse_parameter_type(schema: &Value, registry: &mut SchemaRegistry) -> Parame
     if obj.is_empty() {
         return ParameterType::Scalar(ParameterTypeScalar::any());
     }
-    // Fall-through for shapes covered in later tasks ($ref). For now, degrade
-    // to `any` to keep the encoder permissive.
+    // Fallthrough: schemas with no type/anyOf/enum/$ref. Degrade to `any`
+    // permissively rather than erroring — matches the Python reference.
     ParameterType::Scalar(ParameterTypeScalar::any())
 }
 
