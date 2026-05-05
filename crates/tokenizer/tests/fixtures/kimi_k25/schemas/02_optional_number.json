@@ -1,0 +1,17 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "delay",
+      "description": "Sleep for some milliseconds.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ms": {"type": "integer", "minimum": 0},
+          "reason": {"type": "string"}
+        },
+        "required": ["ms"]
+      }
+    }
+  }
+]
