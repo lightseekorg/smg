@@ -384,6 +384,16 @@ pub(super) async fn execute_tool_loop(
             let (inputs, formats): (Vec<_>, Vec<_>) = prepared.into_iter().unzip();
 
             let results = session.execute_tools(inputs).await;
+            // `session.execute_tools` preserves input order and length; assert
+            // it so a regression there can't silently truncate via `zip`.
+            assert_eq!(
+                results.len(),
+                formats.len(),
+                "session.execute_tools returned {} outputs for {} inputs; \
+                 per-call format zip would silently drop entries",
+                results.len(),
+                formats.len(),
+            );
 
             for (result, response_format) in results.into_iter().zip(formats) {
                 trace!(

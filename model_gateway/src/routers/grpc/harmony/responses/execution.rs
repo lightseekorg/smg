@@ -118,8 +118,18 @@ pub(super) async fn execute_mcp_tools(
     );
 
     // `session.execute_tools` is `buffered()` and preserves input order, so
-    // `formats[i]` matches `outputs[i]`.
+    // `formats[i]` matches `outputs[i]`. The assert below upgrades that
+    // contract from a comment to a runtime check so a future change to the
+    // execution path can't silently truncate via `zip`.
     let outputs = session.execute_tools(inputs).await;
+    assert_eq!(
+        outputs.len(),
+        formats.len(),
+        "session.execute_tools returned {} outputs for {} inputs; \
+         per-call format zip would silently drop entries",
+        outputs.len(),
+        formats.len(),
+    );
 
     let results: Vec<ToolResult> = outputs
         .into_iter()
