@@ -1515,6 +1515,75 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_known_remote_insert_from_request_hot_path() {
+        // Companion to `test_apply_known_remote_insert_round_trip`.
+        // That test seeds via `apply_remote_tree_operation`, which
+        // stores full text/tokens. The local request hot path
+        // (`select_worker_with_text` / `_with_tokens` plus the
+        // imbalanced fallback) stores the *matched prefix* shape
+        // instead. A regression on the matched-prefix apply path
+        // would still pass the full-path test, so seed via
+        // `select_worker` here and assert apply succeeds.
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Drive a string request through select_worker — populates
+        // the string-side hash_index with a matched-prefix value.
+        let text = "the quick brown fox jumps over the lazy dog";
+        policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some(text),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let text_hash = smg_mesh::hash_node_path(text);
+
+        // Drive a token request — populates the token-side
+        // hash_index. select_worker uses the model_id from the
+        // first worker's `model_id()`, which the builder leaves
+        // empty → UNKNOWN_MODEL_ID after normalization.
+        let tokens: Vec<u32> = (0..32).collect();
+        policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&tokens),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let token_hash = smg_mesh::hash_token_path(&tokens);
+
+        // Both populate sites use UNKNOWN_MODEL_ID for these
+        // workers (no model_id set on the builder), and the
+        // resolver normalizes empty → UNKNOWN_MODEL_ID, so an
+        // empty model_id resolves the same entries the populate
+        // sites wrote.
+        assert!(policy.apply_known_remote_insert("", TreeKind::String, text_hash, "http://remote",));
+        assert!(policy.apply_known_remote_insert("", TreeKind::Token, token_hash, "http://remote",));
+    }
+
+    #[test]
     fn test_cache_aware_multi_node_consistency() {
         use std::sync::Arc;
 
