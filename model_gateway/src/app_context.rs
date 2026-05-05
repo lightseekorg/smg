@@ -82,7 +82,7 @@ pub struct AppContext {
     pub realtime_registry: Arc<RealtimeRegistry>,
     /// Bind address for WebRTC UDP sockets (`None` = `0.0.0.0`, auto-detect).
     pub webrtc_bind_addr: Option<std::net::IpAddr>,
-    /// STUN server for ICE candidate gathering (`None` = `stun.l.google.com:19302`).
+    /// STUN server for ICE candidate gathering. Defaults to `stun.l.google.com:19302`; `"none"` to disable.
     pub webrtc_stun_server: Option<String>,
 }
 
@@ -447,7 +447,9 @@ impl AppContextBuilder {
             .with_wasm_manager(&router_config)
             .with_kv_event_monitor(&router_config)
             .webrtc_bind_addr(webrtc_bind_addr)
-            .webrtc_stun_server(webrtc_stun_server)
+            .webrtc_stun_server(
+                webrtc_stun_server.or_else(|| Some("stun.l.google.com:19302".to_string())),
+            )
             .router_config(router_config))
     }
 
