@@ -17,6 +17,12 @@ use crate::{
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
 
+#[derive(Debug, Clone, Copy)]
+enum Renderer {
+    Jinja,
+    KimiK25Tools,
+}
+
 /// Regex pattern for cl100k_base tokenization.
 ///
 /// This pattern is correct for OpenAI models and most open-source tiktoken models (e.g.
@@ -131,6 +137,8 @@ pub struct TiktokenTokenizer {
     vocab_size: usize,
     chat_template: ChatTemplateState,
     eos_token_ids: Vec<TokenIdType>,
+    #[expect(dead_code, reason = "Read by apply_chat_template in Task 9")]
+    renderer: Renderer,
 }
 
 /// Supported Tiktoken models
@@ -180,6 +188,7 @@ impl TiktokenTokenizer {
             vocab_size,
             chat_template: ChatTemplateState::empty(),
             eos_token_ids: Vec::new(), // No directory path in from_model
+            renderer: Renderer::Jinja,
         })
     }
 
@@ -264,6 +273,9 @@ impl TiktokenTokenizer {
         // Load merged EOS token IDs from config.json + generation_config.json
         let eos_token_ids = crate::eos::load_eos_token_ids(dir);
 
+        // Detect which chat-template renderer to use based on config.json::architectures
+        let renderer = detect_renderer_from_config(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
             special_tokens: config.special_tokens,
@@ -272,6 +284,7 @@ impl TiktokenTokenizer {
             vocab_size,
             chat_template: ChatTemplateState::new(chat_template)?,
             eos_token_ids,
+            renderer,
         })
     }
 
@@ -550,6 +563,42 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn set_chat_template(&mut self, template: String) -> Result<()> {
         self.chat_template.set(template)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Renderer detection (config.json::architectures)
+// ---------------------------------------------------------------------------
+/// Inspect the sibling `config.json` to decide which chat-template renderer to
+/// use. Missing / unreadable / malformed config falls back to `Renderer::Jinja`
+/// silently with a debug log, mirroring `huggingface.rs::detect_renderer_from_config`.
+fn detect_renderer_from_config(dir: &Path) -> Renderer {
+    let path = dir.join("config.json");
+    if !path.exists() {
+        return Renderer::Jinja;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::debug!(?err, ?path, "config.json unreadable; using Jinja renderer");
+            return Renderer::Jinja;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::debug!(?err, ?path, "config.json malformed; using Jinja renderer");
+            return Renderer::Jinja;
+        }
+    };
+    let architectures = value.get("architectures").and_then(|v| v.as_array());
+    let arch_strs: Vec<&str> = architectures
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if arch_strs.contains(&"KimiK25ForConditionalGeneration") {
+        tracing::debug!(?path, "selected KimiK25Tools chat-template renderer");
+        return Renderer::KimiK25Tools;
+    }
+    Renderer::Jinja
 }
 
 #[cfg(test)]
