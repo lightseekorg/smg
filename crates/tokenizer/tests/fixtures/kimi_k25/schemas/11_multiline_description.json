@@ -1,0 +1,16 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "annotate",
+      "description": "Annotate the input.\nSupports multiple\nlines.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string", "description": "The text\nto annotate."}
+        },
+        "required": ["text"]
+      }
+    }
+  }
+]

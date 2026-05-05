@@ -6,7 +6,6 @@
 
 #![allow(
     unused_imports,
-    dead_code,
     clippy::todo,
     clippy::disallowed_macros,
     clippy::unwrap_used
@@ -174,6 +173,7 @@ enum ParameterType {
     Enum(ParameterTypeEnum),
     AnyOf(ParameterTypeAnyOf),
     Union(ParameterTypeUnion),
+    Ref(ParameterTypeRef),
 }
 
 impl ParameterType {
@@ -185,6 +185,7 @@ impl ParameterType {
             ParameterType::Enum(e) => e.base.format_docstring(indent),
             ParameterType::AnyOf(a) => a.base.format_docstring(indent),
             ParameterType::Union(u) => u.base.format_docstring(indent),
+            ParameterType::Ref(r) => r.base.format_docstring(indent),
         }
     }
 
@@ -196,6 +197,7 @@ impl ParameterType {
             ParameterType::Enum(e) => e.to_typescript(),
             ParameterType::AnyOf(a) => a.to_typescript(indent, registry),
             ParameterType::Union(u) => u.to_typescript(),
+            ParameterType::Ref(r) => r.to_typescript(),
         }
     }
 }
@@ -502,6 +504,11 @@ struct ParameterTypeUnion {
     types: Vec<String>,
 }
 
+struct ParameterTypeRef {
+    base: BaseType,
+    ref_name: String,
+}
+
 impl ParameterTypeUnion {
     fn parse(schema: &Value) -> Self {
         let raw_types = schema
@@ -533,6 +540,28 @@ impl ParameterTypeUnion {
     }
 }
 
+impl ParameterTypeRef {
+    fn parse(schema: &Value, registry: &mut SchemaRegistry) -> Self {
+        let reference = schema.get("$ref").and_then(Value::as_str).unwrap_or("");
+        let resolved = registry.resolve_ref(reference);
+        let ref_name = match resolved {
+            Some(ref v) if v.get("$self_ref").and_then(Value::as_bool) == Some(true) => {
+                "parameters".to_string()
+            }
+            Some(_) => reference.rsplit('/').next().unwrap_or("").to_string(),
+            None => "any".to_string(),
+        };
+        Self {
+            base: BaseType::from_extra_props(schema, &[]),
+            ref_name,
+        }
+    }
+
+    fn to_typescript(&self) -> String {
+        self.ref_name.clone()
+    }
+}
+
 fn parse_parameter_type(schema: &Value, registry: &mut SchemaRegistry) -> ParameterType {
     if schema.is_boolean() {
         return ParameterType::Scalar(ParameterTypeScalar {
@@ -549,6 +578,10 @@ fn parse_parameter_type(schema: &Value, registry: &mut SchemaRegistry) -> Parame
         Some(o) => o,
         None => return ParameterType::Scalar(ParameterTypeScalar::any()),
     };
+
+    if obj.contains_key("$ref") {
+        return ParameterType::Ref(ParameterTypeRef::parse(schema, registry));
+    }
 
     if obj.contains_key("anyOf") {
         return ParameterType::AnyOf(ParameterTypeAnyOf::parse(schema, registry));

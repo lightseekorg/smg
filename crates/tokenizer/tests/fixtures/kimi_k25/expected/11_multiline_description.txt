@@ -1,0 +1,13 @@
+# Tools
+
+## functions
+namespace functions {
+// Annotate the input.
+// Supports multiple
+// lines.
+type annotate = (_: {
+  // The text
+  // to annotate.
+  text: string
+}) => any;
+}
