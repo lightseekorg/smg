@@ -101,10 +101,7 @@ impl ResponseProcessor {
             Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
         );
 
-        if original_request.separate_reasoning
-            && reasoning_parser_available
-            && !has_structured_output
-        {
+        if original_request.separate_reasoning && reasoning_parser_available {
             let pooled_parser = utils::get_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
@@ -112,11 +109,8 @@ impl ResponseProcessor {
             );
 
             let mut parser = pooled_parser.lock().await;
-            // Reset pooled parser to clean state before each request
             parser.reset();
 
-            // If the template injected `<think>` in the prefill (thinking toggle
-            // is supported and effectively ON), start in reasoning mode.
             if utils::should_mark_reasoning_started(
                 utils::extract_thinking_from_kwargs(
                     original_request.chat_template_kwargs.as_ref(),
@@ -133,6 +127,17 @@ impl ResponseProcessor {
                         reasoning_text = Some(result.reasoning_text);
                     }
                     processed_text = result.normal_text;
+
+                    // Fallback: if structured output is expected but content is
+                    // empty after reasoning extraction, the model likely emitted
+                    // constrained JSON without closing </think> (K2.5 behavior).
+                    // Recover by treating reasoning as the actual content.
+                    if has_structured_output
+                        && processed_text.trim().is_empty()
+                        && reasoning_text.is_some()
+                    {
+                        processed_text = reasoning_text.take().unwrap();
+                    }
                 }
                 Err(e) => {
                     warn!("Reasoning parsing error, skipping parsing: {e}");
@@ -328,14 +333,8 @@ impl ResponseProcessor {
 
         let history_tool_calls_count = utils::get_history_tool_calls_count(&chat_request);
 
-        let has_structured_output = matches!(
-            chat_request.response_format,
-            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
-        );
-
         // Check parser availability once upfront (not per choice)
         let reasoning_parser_available = chat_request.separate_reasoning
-            && !has_structured_output
             && utils::check_reasoning_parser_availability(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
