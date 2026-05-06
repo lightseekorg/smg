@@ -614,11 +614,14 @@ fn detect_renderer_from_config(dir: &Path) -> Renderer {
             return Renderer::Jinja;
         }
     };
-    let architectures = value.get("architectures").and_then(|v| v.as_array());
-    let arch_strs: Vec<&str> = architectures
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    if arch_strs.contains(&"KimiK25ForConditionalGeneration") {
+    let is_kimi = value
+        .get("architectures")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| {
+            a.iter()
+                .any(|v| v.as_str() == Some("KimiK25ForConditionalGeneration"))
+        });
+    if is_kimi {
         tracing::debug!(?path, "selected KimiK25Tools chat-template renderer");
         return Renderer::KimiK25Tools;
     }
