@@ -2,7 +2,7 @@
 //!
 //! Mirrors `tool_declaration_ts.py` from the Kimi-K2.5 model snapshot
 //! function-by-function. Output must be byte-equal to the Python reference;
-//! gated by golden tests in `tests/kimi_k25_tools_encoder.rs`.
+//! gated by golden tests in `tests/kimi_k25.rs`.
 
 #![allow(clippy::unwrap_used)]
 

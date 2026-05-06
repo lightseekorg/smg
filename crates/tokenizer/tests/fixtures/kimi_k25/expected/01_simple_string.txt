@@ -1,9 +1,0 @@
-# Tools
-
-## functions
-namespace functions {
-// Echo a string back to the caller.
-type echo = (_: {
-  text: string
-}) => any;
-}

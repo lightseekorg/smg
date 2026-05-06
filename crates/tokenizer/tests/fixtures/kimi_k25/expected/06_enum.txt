@@ -1,8 +1,0 @@
-# Tools
-
-## functions
-namespace functions {
-type set_status = (_: {
-  status: "active" | "paused" | "done"
-}) => any;
-}
