@@ -55,7 +55,10 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::worker::{KvEventMonitor, Worker};
+use crate::{
+    mesh::adapters::tree_sync::RepairEntry,
+    worker::{KvEventMonitor, Worker},
+};
 
 /// Cache-aware routing policy
 ///
@@ -727,6 +730,18 @@ pub trait TreeHandle: Send + Sync + std::fmt::Debug {
         node_hash: u64,
         worker_url: &str,
     ) -> bool;
+
+    /// Open a stream of `RepairEntry` for one `(model_id,
+    /// tree_kind)`, in the deterministic pre-order produced by
+    /// the underlying tree's `iter_entries`. Returns `None` if
+    /// no tree exists locally for that model. Paging is wire
+    /// shape and lives in the adapter, not on this trait — the
+    /// stream just yields entries one at a time.
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>>;
 }
 
 impl TreeHandle for CacheAwarePolicy {
@@ -780,6 +795,28 @@ impl TreeHandle for CacheAwarePolicy {
                 };
                 tree.insert_tokens(tokens.value(), worker_url);
                 true
+            }
+        }
+    }
+
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>> {
+        let model_id = normalize_model_key(model_id);
+        match tree_kind {
+            TreeKind::String => {
+                let tree = self.string_trees.get(model_id)?.value().clone();
+                Some(Box::new(tree.iter_entries().map(|(path, tenants)| {
+                    RepairEntry::String { path, tenants }
+                })))
+            }
+            TreeKind::Token => {
+                let tree = self.token_trees.get(model_id)?.value().clone();
+                Some(Box::new(tree.iter_entries().map(|(tokens, tenants)| {
+                    RepairEntry::Token { tokens, tenants }
+                })))
             }
         }
     }

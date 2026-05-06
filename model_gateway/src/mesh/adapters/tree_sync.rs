@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use kv_index::TenantId;
 use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use smg_mesh::{DrainHandle, StreamNamespace};
@@ -32,6 +33,20 @@ use crate::policies::{TreeHandle, TreeKind};
 
 const PREFIX: &str = "td:";
 const REPAIR_REQUEST_PREFIX: &str = "tree:req:";
+const REPAIR_PAGE_PREFIX: &str = "tree:page:";
+
+/// Soft cap on the bincode-serialized size of a single
+/// [`TreeRepairPage`]. The responder fills entries until the next
+/// would push the page over this budget. Source: spec §3.1
+/// (ephemeral-stream message budget).
+pub const TREE_REPAIR_PAGE_BYTE_CAP: usize = 2 * 1024 * 1024;
+
+/// Reserved budget for the [`TreeRepairPage`] header (everything
+/// other than `entries`). Subtracted from the byte cap so the
+/// assembled page stays under the cap once header bytes are
+/// added back. UUID + model_id + tree_kind + counters comfortably
+/// fit; 256 is conservative.
+const TREE_REPAIR_PAGE_HEADER_OVERHEAD: usize = 256;
 
 /// Live-membership view consumed by the adapter when picking a
 /// peer to send a repair request to. Defined here (not in the
@@ -87,15 +102,178 @@ pub struct TreeRepairRequest {
     pub reason: RepairReason,
 }
 
+/// One reconstructable tree entry on the repair-page wire. The
+/// variant matches the requested [`TreeKind`]; receivers may
+/// validate the variant against the page's `tree_kind` and drop
+/// mismatched entries as malformed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepairEntry {
+    String {
+        path: String,
+        tenants: Vec<(TenantId, u64)>,
+    },
+    Token {
+        tokens: Vec<u32>,
+        tenants: Vec<(TenantId, u64)>,
+    },
+}
+
+/// One page of tree-repair payload, targeted at the requester
+/// keyed `tree:page:{session_id}:{page_index}`. `next_cursor`
+/// is `None` iff `is_last`; resumed requests echo the cursor
+/// back in [`TreeRepairRequest::cursor`] so the responder skips
+/// already-shipped entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeRepairPage {
+    pub session_id: Uuid,
+    pub model_id: String,
+    pub tree_kind: TreeKind,
+    pub page_index: u32,
+    pub entries: Vec<RepairEntry>,
+    pub next_cursor: Option<Vec<u8>>,
+    pub is_last: bool,
+}
+
+/// Iterator that chunks a stream of [`RepairEntry`] into
+/// byte-capped [`TreeRepairPage`]s. Always emits at least one
+/// page (even on an empty stream — the empty page acts as an
+/// ACK for the requester and gives d-2c a clean session-cleanup
+/// signal).
+struct PagingIter {
+    stream: Box<dyn Iterator<Item = RepairEntry> + Send>,
+    /// Entry pulled from the stream that didn't fit in the
+    /// previous page's budget; consumed first on the next call.
+    deferred: Option<RepairEntry>,
+    session_id: Uuid,
+    model_id: String,
+    tree_kind: TreeKind,
+    /// Per-page budget for entry bytes (cap minus reserved header
+    /// overhead). At least one entry always fits per page even
+    /// if the entry alone exceeds the budget.
+    entry_budget: usize,
+    /// Total entries already consumed across all pages, including
+    /// any entries skipped via the start cursor. Used as the
+    /// `next_cursor` value for the page being built.
+    cumulative_consumed: u64,
+    page_index: u32,
+    finished: bool,
+}
+
+impl PagingIter {
+    fn new(
+        mut stream: Box<dyn Iterator<Item = RepairEntry> + Send>,
+        session_id: Uuid,
+        model_id: String,
+        tree_kind: TreeKind,
+        byte_cap: usize,
+        start_skip: u64,
+    ) -> Self {
+        // Best-effort cursor: skip entries the requester already
+        // has. If the tree shrunk between rounds we end early —
+        // the final page just has fewer entries.
+        for _ in 0..start_skip {
+            if stream.next().is_none() {
+                break;
+            }
+        }
+        Self {
+            stream,
+            deferred: None,
+            session_id,
+            model_id,
+            tree_kind,
+            entry_budget: byte_cap.saturating_sub(TREE_REPAIR_PAGE_HEADER_OVERHEAD),
+            cumulative_consumed: start_skip,
+            page_index: 0,
+            finished: false,
+        }
+    }
+}
+
+impl Iterator for PagingIter {
+    type Item = TreeRepairPage;
+
+    fn next(&mut self) -> Option<TreeRepairPage> {
+        if self.finished {
+            return None;
+        }
+
+        let mut entries: Vec<RepairEntry> = Vec::new();
+        let mut size: usize = 0;
+        let mut hit_budget = false;
+
+        // Carry over the entry deferred from the previous page.
+        if let Some(entry) = self.deferred.take() {
+            let entry_size = bincode::serialized_size(&entry).unwrap_or(0) as usize;
+            entries.push(entry);
+            size += entry_size;
+            self.cumulative_consumed += 1;
+        }
+
+        for entry in self.stream.by_ref() {
+            let entry_size = bincode::serialized_size(&entry).unwrap_or(0) as usize;
+            if !entries.is_empty() && size + entry_size > self.entry_budget {
+                self.deferred = Some(entry);
+                hit_budget = true;
+                break;
+            }
+            entries.push(entry);
+            size += entry_size;
+            self.cumulative_consumed += 1;
+        }
+
+        let is_last = !hit_budget;
+        let next_cursor = if is_last {
+            None
+        } else {
+            // u64 always bincode-serializes; if it ever didn't,
+            // an empty cursor decodes back to 0 ("start over") —
+            // safe best-effort fallback rather than a panic.
+            Some(bincode::serialize(&self.cumulative_consumed).unwrap_or_default())
+        };
+
+        let page = TreeRepairPage {
+            session_id: self.session_id,
+            model_id: self.model_id.clone(),
+            tree_kind: self.tree_kind,
+            page_index: self.page_index,
+            entries,
+            next_cursor,
+            is_last,
+        };
+
+        self.page_index += 1;
+        if is_last {
+            self.finished = true;
+        }
+        Some(page)
+    }
+}
+
+/// Decode a [`TreeRepairRequest::cursor`] (bincode-encoded `u64`
+/// skip count). Treats `None` and decode errors as "start from
+/// the beginning" — a malformed cursor is best handled by re-
+/// shipping the whole tree rather than refusing to respond.
+fn decode_cursor(cursor: Option<&[u8]>) -> u64 {
+    cursor
+        .and_then(|bytes| bincode::deserialize::<u64>(bytes).ok())
+        .unwrap_or(0)
+}
+
 /// Bridges the `td:` broadcast stream namespace to per-model
 /// tenant buffers, querying a [`TreeHandle`] for inbound hash
 /// resolution and a [`PeerList`] for repair-request targeting.
 pub struct TreeSyncAdapter {
     tenant_deltas: Arc<StreamNamespace>,
-    /// Targeted namespace for `tree:req:*` repair requests. The
-    /// adapter only publishes here in slice 5c; subscription (the
-    /// responder side) lands in slice 5d.
+    /// Targeted namespace for `tree:req:*` repair requests.
+    /// The adapter both publishes (5c, when a local node hits an
+    /// unknown hash) and subscribes (d-2b, when a peer asks us
+    /// for our tree).
     tree_repair_requests: Arc<StreamNamespace>,
+    /// Targeted namespace for `tree:page:*` repair pages.
+    /// The adapter publishes pages here in response to
+    /// `tree:req:` messages; the receiver side lands in d-2c.
+    tree_repair_pages: Arc<StreamNamespace>,
     pending_deltas: DashMap<String, Vec<TreeDelta>>,
     /// Hash-membership handle provided by the tree owner.
     tree: Arc<dyn TreeHandle>,
@@ -104,7 +282,7 @@ pub struct TreeSyncAdapter {
     /// Outstanding repair sessions, keyed by (model_id, kind).
     /// Presence-only set: while a key is here, additional unknown
     /// hashes for the same (model, kind) are coalesced into the
-    /// in-flight session. Slice 5d adds the response-side cleanup
+    /// in-flight session. d-2c adds the response-side cleanup
     /// (and the per-session bookkeeping that needs reading).
     outstanding_repairs: DashMap<(String, TreeKind), ()>,
     node_name: String,
@@ -134,6 +312,7 @@ impl TreeSyncAdapter {
     pub fn new(
         tenant_deltas: Arc<StreamNamespace>,
         tree_repair_requests: Arc<StreamNamespace>,
+        tree_repair_pages: Arc<StreamNamespace>,
         tree: Arc<dyn TreeHandle>,
         peers: Arc<dyn PeerList>,
         node_name: String,
@@ -148,6 +327,11 @@ impl TreeSyncAdapter {
             REPAIR_REQUEST_PREFIX,
             "TreeSyncAdapter requires a repair-request namespace scoped to `{REPAIR_REQUEST_PREFIX}`",
         );
+        assert_eq!(
+            tree_repair_pages.prefix(),
+            REPAIR_PAGE_PREFIX,
+            "TreeSyncAdapter requires a repair-page namespace scoped to `{REPAIR_PAGE_PREFIX}`",
+        );
         assert!(
             !node_name.is_empty(),
             "TreeSyncAdapter node_name must not be empty",
@@ -155,6 +339,7 @@ impl TreeSyncAdapter {
         Arc::new(Self {
             tenant_deltas,
             tree_repair_requests,
+            tree_repair_pages,
             pending_deltas: DashMap::new(),
             tree,
             peers,
@@ -214,6 +399,36 @@ impl TreeSyncAdapter {
                 }
             }
             debug!("TreeSyncAdapter tenant-delta subscription closed");
+        });
+
+        // Responder side of the repair protocol: subscribe to
+        // `tree:req:`, dispatch each request to a bounded per-
+        // session task that pages the local tree out via
+        // `tree:page:` to the requester.
+        let req_owner = Arc::downgrade(self);
+        let mut req_sub = self.tree_repair_requests.subscribe("");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "subscription task ends automatically when the mesh KV drops and closes the channel; no handle needed"
+        )]
+        tokio::spawn(async move {
+            while let Some((key, value)) = req_sub.receiver.recv().await {
+                let Some(this) = req_owner.upgrade() else {
+                    debug!("TreeSyncAdapter dropped, exiting tree:req: subscription");
+                    break;
+                };
+                if !key.starts_with(REPAIR_REQUEST_PREFIX) {
+                    warn!(key, "tree:req: subscription yielded unexpected key shape");
+                    continue;
+                }
+                match value {
+                    Some(fragments) => this.handle_incoming_repair_request(&fragments),
+                    None => {
+                        debug!("unexpected tree:req: tombstone event");
+                    }
+                }
+            }
+            debug!("TreeSyncAdapter tree:req: subscription closed");
         });
     }
 
@@ -317,6 +532,98 @@ impl TreeSyncAdapter {
         }
     }
 
+    /// Decode an incoming `tree:req:` payload and dispatch a
+    /// per-session paging task. Mismatched `target_peer_id` is
+    /// dropped silently — targeted routing should already filter,
+    /// but defense-in-depth against future routing changes.
+    fn handle_incoming_repair_request(self: &Arc<Self>, fragments: &[Bytes]) {
+        let total: usize = fragments.iter().map(Bytes::len).sum();
+        let mut bytes = Vec::with_capacity(total);
+        for frag in fragments {
+            bytes.extend_from_slice(frag);
+        }
+        let request: TreeRepairRequest = match bincode::deserialize(&bytes) {
+            Ok(req) => req,
+            Err(err) => {
+                warn!(%err, "failed to decode TreeRepairRequest");
+                return;
+            }
+        };
+        if request.target_peer_id != self.node_name {
+            trace!(
+                target = %request.target_peer_id,
+                local = %self.node_name,
+                session_id = %request.session_id,
+                "dropping repair request not addressed to this node",
+            );
+            return;
+        }
+
+        let this = Arc::clone(self);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "per-request paging task is bounded by stream length and exits on iterator exhaustion"
+        )]
+        tokio::spawn(async move {
+            this.respond_to_repair_request(request);
+        });
+    }
+
+    /// Walk the local tree for the requested model+kind, chunk
+    /// it into byte-capped pages, and publish each page to the
+    /// requester. Always emits at least one page (an empty
+    /// `is_last=true` page if the tree is missing or empty) so
+    /// the requester sees an ACK and d-2c session-cleanup has a
+    /// clean signal.
+    fn respond_to_repair_request(&self, request: TreeRepairRequest) {
+        let stream: Box<dyn Iterator<Item = RepairEntry> + Send> = self
+            .tree
+            .open_repair_stream(&request.model_id, request.tree_kind)
+            .unwrap_or_else(|| Box::new(std::iter::empty()));
+
+        let start_skip = decode_cursor(request.cursor.as_deref());
+        let pager = PagingIter::new(
+            stream,
+            request.session_id,
+            request.model_id.clone(),
+            request.tree_kind,
+            TREE_REPAIR_PAGE_BYTE_CAP,
+            start_skip,
+        );
+
+        let mut pages_sent: u32 = 0;
+        for page in pager {
+            let key = format!(
+                "{REPAIR_PAGE_PREFIX}{}:{}",
+                page.session_id, page.page_index,
+            );
+            let bytes = match bincode::serialize(&page) {
+                Ok(b) => Bytes::from(b),
+                Err(err) => {
+                    warn!(
+                        session_id = %page.session_id,
+                        page_index = page.page_index,
+                        %err,
+                        "failed to serialize TreeRepairPage; skipping",
+                    );
+                    continue;
+                }
+            };
+            self.tree_repair_pages
+                .publish_to(&request.requester_peer_id, &key, bytes);
+            pages_sent += 1;
+        }
+
+        debug!(
+            session_id = %request.session_id,
+            model_id = %request.model_id,
+            kind = ?request.tree_kind,
+            requester = %request.requester_peer_id,
+            pages_sent,
+            "completed repair response",
+        );
+    }
+
     /// Issue a `tree:req:{session_id}` repair request for an
     /// unknown hash, targeted at a random ALIVE peer. Coalesces
     /// duplicates: while a session is already in flight for the
@@ -412,6 +719,18 @@ mod tests {
         )
     }
 
+    fn page_namespace(mesh: &MeshKV) -> Arc<StreamNamespace> {
+        mesh.configure_stream_prefix(
+            REPAIR_PAGE_PREFIX,
+            StreamConfig {
+                // Generous so tests with multi-MB pages don't
+                // FIFO-evict before assertions inspect them.
+                max_buffer_bytes: 8 * 1024 * 1024,
+                routing: StreamRouting::Targeted,
+            },
+        )
+    }
+
     fn delta(hash: u64, worker: &str) -> TreeDelta {
         TreeDelta {
             tree_kind: TreeKind::String,
@@ -424,11 +743,14 @@ mod tests {
     /// Test-only [`TreeHandle`]: a set of known `(model, kind,
     /// hash)` tuples plus a log of every applied call so tests
     /// can assert on apply-side effects. Apply succeeds (returns
-    /// `true`) iff the hash is in the known set.
+    /// `true`) iff the hash is in the known set. `streams` lets
+    /// d-2b tests pre-load `RepairEntry` sequences for
+    /// `open_repair_stream` lookups.
     #[derive(Debug, Default)]
     struct MockTreeHandle {
         known: DashMap<(String, TreeKind, u64), ()>,
         applied: parking_lot::Mutex<Vec<(String, TreeKind, u64, String)>>,
+        streams: DashMap<(String, TreeKind), Vec<RepairEntry>>,
     }
 
     impl MockTreeHandle {
@@ -439,6 +761,16 @@ mod tests {
 
         fn applied_calls(&self) -> Vec<(String, TreeKind, u64, String)> {
             self.applied.lock().clone()
+        }
+
+        fn set_repair_stream(
+            &self,
+            model_id: &str,
+            tree_kind: TreeKind,
+            entries: Vec<RepairEntry>,
+        ) {
+            self.streams
+                .insert((model_id.to_string(), tree_kind), entries);
         }
     }
 
@@ -463,6 +795,15 @@ mod tests {
                 worker_url.to_string(),
             ));
             true
+        }
+
+        fn open_repair_stream(
+            &self,
+            model_id: &str,
+            tree_kind: TreeKind,
+        ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>> {
+            let entries = self.streams.get(&(model_id.to_string(), tree_kind))?;
+            Some(Box::new(entries.value().clone().into_iter()))
         }
     }
 
@@ -497,9 +838,10 @@ mod tests {
     fn adapter_with_empty_handle(mesh: &MeshKV, node_name: &str) -> Arc<TreeSyncAdapter> {
         let td = td_namespace(mesh);
         let req = req_namespace(mesh);
+        let pages = page_namespace(mesh);
         let tree: Arc<dyn TreeHandle> = empty_handle();
         let peers: Arc<dyn PeerList> = empty_peers();
-        TreeSyncAdapter::new(td, req, tree, peers, node_name.into())
+        TreeSyncAdapter::new(td, req, pages, tree, peers, node_name.into())
     }
 
     #[tokio::test]
@@ -630,11 +972,12 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let tree = Arc::new(MockTreeHandle::default());
         tree.mark_known("model-1", TreeKind::String, 42);
         let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
-        let adapter = TreeSyncAdapter::new(td, req, adapter_tree, peers, "node-a".into());
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
 
         let batch = vec![
             TreeDelta {
@@ -687,6 +1030,7 @@ mod tests {
         // Pass the repair-request namespace as the td: arg.
         let mesh = MeshKV::new("node-a".into());
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let req_again = mesh.configure_stream_prefix(
             "td-misnamed:",
             StreamConfig {
@@ -696,7 +1040,7 @@ mod tests {
         );
         let tree: Arc<dyn TreeHandle> = empty_handle();
         let peers: Arc<dyn PeerList> = empty_peers();
-        let _ = TreeSyncAdapter::new(req_again, req, tree, peers, "node-a".into());
+        let _ = TreeSyncAdapter::new(req_again, req, pages, tree, peers, "node-a".into());
     }
 
     #[tokio::test]
@@ -707,6 +1051,7 @@ mod tests {
         // Pass the td: namespace as the repair-request arg.
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let td_again = mesh.configure_stream_prefix(
             "td-also:",
             StreamConfig {
@@ -716,7 +1061,7 @@ mod tests {
         );
         let tree: Arc<dyn TreeHandle> = empty_handle();
         let peers: Arc<dyn PeerList> = empty_peers();
-        let _ = TreeSyncAdapter::new(td, td_again, tree, peers, "node-a".into());
+        let _ = TreeSyncAdapter::new(td, td_again, pages, tree, peers, "node-a".into());
     }
 
     #[tokio::test]
@@ -725,9 +1070,10 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let tree: Arc<dyn TreeHandle> = empty_handle();
         let peers: Arc<dyn PeerList> = empty_peers();
-        let _ = TreeSyncAdapter::new(td, req, tree, peers, String::new());
+        let _ = TreeSyncAdapter::new(td, req, pages, tree, peers, String::new());
     }
 
     #[tokio::test]
@@ -773,9 +1119,10 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let tree: Arc<dyn TreeHandle> = Arc::new(MockTreeHandle::default());
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
-        let adapter = TreeSyncAdapter::new(td, req, tree, peers, "node-a".into());
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
 
         // Single unknown delta → one targeted publish to node-b.
         let batch = vec![delta(99, "http://w1")];
@@ -810,9 +1157,10 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let tree: Arc<dyn TreeHandle> = Arc::new(MockTreeHandle::default());
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
-        let adapter = TreeSyncAdapter::new(td, req, tree, peers, "node-a".into());
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
 
         let batch = vec![delta(101, "http://w1"), delta(102, "http://w2")];
         let bytes = Bytes::from(bincode::serialize(&batch).unwrap());
@@ -829,9 +1177,10 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let tree: Arc<dyn TreeHandle> = Arc::new(MockTreeHandle::default());
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
-        let adapter = TreeSyncAdapter::new(td, req, tree, peers, "node-a".into());
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
 
         let batch = vec![
             TreeDelta {
@@ -878,11 +1227,12 @@ mod tests {
         let mesh = MeshKV::new("node-a".into());
         let td = td_namespace(&mesh);
         let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
         let tree = Arc::new(MockTreeHandle::default());
         tree.mark_known("model-1", TreeKind::String, 42);
         let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
         let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
-        let adapter = TreeSyncAdapter::new(td, req, adapter_tree, peers, "node-a".into());
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
 
         let batch = vec![delta(42, "http://w1")];
         let bytes = Bytes::from(bincode::serialize(&batch).unwrap());
@@ -890,5 +1240,491 @@ mod tests {
 
         let publishes = drain_repair_publishes(&mesh);
         assert!(publishes.is_empty(), "known hash skips repair entirely");
+    }
+
+    // ----- d-2b: repair page wire format + responder -----
+
+    fn string_entry(path: &str, tenants: &[(&str, u64)]) -> RepairEntry {
+        RepairEntry::String {
+            path: path.into(),
+            tenants: tenants.iter().map(|(t, e)| (Arc::from(*t), *e)).collect(),
+        }
+    }
+
+    fn token_entry(tokens: &[u32], tenants: &[(&str, u64)]) -> RepairEntry {
+        RepairEntry::Token {
+            tokens: tokens.to_vec(),
+            tenants: tenants.iter().map(|(t, e)| (Arc::from(*t), *e)).collect(),
+        }
+    }
+
+    fn drain_page_publishes(mesh: &MeshKV) -> Vec<(String, String, Bytes)> {
+        let round = mesh.collect_round_batch();
+        round
+            .targeted_entries
+            .into_iter()
+            .filter(|(_, key, _)| key.starts_with(REPAIR_PAGE_PREFIX))
+            .collect()
+    }
+
+    fn make_request(
+        session_id: Uuid,
+        target: &str,
+        requester: &str,
+        model_id: &str,
+        kind: TreeKind,
+        cursor: Option<Vec<u8>>,
+    ) -> TreeRepairRequest {
+        TreeRepairRequest {
+            session_id,
+            requester_peer_id: requester.into(),
+            target_peer_id: target.into(),
+            model_id: model_id.into(),
+            tree_kind: kind,
+            cursor,
+            reason: RepairReason::UnknownHash(0xdead_beef),
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_entry_and_page_round_trip_through_bincode() {
+        let entries = vec![
+            string_entry("hello", &[("worker-1", 7)]),
+            string_entry("hello world", &[("worker-1", 8), ("worker-2", 9)]),
+        ];
+        let page = TreeRepairPage {
+            session_id: Uuid::now_v7(),
+            model_id: "model-1".into(),
+            tree_kind: TreeKind::String,
+            page_index: 3,
+            entries: entries.clone(),
+            next_cursor: Some(vec![1, 2, 3]),
+            is_last: false,
+        };
+        let bytes = bincode::serialize(&page).unwrap();
+        let decoded: TreeRepairPage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, page);
+
+        // Token variant round-trips too.
+        let tk_entries = vec![token_entry(&[1, 2, 3, 4], &[("worker-1", 0)])];
+        let tk_page = TreeRepairPage {
+            session_id: Uuid::now_v7(),
+            model_id: "model-2".into(),
+            tree_kind: TreeKind::Token,
+            page_index: 0,
+            entries: tk_entries.clone(),
+            next_cursor: None,
+            is_last: true,
+        };
+        let bytes = bincode::serialize(&tk_page).unwrap();
+        let decoded: TreeRepairPage = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, tk_page);
+    }
+
+    #[tokio::test]
+    async fn paging_empty_stream_emits_one_is_last_page() {
+        // Empty input → one page so the requester sees an ACK.
+        let stream: Box<dyn Iterator<Item = RepairEntry> + Send> = Box::new(std::iter::empty());
+        let pager = PagingIter::new(
+            stream,
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            TREE_REPAIR_PAGE_BYTE_CAP,
+            0,
+        );
+        let pages: Vec<_> = pager.collect();
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].is_last);
+        assert!(pages[0].entries.is_empty());
+        assert!(pages[0].next_cursor.is_none());
+        assert_eq!(pages[0].page_index, 0);
+    }
+
+    #[tokio::test]
+    async fn paging_chunks_by_byte_cap_and_marks_last() {
+        // Build entries large enough that a tiny cap forces
+        // multiple pages. Use ~1 KB string paths and a 4 KB
+        // entry budget so each page holds ~3-4 entries.
+        let big_path: String = "a".repeat(1024);
+        let entries: Vec<RepairEntry> = (0..12)
+            .map(|i| RepairEntry::String {
+                path: format!("{big_path}-{i}"),
+                tenants: vec![(Arc::from("worker-1"), i as u64)],
+            })
+            .collect();
+        let total = entries.len();
+
+        // 4 KB cap; entry size ~1 KB + bincode overhead.
+        let pager = PagingIter::new(
+            Box::new(entries.clone().into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            4 * 1024,
+            0,
+        );
+        let pages: Vec<_> = pager.collect();
+        assert!(pages.len() >= 2, "small cap must produce multiple pages");
+
+        // Total entries preserved; only the final page is marked
+        // last; each non-last page carries a non-None cursor.
+        let total_entries: usize = pages.iter().map(|p| p.entries.len()).sum();
+        assert_eq!(total_entries, total);
+        for (i, p) in pages.iter().enumerate() {
+            let is_last = i == pages.len() - 1;
+            assert_eq!(p.is_last, is_last, "page {i} is_last");
+            assert_eq!(p.next_cursor.is_none(), is_last, "page {i} cursor parity");
+            assert_eq!(p.page_index, i as u32, "page index sequential");
+            // Every page that's not the last must have at least
+            // one entry (we always pack at least one per page).
+            if !is_last {
+                assert!(!p.entries.is_empty(), "non-last page must be non-empty");
+            }
+        }
+
+        // Each non-last page's serialized bincode size stays
+        // close to the cap once header overhead is added back.
+        for p in &pages {
+            let size = bincode::serialized_size(p).unwrap() as usize;
+            // Final page may be smaller; just assert non-final
+            // pages don't exceed `cap + slop` for the slop budget
+            // (header overhead already reserved).
+            assert!(
+                size <= 4 * 1024 + TREE_REPAIR_PAGE_HEADER_OVERHEAD,
+                "page size {size} exceeds cap + header budget",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn paging_oversized_single_entry_still_emits_one_per_page() {
+        // A single entry larger than the cap must still go out
+        // — we never produce an empty non-last page.
+        let huge: RepairEntry = RepairEntry::String {
+            path: "x".repeat(8 * 1024),
+            tenants: vec![(Arc::from("w1"), 0)],
+        };
+        let pager = PagingIter::new(
+            Box::new(vec![huge].into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            1024, // cap < entry size
+            0,
+        );
+        let pages: Vec<_> = pager.collect();
+        assert_eq!(pages.len(), 1, "single entry yields exactly one page");
+        assert!(pages[0].is_last);
+        assert_eq!(pages[0].entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn paging_cursor_resume_yields_same_total() {
+        let big_path: String = "p".repeat(1024);
+        let entries: Vec<RepairEntry> = (0..10)
+            .map(|i| RepairEntry::String {
+                path: format!("{big_path}-{i}"),
+                tenants: vec![(Arc::from("w1"), i as u64)],
+            })
+            .collect();
+
+        // Full pass.
+        let full: Vec<RepairEntry> = PagingIter::new(
+            Box::new(entries.clone().into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            4 * 1024,
+            0,
+        )
+        .flat_map(|p| p.entries)
+        .collect();
+        assert_eq!(full.len(), entries.len());
+        assert_eq!(full, entries);
+
+        // Resume halfway: skip 5 → final pass yields the last 5.
+        let resumed: Vec<RepairEntry> = PagingIter::new(
+            Box::new(entries.clone().into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            4 * 1024,
+            5,
+        )
+        .flat_map(|p| p.entries)
+        .collect();
+        assert_eq!(resumed.len(), 5);
+        assert_eq!(resumed, entries[5..]);
+    }
+
+    #[tokio::test]
+    async fn paging_cursor_encodes_cumulative_count() {
+        // Each non-last page's `next_cursor` must decode to the
+        // total items consumed so far — usable as a resume key.
+        let big_path: String = "c".repeat(1024);
+        let entries: Vec<RepairEntry> = (0..8)
+            .map(|i| RepairEntry::String {
+                path: format!("{big_path}-{i}"),
+                tenants: vec![(Arc::from("w1"), i as u64)],
+            })
+            .collect();
+        let pager = PagingIter::new(
+            Box::new(entries.into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            4 * 1024,
+            0,
+        );
+        let pages: Vec<_> = pager.collect();
+        let mut running_total = 0usize;
+        for (i, p) in pages.iter().enumerate() {
+            running_total += p.entries.len();
+            if i < pages.len() - 1 {
+                let cursor_bytes = p.next_cursor.as_ref().expect("non-last has cursor");
+                let decoded: u64 = bincode::deserialize(cursor_bytes).unwrap();
+                assert_eq!(decoded as usize, running_total, "page {i} cursor matches");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn responder_publishes_pages_targeted_at_requester() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        tree.set_repair_stream(
+            "model-1",
+            TreeKind::String,
+            vec![
+                string_entry("hello", &[("w1", 1)]),
+                string_entry("hello world", &[("w1", 2), ("w2", 3)]),
+            ],
+        );
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session_id = Uuid::now_v7();
+        let request = make_request(
+            session_id,
+            "node-a", // targeted at us
+            "node-b", // requester
+            "model-1",
+            TreeKind::String,
+            None,
+        );
+        adapter.respond_to_repair_request(request);
+
+        let publishes = drain_page_publishes(&mesh);
+        assert!(
+            !publishes.is_empty(),
+            "responder must publish at least one page"
+        );
+        for (target, key, _payload) in &publishes {
+            assert_eq!(target, "node-b", "all pages targeted at requester");
+            let expected_prefix = format!("{REPAIR_PAGE_PREFIX}{session_id}:");
+            assert!(
+                key.starts_with(&expected_prefix),
+                "key {key} matches tree:page:{session_id}:N",
+            );
+        }
+
+        // Reconstruct the page sequence and verify entries cover
+        // the input set.
+        let mut all_entries: Vec<RepairEntry> = Vec::new();
+        for (_, _, payload) in &publishes {
+            let page: TreeRepairPage = bincode::deserialize(payload).unwrap();
+            all_entries.extend(page.entries);
+        }
+        assert_eq!(all_entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn responder_emits_empty_ack_for_unknown_model() {
+        // Same shape as "tree exists but is empty" — one is_last
+        // page with no entries — gives the requester an ACK.
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
+
+        let request = make_request(
+            Uuid::now_v7(),
+            "node-a",
+            "node-b",
+            "unknown-model",
+            TreeKind::String,
+            None,
+        );
+        adapter.respond_to_repair_request(request);
+
+        let publishes = drain_page_publishes(&mesh);
+        assert_eq!(publishes.len(), 1, "exactly one ACK page");
+        let page: TreeRepairPage = bincode::deserialize(&publishes[0].2).unwrap();
+        assert!(page.is_last);
+        assert!(page.entries.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn responder_drops_request_with_mismatched_target() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        tree.set_repair_stream(
+            "model-1",
+            TreeKind::String,
+            vec![string_entry("p", &[("w1", 1)])],
+        );
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        // Target is some other peer — drop, no spawn, no publish.
+        let request = make_request(
+            Uuid::now_v7(),
+            "node-elsewhere",
+            "node-b",
+            "model-1",
+            TreeKind::String,
+            None,
+        );
+        let bytes = bincode::serialize(&request).unwrap();
+        adapter.handle_incoming_repair_request(&[Bytes::from(bytes)]);
+        // Yield once to let any spurious spawn observe state;
+        // none is expected.
+        tokio::task::yield_now().await;
+
+        let publishes = drain_page_publishes(&mesh);
+        assert!(
+            publishes.is_empty(),
+            "mismatched target_peer_id must drop the request",
+        );
+    }
+
+    #[tokio::test]
+    async fn responder_handles_two_distinct_sessions_independently() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        tree.set_repair_stream(
+            "model-1",
+            TreeKind::String,
+            vec![string_entry("a", &[("w1", 1)])],
+        );
+        tree.set_repair_stream(
+            "model-2",
+            TreeKind::Token,
+            vec![token_entry(&[1, 2, 3], &[("w2", 2)])],
+        );
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session_a = Uuid::now_v7();
+        let session_b = Uuid::now_v7();
+        adapter.respond_to_repair_request(make_request(
+            session_a,
+            "node-a",
+            "node-b",
+            "model-1",
+            TreeKind::String,
+            None,
+        ));
+        adapter.respond_to_repair_request(make_request(
+            session_b,
+            "node-a",
+            "node-c",
+            "model-2",
+            TreeKind::Token,
+            None,
+        ));
+
+        let publishes = drain_page_publishes(&mesh);
+        let mut by_session: std::collections::HashMap<Uuid, Vec<TreeRepairPage>> =
+            std::collections::HashMap::new();
+        for (_, _, payload) in &publishes {
+            let page: TreeRepairPage = bincode::deserialize(payload).unwrap();
+            by_session.entry(page.session_id).or_default().push(page);
+        }
+        assert!(by_session.contains_key(&session_a));
+        assert!(by_session.contains_key(&session_b));
+        // Each session ends with exactly one is_last=true page.
+        for pages in by_session.values() {
+            let last = pages.iter().filter(|p| p.is_last).count();
+            assert_eq!(last, 1, "each session has exactly one terminal page");
+        }
+    }
+
+    #[tokio::test]
+    async fn responder_resumes_from_request_cursor() {
+        let big_path: String = "r".repeat(1024);
+        let canned: Vec<RepairEntry> = (0..6)
+            .map(|i| RepairEntry::String {
+                path: format!("{big_path}-{i}"),
+                tenants: vec![(Arc::from("w1"), i as u64)],
+            })
+            .collect();
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        tree.set_repair_stream("model-1", TreeKind::String, canned.clone());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        // Resume at offset 4 → response covers the last 2 entries.
+        let cursor = bincode::serialize(&4u64).unwrap();
+        adapter.respond_to_repair_request(make_request(
+            Uuid::now_v7(),
+            "node-a",
+            "node-b",
+            "model-1",
+            TreeKind::String,
+            Some(cursor),
+        ));
+
+        let publishes = drain_page_publishes(&mesh);
+        let mut all_entries: Vec<RepairEntry> = Vec::new();
+        for (_, _, payload) in &publishes {
+            let page: TreeRepairPage = bincode::deserialize(payload).unwrap();
+            all_entries.extend(page.entries);
+        }
+        assert_eq!(all_entries.len(), 2);
+        assert_eq!(all_entries, canned[4..]);
+    }
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "TreeSyncAdapter requires a repair-page namespace scoped to `tree:page:`"
+    )]
+    async fn new_rejects_wrong_pages_prefix() {
+        // Pass the repair-request namespace as the pages arg.
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let req_again = mesh.configure_stream_prefix(
+            "tree:page-misnamed:",
+            StreamConfig {
+                max_buffer_bytes: 64 * 1024,
+                routing: StreamRouting::Targeted,
+            },
+        );
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let _ = TreeSyncAdapter::new(td, req, req_again, tree, peers, "node-a".into());
     }
 }
