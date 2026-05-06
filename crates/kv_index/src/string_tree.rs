@@ -1138,9 +1138,11 @@ pub struct EntriesIter {
 
 struct EntryFrame {
     remaining_children: std::vec::IntoIter<NodeRef>,
-    /// Number of `chars` in this frame's edge text — used to
-    /// truncate the path buffer correctly when popping.
-    edge_char_count: usize,
+    /// Byte length of this frame's edge text — used to truncate
+    /// the path buffer in O(1) when popping. Each descent pushes
+    /// a complete `&str` of this length, so popping the same
+    /// byte count always lands on a UTF-8 char boundary.
+    edge_byte_len: usize,
 }
 
 impl EntriesIter {
@@ -1150,7 +1152,7 @@ impl EntriesIter {
         Self {
             stack: vec![EntryFrame {
                 remaining_children: collect_sorted_children(&tree.root).into_iter(),
-                edge_char_count: 0,
+                edge_byte_len: 0,
             }],
             path: String::new(),
             pending,
@@ -1168,14 +1170,20 @@ impl Iterator for EntriesIter {
         loop {
             let frame = self.stack.last_mut()?;
             if let Some(child) = frame.remaining_children.next() {
-                let edge = child.text.read().as_str().to_string();
-                let edge_char_count = edge.chars().count();
-                self.path.push_str(&edge);
+                // Push the edge directly through the lock guard —
+                // no intermediate clone — and capture its byte
+                // length so we can truncate atomically on pop.
+                let edge_byte_len = {
+                    let guard = child.text.read();
+                    let s = guard.as_str();
+                    self.path.push_str(s);
+                    s.len()
+                };
 
                 let tenants = snapshot_tenants(&child);
                 self.stack.push(EntryFrame {
                     remaining_children: collect_sorted_children(&child).into_iter(),
-                    edge_char_count,
+                    edge_byte_len,
                 });
                 if !tenants.is_empty() {
                     return Some((self.path.clone(), tenants));
@@ -1183,12 +1191,10 @@ impl Iterator for EntriesIter {
                 // Empty tenants → loop continues, descending into
                 // this child's children on the next iteration.
             } else {
-                // No more children at this depth — capture the
-                // edge length before popping so we can truncate
-                // the path back to the parent's level.
-                let edge_char_count = frame.edge_char_count;
+                let edge_byte_len = frame.edge_byte_len;
                 self.stack.pop();
-                truncate_chars_from_end(&mut self.path, edge_char_count);
+                let new_len = self.path.len().saturating_sub(edge_byte_len);
+                self.path.truncate(new_len);
             }
         }
     }
@@ -1212,24 +1218,6 @@ fn collect_sorted_children(node: &NodeRef) -> Vec<NodeRef> {
         .collect();
     children.sort_by_key(|(c, _)| *c);
     children.into_iter().map(|(_, n)| n).collect()
-}
-
-fn truncate_chars_from_end(s: &mut String, n: usize) {
-    if n == 0 {
-        return;
-    }
-    let total = s.chars().count();
-    if n >= total {
-        s.clear();
-        return;
-    }
-    let keep_chars = total - n;
-    let cutoff = s
-        .char_indices()
-        .nth(keep_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    s.truncate(cutoff);
 }
 
 impl Tree {
@@ -3013,10 +3001,12 @@ mod tests {
     #[test]
     fn test_iter_entries_preserves_utf8_paths() {
         // Multi-byte chars must not produce torn paths when the
-        // walker pops a frame (path is truncated by char count,
-        // not byte count). Also exercises the split-node case
-        // where the shared "你好" prefix node emits with a clean
-        // multi-byte path.
+        // walker pops a frame. Path is truncated by byte length
+        // — safe because each descent pushes a complete `&str`,
+        // so popping the same byte count always lands on a UTF-8
+        // char boundary (`String::truncate` would panic if not).
+        // Also exercises the split-node case where the shared
+        // "你好" prefix node emits with a clean multi-byte path.
         let tree = Tree::new();
         tree.insert_text("你好世界", "w1");
         tree.insert_text("你好朋友", "w2");

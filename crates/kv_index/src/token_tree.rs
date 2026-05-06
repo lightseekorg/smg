@@ -1093,9 +1093,13 @@ impl Iterator for EntriesIter {
         loop {
             let frame = self.stack.last_mut()?;
             if let Some(child) = frame.remaining_children.next() {
-                let edge_tokens = child.tokens.read().clone();
-                let edge_token_count = edge_tokens.len();
-                self.path.extend_from_slice(&edge_tokens);
+                // Extend the path directly through the lock guard
+                // — no intermediate Vec<TokenId> clone.
+                let edge_token_count = {
+                    let guard = child.tokens.read();
+                    self.path.extend_from_slice(&guard);
+                    guard.len()
+                };
 
                 let tenants = snapshot_tenants(&child);
                 self.stack.push(EntryFrame {
