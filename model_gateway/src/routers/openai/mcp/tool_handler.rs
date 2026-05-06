@@ -3,37 +3,24 @@
 use std::collections::{HashMap, HashSet};
 
 use openai_protocol::event_types::{
-    is_function_call_type, FunctionCallEvent, ItemType, OutputItemEvent, ResponseEvent,
+    is_function_call_type, FunctionCallEvent, OutputItemEvent, ResponseEvent,
 };
 use serde_json::Value;
 use tracing::warn;
 
-use crate::routers::openai::responses::{
-    extract_output_index, get_event_type, StreamingResponseAccumulator,
+use crate::routers::{
+    common::openai_bridge,
+    openai::responses::{extract_output_index, get_event_type, StreamingResponseAccumulator},
 };
 
-/// Item-type discriminators for output items that the streaming tool loop
-/// closes with its own `output_item.done` umbrella event. Upstream emits its
-/// own duplicate umbrella before the structured `<type>.completed` sub-event,
-/// which would violate the spec requirement that `output_item.done` is the
-/// LAST event for a given item (see `.claude/_audit/openai-responses-api-spec.md`
-/// §streaming). Whenever an `output_item.done` arrives for one of these types
-/// while a tool call is pending, we suppress the upstream copy and let the
-/// tool loop emit the umbrella at the correct position.
-const TOOL_CALL_ITEM_TYPES: &[&str] = &[
-    ItemType::FUNCTION_CALL,
-    ItemType::FUNCTION_TOOL_CALL,
-    ItemType::IMAGE_GENERATION_CALL,
-    ItemType::WEB_SEARCH_CALL,
-    ItemType::CODE_INTERPRETER_CALL,
-    ItemType::FILE_SEARCH_CALL,
-];
-
-/// Check whether an item-type string designates a tool-call item whose
-/// umbrella `output_item.done` is re-emitted by the tool loop (and therefore
-/// must be suppressed when forwarded by upstream).
+/// True for item types whose upstream `output_item.done` must be suppressed
+/// — the tool loop emits its own umbrella AFTER `<type>.completed` to
+/// satisfy the spec invariant that the umbrella is the LAST event for a
+/// given item (see `.claude/_audit/openai-responses-api-spec.md`
+/// §streaming). `mcp_call` is excluded; that umbrella is synthesized
+/// here, not forwarded.
 fn is_tool_call_item_type(item_type: &str) -> bool {
-    TOOL_CALL_ITEM_TYPES.contains(&item_type)
+    is_function_call_type(item_type) || openai_bridge::is_hosted_tool_call_item_type(item_type)
 }
 
 /// Action to take based on streaming event processing
@@ -543,6 +530,8 @@ mod tests {
     //! is the LAST event emitted for a given item (see
     //! `.claude/_audit/openai-responses-api-spec.md` §streaming, events
     //! L1054-L1072).
+
+    use openai_protocol::event_types::ItemType;
 
     use super::*;
 
@@ -1069,5 +1058,39 @@ mod tests {
             "second output_item.done for native passthrough must Forward after the first \
              dropped envelope consumed the passthrough-index entry; got {second_action:?}"
         );
+    }
+
+    #[test]
+    fn is_tool_call_item_type_covers_function_call_and_hosted_builtins() {
+        // Pin the suppression-gate set: function_call variants + hosted
+        // builtins. `mcp_call` is NOT included — those umbrellas are
+        // emitted by the tool loop, not forwarded from upstream.
+        // Adding a new hosted format must flip this set automatically via
+        // openai_bridge::is_hosted_tool_call_item_type — no edit here.
+        for ty in [
+            ItemType::FUNCTION_CALL,
+            ItemType::FUNCTION_TOOL_CALL,
+            ItemType::WEB_SEARCH_CALL,
+            ItemType::CODE_INTERPRETER_CALL,
+            ItemType::FILE_SEARCH_CALL,
+            ItemType::IMAGE_GENERATION_CALL,
+        ] {
+            assert!(
+                is_tool_call_item_type(ty),
+                "{ty} must be classified as a tool-call item type"
+            );
+        }
+        for ty in [
+            ItemType::MCP_CALL,
+            ItemType::MCP_LIST_TOOLS,
+            ItemType::FUNCTION_CALL_OUTPUT,
+            "message",
+            "reasoning",
+        ] {
+            assert!(
+                !is_tool_call_item_type(ty),
+                "{ty} must NOT be classified as a tool-call item type"
+            );
+        }
     }
 }

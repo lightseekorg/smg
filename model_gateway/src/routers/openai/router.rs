@@ -96,6 +96,7 @@ impl OpenAIRouter {
         let responses_components = Arc::new(ResponsesComponents {
             shared: Arc::clone(&shared_components),
             mcp_orchestrator: mcp_orchestrator.clone(),
+            mcp_format_registry: ctx.mcp_format_registry.clone(),
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),

@@ -18,16 +18,13 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use openai_protocol::{
     event_types::{
-        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
-        FunctionCallEvent, ImageGenerationCallEvent, ItemType, McpEvent, OutputItemEvent,
-        ResponseEvent, WebSearchCallEvent,
+        is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
+        OutputItemEvent, ResponseEvent,
     },
     responses::{ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{
-    mcp_response_item_id, McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat,
-};
+use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -40,6 +37,7 @@ use super::{
         rewrite_streaming_block,
     },
 };
+use crate::routers::common::openai_bridge::{self, mcp_response_item_id, ResponseFormat};
 const SSE_DONE: &str = "data: [DONE]\n\n";
 
 use crate::{
@@ -147,16 +145,15 @@ pub(super) fn apply_event_transformations_inplace(
                         if let Some(session) =
                             ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
                         {
-                            let response_format = session.tool_response_format(&tool_name);
+                            let response_format = ctx
+                                .mcp_format_registry
+                                .map(|reg| {
+                                    openai_bridge::lookup_tool_format(session, reg, &tool_name)
+                                })
+                                .unwrap_or(ResponseFormat::Passthrough);
 
-                            // Determine item type and ID prefix based on response_format
-                            let (new_type, id_prefix) = match response_format {
-                                ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                                ResponseFormat::ImageGenerationCall => {
-                                    (ItemType::IMAGE_GENERATION_CALL, "ig_")
-                                }
-                                _ => (ItemType::MCP_CALL, "mcp_"),
-                            };
+                            let d = openai_bridge::descriptor(response_format);
+                            let (new_type, id_prefix) = (d.type_str, d.id_prefix);
 
                             item["type"] = json!(new_type);
                             if new_type == ItemType::MCP_CALL {
@@ -169,7 +166,7 @@ pub(super) fn apply_event_transformations_inplace(
                                 if new_type == ItemType::MCP_CALL {
                                     item["id"] = json!(mcp_response_item_id(id));
                                 } else if let Some(stripped) = id.strip_prefix("fc_") {
-                                    let new_id = format!("{id_prefix}{stripped}");
+                                    let new_id = format!("{id_prefix}_{stripped}");
                                     item["id"] = json!(new_id);
                                 }
                             }
@@ -432,15 +429,10 @@ fn maybe_inject_tool_in_progress(
 
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Determine the in_progress event type based on item type
-    let event_type = match item_type {
-        ItemType::MCP_CALL => McpEvent::CALL_IN_PROGRESS,
-        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
-        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
-        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
-        ItemType::IMAGE_GENERATION_CALL => ImageGenerationCallEvent::IN_PROGRESS,
-        _ => return true, // Not a tool call item, nothing to inject
+    let Some(format) = openai_bridge::format_from_type_str(item_type) else {
+        return true; // Not a tool call item, nothing to inject
     };
+    let event_type = openai_bridge::descriptor(format).in_progress_event;
 
     let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
         return true;
@@ -674,6 +666,7 @@ pub(super) fn handle_streaming_with_tool_interception(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
+    format_registry: openai_bridge::FormatRegistry,
     mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
     let payload = req.payload;
@@ -730,6 +723,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             original_request: &original_request,
             previous_response_id: previous_response_id.as_deref(),
             session: Some(&session),
+            mcp_format_registry: Some(&format_registry),
         };
         let provider = ApiProvider::from_url(&url_clone);
         let auth_header =
@@ -1016,6 +1010,7 @@ pub(super) fn handle_streaming_with_tool_interception(
             if !execute_streaming_tool_calls(
                 pending_calls,
                 &session,
+                &format_registry,
                 &tx,
                 &mut state,
                 &mut sequence_number,
@@ -1064,7 +1059,7 @@ pub(super) fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
-    use crate::routers::common::mcp_utils::ensure_request_mcp_client;
+    use crate::routers::common::mcp_utils::{ensure_request_mcp_client, request_uses_mcp_routing};
 
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
@@ -1079,18 +1074,29 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             return error::internal_error("internal_error", "Expected responses request");
         }
     };
-    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
-        Some(m) => m.clone(),
-        None => {
-            return error::internal_error("internal_error", "MCP orchestrator required");
+    // Only MCP-laden requests need the orchestrator and format registry;
+    // plain streaming requests must still pass through deployments without
+    // MCP wiring.
+    let mcp_routing = match original_body.tools.as_deref() {
+        Some(tools) if request_uses_mcp_routing(tools) => {
+            let Some(mcp_orchestrator) = ctx.components.mcp_orchestrator().cloned() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP orchestrator required for requests carrying MCP/builtin tools",
+                );
+            };
+            let Some(registry) = ctx.components.mcp_format_registry() else {
+                return error::internal_error(
+                    "internal_error",
+                    "MCP format registry required for requests carrying MCP/builtin tools",
+                );
+            };
+            let registry = registry.clone();
+            ensure_request_mcp_client(&mcp_orchestrator, &registry, tools)
+                .await
+                .map(|servers| (servers, mcp_orchestrator, registry))
         }
-    };
-
-    // Check for MCP tools and create request context if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(&mcp_orchestrator, tools).await
-    } else {
-        None
+        _ => None,
     };
 
     let client = ctx.components.client().clone();
@@ -1101,7 +1107,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         }
     };
 
-    let Some(mcp_servers) = mcp_servers else {
+    let Some((mcp_servers, mcp_orchestrator, mcp_format_registry)) = mcp_routing else {
         return handle_simple_streaming_passthrough(&client, &worker, headers.as_ref(), req).await;
     };
 
@@ -1111,6 +1117,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         headers.as_ref(),
         req,
         &mcp_orchestrator,
+        mcp_format_registry,
         mcp_servers,
     )
 }

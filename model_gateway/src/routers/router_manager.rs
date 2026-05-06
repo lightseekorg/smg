@@ -33,7 +33,7 @@ use openai_protocol::{
     },
     rerank::RerankRequest,
     responses::ResponsesRequest,
-    transcription::TranscriptionRequest,
+    transcription::{AudioFile, TranscriptionRequest},
     UNKNOWN_MODEL_ID,
 };
 use serde_json::Value;
@@ -52,7 +52,7 @@ use crate::{
         common::header_utils::apply_provider_headers,
         error as route_error,
         factory::{router_ids, RouterId},
-        AudioFile, RouterFactory, RouterTrait,
+        RouterFactory, RouterTrait,
     },
     server::ServerConfig,
     worker::{ConnectionMode, ProviderType, RuntimeType, WorkerRegistry, WorkerType},

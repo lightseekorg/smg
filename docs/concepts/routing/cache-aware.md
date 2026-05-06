@@ -97,7 +97,7 @@ Multiple users with same instructions. Amortized prefill cost across sessions.
 ## Multi-Tenant Radix Tree Architecture
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/radix-tree.svg" alt="Multi-Tenant Radix Tree Architecture">
+  <img src="../../assets/images/radix-tree.svg" alt="Multi-Tenant Radix Tree Architecture">
 </div>
 
 SMG maintains a **multi-tenant radix tree** that mirrors the KV cache state on each backend worker. This enables true cache-aware routing with 100% prefix match accuracy.
@@ -193,7 +193,7 @@ max_load > balance_rel_threshold × min_load
 ### Selection Flow
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/cache-routing-flow.svg" alt="Cache-Aware Routing Selection Flow">
+  <img src="../../assets/images/cache-routing-flow.svg" alt="Cache-Aware Routing Selection Flow">
 </div>
 
 ---
