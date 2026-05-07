@@ -264,6 +264,49 @@ fn test_no_stream_options_valid_when_stream_disabled() {
     );
 }
 
+#[test]
+fn test_stream_options_continuous_usage_stats_valid() {
+    let req = ChatCompletionRequest {
+        model: "test-model".to_string(),
+        messages: vec![ChatMessage::User {
+            content: MessageContent::Text("hello".to_string()),
+            name: None,
+        }],
+        stream: true,
+        stream_options: Some(StreamOptions {
+            include_usage: Some(true),
+            continuous_usage_stats: Some(true),
+            ..StreamOptions::default()
+        }),
+        ..Default::default()
+    };
+
+    let result = req.validate();
+    assert!(
+        result.is_ok(),
+        "Should accept continuous_usage_stats in stream_options"
+    );
+
+    // Verify the field survives a full serialise → deserialise round-trip
+    let opts = req.stream_options.unwrap();
+    let json = serde_json::to_string(&opts).unwrap();
+    assert!(
+        json.contains("continuous_usage_stats"),
+        "continuous_usage_stats must be present in serialised output"
+    );
+    let decoded: StreamOptions = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        decoded.continuous_usage_stats,
+        Some(true),
+        "continuous_usage_stats must deserialise back to Some(true)"
+    );
+    assert_eq!(
+        decoded.include_usage,
+        Some(true),
+        "include_usage must survive the round-trip unchanged"
+    );
+}
+
 // Tool choice validation tests
 #[test]
 fn test_tool_choice_function_not_found() {
