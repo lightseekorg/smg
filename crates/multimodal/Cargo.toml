@@ -17,7 +17,7 @@ name = "llm_multimodal"
 
 [dependencies]
 base64 = "0.22"
-hf-hub = "0.5.0"
+hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
 bytes = { version = "1.8.0", features = ["serde"] }
 fast_image_resize = { version = "6.0.0", features = ["image"] }
 image = { version = "0.25.4", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "webp"] }
