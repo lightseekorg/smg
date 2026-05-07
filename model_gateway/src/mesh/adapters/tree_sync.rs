@@ -293,10 +293,10 @@ impl Iterator for PagingIter {
         // Pull-then-process avoids holding a `&mut self.stream`
         // borrow across the `&mut self` call to `try_pack_entry`.
         loop {
-            let entry = if let Some(d) = self.deferred.take() {
-                d
-            } else if let Some(s) = self.stream.next() {
-                s
+            let entry = if let Some(entry) = self.deferred.take() {
+                entry
+            } else if let Some(entry) = self.stream.next() {
+                entry
             } else {
                 break;
             };
