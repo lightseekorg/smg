@@ -134,79 +134,126 @@ pub struct TreeRepairPage {
     pub is_last: bool,
 }
 
-/// Chunk a stream of [`RepairEntry`] into byte-capped
-/// [`TreeRepairPage`]s. Always emits at least one page (even on
-/// an empty stream — the empty page acts as an ACK for the
-/// requester and gives d-2c a clean session-cleanup signal).
-///
-/// `start_skip` advances the stream by that many items before
-/// chunking — used to honour [`TreeRepairRequest::cursor`].
-/// Unknown serialized-size estimates default to `entry_budget`
-/// so an estimator failure forces a page break (safe direction —
-/// never silently overflow the cap).
-fn paginate(
-    mut stream: Box<dyn Iterator<Item = RepairEntry> + Send>,
+/// Iterator that chunks a stream of [`RepairEntry`] into
+/// byte-capped [`TreeRepairPage`]s. Always emits at least one
+/// page (even on an empty stream — the empty page acts as an
+/// ACK for the requester and gives d-2c a clean session-cleanup
+/// signal).
+struct PagingIter {
+    stream: Box<dyn Iterator<Item = RepairEntry> + Send>,
+    /// Entry pulled from the stream that didn't fit in the
+    /// previous page's budget; consumed first on the next call.
+    deferred: Option<RepairEntry>,
     session_id: Uuid,
     model_id: String,
     tree_kind: TreeKind,
-    byte_cap: usize,
-    start_skip: u64,
-) -> Vec<TreeRepairPage> {
-    // Best-effort cursor: skip entries the requester already
-    // has. If the tree shrunk between rounds we end early —
-    // the final page just has fewer entries.
-    for _ in 0..start_skip {
-        if stream.next().is_none() {
-            break;
+    /// Per-page budget for entry bytes (cap minus reserved header
+    /// overhead). At least one entry always fits per page even
+    /// if the entry alone exceeds the budget.
+    entry_budget: usize,
+    /// Total entries already consumed across all pages, including
+    /// any entries skipped via the start cursor. Used as the
+    /// `next_cursor` value for the page being built.
+    cumulative_consumed: u64,
+    page_index: u32,
+    finished: bool,
+}
+
+impl PagingIter {
+    fn new(
+        mut stream: Box<dyn Iterator<Item = RepairEntry> + Send>,
+        session_id: Uuid,
+        model_id: String,
+        tree_kind: TreeKind,
+        byte_cap: usize,
+        start_skip: u64,
+    ) -> Self {
+        // Best-effort cursor: skip entries the requester already
+        // has. If the tree shrunk between rounds we end early —
+        // the final page just has fewer entries.
+        for _ in 0..start_skip {
+            if stream.next().is_none() {
+                break;
+            }
+        }
+        Self {
+            stream,
+            deferred: None,
+            session_id,
+            model_id,
+            tree_kind,
+            entry_budget: byte_cap.saturating_sub(TREE_REPAIR_PAGE_HEADER_OVERHEAD),
+            cumulative_consumed: start_skip,
+            page_index: 0,
+            finished: false,
         }
     }
+}
 
-    let entry_budget = byte_cap.saturating_sub(TREE_REPAIR_PAGE_HEADER_OVERHEAD);
-    let mut pages: Vec<TreeRepairPage> = Vec::new();
-    let mut entries: Vec<RepairEntry> = Vec::new();
-    let mut size: usize = 0;
-    let mut page_index: u32 = 0;
+impl Iterator for PagingIter {
+    type Item = TreeRepairPage;
 
-    // `index` is the count of entries consumed BEFORE this
-    // iteration — exactly the cursor a requester would need to
-    // resume from the entry we're about to consider.
-    for (index, entry) in (start_skip..).zip(&mut stream) {
-        let entry_size = bincode::serialized_size(&entry).unwrap_or(entry_budget as u64) as usize;
-        if !entries.is_empty() && size + entry_size > entry_budget {
-            // Current page is full — emit it and start a new one
-            // with this entry as the first item.
-            pages.push(TreeRepairPage {
-                session_id,
-                model_id: model_id.clone(),
-                tree_kind,
-                page_index,
-                entries: std::mem::take(&mut entries),
-                // u64 always bincode-serializes; an empty cursor
-                // decodes back to 0 ("start over") on the
-                // unreachable failure path.
-                next_cursor: Some(bincode::serialize(&index).unwrap_or_default()),
-                is_last: false,
-            });
-            page_index += 1;
-            size = 0;
+    fn next(&mut self) -> Option<TreeRepairPage> {
+        if self.finished {
+            return None;
         }
-        entries.push(entry);
-        size += entry_size;
+
+        let mut entries: Vec<RepairEntry> = Vec::new();
+        let mut size: usize = 0;
+        let mut hit_budget = false;
+
+        // Carry over the entry deferred from the previous page.
+        // Default unknown sizes to the budget so an estimator
+        // failure forces a page break (the safe direction —
+        // never silently overflow the cap). Unreachable for our
+        // schema in practice; defensive against future changes.
+        if let Some(entry) = self.deferred.take() {
+            let entry_size =
+                bincode::serialized_size(&entry).unwrap_or(self.entry_budget as u64) as usize;
+            entries.push(entry);
+            size += entry_size;
+            self.cumulative_consumed += 1;
+        }
+
+        for entry in self.stream.by_ref() {
+            let entry_size =
+                bincode::serialized_size(&entry).unwrap_or(self.entry_budget as u64) as usize;
+            if !entries.is_empty() && size + entry_size > self.entry_budget {
+                self.deferred = Some(entry);
+                hit_budget = true;
+                break;
+            }
+            entries.push(entry);
+            size += entry_size;
+            self.cumulative_consumed += 1;
+        }
+
+        let is_last = !hit_budget;
+        let next_cursor = if is_last {
+            None
+        } else {
+            // u64 always bincode-serializes; if it ever didn't,
+            // an empty cursor decodes back to 0 ("start over") —
+            // safe best-effort fallback rather than a panic.
+            Some(bincode::serialize(&self.cumulative_consumed).unwrap_or_default())
+        };
+
+        let page = TreeRepairPage {
+            session_id: self.session_id,
+            model_id: self.model_id.clone(),
+            tree_kind: self.tree_kind,
+            page_index: self.page_index,
+            entries,
+            next_cursor,
+            is_last,
+        };
+
+        self.page_index += 1;
+        if is_last {
+            self.finished = true;
+        }
+        Some(page)
     }
-
-    // Always emit a terminal page — even empty — so the
-    // requester gets an ACK on empty trees / unknown models.
-    pages.push(TreeRepairPage {
-        session_id,
-        model_id,
-        tree_kind,
-        page_index,
-        entries,
-        next_cursor: None,
-        is_last: true,
-    });
-
-    pages
 }
 
 /// Decode a [`TreeRepairRequest::cursor`] (bincode-encoded `u64`
@@ -542,7 +589,7 @@ impl TreeSyncAdapter {
             .unwrap_or_else(|| Box::new(std::iter::empty()));
 
         let start_skip = decode_cursor(request.cursor.as_deref());
-        let pages = paginate(
+        let pager = PagingIter::new(
             stream,
             request.session_id,
             request.model_id.clone(),
@@ -552,7 +599,7 @@ impl TreeSyncAdapter {
         );
 
         let mut pages_sent: u32 = 0;
-        for page in pages {
+        for page in pager {
             let key = format!(
                 "{REPAIR_PAGE_PREFIX}{}:{}",
                 page.session_id, page.page_index,
@@ -1285,7 +1332,7 @@ mod tests {
     async fn paging_empty_stream_emits_one_is_last_page() {
         // Empty input → one page so the requester sees an ACK.
         let stream: Box<dyn Iterator<Item = RepairEntry> + Send> = Box::new(std::iter::empty());
-        let pages = paginate(
+        let pager = PagingIter::new(
             stream,
             Uuid::now_v7(),
             "m".into(),
@@ -1293,6 +1340,7 @@ mod tests {
             TREE_REPAIR_PAGE_BYTE_CAP,
             0,
         );
+        let pages: Vec<_> = pager.collect();
         assert_eq!(pages.len(), 1);
         assert!(pages[0].is_last);
         assert!(pages[0].entries.is_empty());
@@ -1315,7 +1363,7 @@ mod tests {
         let total = entries.len();
 
         // 4 KB cap; entry size ~1 KB + bincode overhead.
-        let pages = paginate(
+        let pager = PagingIter::new(
             Box::new(entries.clone().into_iter()),
             Uuid::now_v7(),
             "m".into(),
@@ -1323,6 +1371,7 @@ mod tests {
             4 * 1024,
             0,
         );
+        let pages: Vec<_> = pager.collect();
         assert!(pages.len() >= 2, "small cap must produce multiple pages");
 
         // Total entries preserved; only the final page is marked
@@ -1363,7 +1412,7 @@ mod tests {
             path: "x".repeat(8 * 1024),
             tenants: vec![(Arc::from("w1"), 0)],
         };
-        let pages = paginate(
+        let pager = PagingIter::new(
             Box::new(vec![huge].into_iter()),
             Uuid::now_v7(),
             "m".into(),
@@ -1371,6 +1420,7 @@ mod tests {
             1024, // cap < entry size
             0,
         );
+        let pages: Vec<_> = pager.collect();
         assert_eq!(pages.len(), 1, "single entry yields exactly one page");
         assert!(pages[0].is_last);
         assert_eq!(pages[0].entries.len(), 1);
@@ -1387,7 +1437,7 @@ mod tests {
             .collect();
 
         // Full pass.
-        let full: Vec<RepairEntry> = paginate(
+        let full: Vec<RepairEntry> = PagingIter::new(
             Box::new(entries.clone().into_iter()),
             Uuid::now_v7(),
             "m".into(),
@@ -1395,14 +1445,13 @@ mod tests {
             4 * 1024,
             0,
         )
-        .into_iter()
         .flat_map(|p| p.entries)
         .collect();
         assert_eq!(full.len(), entries.len());
         assert_eq!(full, entries);
 
         // Resume halfway: skip 5 → final pass yields the last 5.
-        let resumed: Vec<RepairEntry> = paginate(
+        let resumed: Vec<RepairEntry> = PagingIter::new(
             Box::new(entries.clone().into_iter()),
             Uuid::now_v7(),
             "m".into(),
@@ -1410,7 +1459,6 @@ mod tests {
             4 * 1024,
             5,
         )
-        .into_iter()
         .flat_map(|p| p.entries)
         .collect();
         assert_eq!(resumed.len(), 5);
@@ -1428,7 +1476,7 @@ mod tests {
                 tenants: vec![(Arc::from("w1"), i as u64)],
             })
             .collect();
-        let pages = paginate(
+        let pager = PagingIter::new(
             Box::new(entries.into_iter()),
             Uuid::now_v7(),
             "m".into(),
@@ -1436,6 +1484,7 @@ mod tests {
             4 * 1024,
             0,
         );
+        let pages: Vec<_> = pager.collect();
         let mut running_total = 0usize;
         for (i, p) in pages.iter().enumerate() {
             running_total += p.entries.len();
