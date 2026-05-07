@@ -203,15 +203,21 @@ impl Iterator for PagingIter {
         let mut hit_budget = false;
 
         // Carry over the entry deferred from the previous page.
+        // Default unknown sizes to the budget so an estimator
+        // failure forces a page break (the safe direction —
+        // never silently overflow the cap). Unreachable for our
+        // schema in practice; defensive against future changes.
         if let Some(entry) = self.deferred.take() {
-            let entry_size = bincode::serialized_size(&entry).unwrap_or(0) as usize;
+            let entry_size =
+                bincode::serialized_size(&entry).unwrap_or(self.entry_budget as u64) as usize;
             entries.push(entry);
             size += entry_size;
             self.cumulative_consumed += 1;
         }
 
         for entry in self.stream.by_ref() {
-            let entry_size = bincode::serialized_size(&entry).unwrap_or(0) as usize;
+            let entry_size =
+                bincode::serialized_size(&entry).unwrap_or(self.entry_budget as u64) as usize;
             if !entries.is_empty() && size + entry_size > self.entry_budget {
                 self.deferred = Some(entry);
                 hit_budget = true;
@@ -559,12 +565,13 @@ impl TreeSyncAdapter {
             return;
         }
 
+        // CPU-bound: tree walk + bincode-serialize multi-MB
+        // pages. Park it on the blocking pool so a busy responder
+        // doesn't starve tokio worker threads. Bounded by stream
+        // length; loss on shutdown is fine (the requester retries
+        // or times out via d-2c session cleanup).
         let this = Arc::clone(self);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "per-request paging task is bounded by stream length and exits on iterator exhaustion"
-        )]
-        tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
             this.respond_to_repair_request(request);
         });
     }
