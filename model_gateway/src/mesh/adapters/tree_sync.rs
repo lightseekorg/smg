@@ -25,8 +25,8 @@ use dashmap::DashMap;
 use kv_index::TenantId;
 use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
-use smg_mesh::{DrainHandle, StreamNamespace};
-use tracing::{debug, trace, warn};
+use smg_mesh::{DrainHandle, StreamNamespace, MAX_STREAM_CHUNK_BYTES};
+use tracing::{debug, error, trace, warn};
 use uuid::Uuid;
 
 use crate::policies::{TreeHandle, TreeKind};
@@ -36,9 +36,12 @@ const REPAIR_REQUEST_PREFIX: &str = "tree:req:";
 const REPAIR_PAGE_PREFIX: &str = "tree:page:";
 
 /// Soft cap on the bincode-serialized size of a single
-/// [`TreeRepairPage`]. The responder fills entries until the next
-/// would push the page over this budget. Source: spec §3.1
-/// (ephemeral-stream message budget).
+/// [`TreeRepairPage`]. Spec default (mesh-v2 §3.1,
+/// `max_tree_repair_page_bytes`). The responder fills entries
+/// until the next would push the page over this budget.
+//
+// TODO(d-3): read from the live `MeshConfig.max_tree_repair_page_bytes`
+// once `server.rs` wires the adapter, instead of using a const.
 pub const TREE_REPAIR_PAGE_BYTE_CAP: usize = 2 * 1024 * 1024;
 
 /// Reserved budget for the [`TreeRepairPage`] header (everything
@@ -47,6 +50,22 @@ pub const TREE_REPAIR_PAGE_BYTE_CAP: usize = 2 * 1024 * 1024;
 /// added back. UUID + model_id + tree_kind + counters comfortably
 /// fit; 256 is conservative.
 const TREE_REPAIR_PAGE_HEADER_OVERHEAD: usize = 256;
+
+/// Hard ceiling on the bincode-serialized size of a single
+/// [`TreeRepairPage`]. Above this, the mesh layer's chunking path
+/// fires a `debug_assert!` for `tree:page:*` (spec forbids
+/// multi-chunk reassembly for tree repair) and would split the
+/// value across multiple wire frames in release. The ceiling
+/// already accounts for gossip envelope overhead via
+/// `STREAM_CHUNK_OVERHEAD_MARGIN`.
+const TREE_REPAIR_PAGE_HARD_CEILING: usize = MAX_STREAM_CHUNK_BYTES;
+
+/// Hard ceiling on a single [`RepairEntry`]'s serialized size:
+/// the wire ceiling minus the page header reserve. Entries
+/// exceeding this cannot be shipped at all without triggering
+/// the multi-chunk path.
+const REPAIR_ENTRY_HARD_CEILING: usize =
+    TREE_REPAIR_PAGE_HARD_CEILING - TREE_REPAIR_PAGE_HEADER_OVERHEAD;
 
 /// Live-membership view consumed by the adapter when picking a
 /// peer to send a repair request to. Defined here (not in the
@@ -190,6 +209,70 @@ impl PagingIter {
     }
 }
 
+impl PagingIter {
+    /// Classify and try to pack a single entry into the current
+    /// page being built. Returns `Some(entry)` if the entry didn't
+    /// fit and must be deferred to the next page; otherwise `None`
+    /// (entry was either packed, or dropped above the wire ceiling).
+    ///
+    /// Four cases:
+    ///   - size > `REPAIR_ENTRY_HARD_CEILING`: drop with `error!`
+    ///     (multi-chunk path is forbidden for `tree:page:*`).
+    ///   - page non-empty AND would overflow `entry_budget`:
+    ///     defer to next page.
+    ///   - page empty AND size > `entry_budget`: emit anyway as
+    ///     sole-entry page with `warn!` flagged as spec debt.
+    ///   - otherwise: pack normally.
+    fn try_pack_entry(
+        &mut self,
+        entries: &mut Vec<RepairEntry>,
+        size: &mut usize,
+        entry: RepairEntry,
+    ) -> Option<RepairEntry> {
+        let entry_size =
+            bincode::serialized_size(&entry).unwrap_or(REPAIR_ENTRY_HARD_CEILING as u64) as usize;
+
+        if entry_size > REPAIR_ENTRY_HARD_CEILING {
+            error!(
+                entry_size,
+                ceiling = REPAIR_ENTRY_HARD_CEILING,
+                model_id = %self.model_id,
+                kind = ?self.tree_kind,
+                "RepairEntry exceeds wire-level ceiling; dropping. \
+                 Receiver will not learn this prefix via repair until \
+                 direct traffic populates it. See d-2c follow-up for \
+                 entry fragmentation."
+            );
+            // TODO(d-2c): emit a `router_mesh_tree_repair_drops_total{reason=\"oversized_entry\"}` counter.
+            self.cumulative_consumed += 1;
+            return None;
+        }
+
+        if !entries.is_empty() && *size + entry_size > self.entry_budget {
+            return Some(entry);
+        }
+
+        if entries.is_empty() && entry_size > self.entry_budget {
+            warn!(
+                entry_size,
+                budget = self.entry_budget,
+                ceiling = REPAIR_ENTRY_HARD_CEILING,
+                model_id = %self.model_id,
+                kind = ?self.tree_kind,
+                "tree-repair spec debt: RepairEntry exceeds soft page \
+                 cap; emitting as sole-entry oversized page (still \
+                 under the wire ceiling). See d-2c follow-up for \
+                 entry fragmentation."
+            );
+        }
+
+        entries.push(entry);
+        *size += entry_size;
+        self.cumulative_consumed += 1;
+        None
+    }
+}
+
 impl Iterator for PagingIter {
     type Item = TreeRepairPage;
 
@@ -202,30 +285,36 @@ impl Iterator for PagingIter {
         let mut size: usize = 0;
         let mut hit_budget = false;
 
-        // Carry over the entry deferred from the previous page.
-        // Default unknown sizes to the budget so an estimator
-        // failure forces a page break (the safe direction —
-        // never silently overflow the cap). Unreachable for our
-        // schema in practice; defensive against future changes.
+        // Carry over the entry deferred from the previous page,
+        // running it through the same classification as fresh
+        // pulls (it could itself be oversized if it was deferred
+        // by a sole-entry warn-emit on the previous page).
         if let Some(entry) = self.deferred.take() {
-            let entry_size =
-                bincode::serialized_size(&entry).unwrap_or(self.entry_budget as u64) as usize;
-            entries.push(entry);
-            size += entry_size;
-            self.cumulative_consumed += 1;
+            if let Some(deferred) = self.try_pack_entry(&mut entries, &mut size, entry) {
+                self.deferred = Some(deferred);
+                hit_budget = true;
+            }
         }
 
-        for entry in self.stream.by_ref() {
-            let entry_size =
-                bincode::serialized_size(&entry).unwrap_or(self.entry_budget as u64) as usize;
-            if !entries.is_empty() && size + entry_size > self.entry_budget {
-                self.deferred = Some(entry);
-                hit_budget = true;
-                break;
+        if !hit_budget {
+            // Pull-then-process avoids holding a `&mut self.stream`
+            // borrow across the `&mut self` call to `try_pack_entry`,
+            // so `for` / `while let` over the stream won't compile
+            // here even though clippy prefers them.
+            #[expect(
+                clippy::while_let_loop,
+                reason = "alternative forms hold &mut self.stream across the try_pack_entry &mut self call"
+            )]
+            loop {
+                let Some(entry) = self.stream.next() else {
+                    break;
+                };
+                if let Some(deferred) = self.try_pack_entry(&mut entries, &mut size, entry) {
+                    self.deferred = Some(deferred);
+                    hit_budget = true;
+                    break;
+                }
             }
-            entries.push(entry);
-            size += entry_size;
-            self.cumulative_consumed += 1;
         }
 
         let is_last = !hit_budget;
@@ -1326,6 +1415,82 @@ mod tests {
         let bytes = bincode::serialize(&tk_page).unwrap();
         let decoded: TreeRepairPage = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded, tk_page);
+    }
+
+    #[tokio::test]
+    async fn paging_drops_entries_above_wire_ceiling() {
+        // Entry serialized size > REPAIR_ENTRY_HARD_CEILING must be
+        // dropped, not emitted — otherwise the mesh chunking layer
+        // would split the page across wire frames and the spec
+        // forbids `tree:page:*` from entering that path.
+        let huge_path: String = "x".repeat(REPAIR_ENTRY_HARD_CEILING + 1024);
+        let small = string_entry("small", &[("w1", 1)]);
+        let entries: Vec<RepairEntry> = vec![
+            RepairEntry::String {
+                path: huge_path,
+                tenants: vec![(Arc::from("w1"), 0)],
+            },
+            small.clone(),
+        ];
+
+        let pager = PagingIter::new(
+            Box::new(entries.into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            TREE_REPAIR_PAGE_BYTE_CAP,
+            0,
+        );
+        let pages: Vec<_> = pager.collect();
+        // The huge entry is dropped; only `small` survives. We
+        // should see exactly one page (the terminal one) carrying
+        // just the small entry.
+        let surviving: Vec<RepairEntry> = pages.iter().flat_map(|p| p.entries.clone()).collect();
+        assert_eq!(surviving, vec![small], "huge entry dropped, small survives");
+        assert!(pages.last().unwrap().is_last);
+    }
+
+    #[tokio::test]
+    async fn paging_pages_never_exceed_wire_ceiling() {
+        // Invariant test: no `TreeRepairPage` produced by paging
+        // serializes above `TREE_REPAIR_PAGE_HARD_CEILING`. Mix
+        // entries at three sizes — small, between soft and hard,
+        // and above hard — and assert every emitted page fits.
+        let between = "y".repeat(TREE_REPAIR_PAGE_BYTE_CAP + 16 * 1024); // ~2 MB + 16 KB
+        let above = "z".repeat(REPAIR_ENTRY_HARD_CEILING + 1024);
+
+        let entries: Vec<RepairEntry> = vec![
+            string_entry("small-1", &[("w1", 1)]),
+            RepairEntry::String {
+                path: between,
+                tenants: vec![(Arc::from("w1"), 0)],
+            },
+            string_entry("small-2", &[("w1", 2)]),
+            RepairEntry::String {
+                path: above,
+                tenants: vec![(Arc::from("w1"), 0)],
+            },
+            string_entry("small-3", &[("w1", 3)]),
+        ];
+
+        let pager = PagingIter::new(
+            Box::new(entries.into_iter()),
+            Uuid::now_v7(),
+            "m".into(),
+            TreeKind::String,
+            TREE_REPAIR_PAGE_BYTE_CAP,
+            0,
+        );
+        let pages: Vec<_> = pager.collect();
+        for (i, p) in pages.iter().enumerate() {
+            let size = bincode::serialized_size(p).unwrap() as usize;
+            assert!(
+                size <= TREE_REPAIR_PAGE_HARD_CEILING,
+                "page {i} (size {size}) exceeds hard wire ceiling \
+                 ({TREE_REPAIR_PAGE_HARD_CEILING}) — would invoke \
+                 multi-chunk path forbidden for tree:page:*",
+            );
+        }
     }
 
     #[tokio::test]
