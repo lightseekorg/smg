@@ -48,7 +48,10 @@ pub const TREE_REPAIR_PAGE_BYTE_CAP: usize = 2 * 1024 * 1024;
 /// other than `entries`). Subtracted from the byte cap so the
 /// assembled page stays under the cap once header bytes are
 /// added back. UUID + model_id + tree_kind + counters comfortably
-/// fit; 256 is conservative.
+/// fit; 256 is conservative for realistic model-id lengths
+/// (typical ~30 chars, max ~100). A pathological multi-hundred-
+/// char model_id could theoretically push the actual header
+/// past this budget, but SMG does not produce such ids.
 const TREE_REPAIR_PAGE_HEADER_OVERHEAD: usize = 256;
 
 /// Hard ceiling on the bincode-serialized size of a single
@@ -285,35 +288,22 @@ impl Iterator for PagingIter {
         let mut size: usize = 0;
         let mut hit_budget = false;
 
-        // Carry over the entry deferred from the previous page,
-        // running it through the same classification as fresh
-        // pulls (it could itself be oversized if it was deferred
-        // by a sole-entry warn-emit on the previous page).
-        if let Some(entry) = self.deferred.take() {
+        // Pull deferred entry first, then fall through to the
+        // stream. Both sources share one classification path.
+        // Pull-then-process avoids holding a `&mut self.stream`
+        // borrow across the `&mut self` call to `try_pack_entry`.
+        loop {
+            let entry = if let Some(d) = self.deferred.take() {
+                d
+            } else if let Some(s) = self.stream.next() {
+                s
+            } else {
+                break;
+            };
             if let Some(deferred) = self.try_pack_entry(&mut entries, &mut size, entry) {
                 self.deferred = Some(deferred);
                 hit_budget = true;
-            }
-        }
-
-        if !hit_budget {
-            // Pull-then-process avoids holding a `&mut self.stream`
-            // borrow across the `&mut self` call to `try_pack_entry`,
-            // so `for` / `while let` over the stream won't compile
-            // here even though clippy prefers them.
-            #[expect(
-                clippy::while_let_loop,
-                reason = "alternative forms hold &mut self.stream across the try_pack_entry &mut self call"
-            )]
-            loop {
-                let Some(entry) = self.stream.next() else {
-                    break;
-                };
-                if let Some(deferred) = self.try_pack_entry(&mut entries, &mut size, entry) {
-                    self.deferred = Some(deferred);
-                    hit_budget = true;
-                    break;
-                }
+                break;
             }
         }
 
