@@ -247,7 +247,7 @@ impl ResponseTransformer {
             id: format!("fs_{tool_call_id}"),
             status: FileSearchCallStatus::Completed,
             queries: if queries.is_empty() {
-                obj.and_then(|o| o.get("query"))
+                obj.and_then(|o| o.get(Self::KEY_QUERY))
                     .and_then(|v| v.as_str())
                     .map(|q| vec![q.to_string()])
                     .unwrap_or_default()
@@ -564,19 +564,39 @@ impl ResponseTransformer {
     fn extract_file_results(result: &serde_json::Value) -> Vec<FileSearchResult> {
         result
             .as_object()
-            .and_then(|obj| obj.get("results"))
+            .and_then(|obj| obj.get(Self::KEY_RESULTS))
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(Self::parse_file_result).collect())
             .unwrap_or_default()
     }
 
+    // Deterministic key names for parsing MCP file search result JSON objects.
+    const KEY_RESULTS: &'static str = "results";
+    const KEY_QUERY: &'static str = "query";
+    const KEY_FILE_ID: &'static str = "file_id";
+    const KEY_FILENAME: &'static str = "filename";
+    const KEY_TEXT: &'static str = "text";
+    const KEY_SCORE: &'static str = "score";
+
     /// Parse a file search result from JSON.
     fn parse_file_result(item: &serde_json::Value) -> Option<FileSearchResult> {
         let obj = item.as_object()?;
-        let file_id = obj.get("file_id").and_then(|v| v.as_str())?.to_string();
-        let filename = obj.get("filename").and_then(|v| v.as_str())?.to_string();
-        let text = obj.get("text").and_then(|v| v.as_str()).map(String::from);
-        let score = obj.get("score").and_then(|v| v.as_f64()).map(|f| f as f32);
+        let file_id = obj
+            .get(Self::KEY_FILE_ID)
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let filename = obj
+            .get(Self::KEY_FILENAME)
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let text = obj
+            .get(Self::KEY_TEXT)
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let score = obj
+            .get(Self::KEY_SCORE)
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32);
 
         Some(FileSearchResult {
             file_id,
