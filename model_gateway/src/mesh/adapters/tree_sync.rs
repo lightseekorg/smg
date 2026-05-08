@@ -689,6 +689,7 @@ impl TreeSyncAdapter {
                     warn!(
                         session_id = %page.session_id,
                         page_index = page.page_index,
+                        entry_count = page.entries.len(),
                         %err,
                         "failed to serialize TreeRepairPage; skipping",
                     );
