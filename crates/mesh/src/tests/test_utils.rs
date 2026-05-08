@@ -9,11 +9,7 @@ use std::{
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
 
-use crate::{
-    service::{gossip::NodeState, ClusterState},
-    stores::StateStores,
-    sync::MeshSyncManager,
-};
+use crate::service::{gossip::NodeState, ClusterState};
 
 /// Bind to an ephemeral port and return the listener + address.
 /// The caller must keep the listener alive and pass it to `mesh_run!`
@@ -40,17 +36,6 @@ where
     }
 }
 
-/// Create test StateStores with a given node name
-pub fn create_test_stores(self_name: String) -> Arc<StateStores> {
-    Arc::new(StateStores::with_self_name(self_name))
-}
-
-/// Create test MeshSyncManager
-pub fn create_test_sync_manager(self_name: String) -> Arc<MeshSyncManager> {
-    let stores = create_test_stores(self_name.clone());
-    Arc::new(MeshSyncManager::new(stores, self_name))
-}
-
 /// Create test cluster state with given nodes
 pub fn create_test_cluster_state(
     nodes: Vec<(String, String, i32)>, // (name, address, status)
@@ -74,18 +59,6 @@ pub fn create_test_cluster_state(
 #[cfg(test)]
 mod test_utils_tests {
     use super::*;
-
-    #[test]
-    fn test_create_test_stores() {
-        let stores = create_test_stores("test_node".to_string());
-        assert!(!stores.rate_limit.is_owner("key1"));
-    }
-
-    #[test]
-    fn test_create_test_sync_manager() {
-        let manager = create_test_sync_manager("test_node".to_string());
-        assert_eq!(manager.self_name(), "test_node");
-    }
 
     #[test]
     fn test_create_test_cluster_state() {

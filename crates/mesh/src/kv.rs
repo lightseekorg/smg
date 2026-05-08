@@ -6,7 +6,7 @@
 //!
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     chunk_assembler::ChunkAssembler,
-    crdt_kv::{CrdtOrMap, MergeStrategy},
+    crdt_kv::{CrdtOrMap, MergeStrategy, OperationLog},
 };
 
 // ============================================================================
@@ -461,9 +461,7 @@ pub struct MeshKV {
     /// Pre-created at `new()` time so every gateway (admin API,
     /// middleware, adapters) can read and write config without the
     /// application having to remember to `configure_crdt_prefix`
-    /// explicitly. Also used by the gossip receive path to mirror
-    /// incoming v1 `StoreType::App` entries into `config:{key}` for
-    /// rolling-upgrade compatibility.
+    /// explicitly.
     configs: Arc<CrdtNamespace>,
     /// Server name for this node (used to derive replica_id).
     server_name: String,
@@ -528,6 +526,51 @@ impl MeshKV {
     /// mpsc channels without reaching into internal registries.
     pub(crate) fn notify_subscribers(&self, key: &str, value: Option<Vec<Bytes>>) {
         self.subscriber_registry.notify(key, value);
+    }
+
+    /// Current mutation generation for all CRDT namespaces. Sender tasks use
+    /// this to avoid re-sending an unchanged operation log on every tick.
+    pub(crate) fn crdt_generation(&self) -> u64 {
+        self.store.generation()
+    }
+
+    /// Clone the CRDT operation log for transport to a peer.
+    pub(crate) fn crdt_operation_log(&self) -> OperationLog {
+        self.store.get_operation_log()
+    }
+
+    /// Merge a peer's CRDT operation log and notify namespace subscribers for
+    /// any keys whose visible value changed.
+    pub(crate) fn apply_crdt_operation_log(&self, log: &OperationLog) {
+        if log.is_empty() {
+            return;
+        }
+
+        let touched_keys = log
+            .operations()
+            .iter()
+            .map(|operation| operation.key().to_string())
+            .collect::<HashSet<_>>();
+        let before = touched_keys
+            .iter()
+            .map(|key| (key.clone(), self.store.get(key)))
+            .collect::<HashMap<_, _>>();
+
+        self.store.merge(log);
+
+        for key in touched_keys {
+            let after = self.store.get(&key);
+            if before.get(&key).is_some_and(|value| value == &after) {
+                continue;
+            }
+            self.subscriber_registry
+                .notify(&key, after.map(|value| vec![Bytes::from(value)]));
+        }
+    }
+
+    /// Remove old CRDT tombstones from the shared store.
+    pub(crate) fn gc_tombstones(&self) -> usize {
+        self.store.gc_tombstones()
     }
 
     /// Derive replica_id from server_name using blake3 hash truncated to u64.

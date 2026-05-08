@@ -719,7 +719,7 @@ impl TreeSyncAdapter {
     /// Buffer a local tree insert for the next gossip round. Hot
     /// path — keep it cheap; the drain does the serialisation.
     /// `delta.node_hash` must be non-zero: 0 is
-    /// `smg_mesh::tree_ops::GLOBAL_EVICTION_HASH` (producers remap
+    /// `smg_mesh::GLOBAL_EVICTION_HASH` (producers remap
     /// 0→1 to keep the space disjoint).
     pub fn on_local_insert(&self, model_id: &str, delta: TreeDelta) {
         debug_assert!(

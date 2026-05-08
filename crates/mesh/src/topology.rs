@@ -16,7 +16,7 @@ use std::{
 use parking_lot::RwLock;
 use tracing::debug;
 
-use super::{service::ClusterState, stores::MembershipState};
+use super::{service::ClusterState, types::MembershipState};
 
 /// Topology configuration
 #[derive(Debug, Clone)]

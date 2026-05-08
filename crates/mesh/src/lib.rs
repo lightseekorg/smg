@@ -8,23 +8,20 @@
 
 mod chunk_assembler;
 mod chunking;
-mod collector;
-mod consistent_hash;
 mod controller;
 mod crdt_kv;
 mod flow_control;
+mod hash;
 pub mod kv;
 mod metrics;
 mod mtls;
 mod node_state_machine;
 mod partition;
 mod ping_server;
-mod rate_limit_window;
 mod service;
-mod stores;
-mod sync;
+mod stream_sync;
 mod topology;
-mod tree_ops;
+mod types;
 
 // Internal tests module with full access to private types
 #[cfg(test)]
@@ -35,8 +32,9 @@ mod tests;
 pub use chunking::MAX_STREAM_CHUNK_BYTES;
 pub use crdt_kv::{
     decode as decode_epoch_count, encode as encode_epoch_count, merge as merge_epoch_max_wins,
-    CrdtOrMap, EpochCount, MergeStrategy, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
+    CrdtOrMap, EpochCount, MergeStrategy, EPOCH_MAX_WINS_ENCODED_LEN,
 };
+pub use hash::{hash_node_path, hash_token_path, GLOBAL_EVICTION_HASH};
 pub use kv::{
     CrdtNamespace, DrainHandle, MeshKV, StreamConfig, StreamDrainFn, StreamNamespace,
     StreamRouting, Subscription,
@@ -44,17 +42,8 @@ pub use kv::{
 pub use metrics::init_mesh_metrics;
 pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};
 pub use partition::PartitionDetector;
-pub use rate_limit_window::RateLimitWindow;
 pub use service::{gossip, ClusterState, MeshServerBuilder, MeshServerConfig, MeshServerHandler};
-pub use stores::{
-    AppState, MembershipState, RateLimitConfig, StateStores, WorkerState,
-    GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
-};
-pub use sync::{
-    MeshSyncManager, OptionalMeshSyncManager, TreeStateSubscriber, WorkerStateSubscriber,
-};
-pub use tree_ops::{
-    hash_node_path, hash_token_path, lz4_compress, lz4_decompress, TenantDelta, TenantEvict,
-    TenantInsert, TreeInsertOp, TreeKey, TreeOperation, TreeRemoveOp, TreeState,
-    GLOBAL_EVICTION_HASH,
+pub use types::{
+    MembershipState, RateLimitConfig, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY,
+    GLOBAL_RATE_LIMIT_KEY,
 };

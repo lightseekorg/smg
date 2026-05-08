@@ -10,10 +10,8 @@ use std::{
 use parking_lot::RwLock;
 use tracing::info;
 
-use super::stores::StateStores;
-
 /// Node readiness state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeReadiness {
     /// Node is not ready (initial state)
     NotReady,
@@ -127,17 +125,15 @@ pub struct NodeStateMachine {
     config: ConvergenceConfig,
     convergence_tracker: Arc<RwLock<ConvergenceTracker>>,
     snapshot_start_time: Arc<RwLock<Option<Instant>>>,
-    stores: Arc<StateStores>,
 }
 
 impl NodeStateMachine {
-    pub fn new(stores: Arc<StateStores>, config: ConvergenceConfig) -> Self {
+    pub fn new(config: ConvergenceConfig) -> Self {
         Self {
             readiness: Arc::new(RwLock::new(NodeReadiness::NotReady)),
             config,
             convergence_tracker: Arc::new(RwLock::new(ConvergenceTracker::new())),
             snapshot_start_time: Arc::new(RwLock::new(None)),
-            stores,
         }
     }
 
@@ -218,13 +214,6 @@ impl NodeStateMachine {
         self.readiness() == NodeReadiness::Ready
     }
 
-    /// Check if stores are empty (need snapshot)
-    pub fn needs_snapshot(&self) -> bool {
-        self.stores.membership.is_empty()
-            || self.stores.worker.is_empty()
-            || self.stores.policy.is_empty()
-    }
-
     /// Calculate a simple hash of current state (for convergence detection)
     fn calculate_state_hash(&self) -> u64 {
         use std::{
@@ -233,10 +222,7 @@ impl NodeStateMachine {
         };
 
         let mut hasher = DefaultHasher::new();
-        self.stores.membership.len().hash(&mut hasher);
-        self.stores.worker.len().hash(&mut hasher);
-        self.stores.policy.len().hash(&mut hasher);
-        self.stores.app.len().hash(&mut hasher);
+        self.readiness().hash(&mut hasher);
         hasher.finish()
     }
 
@@ -250,10 +236,7 @@ impl NodeStateMachine {
 
 impl Default for NodeStateMachine {
     fn default() -> Self {
-        Self::new(
-            Arc::new(StateStores::default()),
-            ConvergenceConfig::default(),
-        )
+        Self::new(ConvergenceConfig::default())
     }
 }
 
@@ -262,10 +245,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-
-    fn create_test_stores() -> Arc<StateStores> {
-        Arc::new(StateStores::default())
-    }
 
     fn create_test_config() -> ConvergenceConfig {
         ConvergenceConfig {
@@ -294,9 +273,8 @@ mod tests {
 
     #[test]
     fn test_node_state_machine_initial_state() {
-        let stores = create_test_stores();
         let config = create_test_config();
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         assert_eq!(sm.readiness(), NodeReadiness::NotReady);
         assert!(!sm.is_ready());
@@ -304,9 +282,8 @@ mod tests {
 
     #[test]
     fn test_state_transition_flow() {
-        let stores = create_test_stores();
         let config = create_test_config();
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         // Start joining
         sm.start_joining();
@@ -329,9 +306,8 @@ mod tests {
 
     #[test]
     fn test_state_transition_guards() {
-        let stores = create_test_stores();
         let config = create_test_config();
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         // Cannot start snapshot pull without joining first
         sm.start_snapshot_pull();
@@ -349,10 +325,9 @@ mod tests {
 
     #[test]
     fn test_snapshot_timeout() {
-        let stores = create_test_stores();
         let mut config = create_test_config();
         config.snapshot_timeout = Duration::from_millis(50);
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         sm.start_joining();
         sm.start_snapshot_pull();
@@ -364,60 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_snapshot() {
-        let stores = create_test_stores();
-        let config = create_test_config();
-        let sm = NodeStateMachine::new(stores.clone(), config);
-
-        // Empty stores need snapshot
-        assert!(sm.needs_snapshot());
-
-        // Add some data to stores
-        use super::super::stores::{MembershipState, PolicyState, WorkerState};
-
-        let _ = stores.membership.insert(
-            "node1".to_string(),
-            MembershipState {
-                name: "node1".to_string(),
-                address: "127.0.0.1:8080".to_string(),
-                status: 1,
-                version: 1,
-                metadata: Default::default(),
-            },
-        );
-
-        let _ = stores.worker.insert(
-            "worker1".to_string(),
-            WorkerState {
-                worker_id: "worker1".to_string(),
-                model_id: "model1".to_string(),
-                url: "http://localhost:8000".to_string(),
-                health: true,
-                load: 0.5,
-                version: 1,
-                spec: vec![],
-            },
-        );
-
-        let _ = stores.policy.insert(
-            "policy1".to_string(),
-            PolicyState {
-                model_id: "model1".to_string(),
-                policy_type: "round_robin".to_string(),
-                config: vec![],
-                version: 1,
-            },
-        );
-
-        // Now should not need snapshot
-        assert!(!sm.needs_snapshot());
-    }
-
-    #[test]
     fn test_record_state_update_not_converging() {
-        let stores = create_test_stores();
         let config = create_test_config();
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         // Should return false when not in converging state
         assert!(!sm.record_state_update());
@@ -426,11 +350,10 @@ mod tests {
 
     #[test]
     fn test_convergence_detection() {
-        let stores = create_test_stores();
         let mut config = create_test_config();
         config.convergence_window = Duration::from_millis(50);
         config.min_stable_updates = 2;
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         // Transition to converging state
         sm.start_joining();
@@ -458,11 +381,10 @@ mod tests {
 
     #[test]
     fn test_convergence_reset_on_state_change() {
-        let stores = create_test_stores();
         let mut config = create_test_config();
         config.convergence_window = Duration::from_millis(100);
         config.min_stable_updates = 2;
-        let sm = NodeStateMachine::new(stores.clone(), config);
+        let sm = NodeStateMachine::new(config);
 
         sm.start_joining();
         sm.start_snapshot_pull();
@@ -471,18 +393,11 @@ mod tests {
         // Record update
         sm.record_state_update();
 
-        // Change state by adding data
-        use super::super::stores::AppState;
-        let _ = stores.app.insert(
-            "app1".to_string(),
-            AppState {
-                key: "app1".to_string(),
-                value: vec![1, 2, 3],
-                version: 1,
-            },
-        );
+        sm.reset();
+        sm.start_joining();
+        sm.start_snapshot_pull();
+        sm.start_converging();
 
-        // Record update with changed state
         sm.record_state_update();
 
         // The stable count should be reset
@@ -494,9 +409,8 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        let stores = create_test_stores();
         let config = create_test_config();
-        let sm = NodeStateMachine::new(stores, config);
+        let sm = NodeStateMachine::new(config);
 
         // Go through states
         sm.start_joining();
@@ -515,24 +429,11 @@ mod tests {
 
     #[test]
     fn test_calculate_state_hash() {
-        let stores = create_test_stores();
         let config = create_test_config();
-        let sm = NodeStateMachine::new(stores.clone(), config);
+        let sm = NodeStateMachine::new(config);
 
         let hash1 = sm.calculate_state_hash();
-
-        // Add some data
-        use super::super::stores::AppState;
-        let _ = stores.app.insert(
-            "app1".to_string(),
-            AppState {
-                key: "app1".to_string(),
-                value: vec![],
-                version: 1,
-            },
-        );
-
-        // Hash should change
+        sm.start_joining();
         let hash2 = sm.calculate_state_hash();
         assert_ne!(hash1, hash2);
     }

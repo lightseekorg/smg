@@ -106,6 +106,7 @@ pub fn record_convergence_latency(duration: Duration) {
 }
 
 /// Record batch transmission
+#[expect(dead_code)]
 pub fn record_batch_sent(peer: &str, batch_size: usize) {
     counter!("router_mesh_batches_total",
         "direction" => "sent",
@@ -135,6 +136,7 @@ pub fn record_batch_received(peer: &str, batch_size: usize) {
 }
 
 /// Record snapshot trigger
+#[expect(dead_code)]
 pub fn record_snapshot_trigger(store: &str, reason: &str) {
     counter!("router_mesh_snapshot_trigger_total",
         "store" => store.to_string(),
@@ -144,6 +146,7 @@ pub fn record_snapshot_trigger(store: &str, reason: &str) {
 }
 
 /// Record snapshot generation duration
+#[expect(dead_code)]
 pub fn record_snapshot_duration(store: &str, duration: Duration) {
     histogram!("router_mesh_snapshot_duration_seconds",
         "store" => store.to_string()
@@ -152,6 +155,7 @@ pub fn record_snapshot_duration(store: &str, duration: Duration) {
 }
 
 /// Record snapshot bytes
+#[expect(dead_code)]
 pub fn record_snapshot_bytes(store: &str, direction: &str, bytes: usize) {
     counter!("router_mesh_snapshot_bytes_total",
         "store" => store.to_string(),
@@ -169,6 +173,7 @@ pub fn update_peer_connections(peer: &str, connected: bool) {
 }
 
 /// Record peer reconnection
+#[expect(dead_code)]
 pub fn record_peer_reconnect(peer: &str) {
     counter!("router_mesh_peer_reconnects_total",
         "peer" => peer.to_string()
@@ -239,6 +244,7 @@ pub fn record_sync_round_duration(peer: &str, duration: Duration) {
 }
 
 /// Record mesh sync batch size in bytes
+#[expect(dead_code)]
 pub fn record_sync_batch_bytes(peer: &str, store: &str, bytes: usize) {
     histogram!("router_mesh_sync_batch_bytes",
         "peer" => peer.to_string(),
@@ -248,6 +254,7 @@ pub fn record_sync_batch_bytes(peer: &str, store: &str, bytes: usize) {
 }
 
 /// Record mesh store sizes for monitoring unbounded growth
+#[expect(dead_code)]
 pub fn record_store_sizes(
     worker_count: usize,
     policy_count: usize,

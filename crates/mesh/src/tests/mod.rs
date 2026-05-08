@@ -5,6 +5,4 @@
 
 #[cfg(test)]
 mod chunking_integration;
-#[cfg(test)]
-mod comprehensive;
 pub(crate) mod test_utils;
