@@ -5,6 +5,17 @@ use pyo3::prelude::*;
 use smg::*;
 use smg_auth as auth;
 
+/// Wrap a Python-provided single label-selector map into the Rust-side list of
+/// pools. An empty map yields an empty list so `Default::default()` semantics
+/// are preserved (i.e. "no discovery filtering configured").
+fn wrap_selector_as_pool(selector: &HashMap<String, String>) -> Vec<HashMap<String, String>> {
+    if selector.is_empty() {
+        Vec::new()
+    } else {
+        vec![selector.clone()]
+    }
+}
+
 // Define the enums with PyO3 bindings
 #[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
@@ -577,14 +588,18 @@ impl Router {
         let policy = convert_policy(&self.policy)?;
 
         let discovery = if self.service_discovery {
+            // The Python API still exposes a single HashMap per selector kind.
+            // Wrap each into a single-pool Vec to match the Rust-side plural
+            // schema. Multi-pool usage from Python can be added later by
+            // accepting Vec<HashMap> here.
             Some(DiscoveryConfig {
                 enabled: true,
                 namespace: self.service_discovery_namespace.clone(),
                 port: self.service_discovery_port,
                 check_interval_secs: 60,
-                selector: self.selector.clone(),
-                prefill_selector: self.prefill_selector.clone(),
-                decode_selector: self.decode_selector.clone(),
+                selectors: wrap_selector_as_pool(&self.selector),
+                prefill_selectors: wrap_selector_as_pool(&self.prefill_selector),
+                decode_selectors: wrap_selector_as_pool(&self.decode_selector),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: self.router_selector.clone(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
@@ -1112,13 +1127,13 @@ impl Router {
         let service_discovery_config = if self.service_discovery {
             Some(service_discovery::ServiceDiscoveryConfig {
                 enabled: true,
-                selector: self.selector.clone(),
+                selectors: wrap_selector_as_pool(&self.selector),
                 check_interval: std::time::Duration::from_secs(60),
                 port: self.service_discovery_port,
                 namespace: self.service_discovery_namespace.clone(),
                 pd_mode: self.pd_disaggregation,
-                prefill_selector: self.prefill_selector.clone(),
-                decode_selector: self.decode_selector.clone(),
+                prefill_selectors: wrap_selector_as_pool(&self.prefill_selector),
+                decode_selectors: wrap_selector_as_pool(&self.decode_selector),
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: self.router_selector.clone(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
