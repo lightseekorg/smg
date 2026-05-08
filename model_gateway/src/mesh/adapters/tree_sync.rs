@@ -390,11 +390,6 @@ struct RepairProgress {
     /// is complete only when every page through this index has
     /// been applied.
     terminal_page_index: Option<u32>,
-    /// True once an `is_last=true` page has been applied. The
-    /// session entry is removed from `outstanding_repairs`
-    /// shortly after this is set; this flag exists primarily
-    /// so concurrent reads can observe completion.
-    completed: bool,
 }
 
 impl RepairProgress {
@@ -407,7 +402,6 @@ impl RepairProgress {
             retry_count: 0,
             applied: BTreeMap::new(),
             terminal_page_index: None,
-            completed: false,
         }
     }
 
@@ -1061,7 +1055,7 @@ impl TreeSyncAdapter {
             .iter()
             .filter(|e| {
                 let p = e.value();
-                !p.completed && now.duration_since(p.last_activity_at) >= retry_timeout
+                now.duration_since(p.last_activity_at) >= retry_timeout
             })
             .map(|e| e.key().clone())
             .collect();
@@ -1167,7 +1161,6 @@ impl TreeSyncAdapter {
                         retry_count: retry_count + 1,
                         applied: BTreeMap::new(),
                         terminal_page_index: None,
-                        completed: false,
                     };
                     true
                 });
@@ -2401,8 +2394,8 @@ mod tests {
         assert_eq!(calls[0].session_id, session);
         assert_eq!(calls[0].page_index, 0);
 
-        // Session progress recorded with cursor and not yet
-        // marked complete.
+        // Session progress recorded with cursor and no terminal
+        // page observed yet.
         let entry = adapter
             .outstanding_repairs
             .get(&("model-1".to_string(), TreeKind::String))
@@ -2412,7 +2405,8 @@ mod tests {
             entry.contiguous_cursor(),
             Some(bincode::serialize(&1u64).unwrap())
         );
-        assert!(!entry.completed);
+        assert_eq!(entry.terminal_page_index, None);
+        assert!(!entry.is_contiguously_complete());
     }
 
     #[tokio::test]
