@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
@@ -9,7 +10,9 @@ use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info};
 
 use super::{
+    epoch_max_wins,
     kv_store::KvStore,
+    merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
     replica::{LamportClock, ReplicaId},
 };
@@ -83,6 +86,7 @@ pub struct CrdtOrMap {
     store: KvStore,
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>, // Key to list of versions
     key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,    // Per-key critical section lock
+    merge_strategies: Arc<RwLock<Vec<(String, MergeStrategy)>>>,
     replica_id: ReplicaId,
     clock: LamportClock,
     operation_log: Arc<RwLock<OperationLog>>,
@@ -101,10 +105,43 @@ impl CrdtOrMap {
             store: KvStore::new(),
             metadata: Arc::new(DashMap::new()),
             key_locks: Arc::new(DashMap::new()),
+            merge_strategies: Arc::new(RwLock::new(Vec::new())),
             replica_id,
             clock: LamportClock::new(),
             operation_log: Arc::new(RwLock::new(OperationLog::new())),
         }
+    }
+
+    /// Register the merge strategy for a key prefix.
+    pub(crate) fn register_merge_strategy(&self, prefix: String, strategy: MergeStrategy) {
+        let mut strategies = self.merge_strategies.write();
+        if let Some((_, existing)) = strategies
+            .iter_mut()
+            .find(|(registered_prefix, _)| registered_prefix == &prefix)
+        {
+            *existing = strategy;
+        } else {
+            strategies.push((prefix, strategy));
+        }
+        strategies.sort_by_key(|(prefix, _)| Reverse(prefix.len()));
+    }
+
+    fn merge_strategy_for_key(&self, key: &str) -> MergeStrategy {
+        self.merge_strategies
+            .read()
+            .iter()
+            .find_map(|(prefix, strategy)| key.starts_with(prefix).then(|| strategy.clone()))
+            .unwrap_or(MergeStrategy::LastWriterWins)
+    }
+
+    fn compact_operation_log(&self, operation_log: &mut OperationLog) {
+        operation_log.compact_with_strategy(|key| self.merge_strategy_for_key(key));
+    }
+
+    fn append_operation(&self, operation: Operation) {
+        self.operation_log
+            .write()
+            .append_with_strategy(operation, |key| self.merge_strategy_for_key(key));
     }
 
     fn key_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
@@ -151,7 +188,7 @@ impl CrdtOrMap {
 
             let operation =
                 Operation::insert(key.clone(), value_for_operation, timestamp, self.replica_id);
-            self.operation_log.write().append(operation);
+            self.append_operation(operation);
 
             debug!(
                 "Insert: key={}, timestamp={}, replica={}",
@@ -182,7 +219,7 @@ impl CrdtOrMap {
 
         let removed = if self.record_remove_metadata(key, timestamp, self.replica_id) {
             let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
-            self.operation_log.write().append(operation);
+            self.append_operation(operation);
             self.store.remove(key)
         } else {
             None
@@ -341,7 +378,7 @@ impl CrdtOrMap {
         let unseen_operations: Vec<Operation> = {
             let mut local_log = self.operation_log.write();
             local_log.merge(log);
-            local_log.compact();
+            self.compact_operation_log(&mut local_log);
 
             let mut unseen: Vec<Operation> = local_log
                 .operations()
@@ -377,8 +414,25 @@ impl CrdtOrMap {
         let key_lock = self.key_lock_for(key);
         let key_guard = key_lock.lock();
 
-        if self.record_insert_metadata(key, timestamp, replica_id) {
-            self.store.insert(key.to_string(), value);
+        match self.merge_strategy_for_key(key) {
+            MergeStrategy::EpochMaxWins => {
+                if self.record_epoch_insert_metadata(key, timestamp, replica_id) {
+                    let current = self.store.get(key);
+                    let merged = if let Some(local) = current.as_deref() {
+                        epoch_max_wins::merge(local, &value)
+                    } else {
+                        value
+                    };
+                    if current.as_deref() != Some(merged.as_slice()) {
+                        self.store.insert(key.to_string(), merged);
+                    }
+                }
+            }
+            MergeStrategy::LastWriterWins | MergeStrategy::MaxValueWins => {
+                if self.record_insert_metadata(key, timestamp, replica_id) {
+                    self.store.insert(key.to_string(), value);
+                }
+            }
         }
 
         drop(key_guard);
@@ -415,6 +469,45 @@ impl CrdtOrMap {
 
                 if current_winner.is_some_and(|winner| winner.is_newer_than(timestamp, replica_id))
                 {
+                    Self::compact_key_metadata(versions);
+                    return false;
+                }
+
+                versions.push(new_metadata);
+                Self::compact_key_metadata(versions);
+                true
+            }
+            MapEntry::Vacant(entry) => {
+                entry.insert(vec![new_metadata]);
+                true
+            }
+        }
+    }
+
+    fn record_epoch_insert_metadata(
+        &self,
+        key: &str,
+        timestamp: u64,
+        replica_id: ReplicaId,
+    ) -> bool {
+        let new_metadata = ValueMetadata::new(timestamp, replica_id);
+
+        match self.metadata.entry(key.to_string()) {
+            MapEntry::Occupied(mut entry) => {
+                let versions = entry.get_mut();
+
+                let has_existing_entry = versions
+                    .iter()
+                    .any(|v| !v.is_tombstone && v.matches_version(timestamp, replica_id));
+                if has_existing_entry {
+                    Self::compact_key_metadata(versions);
+                    return false;
+                }
+
+                let has_newer_tombstone = versions
+                    .iter()
+                    .any(|v| v.is_tombstone && v.is_newer_than(timestamp, replica_id));
+                if has_newer_tombstone {
                     Self::compact_key_metadata(versions);
                     return false;
                 }

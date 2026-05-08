@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::replica::ReplicaId;
+use super::{epoch_max_wins, merge_strategy::MergeStrategy, replica::ReplicaId};
 
 // ============================================================================
 // Operation Type Definition - Atomic Unit of State Change
@@ -112,9 +112,16 @@ impl OperationLog {
     /// new appends, not on every append. If compaction doesn't reduce below
     /// threshold (very high key cardinality), the oldest entries are truncated.
     pub fn append(&mut self, operation: Operation) {
+        self.append_with_strategy(operation, |_| MergeStrategy::LastWriterWins);
+    }
+
+    pub(super) fn append_with_strategy<F>(&mut self, operation: Operation, strategy_for_key: F)
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
         self.operations.push(operation);
         if self.operations.len() > Self::AUTO_COMPACT_THRESHOLD {
-            self.compact();
+            self.compact_with_strategy(strategy_for_key);
             // If still over threshold after dedup (extremely high key cardinality
             // >10K unique keys), truncate oldest entries. This drops state for the
             // oldest keys, which will be re-synced from peers on the next merge.
@@ -159,16 +166,51 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
-    fn latest_operations_by_key(&self) -> HashMap<String, Operation> {
+    fn candidate_wins(current: &Operation, candidate: &Operation, strategy: MergeStrategy) -> bool {
+        match strategy {
+            MergeStrategy::EpochMaxWins => {
+                if let (
+                    Operation::Insert {
+                        value: current_value,
+                        ..
+                    },
+                    Operation::Insert {
+                        value: candidate_value,
+                        ..
+                    },
+                ) = (current, candidate)
+                {
+                    let merged = epoch_max_wins::merge(current_value, candidate_value);
+                    if merged == *candidate_value && merged != *current_value {
+                        return true;
+                    }
+                    if merged == *current_value && merged != *candidate_value {
+                        return false;
+                    }
+                }
+            }
+            MergeStrategy::LastWriterWins | MergeStrategy::MaxValueWins => {}
+        }
+
+        (candidate.timestamp(), candidate.replica_id())
+            > (current.timestamp(), current.replica_id())
+    }
+
+    fn latest_operations_by_key_with_strategy<F>(
+        &self,
+        strategy_for_key: F,
+    ) -> HashMap<String, Operation>
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
         let mut latest_by_key: HashMap<String, Operation> = HashMap::new();
 
         for operation in &self.operations {
             let key = operation.key().to_string();
             match latest_by_key.get(&key) {
                 Some(current)
-                    if (current.timestamp(), current.replica_id())
-                        >= (operation.timestamp(), operation.replica_id()) => {}
-                _ => {
+                    if !Self::candidate_wins(current, operation, strategy_for_key(&key)) => {}
+                Some(_) | None => {
                     latest_by_key.insert(key, operation.clone());
                 }
             }
@@ -185,8 +227,15 @@ impl OperationLog {
     /// `apply_operation` and `operation_id` guards keep state semantics safe.
     /// Stronger concurrency retention would require vector-clock/version-vector metadata.
     pub fn compact(&mut self) {
+        self.compact_with_strategy(|_| MergeStrategy::LastWriterWins);
+    }
+
+    pub(super) fn compact_with_strategy<F>(&mut self, strategy_for_key: F)
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
         self.operations = self
-            .latest_operations_by_key()
+            .latest_operations_by_key_with_strategy(strategy_for_key)
             .into_values()
             .collect::<Vec<_>>();
         self.operations
@@ -201,7 +250,8 @@ impl OperationLog {
 
     /// Build a latest-state snapshot and clear the operation log.
     pub fn snapshot_and_truncate(&mut self) -> HashMap<String, Operation> {
-        let snapshot = self.latest_operations_by_key();
+        let snapshot =
+            self.latest_operations_by_key_with_strategy(|_| MergeStrategy::LastWriterWins);
         self.operations.clear();
         snapshot
     }
