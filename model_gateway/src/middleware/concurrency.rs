@@ -35,6 +35,12 @@ use crate::{
     server::AppState,
 };
 
+const CONFIG_PREFIX: &str = "config:";
+
+fn config_key(key: &str) -> String {
+    format!("{CONFIG_PREFIX}{key}")
+}
+
 /// A body wrapper that holds a token and returns it when the body is fully consumed or dropped.
 /// This ensures that for streaming responses, the token is only returned after the entire
 /// stream has been sent to the client.
@@ -209,7 +215,12 @@ pub async fn concurrency_limit_middleware(
         let config = app_state
             .mesh_handler
             .as_ref()
-            .and_then(|handler| handler.read_data(GLOBAL_RATE_LIMIT_KEY.to_string()))
+            .and_then(|handler| {
+                handler
+                    .mesh_kv()
+                    .configs()
+                    .get(&config_key(GLOBAL_RATE_LIMIT_KEY))
+            })
             .and_then(|value| serde_json::from_slice::<RateLimitConfig>(&value).ok())
             .unwrap_or_default();
         let (is_exceeded, current_count, limit) = mesh_adapters.rate_limit_sync.check_counter(
@@ -217,24 +228,6 @@ pub async fn concurrency_limit_middleware(
             1,
             config.limit_per_second,
         );
-        if is_exceeded {
-            debug!(
-                "Global rate limit exceeded: {}/{} req/s",
-                current_count, limit
-            );
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": "Rate limit exceeded",
-                    "current_count": current_count,
-                    "limit": limit
-                })),
-            )
-                .into_response();
-        }
-    } else if let Some(mesh_handler) = &app_state.mesh_handler {
-        let (is_exceeded, current_count, limit) =
-            mesh_handler.sync_manager.check_global_rate_limit();
         if is_exceeded {
             debug!(
                 "Global rate limit exceeded: {}/{} req/s",

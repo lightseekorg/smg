@@ -2,19 +2,17 @@
 //!
 //! Outbound: `on_worker_changed` bincode-serialises a `WorkerState`
 //! and writes it under `worker:{worker_id}`. `on_worker_removed`
-//! writes a tombstone. Both map 1:1 to the v1
-//! `MeshSyncManager::sync_worker_state` / `remove_worker_state`
-//! behaviour but target the typed CRDT namespace instead of the
-//! untyped store.
+//! writes a tombstone. Both preserve the legacy worker-sync
+//! semantics while targeting the typed CRDT namespace instead of the
+//! untyped v1 store.
 //!
 //! Inbound: `start` spawns a task that subscribes to the namespace
 //! and routes each non-tombstone update through
-//! `WorkerRegistry::on_remote_worker_state` — the same sink the v1
-//! `WorkerStateSubscriber` wires up, so registry behaviour
-//! (URL-dedupe, health promotion, `Registered` event fan-out) is
-//! unchanged. Tombstones are logged at debug; the registry does not
+//! `WorkerRegistry::on_remote_worker_state`, preserving registry
+//! behaviour (URL-dedupe, health promotion, `Registered` event
+//! fan-out). Tombstones are logged at debug; the registry does not
 //! yet expose a remote-remove hook, and wiring one belongs in a
-//! later PR together with the v1 mirror teardown.
+//! later PR if remote removals become observable.
 //!
 //! The adapter writes through `CrdtNamespace::put`, which fires
 //! local subscribers in addition to gossiping. A local write
@@ -28,7 +26,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use smg_mesh::{CrdtNamespace, WorkerState, WorkerStateSubscriber};
+use smg_mesh::{CrdtNamespace, WorkerState};
 use tracing::{debug, warn};
 
 use crate::worker::{registry::WorkerStatePublisher, WorkerRegistry};
@@ -132,6 +130,33 @@ impl WorkerSyncAdapter {
             Ok(state) => self.worker_registry.on_remote_worker_state(&state),
             Err(err) => warn!(worker_id, %err, "failed to decode WorkerState"),
         }
+    }
+
+    /// Return every live worker state currently visible in the
+    /// `worker:` CRDT namespace. Used by management endpoints; the
+    /// routing path consumes updates through the registry subscriber.
+    pub fn worker_states(&self) -> Vec<WorkerState> {
+        self.workers
+            .keys("")
+            .into_iter()
+            .filter_map(|key| {
+                let worker_id = key.strip_prefix(PREFIX).filter(|s| !s.is_empty())?;
+                self.worker_state(worker_id)
+            })
+            .collect()
+    }
+
+    /// Read one worker state from the `worker:` CRDT namespace.
+    pub fn worker_state(&self, worker_id: &str) -> Option<WorkerState> {
+        self.workers
+            .get(&format!("{PREFIX}{worker_id}"))
+            .and_then(|bytes| match bincode::deserialize::<WorkerState>(&bytes) {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    warn!(worker_id, %err, "failed to decode stored WorkerState");
+                    None
+                }
+            })
     }
 
     /// Publish a worker update to the cluster. Callers pass the

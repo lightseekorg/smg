@@ -20,6 +20,16 @@ use tracing::{info, warn};
 
 use crate::server::AppState;
 
+const CONFIG_PREFIX: &str = "config:";
+
+fn config_key(key: &str) -> String {
+    if key.starts_with(CONFIG_PREFIX) {
+        key.to_string()
+    } else {
+        format!("{CONFIG_PREFIX}{key}")
+    }
+}
+
 /// Mesh cluster status response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClusterStatusResponse {
@@ -77,12 +87,15 @@ pub async fn get_cluster_status(State(app_state): State<Arc<AppState>>) -> Respo
         })
         .collect();
 
-    // Get store counts (if stores are available)
     let stores = StoreStatus {
         membership_count: state.len(),
-        worker_count: 0, // TODO: Get from stores if available
-        policy_count: 0,
-        app_count: 0,
+        worker_count: app_state
+            .mesh_adapters
+            .as_ref()
+            .map(|adapters| adapters.worker_sync.worker_states().len())
+            .unwrap_or(0),
+        policy_count: app_state.context.policy_registry.get_all_mappings().len(),
+        app_count: handler.mesh_kv().configs().keys("").len(),
     };
 
     let response = ClusterStatusResponse {
@@ -122,14 +135,14 @@ pub async fn get_mesh_health(State(app_state): State<Arc<AppState>>) -> Response
 
 /// Get worker states from mesh store
 pub async fn get_worker_states(State(app_state): State<Arc<AppState>>) -> Response {
-    match &app_state.mesh_handler {
-        Some(handler) => {
-            let workers = handler.sync_manager.get_all_worker_states();
+    match &app_state.mesh_adapters {
+        Some(adapters) => {
+            let workers = adapters.worker_sync.worker_states();
             (StatusCode::OK, Json(workers)).into_response()
         }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "mesh sync manager not available"})),
+            Json(json!({"error": "mesh v2 adapters not available"})),
         )
             .into_response(),
     }
@@ -137,17 +150,22 @@ pub async fn get_worker_states(State(app_state): State<Arc<AppState>>) -> Respon
 
 /// Get policy states from mesh store
 pub async fn get_policy_states(State(app_state): State<Arc<AppState>>) -> Response {
-    match &app_state.mesh_handler {
-        Some(handler) => {
-            let policies = handler.sync_manager.get_all_policy_states();
-            (StatusCode::OK, Json(policies)).into_response()
-        }
-        None => (
+    if app_state.mesh_handler.is_none() {
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "mesh sync manager not available"})),
+            Json(json!({"error": "mesh not enabled"})),
         )
-            .into_response(),
+            .into_response();
     }
+
+    let policies: Vec<_> = app_state
+        .context
+        .policy_registry
+        .get_all_mappings()
+        .into_iter()
+        .map(|(model_id, policy_type)| json!({ "model_id": model_id, "policy_type": policy_type }))
+        .collect();
+    (StatusCode::OK, Json(policies)).into_response()
 }
 
 /// Get a specific worker state
@@ -155,8 +173,8 @@ pub async fn get_worker_state(
     Path(worker_id): Path<String>,
     State(app_state): State<Arc<AppState>>,
 ) -> Response {
-    match &app_state.mesh_handler {
-        Some(handler) => match handler.sync_manager.get_worker_state(&worker_id) {
+    match &app_state.mesh_adapters {
+        Some(adapters) => match adapters.worker_sync.worker_state(&worker_id) {
             Some(state) => (StatusCode::OK, Json(state)).into_response(),
             None => (
                 StatusCode::NOT_FOUND,
@@ -166,7 +184,7 @@ pub async fn get_worker_state(
         },
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "mesh sync manager not available"})),
+            Json(json!({"error": "mesh v2 adapters not available"})),
         )
             .into_response(),
     }
@@ -177,18 +195,24 @@ pub async fn get_policy_state(
     Path(model_id): Path<String>,
     State(app_state): State<Arc<AppState>>,
 ) -> Response {
-    match &app_state.mesh_handler {
-        Some(handler) => match handler.sync_manager.get_policy_state(&model_id) {
-            Some(state) => (StatusCode::OK, Json(state)).into_response(),
-            None => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Policy not found"})),
-            )
-                .into_response(),
-        },
-        None => (
+    if app_state.mesh_handler.is_none() {
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "mesh sync manager not available"})),
+            Json(json!({"error": "mesh not enabled"})),
+        )
+            .into_response();
+    }
+
+    let policies = app_state.context.policy_registry.get_all_mappings();
+    match policies.get(&model_id) {
+        Some(policy_type) => (
+            StatusCode::OK,
+            Json(json!({ "model_id": model_id, "policy_type": policy_type })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Policy not found"})),
         )
             .into_response(),
     }
@@ -240,13 +264,8 @@ pub async fn update_app_config(
         )
             .into_response();
     };
-    if let Err(e) = handler.write_data(request.key.clone(), value) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to write app config: {}", e)})),
-        )
-            .into_response();
-    }
+    let stored_key = config_key(&request.key);
+    handler.mesh_kv().configs().put(&stored_key, value);
 
     info!("Updated app config: {}", request.key);
     (
@@ -271,7 +290,7 @@ pub async fn get_app_config(
                 .into_response();
         }
     };
-    match handler.read_data(key.clone()) {
+    match handler.mesh_kv().configs().get(&config_key(&key)) {
         Some(value) => {
             // Return value as hex encoded string for JSON compatibility
             let hex_value: String = value.iter().map(|b| format!("{b:02x}")).collect();
@@ -316,15 +335,10 @@ pub async fn set_global_rate_limit(
             }
         };
 
-        if let Err(e) = handler.write_data(GLOBAL_RATE_LIMIT_KEY.to_string(), config_bytes) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to persist rate limit config: {}", e)
-                })),
-            )
-                .into_response();
-        }
+        handler
+            .mesh_kv()
+            .configs()
+            .put(&config_key(GLOBAL_RATE_LIMIT_KEY), config_bytes);
 
         info!("Set global rate limit: {} req/s", request.limit_per_second);
 
@@ -358,7 +372,11 @@ pub async fn get_global_rate_limit(State(app_state): State<Arc<AppState>>) -> Re
         }
     };
 
-    match handler.read_data(GLOBAL_RATE_LIMIT_KEY.to_string()) {
+    match handler
+        .mesh_kv()
+        .configs()
+        .get(&config_key(GLOBAL_RATE_LIMIT_KEY))
+    {
         Some(value) => match serde_json::from_slice::<RateLimitConfig>(&value) {
             Ok(config) => (
                 StatusCode::OK,
@@ -396,14 +414,21 @@ pub async fn get_global_rate_limit_stats(State(app_state): State<Arc<AppState>>)
     };
 
     let config = handler
-        .read_data(GLOBAL_RATE_LIMIT_KEY.to_string())
+        .mesh_kv()
+        .configs()
+        .get(&config_key(GLOBAL_RATE_LIMIT_KEY))
         .and_then(|v| serde_json::from_slice::<RateLimitConfig>(&v).ok())
         .unwrap_or_default();
 
     // Get current counter value
-    let current_count = handler
-        .sync_manager
-        .get_rate_limit_value(GLOBAL_RATE_LIMIT_COUNTER_KEY)
+    let current_count = app_state
+        .mesh_adapters
+        .as_ref()
+        .map(|adapters| {
+            adapters
+                .rate_limit_sync
+                .get_aggregate(GLOBAL_RATE_LIMIT_COUNTER_KEY)
+        })
         .unwrap_or(0);
 
     (

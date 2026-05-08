@@ -20,7 +20,6 @@ use std::{
 use dashmap::{mapref::entry::Entry, DashMap};
 use openai_protocol::worker::WorkerStatus;
 use parking_lot::RwLock;
-use smg_mesh::OptionalMeshSyncManager;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -111,11 +110,6 @@ pub struct WorkerRegistry {
     /// Only held during the in-memory model index diff (no I/O, microseconds).
     worker_mutation_locks: Arc<DashMap<WorkerId, Arc<parking_lot::Mutex<()>>>>,
 
-    /// Optional mesh sync manager for state synchronization
-    /// When None, the registry works independently without mesh synchronization
-    /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
-    mesh_sync: Arc<RwLock<OptionalMeshSyncManager>>,
-
     /// v2 mesh publisher for local worker mutations.
     worker_state_publisher: Arc<RwLock<OptionalWorkerStatePublisher>>,
 
@@ -147,7 +141,6 @@ impl WorkerRegistry {
             connection_workers: Arc::new(DashMap::new()),
             url_to_id: Arc::new(DashMap::new()),
             worker_mutation_locks: Arc::new(DashMap::new()),
-            mesh_sync: Arc::new(RwLock::new(None)),
             worker_state_publisher: Arc::new(RwLock::new(None)),
             model_retry_configs: Arc::new(DashMap::new()),
             event_tx: broadcast::Sender::new(64),
@@ -709,7 +702,7 @@ impl WorkerRegistry {
                 .push(worker_id.clone());
         }
 
-        if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+        if self.worker_state_publisher.read().is_some() {
             self.publish_worker_state(worker_id, &new_worker);
         }
 
@@ -807,7 +800,7 @@ impl WorkerRegistry {
         let transition = match candidate_status {
             Some(new_status) if new_status != old_status => {
                 worker.set_status(new_status);
-                if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+                if self.worker_state_publisher.read().is_some() {
                     self.publish_worker_state(worker_id, &worker);
                 }
                 let _ = self.event_tx.send(WorkerEvent::StatusChanged {
@@ -850,18 +843,6 @@ impl WorkerRegistry {
     /// the same URL return the same ID. Emits no events.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
         self.url_to_id.entry(url.to_string()).or_default().clone()
-    }
-
-    /// Set (or clear) the mesh sync manager after initialisation.
-    ///
-    /// Thread-safe via an internal `RwLock`. The registry forwards worker
-    /// add/replace/remove events to the manager when one is installed.
-    /// Scheduled for removal when `WorkerSyncAdapter` (mesh v2) replaces
-    /// this hook; the registry will then have zero mesh awareness. Emits
-    /// no events.
-    pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        let mut guard = self.mesh_sync.write();
-        *guard = mesh_sync;
     }
 
     pub fn set_worker_state_publisher(&self, publisher: OptionalWorkerStatePublisher) {
@@ -930,7 +911,7 @@ impl WorkerRegistry {
             }
             Metrics::remove_worker_metrics(worker.url());
 
-            if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+            if self.worker_state_publisher.read().is_some() {
                 self.publish_worker_removed(worker_id);
             }
 
@@ -1070,31 +1051,12 @@ impl WorkerRegistry {
         let state = Self::build_mesh_worker_state(worker_id, worker);
         if let Some(publisher) = self.worker_state_publisher.read().clone() {
             publisher.publish_worker_state(worker_id.as_str(), &state);
-            return;
-        }
-
-        let guard = self.mesh_sync.read();
-        if let Some(ref mesh_sync) = *guard {
-            mesh_sync.sync_worker_state(
-                state.worker_id,
-                state.model_id,
-                state.url,
-                state.health,
-                state.load,
-                state.spec,
-            );
         }
     }
 
     fn publish_worker_removed(&self, worker_id: &WorkerId) {
         if let Some(publisher) = self.worker_state_publisher.read().clone() {
             publisher.publish_worker_removed(worker_id.as_str());
-            return;
-        }
-
-        let guard = self.mesh_sync.read();
-        if let Some(ref mesh_sync) = *guard {
-            mesh_sync.remove_worker_state(worker_id.as_str());
         }
     }
 
@@ -1260,7 +1222,7 @@ impl WorkerRegistry {
 
         worker.set_status(new_status);
 
-        if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+        if self.worker_state_publisher.read().is_some() {
             self.publish_worker_state(worker_id, &worker);
         }
 
@@ -1285,8 +1247,8 @@ impl Default for WorkerRegistry {
     }
 }
 
-impl smg_mesh::WorkerStateSubscriber for WorkerRegistry {
-    fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
+impl WorkerRegistry {
+    pub fn on_remote_worker_state(&self, state: &smg_mesh::WorkerState) {
         use openai_protocol::model_card::ModelCard;
 
         // If worker already exists at this URL, update its health
@@ -2092,7 +2054,7 @@ mod tests {
 
     #[test]
     fn test_mesh_worker_state_subscriber() {
-        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+        use smg_mesh::WorkerState;
 
         let registry = WorkerRegistry::new();
 
@@ -2141,7 +2103,7 @@ mod tests {
 
     #[test]
     fn test_mesh_imported_worker_emits_registered_event() {
-        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+        use smg_mesh::WorkerState;
 
         // Mesh-imported workers must emit `WorkerEvent::Registered` so
         // event-driven subscribers (WorkerManager's health scheduler)
@@ -2178,7 +2140,7 @@ mod tests {
 
     #[test]
     fn test_mesh_worker_state_update_is_silent_on_existing_worker() {
-        use smg_mesh::{WorkerState, WorkerStateSubscriber};
+        use smg_mesh::WorkerState;
 
         // Health updates for an already-registered worker mutate the
         // local status field directly (via `set_status`) without

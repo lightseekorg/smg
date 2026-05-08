@@ -42,7 +42,7 @@ use openai_protocol::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -1155,9 +1155,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         // Create mesh server builder and build with stores
         let (mesh_server, handler) = MeshServerBuilder::from(mesh_server_config).build();
 
-        // Start rate limit window reset task (managed by handler)
-        handler.start_rate_limit_task(1); // Reset every 1 second
-
         #[expect(
             clippy::disallowed_methods,
             reason = "mesh server runs for the lifetime of the process; shutdown is handled by the mesh handler"
@@ -1414,33 +1411,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                 config.router_config.max_concurrent_requests
             );
         }
-    }
-
-    // Set mesh sync manager to worker registry and policy registry if mesh is enabled
-    // This allows these components to sync state across mesh nodes when mesh is enabled,
-    // but they work independently without mesh when mesh is disabled.
-    // Using thread-safe set_mesh_sync method that works with Arc-wrapped registries
-    if let Some(ref handle) = mesh_handler {
-        app_context
-            .worker_registry
-            .set_mesh_sync(Some(handle.sync_manager.clone()));
-        handle
-            .sync_manager
-            .register_worker_state_subscriber(app_context.worker_registry.clone());
-        // Replay workers already in the CRDT store — they arrived between
-        // mesh server start and subscriber registration above.
-        for state in handle.sync_manager.get_all_worker_states() {
-            app_context.worker_registry.on_remote_worker_state(&state);
-        }
-        info!("Mesh sync manager set on worker registry");
-
-        handle
-            .sync_manager
-            .register_tree_state_subscriber(app_context.policy_registry.clone());
-        app_context
-            .policy_registry
-            .set_mesh_sync(Some(handle.sync_manager.clone()));
-        info!("Mesh sync manager set on policy registry");
     }
 
     // Get mesh cluster state and port before moving mesh_handler into app_state
