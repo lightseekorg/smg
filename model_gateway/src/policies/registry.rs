@@ -13,8 +13,8 @@ use tracing::{debug, info, warn};
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
 use super::{
-    BucketPolicy, CacheAwarePolicy, DPRankLoadPolicy, LoadBalancingPolicy, PolicyFactory,
-    TreeHandle, TreeKind,
+    BucketPolicy, CacheAwarePolicy, DPRankLoadPolicy, LoadBalancingPolicy,
+    OptionalTreeDeltaPublisher, PolicyFactory, TreeHandle, TreeKind,
 };
 use crate::{
     config::types::PolicyConfig,
@@ -49,6 +49,8 @@ pub struct PolicyRegistry {
     /// When set, new CacheAwarePolicy instances are injected with this monitor.
     kv_event_monitor: Arc<RwLock<Option<Arc<KvEventMonitor>>>>,
 
+    tree_delta_publisher: Arc<RwLock<OptionalTreeDeltaPublisher>>,
+
     // DP-rank policy: Supports the selection of dp-rank outside the engine.
     dp_rank_policy: Arc<OnceLock<Arc<dyn DPRankLoadPolicy>>>,
 }
@@ -66,6 +68,7 @@ impl PolicyRegistry {
             decode_policy: Arc::new(OnceLock::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
             kv_event_monitor: Arc::new(RwLock::new(None)),
+            tree_delta_publisher: Arc::new(RwLock::new(None)),
             dp_rank_policy: Arc::new(OnceLock::new()),
         }
     }
@@ -118,6 +121,24 @@ impl PolicyRegistry {
         }
     }
 
+    pub fn set_tree_delta_publisher(&self, publisher: OptionalTreeDeltaPublisher) {
+        {
+            let mut guard = self.tree_delta_publisher.write();
+            guard.clone_from(&publisher);
+        }
+
+        Self::maybe_inject_tree_delta_publisher(&self.default_policy, publisher.as_ref());
+        if let Some(policy) = self.prefill_policy.get() {
+            Self::maybe_inject_tree_delta_publisher(policy, publisher.as_ref());
+        }
+        if let Some(policy) = self.decode_policy.get() {
+            Self::maybe_inject_tree_delta_publisher(policy, publisher.as_ref());
+        }
+        for entry in self.model_policies.iter() {
+            Self::maybe_inject_tree_delta_publisher(entry.value(), publisher.as_ref());
+        }
+    }
+
     /// Inject KV event monitor into a policy if it's cache-aware.
     fn maybe_inject_monitor(
         policy: &Arc<dyn LoadBalancingPolicy>,
@@ -134,6 +155,15 @@ impl PolicyRegistry {
     ) {
         if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
             cache_aware.set_mesh_sync(mesh_sync.cloned());
+        }
+    }
+
+    fn maybe_inject_tree_delta_publisher(
+        policy: &Arc<dyn LoadBalancingPolicy>,
+        publisher: Option<&Arc<dyn super::TreeDeltaPublisher>>,
+    ) {
+        if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
+            cache_aware.set_tree_delta_publisher(publisher.cloned());
         }
     }
 
@@ -315,6 +345,10 @@ impl PolicyRegistry {
                     cache_aware.set_kv_event_monitor(Some(Arc::clone(monitor)));
                 }
             }
+            {
+                let guard = self.tree_delta_publisher.read();
+                cache_aware.set_tree_delta_publisher(guard.clone());
+            }
             Arc::new(cache_aware)
         } else {
             PolicyFactory::create_by_name(policy_type).unwrap_or_else(|| {
@@ -353,6 +387,10 @@ impl PolicyRegistry {
 
     /// Set the prefill policy for PD mode (lock-free, set once at startup)
     pub fn set_prefill_policy(&self, policy: Arc<dyn LoadBalancingPolicy>) {
+        {
+            let guard = self.tree_delta_publisher.read();
+            Self::maybe_inject_tree_delta_publisher(&policy, guard.as_ref());
+        }
         // OnceLock::set returns Err if already set, which we ignore since
         // the policy should only be set once at startup
         let _ = self.prefill_policy.set(policy);
@@ -371,6 +409,10 @@ impl PolicyRegistry {
 
     /// Set the decode policy for PD mode (lock-free, set once at startup)
     pub fn set_decode_policy(&self, policy: Arc<dyn LoadBalancingPolicy>) {
+        {
+            let guard = self.tree_delta_publisher.read();
+            Self::maybe_inject_tree_delta_publisher(&policy, guard.as_ref());
+        }
         // OnceLock::set returns Err if already set, which we ignore since
         // the policy should only be set once at startup
         let _ = self.decode_policy.set(policy);

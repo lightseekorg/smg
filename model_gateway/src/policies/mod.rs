@@ -24,7 +24,9 @@ mod round_robin;
 pub(crate) mod utils;
 
 pub use bucket::BucketPolicy;
-pub use cache_aware::{CacheAwarePolicy, TreeHandle, TreeKind};
+pub use cache_aware::{
+    CacheAwarePolicy, OptionalTreeDeltaPublisher, TreeDeltaPublisher, TreeHandle, TreeKind,
+};
 pub use consistent_hashing::ConsistentHashingPolicy;
 pub use dp_min_token::MinimumTokensPolicy;
 pub use factory::PolicyFactory;

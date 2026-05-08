@@ -31,7 +31,7 @@ use bytes::Bytes;
 use smg_mesh::{CrdtNamespace, WorkerState, WorkerStateSubscriber};
 use tracing::{debug, warn};
 
-use crate::worker::WorkerRegistry;
+use crate::worker::{registry::WorkerStatePublisher, WorkerRegistry};
 
 const PREFIX: &str = "worker:";
 
@@ -147,6 +147,16 @@ impl WorkerSyncAdapter {
     /// Publish a tombstone for a worker, removing it from the CRDT.
     pub fn on_worker_removed(&self, worker_id: &str) {
         self.workers.delete(&format!("{PREFIX}{worker_id}"));
+    }
+}
+
+impl WorkerStatePublisher for WorkerSyncAdapter {
+    fn publish_worker_state(&self, worker_id: &str, state: &WorkerState) {
+        self.on_worker_changed(worker_id, state);
+    }
+
+    fn publish_worker_removed(&self, worker_id: &str) {
+        self.on_worker_removed(worker_id);
     }
 }
 

@@ -25,6 +25,7 @@ use axum::{
 use bytes::Bytes;
 use http_body::Frame;
 use serde_json::json;
+use smg_mesh::{RateLimitConfig, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
 
@@ -204,9 +205,34 @@ pub async fn concurrency_limit_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Check mesh global rate limit first if mesh is enabled
-    // If mesh is not enabled, this check is skipped and local rate limiting is used
-    if let Some(mesh_handler) = &app_state.mesh_handler {
+    if let Some(mesh_adapters) = &app_state.mesh_adapters {
+        let config = app_state
+            .mesh_handler
+            .as_ref()
+            .and_then(|handler| handler.read_data(GLOBAL_RATE_LIMIT_KEY.to_string()))
+            .and_then(|value| serde_json::from_slice::<RateLimitConfig>(&value).ok())
+            .unwrap_or_default();
+        let (is_exceeded, current_count, limit) = mesh_adapters.rate_limit_sync.check_counter(
+            GLOBAL_RATE_LIMIT_COUNTER_KEY,
+            1,
+            config.limit_per_second,
+        );
+        if is_exceeded {
+            debug!(
+                "Global rate limit exceeded: {}/{} req/s",
+                current_count, limit
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": "Rate limit exceeded",
+                    "current_count": current_count,
+                    "limit": limit
+                })),
+            )
+                .into_response();
+        }
+    } else if let Some(mesh_handler) = &app_state.mesh_handler {
         let (is_exceeded, current_count, limit) =
             mesh_handler.sync_manager.check_global_rate_limit();
         if is_exceeded {

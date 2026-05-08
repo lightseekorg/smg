@@ -26,9 +26,14 @@
 //! resets are ignored, matching the v1 behaviour after window
 //! advance.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use smg_mesh::{
     decode_epoch_count, encode_epoch_count, CrdtNamespace, EpochCount, EPOCH_MAX_WINS_ENCODED_LEN,
 };
@@ -42,6 +47,7 @@ const PREFIX: &str = "rl:";
 pub struct RateLimitSyncAdapter {
     rate_limits: Arc<CrdtNamespace>,
     node_name: String,
+    local_counters: Mutex<HashMap<String, EpochCount>>,
 }
 
 impl std::fmt::Debug for RateLimitSyncAdapter {
@@ -77,6 +83,7 @@ impl RateLimitSyncAdapter {
         Arc::new(Self {
             rate_limits,
             node_name,
+            local_counters: Mutex::new(HashMap::new()),
         })
     }
 
@@ -194,6 +201,47 @@ impl RateLimitSyncAdapter {
             .try_fold(0i64, |acc, s| acc.checked_add(s.count))
             .unwrap_or(i64::MAX)
     }
+
+    pub fn check_counter(
+        &self,
+        counter_name: &str,
+        window_seconds: u64,
+        limit_per_window: u64,
+    ) -> (bool, i64, u64) {
+        if limit_per_window == 0 {
+            return (false, 0, 0);
+        }
+
+        let epoch = current_epoch(window_seconds);
+        let local_count = {
+            let mut counters = self.local_counters.lock();
+            let counter = counters
+                .entry(counter_name.to_string())
+                .or_insert(EpochCount { epoch, count: 0 });
+            if counter.epoch != epoch {
+                *counter = EpochCount { epoch, count: 0 };
+            }
+            counter.count = counter.count.saturating_add(1);
+            counter.count
+        };
+
+        self.sync_counter(counter_name, epoch, local_count);
+        let aggregate = self.get_aggregate(counter_name);
+        (
+            aggregate > limit_per_window as i64,
+            aggregate,
+            limit_per_window,
+        )
+    }
+}
+
+fn current_epoch(window_seconds: u64) -> u64 {
+    let window_seconds = window_seconds.max(1);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now / window_seconds
 }
 
 #[cfg(test)]
@@ -320,6 +368,37 @@ mod tests {
             adapter.get_aggregate("global"),
             0,
             "new epoch dominates stale count"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_counter_increments_local_shard_and_reports_limit() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = rl_namespace(&mesh);
+        let adapter = RateLimitSyncAdapter::new(ns, "node-a".into());
+
+        assert!(!adapter.check_counter("global", 1, 2).0);
+        let (exceeded, count, limit) = adapter.check_counter("global", 1, 2);
+        assert!(!exceeded);
+        assert_eq!(count, 2);
+        assert_eq!(limit, 2);
+
+        let (exceeded, count, limit) = adapter.check_counter("global", 1, 2);
+        assert!(exceeded);
+        assert_eq!(count, 3);
+        assert_eq!(limit, 2);
+    }
+
+    #[tokio::test]
+    async fn check_counter_zero_limit_is_disabled() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = rl_namespace(&mesh);
+        let adapter = RateLimitSyncAdapter::new(ns.clone(), "node-a".into());
+
+        assert_eq!(adapter.check_counter("global", 1, 0), (false, 0, 0));
+        assert!(
+            ns.get("rl:global:node-a").is_none(),
+            "disabled checks should not write a local shard"
         );
     }
 

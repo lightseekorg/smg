@@ -72,6 +72,13 @@ pub struct WorkerDescriptor {
     pub check_interval_secs: u64,
 }
 
+pub trait WorkerStatePublisher: Send + Sync + std::fmt::Debug {
+    fn publish_worker_state(&self, worker_id: &str, state: &smg_mesh::WorkerState);
+    fn publish_worker_removed(&self, worker_id: &str);
+}
+
+pub type OptionalWorkerStatePublisher = Option<Arc<dyn WorkerStatePublisher>>;
+
 /// Model index using immutable snapshots for lock-free reads.
 /// Each model maps to an Arc'd slice of workers that can be read without locking.
 /// Updates create new snapshots (copy-on-write semantics).
@@ -109,6 +116,9 @@ pub struct WorkerRegistry {
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
     mesh_sync: Arc<RwLock<OptionalMeshSyncManager>>,
 
+    /// v2 mesh publisher for local worker mutations.
+    worker_state_publisher: Arc<RwLock<OptionalWorkerStatePublisher>>,
+
     /// Per-model retry config (last write wins).
     /// Updated when a worker with non-empty retry overrides registers.
     /// Cleaned up when the last worker for a model is removed.
@@ -138,6 +148,7 @@ impl WorkerRegistry {
             url_to_id: Arc::new(DashMap::new()),
             worker_mutation_locks: Arc::new(DashMap::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
+            worker_state_publisher: Arc::new(RwLock::new(None)),
             model_retry_configs: Arc::new(DashMap::new()),
             event_tx: broadcast::Sender::new(64),
         }
@@ -698,19 +709,8 @@ impl WorkerRegistry {
                 .push(worker_id.clone());
         }
 
-        // Sync to mesh if enabled (no-op if mesh is not enabled)
-        {
-            let guard = self.mesh_sync.read();
-            if let Some(ref mesh_sync) = *guard {
-                mesh_sync.sync_worker_state(
-                    worker_id.as_str().to_string(),
-                    new_worker.model_id().to_string(),
-                    new_worker.url().to_string(),
-                    new_worker.is_healthy(),
-                    0.0,
-                    bincode::serialize(&new_worker.metadata().spec).unwrap_or_default(),
-                );
-            }
+        if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+            self.publish_worker_state(worker_id, &new_worker);
         }
 
         let _ = self.event_tx.send(WorkerEvent::Replaced {
@@ -807,6 +807,9 @@ impl WorkerRegistry {
         let transition = match candidate_status {
             Some(new_status) if new_status != old_status => {
                 worker.set_status(new_status);
+                if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+                    self.publish_worker_state(worker_id, &worker);
+                }
                 let _ = self.event_tx.send(WorkerEvent::StatusChanged {
                     worker_id: worker_id.clone(),
                     worker: worker.clone(),
@@ -859,6 +862,11 @@ impl WorkerRegistry {
     pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
         let mut guard = self.mesh_sync.write();
         *guard = mesh_sync;
+    }
+
+    pub fn set_worker_state_publisher(&self, publisher: OptionalWorkerStatePublisher) {
+        let mut guard = self.worker_state_publisher.write();
+        *guard = publisher;
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -922,12 +930,8 @@ impl WorkerRegistry {
             }
             Metrics::remove_worker_metrics(worker.url());
 
-            // Sync removal to mesh if enabled (no-op if mesh is not enabled)
-            {
-                let guard = self.mesh_sync.read();
-                if let Some(ref mesh_sync) = *guard {
-                    mesh_sync.remove_worker_state(worker_id.as_str());
-                }
+            if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+                self.publish_worker_removed(worker_id);
             }
 
             let _ = self.event_tx.send(WorkerEvent::Removed {
@@ -1047,6 +1051,53 @@ impl WorkerRegistry {
         }
     }
 
+    fn build_mesh_worker_state(
+        worker_id: &WorkerId,
+        worker: &Arc<dyn Worker>,
+    ) -> smg_mesh::WorkerState {
+        smg_mesh::WorkerState {
+            worker_id: worker_id.as_str().to_string(),
+            model_id: worker.model_id().to_string(),
+            url: worker.url().to_string(),
+            health: worker.is_healthy(),
+            load: worker.load() as f64,
+            version: worker.revision(),
+            spec: bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
+        }
+    }
+
+    fn publish_worker_state(&self, worker_id: &WorkerId, worker: &Arc<dyn Worker>) {
+        let state = Self::build_mesh_worker_state(worker_id, worker);
+        if let Some(publisher) = self.worker_state_publisher.read().clone() {
+            publisher.publish_worker_state(worker_id.as_str(), &state);
+            return;
+        }
+
+        let guard = self.mesh_sync.read();
+        if let Some(ref mesh_sync) = *guard {
+            mesh_sync.sync_worker_state(
+                state.worker_id,
+                state.model_id,
+                state.url,
+                state.health,
+                state.load,
+                state.spec,
+            );
+        }
+    }
+
+    fn publish_worker_removed(&self, worker_id: &WorkerId) {
+        if let Some(publisher) = self.worker_state_publisher.read().clone() {
+            publisher.publish_worker_removed(worker_id.as_str());
+            return;
+        }
+
+        let guard = self.mesh_sync.read();
+        if let Some(ref mesh_sync) = *guard {
+            mesh_sync.remove_worker_state(worker_id.as_str());
+        }
+    }
+
     /// Core registration logic shared by local and mesh paths.
     ///
     /// Acquires the per-worker mutation lock before making the worker
@@ -1110,21 +1161,8 @@ impl WorkerRegistry {
             .or_default()
             .push(worker_id.clone());
 
-        // Outgoing mesh sync happens under the lock so mesh observers
-        // cannot see a later mutation (Replaced/Removed/StatusChanged)
-        // for this worker_id before the initial state is published.
         if sync_mesh {
-            let guard = self.mesh_sync.read();
-            if let Some(ref mesh_sync) = *guard {
-                mesh_sync.sync_worker_state(
-                    worker_id.as_str().to_string(),
-                    worker.model_id().to_string(),
-                    worker.url().to_string(),
-                    worker.is_healthy(),
-                    0.0,
-                    bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
-                );
-            }
+            self.publish_worker_state(&worker_id, &worker);
         }
 
         // Broadcast under the lock so event order per worker_id is
@@ -1221,6 +1259,10 @@ impl WorkerRegistry {
         }
 
         worker.set_status(new_status);
+
+        if self.worker_state_publisher.read().is_some() || self.mesh_sync.read().is_some() {
+            self.publish_worker_state(worker_id, &worker);
+        }
 
         let _ = self.event_tx.send(WorkerEvent::StatusChanged {
             worker_id: worker_id.clone(),

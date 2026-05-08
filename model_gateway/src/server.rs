@@ -58,6 +58,7 @@ use crate::{
         metrics_ws::{collectors, registry::WatchRegistry},
         otel_trace,
     },
+    policies::TreeDeltaPublisher,
     routers::{
         conversations,
         mesh::{
@@ -74,6 +75,7 @@ use crate::{
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
     worker::{
         manager::{WorkerManager, WorkerManagerConfig},
+        registry::WorkerStatePublisher,
         worker::WorkerType,
     },
     workflow::{
@@ -1145,6 +1147,14 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             app_context.policy_registry.clone(),
         ));
         adapters.start();
+        let worker_publisher: Arc<dyn WorkerStatePublisher> = adapters.worker_sync.clone();
+        app_context
+            .worker_registry
+            .set_worker_state_publisher(Some(worker_publisher));
+        let tree_publisher: Arc<dyn TreeDeltaPublisher> = adapters.tree_sync.clone();
+        app_context
+            .policy_registry
+            .set_tree_delta_publisher(Some(tree_publisher));
         info!("Mesh v2 adapters started");
         adapters
     });

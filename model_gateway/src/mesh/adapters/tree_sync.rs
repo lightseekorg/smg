@@ -33,7 +33,7 @@ use smg_mesh::{DrainHandle, StreamNamespace, MAX_STREAM_CHUNK_BYTES};
 use tracing::{debug, error, trace, warn};
 use uuid::Uuid;
 
-use crate::policies::{TreeHandle, TreeKind};
+use crate::policies::{TreeDeltaPublisher, TreeHandle, TreeKind};
 
 const PREFIX: &str = "td:";
 const REPAIR_REQUEST_PREFIX: &str = "tree:req:";
@@ -1184,6 +1184,12 @@ impl TreeSyncAdapter {
                 );
             }
         }
+    }
+}
+
+impl TreeDeltaPublisher for TreeSyncAdapter {
+    fn publish_tree_delta(&self, model_id: &str, delta: TreeDelta) {
+        self.on_local_insert(model_id, delta);
     }
 }
 

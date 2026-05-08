@@ -41,7 +41,10 @@
     block_size:              Backend KV cache block size for event-driven routing
 */
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
@@ -56,7 +59,7 @@ use super::{
     LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::{
-    mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
+    mesh::adapters::tree_sync::{RepairEntry, TreeDelta, TreeRepairPage},
     worker::{KvEventMonitor, Worker},
 };
 
@@ -79,6 +82,8 @@ pub struct CacheAwarePolicy {
     /// Token-based trees for gRPC connections (pre-tokenized input)
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
     mesh_sync: RwLock<OptionalMeshSyncManager>,
+    tree_delta_publisher: RwLock<OptionalTreeDeltaPublisher>,
+    tree_delta_epoch: AtomicU64,
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
@@ -114,6 +119,12 @@ struct PerModelHashIndex {
     /// token-path hash → tokens (reconstructs the token-tree node).
     token_tree: DashMap<u64, Vec<u32>>,
 }
+
+pub trait TreeDeltaPublisher: Send + Sync + std::fmt::Debug {
+    fn publish_tree_delta(&self, model_id: &str, delta: TreeDelta);
+}
+
+pub type OptionalTreeDeltaPublisher = Option<Arc<dyn TreeDeltaPublisher>>;
 
 impl CacheAwarePolicy {
     pub fn new() -> Self {
@@ -206,6 +217,8 @@ impl CacheAwarePolicy {
             string_trees,
             token_trees,
             mesh_sync: RwLock::new(None),
+            tree_delta_publisher: RwLock::new(None),
+            tree_delta_epoch: AtomicU64::new(0),
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
             hash_index,
@@ -224,6 +237,10 @@ impl CacheAwarePolicy {
     /// Uses interior mutability so this works on policies behind `Arc<dyn LoadBalancingPolicy>`.
     pub fn set_kv_event_monitor(&self, monitor: Option<Arc<KvEventMonitor>>) {
         *self.kv_monitor.write() = monitor;
+    }
+
+    pub fn set_tree_delta_publisher(&self, publisher: OptionalTreeDeltaPublisher) {
+        self.tree_delta_publisher.write().clone_from(&publisher);
     }
 
     /// Initialize the trees with worker URLs (used only during initial setup)
@@ -420,6 +437,20 @@ impl CacheAwarePolicy {
     /// is passed — NOT the full prompt text — to avoid 80k+ String clones
     /// on every request (16 MB/s of allocator churn at 200 rps).
     fn sync_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
+        if let Some(publisher) = self.tree_delta_publisher.read().clone() {
+            let mesh_model_id = normalize_model_key(model_id);
+            publisher.publish_tree_delta(
+                mesh_model_id,
+                TreeDelta {
+                    tree_kind: TreeKind::String,
+                    node_hash: path_hash,
+                    worker_url: tenant.to_string(),
+                    epoch: self.tree_delta_epoch.fetch_add(1, Ordering::Relaxed),
+                },
+            );
+            return;
+        }
+
         let mesh_sync = self.mesh_sync.read().clone();
         if let Some(mesh_sync) = mesh_sync {
             let mesh_model_id = normalize_model_key(model_id);
@@ -428,7 +459,21 @@ impl CacheAwarePolicy {
     }
 
     /// Deferred token allocation: only allocate `Vec` for TreeKey if mesh sync is active.
-    fn sync_insert_tokens(&self, model_id: &str, tokens: &[u32], tenant: &str) {
+    fn sync_insert_tokens(&self, model_id: &str, tokens: &[u32], path_hash: u64, tenant: &str) {
+        if let Some(publisher) = self.tree_delta_publisher.read().clone() {
+            let mesh_model_id = normalize_model_key(model_id);
+            publisher.publish_tree_delta(
+                mesh_model_id,
+                TreeDelta {
+                    tree_kind: TreeKind::Token,
+                    node_hash: path_hash,
+                    worker_url: tenant.to_string(),
+                    epoch: self.tree_delta_epoch.fetch_add(1, Ordering::Relaxed),
+                },
+            );
+            return;
+        }
+
         let mesh_sync = self.mesh_sync.read().clone();
         if let Some(mesh_sync) = mesh_sync {
             let op = TreeOperation::Insert(TreeInsertOp {
@@ -652,12 +697,13 @@ impl CacheAwarePolicy {
                 let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
 
                 tree.insert_tokens(tokens, worker_url);
+                let path_hash = smg_mesh::hash_token_path(tokens);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
-                self.sync_insert_tokens(model_id, tokens, worker_url);
+                    .insert(path_hash, matched_prefix);
+                self.sync_insert_tokens(model_id, tokens, path_hash, worker_url);
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -1139,13 +1185,14 @@ impl CacheAwarePolicy {
                 // analogous block; reuses the match `result`
                 // already computed at the top of this branch.
                 let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+                let path_hash = smg_mesh::hash_token_path(tokens);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
+                    .insert(path_hash, matched_prefix);
 
-                self.sync_insert_tokens(model_id, tokens, workers[idx].url());
+                self.sync_insert_tokens(model_id, tokens, path_hash, workers[idx].url());
                 workers[idx].increment_processed();
                 return Some(idx);
             }
