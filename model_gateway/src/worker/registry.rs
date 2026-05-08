@@ -12,7 +12,10 @@
 //! removed, not per request. See [`crate::worker::hash_ring`] for the ring
 //! itself — this file only wires registry events to ring rebuilds.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use openai_protocol::worker::WorkerStatus;
@@ -29,7 +32,7 @@ use crate::{
         event::WorkerEvent,
         hash_ring::HashRing,
         worker::{RuntimeType, WorkerType},
-        ConnectionMode, Worker,
+        ConnectionMode, Worker, DEFAULT_SAMPLING_PARAMS_LABEL,
     },
 };
 
@@ -670,6 +673,8 @@ impl WorkerRegistry {
             self.rebuild_hash_ring(kept_model);
         }
 
+        self.warn_on_sampling_defaults_divergence_for_worker(&new_worker);
+
         if old_worker.worker_type() != new_worker.worker_type() {
             if let Some(mut type_workers) = self.type_workers.get_mut(old_worker.worker_type()) {
                 type_workers.retain(|id| id != worker_id);
@@ -895,7 +900,6 @@ impl WorkerRegistry {
                     self.model_retry_configs.remove(&model_id);
                 }
             }
-
             if let Some(mut type_workers) = self.type_workers.get_mut(worker.worker_type()) {
                 type_workers.retain(|id| id != worker_id);
             }
@@ -982,6 +986,67 @@ impl WorkerRegistry {
         model_ids
     }
 
+    fn sampling_defaults_label(worker: &Arc<dyn Worker>) -> Option<&str> {
+        worker
+            .metadata()
+            .spec
+            .labels
+            .get(DEFAULT_SAMPLING_PARAMS_LABEL)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn sampling_defaults_values_for_group(
+        &self,
+        model_id: &str,
+        worker_type: WorkerType,
+    ) -> Vec<String> {
+        self.get_workers_filtered(
+            Some(model_id),
+            Some(worker_type),
+            Some(ConnectionMode::Grpc),
+            None,
+            false,
+        )
+        .into_iter()
+        .filter_map(|worker| Self::sampling_defaults_label(&worker).map(str::to_owned))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+    }
+
+    fn warn_on_sampling_defaults_divergence_for_worker(&self, worker: &Arc<dyn Worker>) {
+        if *worker.connection_mode() != ConnectionMode::Grpc {
+            return;
+        }
+
+        if !matches!(
+            *worker.worker_type(),
+            WorkerType::Regular | WorkerType::Decode
+        ) {
+            return;
+        }
+
+        if Self::sampling_defaults_label(worker).is_none() {
+            return;
+        }
+
+        let worker_type = *worker.worker_type();
+        for model_id in Self::worker_model_ids(worker) {
+            let values = self.sampling_defaults_values_for_group(&model_id, worker_type);
+            if values.len() > 1 {
+                tracing::warn!(
+                    model_id = %model_id,
+                    worker_type = %worker_type,
+                    connection_mode = %ConnectionMode::Grpc,
+                    worker_url = %worker.url(),
+                    observed_values = ?values,
+                    "Divergent default sampling params reported by workers in the same routing group"
+                );
+            }
+        }
+    }
+
     /// Core registration logic shared by local and mesh paths.
     ///
     /// Acquires the per-worker mutation lock before making the worker
@@ -1031,6 +1096,7 @@ impl WorkerRegistry {
             self.add_worker_to_model_index(&model_id, worker.clone());
             self.rebuild_hash_ring(&model_id);
         }
+        self.warn_on_sampling_defaults_divergence_for_worker(&worker);
 
         // Update type index (clone needed for DashMap key ownership)
         self.type_workers
@@ -1290,6 +1356,43 @@ mod tests {
             disable_health_check: true,
             ..Default::default()
         }
+    }
+
+    fn worker_with_sampling_defaults(
+        url: &str,
+        model_id: &str,
+        worker_type: WorkerType,
+        connection_mode: ConnectionMode,
+        defaults: Option<&str>,
+    ) -> Arc<dyn Worker> {
+        let mut builder = BasicWorkerBuilder::new(url)
+            .model(ModelCard::new(model_id))
+            .worker_type(worker_type)
+            .connection_mode(connection_mode);
+
+        if let Some(defaults) = defaults {
+            let mut labels = HashMap::new();
+            labels.insert(
+                DEFAULT_SAMPLING_PARAMS_LABEL.to_string(),
+                defaults.to_string(),
+            );
+            builder = builder.labels(labels);
+        }
+
+        Arc::new(builder.build())
+    }
+
+    fn assert_sampling_defaults_group_values(
+        registry: &WorkerRegistry,
+        model_id: &str,
+        worker_type: WorkerType,
+        expected: &[&str],
+    ) {
+        let expected: Vec<String> = expected.iter().map(|value| value.to_string()).collect();
+        assert_eq!(
+            registry.sampling_defaults_values_for_group(model_id, worker_type),
+            expected
+        );
     }
 
     #[test]
@@ -1816,6 +1919,133 @@ mod tests {
         // Remove last worker — config should be cleaned up
         registry.remove(&id2);
         assert!(registry.get_retry_config("llama-3").is_none());
+    }
+
+    #[test]
+    fn test_sampling_defaults_group_warning_scan_tracks_distinct_values() {
+        let registry = WorkerRegistry::new();
+        let defaults_a = r#"{"temperature":0.6}"#;
+        let defaults_b = r#"{"temperature":0.7}"#;
+
+        let id1 = registry
+            .register(worker_with_sampling_defaults(
+                "http://worker1:8080",
+                "llama-3",
+                WorkerType::Regular,
+                ConnectionMode::Grpc,
+                Some(defaults_a),
+            ))
+            .unwrap();
+        let id2 = registry
+            .register(worker_with_sampling_defaults(
+                "http://worker2:8080",
+                "llama-3",
+                WorkerType::Regular,
+                ConnectionMode::Grpc,
+                Some(defaults_a),
+            ))
+            .unwrap();
+
+        assert_sampling_defaults_group_values(
+            &registry,
+            "llama-3",
+            WorkerType::Regular,
+            &[defaults_a],
+        );
+
+        let id3 = registry
+            .register(worker_with_sampling_defaults(
+                "http://worker3:8080",
+                "llama-3",
+                WorkerType::Regular,
+                ConnectionMode::Grpc,
+                Some(defaults_b),
+            ))
+            .unwrap();
+
+        assert_sampling_defaults_group_values(
+            &registry,
+            "llama-3",
+            WorkerType::Regular,
+            &[defaults_a, defaults_b],
+        );
+
+        registry.remove(&id3);
+        assert_sampling_defaults_group_values(
+            &registry,
+            "llama-3",
+            WorkerType::Regular,
+            &[defaults_a],
+        );
+
+        registry.remove(&id1);
+        registry.remove(&id2);
+        assert_sampling_defaults_group_values(&registry, "llama-3", WorkerType::Regular, &[]);
+    }
+
+    #[test]
+    fn test_sampling_defaults_group_warning_scan_updates_on_replace() {
+        let registry = WorkerRegistry::new();
+        let defaults_a = r#"{"temperature":0.6}"#;
+        let defaults_b = r#"{"temperature":0.7}"#;
+
+        let id = registry
+            .register(worker_with_sampling_defaults(
+                "http://worker:8080",
+                "llama-3",
+                WorkerType::Decode,
+                ConnectionMode::Grpc,
+                Some(defaults_a),
+            ))
+            .unwrap();
+
+        assert!(registry.replace(
+            &id,
+            worker_with_sampling_defaults(
+                "http://worker:8080",
+                "llama-3",
+                WorkerType::Decode,
+                ConnectionMode::Grpc,
+                Some(defaults_b),
+            ),
+        ));
+
+        assert_sampling_defaults_group_values(
+            &registry,
+            "llama-3",
+            WorkerType::Decode,
+            &[defaults_b],
+        );
+    }
+
+    #[test]
+    fn test_sampling_defaults_group_warning_scan_ignores_non_applicable_workers() {
+        let registry = WorkerRegistry::new();
+        let defaults = r#"{"temperature":0.6}"#;
+
+        registry.register(worker_with_sampling_defaults(
+            "http://prefill:8080",
+            "llama-3",
+            WorkerType::Prefill,
+            ConnectionMode::Grpc,
+            Some(defaults),
+        ));
+        registry.register(worker_with_sampling_defaults(
+            "http://http-worker:8080",
+            "llama-3",
+            WorkerType::Regular,
+            ConnectionMode::Http,
+            Some(defaults),
+        ));
+        registry.register(worker_with_sampling_defaults(
+            "http://missing-label:8080",
+            "llama-3",
+            WorkerType::Regular,
+            ConnectionMode::Grpc,
+            None,
+        ));
+
+        assert_sampling_defaults_group_values(&registry, "llama-3", WorkerType::Regular, &[]);
     }
 
     #[test]

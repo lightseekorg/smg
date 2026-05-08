@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use rand::Rng;
-use serde::Deserialize;
 use smg_grpc_client::{
     mlx_proto,
     sglang_proto::{self, DisaggregatedParams},
@@ -16,39 +15,11 @@ use crate::{
         context::{RequestType, WorkerSelection},
         proto_wrapper::ProtoGenerateRequest,
     },
-    worker::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
+    worker::{
+        sampling_defaults::SamplingDefaults, RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT,
+        DEFAULT_SAMPLING_PARAMS_LABEL,
+    },
 };
-
-const DEFAULT_SAMPLING_PARAMS_LABEL: &str = "default_sampling_params_json";
-
-/// Model-author sampling defaults reported by a backend.
-///
-/// This intentionally covers only knobs that are true sampling defaults. Length
-/// limits such as `max_new_tokens` are ignored even when present in a model's
-/// `generation_config.json`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
-pub(crate) struct SamplingDefaults {
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    top_k: Option<i32>,
-    min_p: Option<f32>,
-    repetition_penalty: Option<f32>,
-}
-
-impl SamplingDefaults {
-    fn is_empty(&self) -> bool {
-        self.temperature.is_none()
-            && self.top_p.is_none()
-            && self.top_k.is_none()
-            && self.min_p.is_none()
-            && self.repetition_penalty.is_none()
-    }
-
-    fn from_json_str(json: &str) -> Result<Option<Self>, serde_json::Error> {
-        let defaults: Self = serde_json::from_str(json)?;
-        Ok((!defaults.is_empty()).then_some(defaults))
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SamplingDefaultsMask {
