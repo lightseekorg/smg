@@ -386,6 +386,10 @@ struct RepairProgress {
     /// BTreeMap so iteration order = page-index order — used
     /// to compute the contiguous-prefix cursor for retry.
     applied: BTreeMap<u32, Option<Vec<u8>>>,
+    /// Page index of the terminal page once observed. The repair
+    /// is complete only when every page through this index has
+    /// been applied.
+    terminal_page_index: Option<u32>,
     /// True once an `is_last=true` page has been applied. The
     /// session entry is removed from `outstanding_repairs`
     /// shortly after this is set; this flag exists primarily
@@ -402,6 +406,7 @@ impl RepairProgress {
             last_activity_at: now,
             retry_count: 0,
             applied: BTreeMap::new(),
+            terminal_page_index: None,
             completed: false,
         }
     }
@@ -417,6 +422,13 @@ impl RepairProgress {
             cursor.clone_from(c);
         }
         cursor
+    }
+
+    fn is_contiguously_complete(&self) -> bool {
+        let Some(last_page_index) = self.terminal_page_index else {
+            return false;
+        };
+        (0..=last_page_index).all(|idx| self.applied.contains_key(&idx))
     }
 }
 
@@ -987,6 +999,10 @@ impl TreeSyncAdapter {
             .insert(page.page_index, page.next_cursor.clone());
         entry.last_activity_at = Instant::now();
         let is_last = page.is_last;
+        if is_last {
+            entry.terminal_page_index = Some(page.page_index);
+        }
+        let is_complete = entry.is_contiguously_complete();
 
         debug!(
             model_id = %page.model_id,
@@ -996,6 +1012,7 @@ impl TreeSyncAdapter {
             entries_in_page = page.entries.len(),
             entries_applied = applied,
             is_last,
+            is_complete,
             "applied tree:page:",
         );
 
@@ -1003,7 +1020,7 @@ impl TreeSyncAdapter {
         // `remove()` would deadlock on the held shard write lock.
         drop(entry);
 
-        if is_last {
+        if is_complete {
             self.outstanding_repairs.remove(&key);
             debug!(
                 model_id = %page.model_id,
@@ -1113,6 +1130,7 @@ impl TreeSyncAdapter {
                     last_activity_at: now,
                     retry_count: retry_count + 1,
                     applied: BTreeMap::new(),
+                    terminal_page_index: None,
                     completed: false,
                 },
             );
@@ -2486,6 +2504,53 @@ mod tests {
                 .outstanding_repairs
                 .contains_key(&("model-1".to_string(), TreeKind::String)),
             "terminal page must clear the outstanding session",
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_page_with_gap_keeps_session_open() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        seed_outstanding(&adapter, "model-1", TreeKind::String, session, "node-b");
+        let page0 = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("a", &[("w1", 1)])],
+            Some(1),
+            false,
+        );
+        let terminal_page2 = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            2,
+            vec![string_entry("c", &[("w1", 1)])],
+            None,
+            true,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page0)]);
+        adapter.handle_incoming_repair_page(&[page_bytes(&terminal_page2)]);
+
+        let entry = adapter
+            .outstanding_repairs
+            .get(&("model-1".to_string(), TreeKind::String))
+            .expect("gapped terminal session stays open for retry");
+        assert_eq!(entry.terminal_page_index, Some(2));
+        assert!(!entry.is_contiguously_complete());
+        assert_eq!(
+            entry.contiguous_cursor(),
+            Some(bincode::serialize(&1u64).unwrap()),
+            "retry should resume after the contiguous prefix only",
         );
     }
 
