@@ -1021,13 +1021,25 @@ impl TreeSyncAdapter {
         drop(entry);
 
         if is_complete {
-            self.outstanding_repairs.remove(&key);
-            debug!(
-                model_id = %page.model_id,
-                kind = ?page.tree_kind,
-                session_id = %page.session_id,
-                "repair session complete",
-            );
+            if self
+                .outstanding_repairs
+                .remove_if(&key, |_, progress| progress.session_id == page.session_id)
+                .is_some()
+            {
+                debug!(
+                    model_id = %page.model_id,
+                    kind = ?page.tree_kind,
+                    session_id = %page.session_id,
+                    "repair session complete",
+                );
+            } else {
+                trace!(
+                    model_id = %page.model_id,
+                    kind = ?page.tree_kind,
+                    session_id = %page.session_id,
+                    "repair session completed but current progress changed before cleanup",
+                );
+            }
         }
     }
 
@@ -1055,28 +1067,42 @@ impl TreeSyncAdapter {
             .collect();
 
         for key in stale_keys {
-            let (cursor, retry_count, prev_target, started_at) =
+            let (session_id, cursor, retry_count, prev_target, started_at, last_activity_at) =
                 match self.outstanding_repairs.get(&key) {
                     Some(p) => (
+                        p.session_id,
                         p.contiguous_cursor(),
                         p.retry_count,
                         p.target_peer_id.clone(),
                         p.started_at,
+                        p.last_activity_at,
                     ),
                     None => continue,
                 };
+            if now.duration_since(last_activity_at) < retry_timeout {
+                continue;
+            }
             let session_age_ms = now.duration_since(started_at).as_millis();
 
             if retry_count >= max_retries {
-                self.outstanding_repairs.remove(&key);
-                error!(
-                    model_id = %key.0,
-                    kind = ?key.1,
-                    retry_count,
-                    session_age_ms,
-                    "tree repair session exceeded max retries; giving up. \
-                     Next unknown-hash delta will restart from scratch.",
-                );
+                if self
+                    .outstanding_repairs
+                    .remove_if(&key, |_, progress| {
+                        progress.session_id == session_id
+                            && progress.retry_count >= max_retries
+                            && now.duration_since(progress.last_activity_at) >= retry_timeout
+                    })
+                    .is_some()
+                {
+                    error!(
+                        model_id = %key.0,
+                        kind = ?key.1,
+                        retry_count,
+                        session_age_ms,
+                        "tree repair session exceeded max retries; giving up. \
+                         Next unknown-hash delta will restart from scratch.",
+                    );
+                }
                 continue;
             }
 
@@ -1118,32 +1144,52 @@ impl TreeSyncAdapter {
             self.tree_repair_requests
                 .publish_to(target, &stream_key, bytes);
 
-            // Replace progress: new session_id, fresh applied
-            // map, retry_count incremented. Old in-flight pages
-            // for the old session_id will be rejected as stale.
-            self.outstanding_repairs.insert(
-                key.clone(),
-                RepairProgress {
-                    session_id: new_session_id,
-                    target_peer_id: target.clone(),
-                    started_at: now,
-                    last_activity_at: now,
-                    retry_count: retry_count + 1,
-                    applied: BTreeMap::new(),
-                    terminal_page_index: None,
-                    completed: false,
-                },
-            );
+            // Replace progress only if the same stale session is
+            // still current. If a page made progress or completion
+            // won the race after our snapshot, the extra retry
+            // request is harmless: its fresh session_id has no live
+            // progress entry, so responses are dropped as stale.
+            let replaced = self
+                .outstanding_repairs
+                .get_mut(&key)
+                .is_some_and(|mut progress| {
+                    if progress.session_id != session_id
+                        || progress.retry_count != retry_count
+                        || now.duration_since(progress.last_activity_at) < retry_timeout
+                    {
+                        return false;
+                    }
+                    *progress = RepairProgress {
+                        session_id: new_session_id,
+                        target_peer_id: target.clone(),
+                        started_at: now,
+                        last_activity_at: now,
+                        retry_count: retry_count + 1,
+                        applied: BTreeMap::new(),
+                        terminal_page_index: None,
+                        completed: false,
+                    };
+                    true
+                });
 
-            debug!(
-                model_id = %key.0,
-                kind = ?key.1,
-                target = %target,
-                new_session_id = %new_session_id,
-                retry_count = retry_count + 1,
-                session_age_ms,
-                "reissued repair request",
-            );
+            if replaced {
+                debug!(
+                    model_id = %key.0,
+                    kind = ?key.1,
+                    target = %target,
+                    new_session_id = %new_session_id,
+                    retry_count = retry_count + 1,
+                    session_age_ms,
+                    "reissued repair request",
+                );
+            } else {
+                trace!(
+                    model_id = %key.0,
+                    kind = ?key.1,
+                    new_session_id = %new_session_id,
+                    "skipped retry progress replacement because session changed or made progress",
+                );
+            }
         }
     }
 }
