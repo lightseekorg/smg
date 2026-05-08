@@ -851,6 +851,11 @@ impl TreeHandle for CacheAwarePolicy {
                             for (tenant, _epoch) in tenants {
                                 tree.insert_text(path, tenant);
                             }
+                            self.hash_index
+                                .entry(model_id.to_string())
+                                .or_default()
+                                .string_tree
+                                .insert(smg_mesh::hash_node_path(path), path.clone());
                             applied += 1;
                         }
                         RepairEntry::Token { .. } => {
@@ -876,6 +881,11 @@ impl TreeHandle for CacheAwarePolicy {
                             for (tenant, _epoch) in tenants {
                                 tree.insert_tokens(tokens, tenant);
                             }
+                            self.hash_index
+                                .entry(model_id.to_string())
+                                .or_default()
+                                .token_tree
+                                .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
                             applied += 1;
                         }
                         RepairEntry::String { .. } => {
@@ -1619,6 +1629,57 @@ mod tests {
             "unknown_model",
             TreeKind::String,
             text_hash,
+            "http://w2",
+        ));
+    }
+
+    #[test]
+    fn test_apply_repair_page_seeds_hash_index() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let text = "repaired text";
+        let tokens = vec![1u32; 16];
+
+        let string_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::String,
+            page_index: 0,
+            entries: vec![RepairEntry::String {
+                path: text.to_string(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&string_page), 1);
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::String,
+            smg_mesh::hash_node_path(text),
+            "http://w2",
+        ));
+
+        let token_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::Token,
+            page_index: 0,
+            entries: vec![RepairEntry::Token {
+                tokens: tokens.clone(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&token_page), 1);
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::Token,
+            smg_mesh::hash_token_path(&tokens),
             "http://w2",
         ));
     }
