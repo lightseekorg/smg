@@ -620,11 +620,59 @@ fn render_chat_template(
     // Convert messages to minijinja::Value (messages already processed by router)
     let minijinja_messages: Vec<Value> = messages.iter().map(Value::from_serialize).collect();
 
+    // Strip the OpenAI tool wrapper for downstream rendering: convert
+    // ``[{"type": "function", "function": {...}}, ...]`` into the bare list
+    // ``[{...}, ...]``. This matches what TokenSpeed's HTTP path does in
+    // ``serving_chat.py:188`` (``[item.function.model_dump() for item in
+    // tools]``). Empirically, Kimi-K2.5 + TokenSpeed-NVFP4 BFCL accuracy is
+    // significantly higher when the model sees the bare-inner JSON form
+    // (HTTP path: simple_python 92.25 %) than either the wrapped form
+    // (SMG pre-fix: 86 %) or the TS-namespace form produced by the model's
+    // own ``encode_tools_to_typescript_style`` (88.25 %). The chat template
+    // falls through to ``{{ tools | tojson }}`` whenever ``tools_ts_str``
+    // is empty/missing — so feeding the bare-inner shape and letting the
+    // template's JSON branch fire reproduces the HTTP path exactly.
+    let stripped_tools_json: Option<Vec<serde_json::Value>> = params.tools.as_ref().map(|arr| {
+        arr.iter()
+            .map(|t| {
+                let v = serde_json::to_value(t).unwrap_or(serde_json::Value::Null);
+                // If this is an OpenAI-style wrapped tool ({"type":"function","function":{...}}),
+                // unwrap to the inner function dict. Then mirror what TokenSpeed HTTP's
+                // ``serving_chat.py:188`` does — call Pydantic's ``model_dump()`` on the
+                // inner function model, which emits *all* fields of the function schema
+                // including the ``strict`` field with its default ``false``. Without this
+                // SMG produces 108 tokens vs HTTP's 111 (3 missing tokens for ``,"strict":false``)
+                // and the model's BFCL accuracy stays ~5 pp below HTTP. Adding ``strict:false``
+                // to each function dict closes that gap by matching HTTP byte-for-byte.
+                match v {
+                    serde_json::Value::Object(ref m) => {
+                        if m.get("type").and_then(|x| x.as_str()) == Some("function") {
+                            if let Some(serde_json::Value::Object(inner)) = m.get("function") {
+                                let mut inner_with_default = inner.clone();
+                                // Match Pydantic's ChatCompletionToolFunction.model_dump():
+                                // emit ``strict`` even when not set in the source request,
+                                // defaulting to ``false`` (the OpenAI-API default).
+                                inner_with_default
+                                    .entry("strict")
+                                    .or_insert(serde_json::Value::Bool(false));
+                                return serde_json::Value::Object(inner_with_default);
+                            }
+                        }
+                        v
+                    }
+                    other => other,
+                }
+            })
+            .collect()
+    });
+
     // Use Value::UNDEFINED for missing optional params so they are truly "undefined"
     // in the template context, matching HuggingFace Python behavior. Many chat templates
     // use `{% if tools is defined %}` guards — passing null (none) instead of undefined
     // would bypass those guards since `none` IS defined, causing `tools | length` to fail.
-    let tools_value = params.tools.map_or(Value::UNDEFINED, Value::from_serialize);
+    let tools_value = stripped_tools_json
+        .as_ref()
+        .map_or(Value::UNDEFINED, Value::from_serialize);
     let documents_value = params
         .documents
         .map_or(Value::UNDEFINED, Value::from_serialize);

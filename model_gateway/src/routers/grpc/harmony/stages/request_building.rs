@@ -277,6 +277,55 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
+            // TokenSpeed: builder produces an SGLang-shaped request so the
+            // ``ProtoGenerateRequest::Sglang`` plumbing carries it; the
+            // wire-side translation to TokenSpeed shape happens inside the
+            // client's ``generate()``. Multimodal is intentionally not
+            // supported here — the harmony path is text-only today.
+            GrpcClient::TokenSpeed(tokenspeed_client) => {
+                let req = match &ctx.input.request_type {
+                    RequestType::Chat(request) => {
+                        let body = modified_request.as_deref().unwrap_or_else(|| request.as_ref());
+                        tokenspeed_client
+                            .build_generate_request_from_chat(
+                                request_id,
+                                body,
+                                placeholder_processed_text,
+                                token_ids,
+                                tool_constraints,
+                            )
+                            .map_err(|e| {
+                                error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TokenSpeed generate request");
+                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                            })?
+                    }
+                    RequestType::Responses(request) => tokenspeed_client
+                        .build_generate_request_from_responses(
+                            request_id,
+                            request.as_ref(),
+                            placeholder_processed_text,
+                            token_ids,
+                            tool_constraints,
+                        )
+                        .map_err(|e| {
+                            error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TokenSpeed generate request from responses");
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
+                        })?,
+                    RequestType::Embedding(_) => {
+                        return Err(error::bad_request(
+                            "harmony_embedding_not_supported",
+                            "Embedding requests are not supported with Harmony models".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
+                };
+                ProtoGenerateRequest::Sglang(Box::new(req))
+            }
         };
 
         // Inject Harmony stop token IDs into sampling params for ALL Harmony requests

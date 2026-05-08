@@ -2,6 +2,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rebuild triggers
     println!("cargo:rerun-if-changed=proto/common.proto");
     println!("cargo:rerun-if-changed=proto/sglang_scheduler.proto");
+    println!("cargo:rerun-if-changed=proto/tokenspeed_scheduler.proto");
     println!("cargo:rerun-if-changed=proto/vllm_engine.proto");
     println!("cargo:rerun-if-changed=proto/trtllm_service.proto");
     println!("cargo:rerun-if-changed=proto/mlx_engine.proto");
@@ -20,7 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .extern_path(".smg.grpc.common", "crate::common_proto")
         .type_attribute("GetModelInfoResponse", "#[derive(serde::Serialize)]")
         // vllm + trtllm ServerInfo have only primitive fields.
-        // sglang's contains prost_types::{Struct,Timestamp} so it's handled separately.
+        // sglang's and tokenspeed's contain prost_types::{Struct,Timestamp};
+        // those are handled separately at the wrapper layer.
         .type_attribute(
             "vllm.grpc.engine.GetServerInfoResponse",
             "#[derive(serde::Serialize)]",
@@ -40,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/vllm_engine.proto",
                 "proto/trtllm_service.proto",
                 "proto/mlx_engine.proto",
+                "proto/tokenspeed_scheduler.proto",
             ],
             &["proto"],
         )?;

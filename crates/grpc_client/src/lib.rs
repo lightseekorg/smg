@@ -10,6 +10,7 @@ pub mod common_proto {
 pub mod mlx_engine;
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
+pub mod tokenspeed_scheduler;
 pub mod trtllm_service;
 pub mod vllm_engine;
 
@@ -18,6 +19,12 @@ use std::sync::Arc;
 
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
+// TokenSpeed has a fully independent wire definition (see
+// ``proto/tokenspeed_scheduler.proto``) — distinct service, distinct
+// messages with intentionally trimmed field sets aimed at top-tier LLM
+// workloads. The client wraps that wire and translates to/from SGLang-shaped
+// types at the boundary so the router's dispatch enums don't proliferate.
+pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
 use tonic::metadata::MetadataMap;
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
 pub use vllm_engine::{proto as vllm_proto, VllmEngineClient};

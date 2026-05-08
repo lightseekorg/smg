@@ -11,6 +11,7 @@ use smg_grpc_client::{
     mlx_proto::{self as mlx},
     sglang_proto::{self as sglang, generate_complete::MatchedStop as SglangMatchedStop},
     sglang_scheduler::AbortOnDropStream as SglangStream,
+    tokenspeed_scheduler::AbortOnDropStream as TokenSpeedStream,
     trtllm_proto::{self as trtllm, generate_complete::MatchedStop as TrtllmMatchedStop},
     trtllm_service::AbortOnDropStream as TrtllmStream,
     vllm_engine::AbortOnDropStream as VllmStream,
@@ -918,12 +919,20 @@ impl ProtoGenerateComplete {
     }
 }
 
-/// Unified stream wrapper
+/// Unified stream wrapper.
+///
+/// TokenSpeed has its own variant because its underlying stream type differs
+/// from SGLang's ([`tokenspeed_scheduler::AbortOnDropStream`] vs
+/// [`sglang_scheduler::AbortOnDropStream`]) — the wire is independent. Both
+/// yield ``sglang::GenerateResponse``-shaped items (TokenSpeed translates at
+/// the boundary), so the chunk / complete accessors below don't need a
+/// dedicated TokenSpeed variant.
 pub enum ProtoStream {
     Sglang(SglangStream),
     Vllm(VllmStream),
     Trtllm(TrtllmStream),
     Mlx(MlxStream),
+    TokenSpeed(TokenSpeedStream),
 }
 
 impl ProtoStream {
@@ -946,6 +955,10 @@ impl ProtoStream {
                 .next()
                 .await
                 .map(|result| result.map(|r| ProtoGenerateResponse::Mlx(Box::new(r)))),
+            Self::TokenSpeed(stream) => stream
+                .next()
+                .await
+                .map(|result| result.map(|r| ProtoGenerateResponse::Sglang(Box::new(r)))),
         }
     }
 
@@ -956,6 +969,7 @@ impl ProtoStream {
             Self::Vllm(stream) => stream.mark_completed(),
             Self::Trtllm(stream) => stream.mark_completed(),
             Self::Mlx(stream) => stream.mark_completed(),
+            Self::TokenSpeed(stream) => stream.mark_completed(),
         }
     }
 }

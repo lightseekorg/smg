@@ -114,6 +114,10 @@ impl PipelineStage for RequestExecutionStage {
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::Mlx)
+                            // TokenSpeed shares the SGLang proto but doesn't
+                            // ship PD-disaggregation support yet — treat it
+                            // like the other non-PD backends here.
+                            | Some(RuntimeType::TokenSpeed)
                             | Some(RuntimeType::External)
                             | Some(RuntimeType::Unspecified) => {
                                 error!(
