@@ -49,6 +49,7 @@ use wfaas::LoggingSubscriber;
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
+    mesh::MeshAdapters,
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
         logging::{self, LoggingConfig},
@@ -87,6 +88,7 @@ pub struct AppState {
     pub concurrency_queue_tx: Option<mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
+    pub mesh_adapters: Option<Arc<MeshAdapters>>,
 }
 
 async fn parse_function_call(
@@ -1134,6 +1136,19 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .await?,
     );
 
+    let mesh_adapters = mesh_handler.as_ref().map(|handler| {
+        let adapters = Arc::new(MeshAdapters::new(
+            handler.mesh_kv().clone(),
+            handler.self_name.clone(),
+            handler.state.clone(),
+            app_context.worker_registry.clone(),
+            app_context.policy_registry.clone(),
+        ));
+        adapters.start();
+        info!("Mesh v2 adapters started");
+        adapters
+    });
+
     if config.prometheus_config.is_some() {
         app_context.inflight_tracker.start_sampler(20);
     }
@@ -1372,6 +1387,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         concurrency_queue_tx: limiter.queue_tx.clone(),
         router_manager: Some(router_manager),
         mesh_handler,
+        mesh_adapters,
     });
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {

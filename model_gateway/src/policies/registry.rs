@@ -12,9 +12,13 @@ use tracing::{debug, info, warn};
 /// When the first worker of a new model is added, it determines the policy for that model.
 /// All subsequent workers of the same model use the established policy.
 /// When the last worker of a model is removed, the policy mapping is cleaned up.
-use super::{BucketPolicy, CacheAwarePolicy, DPRankLoadPolicy, LoadBalancingPolicy, PolicyFactory};
+use super::{
+    BucketPolicy, CacheAwarePolicy, DPRankLoadPolicy, LoadBalancingPolicy, PolicyFactory,
+    TreeHandle, TreeKind,
+};
 use crate::{
     config::types::PolicyConfig,
+    mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
     worker::{KvEventMonitor, Worker},
 };
 
@@ -131,6 +135,36 @@ impl PolicyRegistry {
         if let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() {
             cache_aware.set_mesh_sync(mesh_sync.cloned());
         }
+    }
+
+    fn cache_aware_candidates(&self, model_id: &str) -> Vec<Arc<dyn LoadBalancingPolicy>> {
+        let mut policies = Vec::new();
+        let mut push_unique = |policy: Arc<dyn LoadBalancingPolicy>| {
+            if policy.name() != "cache_aware" {
+                return;
+            }
+            if policies
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &policy))
+            {
+                return;
+            }
+            policies.push(policy);
+        };
+
+        if let Some(policy) = self.get_policy(model_id) {
+            push_unique(policy);
+        }
+        push_unique(self.get_default_policy());
+
+        if let Some(policy) = self.prefill_policy.get() {
+            push_unique(Arc::clone(policy));
+        }
+        if let Some(policy) = self.decode_policy.get() {
+            push_unique(Arc::clone(policy));
+        }
+
+        policies
     }
 
     /// Called when a worker is added
@@ -621,6 +655,55 @@ impl PolicyRegistry {
                 }
             }
         }
+    }
+}
+
+impl TreeHandle for PolicyRegistry {
+    fn apply_known_remote_insert(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+        node_hash: u64,
+        worker_url: &str,
+    ) -> bool {
+        let candidates = self.cache_aware_candidates(model_id);
+        if candidates.is_empty() {
+            return true;
+        }
+
+        let mut all_applied = true;
+        for policy in candidates {
+            let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() else {
+                continue;
+            };
+            all_applied &=
+                cache_aware.apply_known_remote_insert(model_id, tree_kind, node_hash, worker_url);
+        }
+        all_applied
+    }
+
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>> {
+        for policy in self.cache_aware_candidates(model_id) {
+            let Some(cache_aware) = policy.as_any().downcast_ref::<CacheAwarePolicy>() else {
+                continue;
+            };
+            if let Some(stream) = cache_aware.open_repair_stream(model_id, tree_kind) {
+                return Some(stream);
+            }
+        }
+        None
+    }
+
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize {
+        self.cache_aware_candidates(&page.model_id)
+            .iter()
+            .filter_map(|policy| policy.as_any().downcast_ref::<CacheAwarePolicy>())
+            .map(|cache_aware| cache_aware.apply_repair_page(page))
+            .sum()
     }
 }
 
