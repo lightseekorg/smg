@@ -19,7 +19,7 @@
 //! reach into the gossip controller directly.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -39,11 +39,8 @@ const PREFIX: &str = "td:";
 const REPAIR_REQUEST_PREFIX: &str = "tree:req:";
 const REPAIR_PAGE_PREFIX: &str = "tree:page:";
 
-/// Duration a repair session may sit without progress before
+/// Default duration a repair session may sit without progress before
 /// the periodic retry scan reissues it. Spec §15 default: 5 s.
-//
-// TODO(d-3): read from `MeshConfig.tree_repair_retry_timeout`
-// once `server.rs` wires the adapter.
 const TREE_REPAIR_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the retry scan runs. Smaller than the timeout so
@@ -55,13 +52,10 @@ const TREE_REPAIR_RETRY_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// delta restarts a fresh session.
 const TREE_REPAIR_MAX_RETRIES: u32 = 3;
 
-/// Soft cap on the bincode-serialized size of a single
+/// Default soft cap on the bincode-serialized size of a single
 /// [`TreeRepairPage`]. Spec default (mesh-v2 §3.1,
 /// `max_tree_repair_page_bytes`). The responder fills entries
 /// until the next would push the page over this budget.
-//
-// TODO(d-3): read from the live `MeshConfig.max_tree_repair_page_bytes`
-// once `server.rs` wires the adapter, instead of using a const.
 pub const TREE_REPAIR_PAGE_BYTE_CAP: usize = 2 * 1024 * 1024;
 
 /// Reserved budget for the [`TreeRepairPage`] header (everything
@@ -89,6 +83,42 @@ const TREE_REPAIR_PAGE_HARD_CEILING: usize = MAX_STREAM_CHUNK_BYTES;
 /// the multi-chunk path.
 const REPAIR_ENTRY_HARD_CEILING: usize =
     TREE_REPAIR_PAGE_HARD_CEILING - TREE_REPAIR_PAGE_HEADER_OVERHEAD;
+
+/// Runtime knobs for TreeSync's repair protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeSyncConfig {
+    /// Per-page soft cap used by repair responders.
+    pub repair_page_byte_cap: usize,
+    /// Inactivity timeout before an outstanding repair is retried.
+    pub repair_retry_timeout: Duration,
+}
+
+impl Default for TreeSyncConfig {
+    fn default() -> Self {
+        Self {
+            repair_page_byte_cap: TREE_REPAIR_PAGE_BYTE_CAP,
+            repair_retry_timeout: TREE_REPAIR_RETRY_TIMEOUT,
+        }
+    }
+}
+
+impl TreeSyncConfig {
+    fn validate(self) -> Self {
+        assert!(
+            self.repair_page_byte_cap > TREE_REPAIR_PAGE_HEADER_OVERHEAD,
+            "TreeSyncConfig.repair_page_byte_cap must exceed repair page header overhead",
+        );
+        assert!(
+            self.repair_page_byte_cap <= TREE_REPAIR_PAGE_HARD_CEILING,
+            "TreeSyncConfig.repair_page_byte_cap must not exceed the mesh stream chunk ceiling",
+        );
+        assert!(
+            !self.repair_retry_timeout.is_zero(),
+            "TreeSyncConfig.repair_retry_timeout must be non-zero",
+        );
+        self
+    }
+}
 
 /// Live-membership view consumed by the adapter when picking a
 /// peer to send a repair request to. Defined here (not in the
@@ -124,6 +154,8 @@ pub struct TreeDelta {
 pub enum RepairReason {
     /// Inbound `TreeDelta` referenced a hash this node didn't know.
     UnknownHash(u64),
+    /// Startup reconciliation for a locally configured model tree.
+    ColdStart,
 }
 
 /// Wire format for a `tree:req:{session_id}` message. Targeted at
@@ -373,6 +405,9 @@ fn decode_cursor(cursor: Option<&[u8]>) -> u64 {
 struct RepairProgress {
     session_id: Uuid,
     target_peer_id: String,
+    /// Original reason carried by retries for consistent responder
+    /// diagnostics.
+    reason: RepairReason,
     /// Time the *current* request was issued. Reset on retry.
     started_at: Instant,
     /// Time the current session last made receiver-side progress.
@@ -393,10 +428,11 @@ struct RepairProgress {
 }
 
 impl RepairProgress {
-    fn new(session_id: Uuid, target_peer_id: String, now: Instant) -> Self {
+    fn new(session_id: Uuid, target_peer_id: String, reason: RepairReason, now: Instant) -> Self {
         Self {
             session_id,
             target_peer_id,
+            reason,
             started_at: now,
             last_activity_at: now,
             retry_count: 0,
@@ -445,6 +481,7 @@ pub struct TreeSyncAdapter {
     tree: Arc<dyn TreeHandle>,
     /// Live-peer source for repair-request targeting.
     peers: Arc<dyn PeerList>,
+    config: TreeSyncConfig,
     /// Outstanding repair sessions, keyed by (model_id, kind).
     /// At most one session per (model_id, kind) at a time:
     /// subsequent unknown-hash triggers coalesce into the
@@ -485,6 +522,26 @@ impl TreeSyncAdapter {
         peers: Arc<dyn PeerList>,
         node_name: String,
     ) -> Arc<Self> {
+        Self::with_config(
+            tenant_deltas,
+            tree_repair_requests,
+            tree_repair_pages,
+            tree,
+            peers,
+            node_name,
+            TreeSyncConfig::default(),
+        )
+    }
+
+    pub fn with_config(
+        tenant_deltas: Arc<StreamNamespace>,
+        tree_repair_requests: Arc<StreamNamespace>,
+        tree_repair_pages: Arc<StreamNamespace>,
+        tree: Arc<dyn TreeHandle>,
+        peers: Arc<dyn PeerList>,
+        node_name: String,
+        config: TreeSyncConfig,
+    ) -> Arc<Self> {
         assert_eq!(
             tenant_deltas.prefix(),
             PREFIX,
@@ -504,6 +561,7 @@ impl TreeSyncAdapter {
             !node_name.is_empty(),
             "TreeSyncAdapter node_name must not be empty",
         );
+        let config = config.validate();
         Arc::new(Self {
             tenant_deltas,
             tree_repair_requests,
@@ -511,6 +569,7 @@ impl TreeSyncAdapter {
             pending_deltas: DashMap::new(),
             tree,
             peers,
+            config,
             outstanding_repairs: DashMap::new(),
             node_name,
             drain_handle: OnceLock::new(),
@@ -636,6 +695,7 @@ impl TreeSyncAdapter {
         // `outstanding_repairs` so the next unknown-hash delta
         // can restart from scratch.
         let retry_owner = Arc::downgrade(self);
+        let retry_timeout = self.config.repair_retry_timeout;
         #[expect(
             clippy::disallowed_methods,
             reason = "periodic scan ends automatically when the adapter is dropped (Weak upgrade fails); no handle needed"
@@ -651,11 +711,7 @@ impl TreeSyncAdapter {
                     debug!("TreeSyncAdapter dropped, exiting retry scan task");
                     break;
                 };
-                this.scan_for_retries(
-                    Instant::now(),
-                    TREE_REPAIR_RETRY_TIMEOUT,
-                    TREE_REPAIR_MAX_RETRIES,
-                );
+                this.scan_for_retries(Instant::now(), retry_timeout, TREE_REPAIR_MAX_RETRIES);
             }
         });
     }
@@ -816,7 +872,7 @@ impl TreeSyncAdapter {
             request.session_id,
             request.model_id.clone(),
             request.tree_kind,
-            TREE_REPAIR_PAGE_BYTE_CAP,
+            self.config.repair_page_byte_cap,
             start_skip,
         );
 
@@ -854,23 +910,55 @@ impl TreeSyncAdapter {
         );
     }
 
+    /// Request both tree kinds for each locally configured model
+    /// during startup. Empty/duplicate model ids are ignored.
+    pub fn request_cold_start_repairs<I, S>(&self, model_ids: I) -> usize
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut seen = BTreeSet::new();
+        let mut requested = 0;
+        for model_id in model_ids {
+            let model_id = model_id.as_ref();
+            if model_id.is_empty() || !seen.insert(model_id.to_string()) {
+                continue;
+            }
+            requested += usize::from(self.request_repair(
+                model_id,
+                TreeKind::String,
+                RepairReason::ColdStart,
+            ));
+            requested += usize::from(self.request_repair(
+                model_id,
+                TreeKind::Token,
+                RepairReason::ColdStart,
+            ));
+        }
+        requested
+    }
+
     /// Issue a `tree:req:{session_id}` repair request for an
     /// unknown hash, targeted at a random ALIVE peer. Coalesces
     /// duplicates: while a session is already in flight for the
-    /// same `(model_id, tree_kind)`, subsequent unknown-hash
-    /// callbacks are dropped — the in-flight request asks for the
-    /// whole tree (`cursor=None`), so it'll cover the new hash
-    /// when the response lands (slice 5d).
+    /// same `(model_id, tree_kind)`, subsequent triggers are
+    /// dropped — the in-flight request asks for the whole tree
+    /// (`cursor=None`), so it'll cover the new hash when the
+    /// response lands.
     fn request_repair_for_unknown_hash(&self, model_id: &str, tree_kind: TreeKind, node_hash: u64) {
+        self.request_repair(model_id, tree_kind, RepairReason::UnknownHash(node_hash));
+    }
+
+    fn request_repair(&self, model_id: &str, tree_kind: TreeKind, reason: RepairReason) -> bool {
         let key = (model_id.to_string(), tree_kind);
         if self.outstanding_repairs.contains_key(&key) {
             trace!(
                 model_id,
                 kind = ?tree_kind,
-                hash = node_hash,
-                "repair already in flight, coalescing unknown-hash trigger",
+                reason = ?reason,
+                "repair already in flight, coalescing trigger",
             );
-            return;
+            return false;
         }
 
         let alive = self.peers.alive_peers();
@@ -878,10 +966,10 @@ impl TreeSyncAdapter {
             warn!(
                 model_id,
                 kind = ?tree_kind,
-                hash = node_hash,
-                "no alive peers to request repair from; will retry on next unknown delta",
+                reason = ?reason,
+                "no alive peers to request repair from; will retry on next trigger",
             );
-            return;
+            return false;
         };
 
         let request = TreeRepairRequest {
@@ -891,7 +979,7 @@ impl TreeSyncAdapter {
             model_id: model_id.to_string(),
             tree_kind,
             cursor: None,
-            reason: RepairReason::UnknownHash(node_hash),
+            reason: reason.clone(),
         };
 
         let bytes = match bincode::serialize(&request) {
@@ -899,7 +987,7 @@ impl TreeSyncAdapter {
             Err(err) => {
                 // Schema is fixed-shape — should be unreachable.
                 warn!(model_id, %err, "failed to serialize tree repair request");
-                return;
+                return false;
             }
         };
 
@@ -912,17 +1000,18 @@ impl TreeSyncAdapter {
         // ghost entry blocking future requests.
         self.outstanding_repairs.insert(
             key,
-            RepairProgress::new(request.session_id, target.clone(), Instant::now()),
+            RepairProgress::new(request.session_id, target.clone(), reason, Instant::now()),
         );
 
         debug!(
             model_id,
             kind = ?tree_kind,
-            hash = node_hash,
+            reason = ?request.reason,
             target = %target,
             session_id = %request.session_id,
             "sent tree repair request",
         );
+        true
     }
 
     /// Decode an incoming `tree:page:` payload, validate it
@@ -1061,18 +1150,26 @@ impl TreeSyncAdapter {
             .collect();
 
         for key in stale_keys {
-            let (session_id, cursor, retry_count, prev_target, started_at, last_activity_at) =
-                match self.outstanding_repairs.get(&key) {
-                    Some(p) => (
-                        p.session_id,
-                        p.contiguous_cursor(),
-                        p.retry_count,
-                        p.target_peer_id.clone(),
-                        p.started_at,
-                        p.last_activity_at,
-                    ),
-                    None => continue,
-                };
+            let (
+                session_id,
+                cursor,
+                retry_count,
+                prev_target,
+                started_at,
+                last_activity_at,
+                reason,
+            ) = match self.outstanding_repairs.get(&key) {
+                Some(p) => (
+                    p.session_id,
+                    p.contiguous_cursor(),
+                    p.retry_count,
+                    p.target_peer_id.clone(),
+                    p.started_at,
+                    p.last_activity_at,
+                    p.reason.clone(),
+                ),
+                None => continue,
+            };
             if now.duration_since(last_activity_at) < retry_timeout {
                 continue;
             }
@@ -1124,7 +1221,7 @@ impl TreeSyncAdapter {
                 model_id: key.0.clone(),
                 tree_kind: key.1,
                 cursor,
-                reason: RepairReason::UnknownHash(0),
+                reason: reason.clone(),
             };
 
             let bytes = match bincode::serialize(&request) {
@@ -1156,6 +1253,7 @@ impl TreeSyncAdapter {
                     *progress = RepairProgress {
                         session_id: new_session_id,
                         target_peer_id: target.clone(),
+                        reason,
                         started_at: now,
                         last_activity_at: now,
                         retry_count: retry_count + 1,
@@ -1672,6 +1770,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_start_publishes_repair_request_for_each_model_kind() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree: Arc<dyn TreeHandle> = Arc::new(MockTreeHandle::default());
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
+
+        let requested = adapter.request_cold_start_repairs(["model-1", "model-1"]);
+
+        assert_eq!(requested, 2, "duplicate model ids coalesce before publish");
+        let publishes = drain_repair_publishes(&mesh);
+        assert_eq!(publishes.len(), 2, "one repair per tree kind");
+
+        let mut saw_string = false;
+        let mut saw_token = false;
+        for (target, _key, payload) in publishes {
+            assert_eq!(target, "node-b");
+            let request: TreeRepairRequest = bincode::deserialize(&payload).unwrap();
+            assert_eq!(request.requester_peer_id, "node-a");
+            assert_eq!(request.target_peer_id, "node-b");
+            assert_eq!(request.model_id, "model-1");
+            assert_eq!(request.reason, RepairReason::ColdStart);
+            assert!(request.cursor.is_none());
+            match request.tree_kind {
+                TreeKind::String => saw_string = true,
+                TreeKind::Token => saw_token = true,
+            }
+        }
+        assert!(saw_string, "cold start requests string tree repair");
+        assert!(saw_token, "cold start requests token tree repair");
+    }
+
+    #[tokio::test]
     async fn coalesces_duplicate_repair_for_same_model_kind() {
         // Two unknown hashes for the same (model, kind) within one
         // batch must produce only one repair request — the
@@ -2142,6 +2275,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responder_uses_configured_page_byte_cap() {
+        let wide_path = "x".repeat(5 * 1024);
+        let canned: Vec<RepairEntry> = (0..3)
+            .map(|i| string_entry(&format!("{wide_path}-{i}"), &[("w1", i)]))
+            .collect();
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        tree.set_repair_stream("model-1", TreeKind::String, canned);
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
+        let config = TreeSyncConfig {
+            repair_page_byte_cap: TREE_REPAIR_PAGE_HEADER_OVERHEAD + 8 * 1024,
+            ..TreeSyncConfig::default()
+        };
+        let adapter = TreeSyncAdapter::with_config(
+            td,
+            req,
+            pages,
+            adapter_tree,
+            peers,
+            "node-a".into(),
+            config,
+        );
+
+        adapter.respond_to_repair_request(make_request(
+            Uuid::now_v7(),
+            "node-a",
+            "node-b",
+            "model-1",
+            TreeKind::String,
+            None,
+        ));
+
+        let publishes = drain_page_publishes(&mesh);
+        assert!(
+            publishes.len() > 1,
+            "small configured cap should force multiple pages",
+        );
+        for (_, _, payload) in publishes {
+            let page: TreeRepairPage = bincode::deserialize(&payload).unwrap();
+            assert!(
+                page.entries.len() <= 1,
+                "configured cap should keep these wide entries one per page",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn responder_emits_empty_ack_for_unknown_model() {
         // Same shape as "tree exists but is empty" — one is_last
         // page with no entries — gives the requester an ACK.
@@ -2361,7 +2545,12 @@ mod tests {
     ) {
         adapter.outstanding_repairs.insert(
             (model_id.to_string(), tree_kind),
-            RepairProgress::new(session_id, target.into(), Instant::now()),
+            RepairProgress::new(
+                session_id,
+                target.into(),
+                RepairReason::UnknownHash(0),
+                Instant::now(),
+            ),
         );
     }
 
@@ -2668,6 +2857,7 @@ mod tests {
         let mut progress = RepairProgress::new(
             old_session,
             "node-b".into(),
+            RepairReason::UnknownHash(17),
             Instant::now() - Duration::from_secs(10),
         );
         progress
@@ -2688,6 +2878,7 @@ mod tests {
         let request: TreeRepairRequest = bincode::deserialize(payload).unwrap();
         assert_eq!(request.model_id, "model-1");
         assert_eq!(request.tree_kind, TreeKind::String);
+        assert_eq!(request.reason, RepairReason::UnknownHash(17));
         assert_ne!(request.session_id, old_session, "fresh session_id on retry");
         assert_eq!(
             request.cursor.as_deref(),
@@ -2723,6 +2914,7 @@ mod tests {
             RepairProgress::new(
                 session,
                 "node-b".into(),
+                RepairReason::UnknownHash(18),
                 Instant::now() - Duration::from_secs(10),
             ),
         );
@@ -2765,6 +2957,7 @@ mod tests {
         let mut progress = RepairProgress::new(
             Uuid::now_v7(),
             "node-b".into(),
+            RepairReason::UnknownHash(19),
             Instant::now() - Duration::from_secs(60),
         );
         progress.retry_count = 3; // already at max
@@ -2795,6 +2988,7 @@ mod tests {
         let progress = RepairProgress::new(
             Uuid::now_v7(),
             "node-b".into(),
+            RepairReason::UnknownHash(20),
             Instant::now() - Duration::from_secs(10),
         );
         adapter

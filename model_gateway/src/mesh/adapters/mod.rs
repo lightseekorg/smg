@@ -8,5 +8,7 @@ pub mod tree_sync;
 pub mod worker_sync;
 
 pub use rate_limit_sync::RateLimitSyncAdapter;
-pub use tree_sync::{PeerList, RepairReason, TreeDelta, TreeRepairRequest, TreeSyncAdapter};
+pub use tree_sync::{
+    PeerList, RepairReason, TreeDelta, TreeRepairRequest, TreeSyncAdapter, TreeSyncConfig,
+};
 pub use worker_sync::WorkerSyncAdapter;

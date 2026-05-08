@@ -12,7 +12,9 @@ use crate::{policies::PolicyRegistry, worker::WorkerRegistry};
 
 pub mod adapters;
 
-pub use adapters::{RateLimitSyncAdapter, TreeDelta, TreeSyncAdapter, WorkerSyncAdapter};
+pub use adapters::{
+    RateLimitSyncAdapter, TreeDelta, TreeSyncAdapter, TreeSyncConfig, WorkerSyncAdapter,
+};
 
 const WORKER_PREFIX: &str = "worker:";
 const RATE_LIMIT_PREFIX: &str = "rl:";
@@ -39,6 +41,24 @@ impl MeshAdapters {
         cluster_state: ClusterState,
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+    ) -> Self {
+        Self::with_tree_sync_config(
+            mesh_kv,
+            node_name,
+            cluster_state,
+            worker_registry,
+            policy_registry,
+            TreeSyncConfig::default(),
+        )
+    }
+
+    pub fn with_tree_sync_config(
+        mesh_kv: Arc<MeshKV>,
+        node_name: String,
+        cluster_state: ClusterState,
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tree_sync_config: TreeSyncConfig,
     ) -> Self {
         let workers = mesh_kv.configure_crdt_prefix(WORKER_PREFIX, MergeStrategy::LastWriterWins);
         let rate_limits =
@@ -72,13 +92,14 @@ impl MeshAdapters {
 
         Self {
             worker_sync: WorkerSyncAdapter::new(workers, worker_registry),
-            tree_sync: TreeSyncAdapter::new(
+            tree_sync: TreeSyncAdapter::with_config(
                 tenant_deltas,
                 repair_requests,
                 repair_pages,
                 policy_registry,
                 peers,
                 node_name.clone(),
+                tree_sync_config,
             ),
             rate_limit_sync: RateLimitSyncAdapter::new(rate_limits, node_name),
         }

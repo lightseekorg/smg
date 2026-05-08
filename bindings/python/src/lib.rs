@@ -1205,6 +1205,7 @@ impl Router {
                 } else {
                     None
                 },
+                mesh_tree_sync_config: mesh::TreeSyncConfig::default(),
                 webrtc_bind_addr: None,
                 webrtc_stun_server: None,
             }))

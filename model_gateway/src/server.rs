@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -49,7 +50,7 @@ use wfaas::LoggingSubscriber;
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    mesh::MeshAdapters,
+    mesh::{MeshAdapters, TreeSyncAdapter, TreeSyncConfig},
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
         logging::{self, LoggingConfig},
@@ -77,6 +78,7 @@ use crate::{
         manager::{WorkerManager, WorkerManagerConfig},
         registry::WorkerStatePublisher,
         worker::WorkerType,
+        UNKNOWN_MODEL_ID,
     },
     workflow::{
         job_queue::{JobQueue, JobQueueConfig},
@@ -767,12 +769,64 @@ pub struct ServerConfig {
     /// Control plane authentication configuration
     pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
+    pub mesh_tree_sync_config: TreeSyncConfig,
     /// Bind address for WebRTC UDP sockets.
     /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
     pub webrtc_bind_addr: Option<std::net::IpAddr>,
     /// STUN server for ICE candidate gathering (host:port).
     /// Defaults to `stun.l.google.com:19302`; `"none"` to disable.
     pub webrtc_stun_server: Option<String>,
+}
+
+const MESH_COLD_START_REPAIR_ATTEMPTS: usize = 30;
+const MESH_COLD_START_REPAIR_INTERVAL: Duration = Duration::from_secs(1);
+
+fn mesh_cold_start_model_ids(router_config: &RouterConfig) -> Vec<String> {
+    let mut model_ids = BTreeSet::new();
+    if let Some(model_path) = router_config
+        .model_path
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    {
+        model_ids.insert(model_path.to_string());
+    }
+    if model_ids.is_empty() {
+        model_ids.insert(UNKNOWN_MODEL_ID.to_string());
+    }
+    model_ids.into_iter().collect()
+}
+
+fn start_mesh_cold_start_repairs(tree_sync: Arc<TreeSyncAdapter>, model_ids: Vec<String>) {
+    if model_ids.is_empty() {
+        return;
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "startup reconciliation task exits after a bounded number of attempts"
+    )]
+    spawn(async move {
+        for attempt in 1..=MESH_COLD_START_REPAIR_ATTEMPTS {
+            let requested =
+                tree_sync.request_cold_start_repairs(model_ids.iter().map(String::as_str));
+            if requested > 0 {
+                info!(
+                    requested,
+                    attempt,
+                    models = ?model_ids,
+                    "requested mesh cold-start tree repair",
+                );
+                return;
+            }
+
+            tokio::time::sleep(MESH_COLD_START_REPAIR_INTERVAL).await;
+        }
+
+        warn!(
+            models = ?model_ids,
+            "mesh cold-start tree repair skipped because no alive peers became available",
+        );
+    });
 }
 
 pub fn build_app(
@@ -1139,12 +1193,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     );
 
     let mesh_adapters = mesh_handler.as_ref().map(|handler| {
-        let adapters = Arc::new(MeshAdapters::new(
+        let adapters = Arc::new(MeshAdapters::with_tree_sync_config(
             handler.mesh_kv().clone(),
             handler.self_name.clone(),
             handler.state.clone(),
             app_context.worker_registry.clone(),
             app_context.policy_registry.clone(),
+            config.mesh_tree_sync_config,
         ));
         adapters.start();
         let worker_publisher: Arc<dyn WorkerStatePublisher> = adapters.worker_sync.clone();
@@ -1155,6 +1210,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         app_context
             .policy_registry
             .set_tree_delta_publisher(Some(tree_publisher));
+        start_mesh_cold_start_repairs(
+            adapters.tree_sync.clone(),
+            mesh_cold_start_model_ids(&config.router_config),
+        );
         info!("Mesh v2 adapters started");
         adapters
     });
