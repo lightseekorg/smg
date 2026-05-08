@@ -25,9 +25,10 @@ pub use adapters::{
 };
 pub use breaker::{BreakerState, CrossRegionBreaker};
 pub use candidate_calculation::{
-    CandidateCalculationInput, CandidateCalculationOutput, CandidateCalculator, CandidateRejection,
-    CandidateRejectionReason, ExecutionTarget, RegionCandidate, RegionRouteDecision, RouteCommit,
-    WorkerHealthSummary,
+    CandidateCalculationInput, CandidateCalculationOutput, CandidateCalculator,
+    CandidateRankingConfig, CandidateRejection, CandidateRejectionReason, ExecutionTarget,
+    RegionCandidate, RegionRouteDecision, RouteCalculationInput, RouteCalculationOutput,
+    RouteCommit, RouteDecisionLogContext, WorkerHealthSummary,
 };
 pub use config::{
     CrossRegionContext, CrossRegionMtlsRuntimeConfig, CrossRegionRuntimeConfig,

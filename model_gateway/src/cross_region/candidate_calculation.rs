@@ -48,6 +48,18 @@ pub struct RouteCommit {
     pub failover_mode: CrossRegionFailoverMode,
 }
 
+/// Inspectable route decision context for log and metric emission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteDecisionLogContext {
+    pub route_id: String,
+    pub entry_region: String,
+    pub target_region: String,
+    pub model_id: String,
+    pub request_mode: RequestMode,
+    pub attempt: u32,
+    pub failover_mode: CrossRegionFailoverMode,
+}
+
 /// Candidate region scoring input produced before a route decision is committed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionCandidate {
@@ -65,6 +77,23 @@ pub struct RegionCandidate {
     pub worker_load: Option<isize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness_age_ms: Option<i64>,
+}
+
+/// Ranking configuration isolated so future weight changes stay local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateRankingConfig {
+    pub missing_client_latency_hint_ms: u64,
+    pub missing_worker_load: isize,
+}
+
+impl Default for CandidateRankingConfig {
+    /// Create the default ranking configuration for absent advisory signals.
+    fn default() -> Self {
+        Self {
+            missing_client_latency_hint_ms: u64::MAX,
+            missing_worker_load: isize::MAX,
+        }
+    }
 }
 
 /// Region-level worker health summary carried by a candidate.
@@ -141,11 +170,30 @@ pub struct CandidateCalculationInput<'a> {
     pub now_ms: i64,
 }
 
+/// Input bundle for deterministic route ranking and commitment.
+#[derive(Debug)]
+pub struct RouteCalculationInput<'a> {
+    pub route_id: String,
+    pub entry_region: String,
+    pub request_mode: RequestMode,
+    pub attempt: u32,
+    pub candidate_input: CandidateCalculationInput<'a>,
+}
+
+/// Output bundle for a committed cross-region route decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteCalculationOutput {
+    pub decision: RegionRouteDecision,
+    pub commit: RouteCommit,
+    pub log_context: RouteDecisionLogContext,
+}
+
 /// Candidate calculator for Phase 1 regional candidate construction.
 #[derive(Debug, Clone)]
 pub struct CandidateCalculator {
     enabled: bool,
     remote_signal_max_age_ms: i64,
+    ranking_config: CandidateRankingConfig,
 }
 
 impl Default for CandidateCalculator {
@@ -154,6 +202,7 @@ impl Default for CandidateCalculator {
         Self {
             enabled: true,
             remote_signal_max_age_ms: DEFAULT_REMOTE_SIGNAL_MAX_AGE_MS,
+            ranking_config: CandidateRankingConfig::default(),
         }
     }
 }
@@ -167,6 +216,12 @@ impl CandidateCalculator {
     /// Override the maximum accepted remote signal age.
     pub fn with_remote_signal_max_age_ms(mut self, max_age_ms: i64) -> Self {
         self.remote_signal_max_age_ms = max_age_ms;
+        self
+    }
+
+    /// Override ranking behavior for absent advisory signal values.
+    pub fn with_ranking_config(mut self, ranking_config: CandidateRankingConfig) -> Self {
+        self.ranking_config = ranking_config;
         self
     }
 
@@ -214,13 +269,104 @@ impl CandidateCalculator {
         Ok(output)
     }
 
-    /// Build a route decision only after SMG-11 adds ranking and commitment.
+    /// Rank eligible region candidates and commit the best route.
     pub fn calculate(
         &self,
-        input: CandidateCalculationInput<'_>,
-    ) -> CrossRegionResult<Option<RegionRouteDecision>> {
-        let _ = self.build_candidates(input)?;
-        Ok(None)
+        input: RouteCalculationInput<'_>,
+    ) -> CrossRegionResult<Option<RouteCalculationOutput>> {
+        validate_route_input(&input)?;
+        if !self.enabled {
+            return Ok(None);
+        }
+
+        let profile = input.candidate_input.profile.clone();
+        let local_region = input.candidate_input.local_region.clone();
+        let model_id = profile.single_model_id()?.to_string();
+        let failover_mode = profile.failover_policy.failover_mode;
+        let candidate_output = self.build_candidates(input.candidate_input)?;
+        let maybe_candidate = self.best_candidate(
+            &candidate_output.candidates,
+            &profile,
+            &model_id,
+            &local_region,
+        );
+        let Some(selected_candidate) = maybe_candidate else {
+            return Ok(None);
+        };
+
+        let target_region = selected_candidate.region_id.clone();
+        let decision = RegionRouteDecision {
+            route_id: input.route_id.clone(),
+            target_region: target_region.clone(),
+            model_id,
+            execution_target: execution_target_for(&target_region, &local_region),
+        };
+        let commit = RouteCommit::from_decision(
+            decision.clone(),
+            input.entry_region,
+            input.request_mode,
+            input.attempt,
+            failover_mode,
+        );
+        let log_context = RouteDecisionLogContext::from_commit(&commit);
+
+        Ok(Some(RouteCalculationOutput {
+            decision,
+            commit,
+            log_context,
+        }))
+    }
+
+    /// Return the best eligible candidate according to SMG-11 ranking order.
+    fn best_candidate<'a>(
+        &self,
+        candidates: &'a [RegionCandidate],
+        profile: &RoutingProfileContext,
+        model_id: &str,
+        local_region: &str,
+    ) -> Option<&'a RegionCandidate> {
+        candidates
+            .iter()
+            .filter(|candidate| candidate_matches_profile(candidate, profile, model_id))
+            .min_by(|left, right| self.compare_candidates(left, right, local_region))
+    }
+
+    /// Compare candidates in the configured deterministic ranking order.
+    fn compare_candidates(
+        &self,
+        left: &RegionCandidate,
+        right: &RegionCandidate,
+        local_region: &str,
+    ) -> std::cmp::Ordering {
+        right
+            .healthy
+            .cmp(&left.healthy)
+            .then_with(|| right.has_capacity.cmp(&left.has_capacity))
+            .then_with(|| self.latency_rank(left).cmp(&self.latency_rank(right)))
+            .then_with(|| {
+                self.worker_load_rank(left)
+                    .cmp(&self.worker_load_rank(right))
+            })
+            .then_with(|| {
+                let left_is_local = left.region_id == local_region;
+                let right_is_local = right.region_id == local_region;
+                right_is_local.cmp(&left_is_local)
+            })
+            .then_with(|| left.region_id.cmp(&right.region_id))
+    }
+
+    /// Return the comparable client-latency rank for a candidate.
+    fn latency_rank(&self, candidate: &RegionCandidate) -> u64 {
+        candidate
+            .client_latency_hint_ms
+            .unwrap_or(self.ranking_config.missing_client_latency_hint_ms)
+    }
+
+    /// Return the comparable worker-load rank for a candidate.
+    fn worker_load_rank(&self, candidate: &RegionCandidate) -> isize {
+        candidate
+            .worker_load
+            .unwrap_or(self.ranking_config.missing_worker_load)
     }
 
     /// Build a local-region candidate from the local worker registry.
@@ -427,6 +573,21 @@ fn validate_input(input: &CandidateCalculationInput<'_>) -> CrossRegionResult<()
     input.profile.validate()
 }
 
+/// Validate route-commit inputs before ranking candidate output.
+fn validate_route_input(input: &RouteCalculationInput<'_>) -> CrossRegionResult<()> {
+    if input.entry_region.trim().is_empty() {
+        return Err(CrossRegionError::InvalidConfig {
+            reason: "entry_region must not be empty".to_string(),
+        });
+    }
+    if input.route_id.trim().is_empty() {
+        return Err(CrossRegionError::InvalidConfig {
+            reason: "route_id must not be empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Return every region that can produce a candidate or rejection in stable order.
 fn candidate_region_ids(input: &CandidateCalculationInput<'_>) -> Vec<String> {
     let mut region_ids = BTreeSet::new();
@@ -577,6 +738,45 @@ impl RouteCommit {
     }
 }
 
+impl RouteDecisionLogContext {
+    /// Build log and metric context from committed route metadata.
+    pub fn from_commit(commit: &RouteCommit) -> Self {
+        Self {
+            route_id: commit.route_id.clone(),
+            entry_region: commit.entry_region.clone(),
+            target_region: commit.target_region.clone(),
+            model_id: commit.model_id.clone(),
+            request_mode: commit.request_mode,
+            attempt: commit.attempt,
+            failover_mode: commit.failover_mode,
+        }
+    }
+}
+
+/// Return true when a candidate belongs to the active Phase 1 profile.
+fn candidate_matches_profile(
+    candidate: &RegionCandidate,
+    profile: &RoutingProfileContext,
+    model_id: &str,
+) -> bool {
+    candidate.model_id == model_id
+        && profile
+            .allowed_regions
+            .iter()
+            .any(|region| region == &candidate.region_id)
+}
+
+/// Build the execution target without ever carrying a worker URL.
+fn execution_target_for(target_region: &str, local_region: &str) -> ExecutionTarget {
+    if target_region == local_region {
+        ExecutionTarget::LocalRegion
+    } else {
+        ExecutionTarget::RemoteRegion {
+            region_id: target_region.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -612,6 +812,384 @@ mod tests {
 
         assert!(json.contains("us-chicago-1"));
         assert!(!json.contains("worker_url"));
+    }
+
+    #[test]
+    fn route_calculation_commits_remote_region_without_worker_url() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            10,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-a",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            1,
+            NOW_MS,
+        );
+        add_client_latency(&mut remote_state, "us-chicago-1", 20, NOW_MS);
+
+        let output = calculate_route(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-ashburn-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        )
+        .expect("route should be committed");
+        let commit_json = serde_json::to_string(&output.commit).expect("serialize commit");
+
+        assert_eq!(output.decision.target_region, "us-chicago-1");
+        assert_eq!(output.commit.entry_region, "us-ashburn-1");
+        assert_eq!(output.commit.model_id, "cohere.command-r-plus");
+        assert_eq!(output.log_context.route_id, "route-1");
+        assert_eq!(output.log_context.target_region, "us-chicago-1");
+        assert!(!commit_json.contains("worker_url"));
+        assert!(!commit_json.contains("http://"));
+        assert!(!commit_json.contains("https://"));
+        assert_eq!(
+            output.decision.execution_target,
+            ExecutionTarget::RemoteRegion {
+                region_id: "us-chicago-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn route_ranking_is_deterministic_with_stable_signal_state() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            50,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-phoenix-1",
+            "remote-worker-phx",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            20,
+            NOW_MS,
+        );
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-ord",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            20,
+            NOW_MS,
+        );
+        add_client_latency(&mut remote_state, "us-phoenix-1", 30, NOW_MS);
+        add_client_latency(&mut remote_state, "us-chicago-1", 20, NOW_MS);
+
+        let profile = profile(
+            &["us-ashburn-1", "us-chicago-1", "us-phoenix-1"],
+            "cohere.command-r-plus",
+            ModalityPolicy::default(),
+        );
+        let first = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1", "us-phoenix-1"]),
+            CrossRegionBreaker::new(),
+            profile.clone(),
+            Endpoint::Chat,
+        );
+        let second = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1", "us-phoenix-1"]),
+            CrossRegionBreaker::new(),
+            profile,
+            Endpoint::Chat,
+        );
+
+        assert_eq!(first, "us-chicago-1");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn healthy_candidates_outrank_unhealthy_candidates() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            100,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-a",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            1,
+            NOW_MS,
+        );
+        remote_state.upsert_readiness(
+            SmgReadinessSignal {
+                region_id: "us-chicago-1".to_string(),
+                ready: false,
+            },
+            signal_version(NOW_MS),
+        );
+        add_client_latency(&mut remote_state, "us-chicago-1", 1, NOW_MS);
+
+        let target_region = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-ashburn-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+
+        assert_eq!(target_region, "us-ashburn-1");
+    }
+
+    #[test]
+    fn available_capacity_order_is_respected() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Pending,
+            1,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-a",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            100,
+            NOW_MS,
+        );
+        remote_state.upsert_readiness(
+            SmgReadinessSignal {
+                region_id: "us-chicago-1".to_string(),
+                ready: false,
+            },
+            signal_version(NOW_MS),
+        );
+
+        let target_region = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-ashburn-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+
+        assert_eq!(target_region, "us-chicago-1");
+    }
+
+    #[test]
+    fn lower_client_latency_wins_before_worker_load() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            0,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-ord",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            90,
+            NOW_MS,
+        );
+        add_remote_worker(
+            &mut remote_state,
+            "us-phoenix-1",
+            "remote-worker-phx",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            1,
+            NOW_MS,
+        );
+        add_client_latency(&mut remote_state, "us-chicago-1", 20, NOW_MS);
+        add_client_latency(&mut remote_state, "us-phoenix-1", 40, NOW_MS);
+
+        let target_region = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1", "us-phoenix-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-chicago-1", "us-phoenix-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+
+        assert_eq!(target_region, "us-chicago-1");
+    }
+
+    #[test]
+    fn lower_worker_load_wins_when_higher_order_fields_match() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            0,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-ord",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            90,
+            NOW_MS,
+        );
+        add_remote_worker(
+            &mut remote_state,
+            "us-phoenix-1",
+            "remote-worker-phx",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            1,
+            NOW_MS,
+        );
+        add_client_latency(&mut remote_state, "us-chicago-1", 20, NOW_MS);
+        add_client_latency(&mut remote_state, "us-phoenix-1", 20, NOW_MS);
+
+        let target_region = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1", "us-phoenix-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-chicago-1", "us-phoenix-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+
+        assert_eq!(target_region, "us-phoenix-1");
+    }
+
+    #[test]
+    fn local_first_tie_break_applies_only_to_equivalent_outcomes() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            10,
+        );
+        let mut tied_remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut tied_remote_state,
+            "us-chicago-1",
+            "remote-worker-a",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            10,
+            NOW_MS,
+        );
+        let mut lower_latency_remote_state = tied_remote_state.clone();
+        add_client_latency(&mut lower_latency_remote_state, "us-chicago-1", 10, NOW_MS);
+
+        let tied_target_region = route_target_region(
+            &registry,
+            &tied_remote_state,
+            peer_registry(&["us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-ashburn-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+        let lower_latency_target_region = route_target_region(
+            &registry,
+            &lower_latency_remote_state,
+            peer_registry(&["us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-ashburn-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+
+        assert_eq!(tied_target_region, "us-ashburn-1");
+        assert_eq!(lower_latency_target_region, "us-chicago-1");
+    }
+
+    #[test]
+    fn stable_region_id_tie_break_prevents_flapping() {
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            0,
+        );
+        let mut remote_state = CrossRegionState::new();
+        add_remote_worker(
+            &mut remote_state,
+            "us-phoenix-1",
+            "remote-worker-phx",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            10,
+            NOW_MS,
+        );
+        add_remote_worker(
+            &mut remote_state,
+            "us-chicago-1",
+            "remote-worker-ord",
+            Some("cohere.command-r-plus"),
+            WorkerStatus::Ready,
+            10,
+            NOW_MS,
+        );
+
+        let target_region = route_target_region(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-phoenix-1", "us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-phoenix-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+
+        assert_eq!(target_region, "us-chicago-1");
     }
 
     #[test]
@@ -1800,6 +2378,24 @@ mod tests {
         );
     }
 
+    /// Add a client-latency signal for the common test client region.
+    fn add_client_latency(
+        state: &mut CrossRegionState,
+        target_region: &str,
+        p50_latency_ms: u64,
+        updated_at_ms: i64,
+    ) {
+        state.upsert_client_latency(
+            crate::cross_region::ClientLatencySignal {
+                client_region: "iad".to_string(),
+                target_region: target_region.to_string(),
+                p50_latency_ms,
+                p95_latency_ms: p50_latency_ms.saturating_mul(2),
+            },
+            signal_version(updated_at_ms),
+        );
+    }
+
     /// Run candidate construction with the common local-region and client-region fixtures.
     fn build_candidates(
         local_worker_registry: &WorkerRegistry,
@@ -1822,6 +2418,58 @@ mod tests {
                 now_ms: NOW_MS,
             })
             .expect("candidate calculation should succeed")
+    }
+
+    /// Run route calculation with the common local-region and request fixtures.
+    fn calculate_route(
+        local_worker_registry: &WorkerRegistry,
+        remote_state: &CrossRegionState,
+        peer_registry: RegionPeerRegistry,
+        breaker: CrossRegionBreaker,
+        profile: RoutingProfileContext,
+        endpoint_type: Endpoint,
+    ) -> Option<RouteCalculationOutput> {
+        CandidateCalculator::new()
+            .calculate(RouteCalculationInput {
+                route_id: "route-1".to_string(),
+                entry_region: "us-ashburn-1".to_string(),
+                request_mode: RequestMode::Unresolved,
+                attempt: 1,
+                candidate_input: CandidateCalculationInput {
+                    profile,
+                    local_region: "us-ashburn-1".to_string(),
+                    endpoint_type,
+                    local_worker_registry,
+                    remote_state,
+                    peer_registry: &peer_registry,
+                    breaker: &breaker,
+                    client_region: Some("iad".to_string()),
+                    now_ms: NOW_MS,
+                },
+            })
+            .expect("route calculation should succeed")
+    }
+
+    /// Return the committed target region for concise route-ranking assertions.
+    fn route_target_region(
+        local_worker_registry: &WorkerRegistry,
+        remote_state: &CrossRegionState,
+        peer_registry: RegionPeerRegistry,
+        breaker: CrossRegionBreaker,
+        profile: RoutingProfileContext,
+        endpoint_type: Endpoint,
+    ) -> String {
+        calculate_route(
+            local_worker_registry,
+            remote_state,
+            peer_registry,
+            breaker,
+            profile,
+            endpoint_type,
+        )
+        .expect("route should be committed")
+        .decision
+        .target_region
     }
 
     /// Return candidate regions in output order for concise assertions.
