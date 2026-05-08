@@ -375,6 +375,10 @@ struct RepairProgress {
     target_peer_id: String,
     /// Time the *current* request was issued. Reset on retry.
     started_at: Instant,
+    /// Time the current session last made receiver-side progress.
+    /// Refreshed on every accepted repair page so long-running
+    /// transfers do not retry while actively advancing.
+    last_activity_at: Instant,
     /// Number of times this (model_id, tree_kind) session has
     /// been retried. New session_id is generated on each retry.
     retry_count: u32,
@@ -395,6 +399,7 @@ impl RepairProgress {
             session_id,
             target_peer_id,
             started_at: now,
+            last_activity_at: now,
             retry_count: 0,
             applied: BTreeMap::new(),
             completed: false,
@@ -980,6 +985,7 @@ impl TreeSyncAdapter {
         entry
             .applied
             .insert(page.page_index, page.next_cursor.clone());
+        entry.last_activity_at = Instant::now();
         let is_last = page.is_last;
 
         debug!(
@@ -1026,20 +1032,23 @@ impl TreeSyncAdapter {
             .iter()
             .filter(|e| {
                 let p = e.value();
-                !p.completed && now.duration_since(p.started_at) >= retry_timeout
+                !p.completed && now.duration_since(p.last_activity_at) >= retry_timeout
             })
             .map(|e| e.key().clone())
             .collect();
 
         for key in stale_keys {
-            let (cursor, retry_count, prev_target) = match self.outstanding_repairs.get(&key) {
-                Some(p) => (
-                    p.contiguous_cursor(),
-                    p.retry_count,
-                    p.target_peer_id.clone(),
-                ),
-                None => continue,
-            };
+            let (cursor, retry_count, prev_target, started_at) =
+                match self.outstanding_repairs.get(&key) {
+                    Some(p) => (
+                        p.contiguous_cursor(),
+                        p.retry_count,
+                        p.target_peer_id.clone(),
+                        p.started_at,
+                    ),
+                    None => continue,
+                };
+            let session_age_ms = now.duration_since(started_at).as_millis();
 
             if retry_count >= max_retries {
                 self.outstanding_repairs.remove(&key);
@@ -1047,6 +1056,7 @@ impl TreeSyncAdapter {
                     model_id = %key.0,
                     kind = ?key.1,
                     retry_count,
+                    session_age_ms,
                     "tree repair session exceeded max retries; giving up. \
                      Next unknown-hash delta will restart from scratch.",
                 );
@@ -1100,6 +1110,7 @@ impl TreeSyncAdapter {
                     session_id: new_session_id,
                     target_peer_id: target.clone(),
                     started_at: now,
+                    last_activity_at: now,
                     retry_count: retry_count + 1,
                     applied: BTreeMap::new(),
                     completed: false,
@@ -1112,6 +1123,7 @@ impl TreeSyncAdapter {
                 target = %target,
                 new_session_id = %new_session_id,
                 retry_count = retry_count + 1,
+                session_age_ms,
                 "reissued repair request",
             );
         }
@@ -2581,6 +2593,52 @@ mod tests {
         assert_eq!(entry.session_id, request.session_id);
         assert_eq!(entry.retry_count, 1);
         assert!(entry.applied.is_empty(), "applied set reset on retry");
+    }
+
+    #[tokio::test]
+    async fn retry_scan_skips_session_with_recent_page_progress() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        adapter.outstanding_repairs.insert(
+            ("model-1".to_string(), TreeKind::String),
+            RepairProgress::new(
+                session,
+                "node-b".into(),
+                Instant::now() - Duration::from_secs(10),
+            ),
+        );
+
+        let page = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("a", &[("w1", 1)])],
+            Some(1),
+            false,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        adapter.scan_for_retries(Instant::now(), Duration::from_secs(5), 3);
+
+        assert!(
+            drain_repair_publishes(&mesh).is_empty(),
+            "recent page progress should suppress retry",
+        );
+        let entry = adapter
+            .outstanding_repairs
+            .get(&("model-1".to_string(), TreeKind::String))
+            .expect("session retained");
+        assert_eq!(entry.session_id, session);
+        assert_eq!(entry.retry_count, 0);
     }
 
     #[tokio::test]
