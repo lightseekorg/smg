@@ -35,11 +35,11 @@ mod tests;
 pub use chunking::MAX_STREAM_CHUNK_BYTES;
 pub use crdt_kv::{
     decode as decode_epoch_count, encode as encode_epoch_count, merge as merge_epoch_max_wins,
-    CrdtOrMap, EpochCount, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
+    CrdtOrMap, EpochCount, MergeStrategy, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
 };
 pub use kv::{
-    CrdtNamespace, DrainHandle, MergeStrategy, MeshKV, StreamConfig, StreamDrainFn,
-    StreamNamespace, StreamRouting, Subscription,
+    CrdtNamespace, DrainHandle, MeshKV, StreamConfig, StreamDrainFn, StreamNamespace,
+    StreamRouting, Subscription,
 };
 pub use metrics::init_mesh_metrics;
 pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};

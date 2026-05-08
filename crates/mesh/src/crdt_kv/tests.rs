@@ -7,7 +7,10 @@ use tracing_subscriber::{
 
 use super::{
     crdt::CrdtOrMap,
+    epoch_max_wins::{decode, encode, EpochCount},
+    merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
+    replica::ReplicaId,
 };
 static INIT: Once = Once::new();
 
@@ -217,6 +220,52 @@ fn test_older_insert_applied_later_does_not_overwrite_winner() {
     replica.merge(&stale_log);
 
     assert_eq!(replica.get("key1"), Some(b"newer_value".to_vec()));
+}
+
+#[test]
+fn test_epoch_max_wins_compaction_uses_value_epoch() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    let older_reset =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 1, ReplicaId::new());
+    let newer_stale_count = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        2,
+        ReplicaId::new(),
+    );
+
+    let mut log = OperationLog::new();
+    log.append(newer_stale_count);
+    log.append(older_reset);
+
+    replica.merge(&log);
+
+    let value = replica.get(key).expect("rate-limit shard should exist");
+    assert_eq!(decode(&value), Some(EpochCount { epoch: 6, count: 0 }));
+}
+
+#[test]
+fn test_epoch_max_wins_preserves_newer_tombstone() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:dead-node";
+    let stale_insert =
+        Operation::insert(key.to_string(), encode(6, 50).to_vec(), 1, ReplicaId::new());
+    let tombstone = Operation::remove(key.to_string(), 2, ReplicaId::new());
+
+    let mut log = OperationLog::new();
+    log.append(stale_insert);
+    log.append(tombstone);
+
+    replica.merge(&log);
+
+    assert_eq!(replica.get(key), None);
 }
 
 // ============================================================================
