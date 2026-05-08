@@ -130,6 +130,7 @@ async def serve_grpc(
     servicer = SGLangSchedulerServicer(
         request_manager=request_manager,
         server_args=server_args,
+        model_config=model_config,
         model_info=model_info,
         scheduler_info=scheduler_info,
         health_servicer=health_servicer,

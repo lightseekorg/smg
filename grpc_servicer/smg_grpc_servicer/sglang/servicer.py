@@ -8,6 +8,7 @@ for orchestration without tokenization.
 import asyncio
 import dataclasses
 import hashlib
+import json
 import logging
 import os
 import time
@@ -25,6 +26,7 @@ import zmq.asyncio
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
+from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
@@ -53,6 +55,23 @@ from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = logging.getLogger(__name__)
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
+SAMPLING_DEFAULT_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+)
+
+
+def _filtered_sampling_defaults(params: dict | None) -> dict:
+    if not params:
+        return {}
+    return {
+        key: params[key]
+        for key in SAMPLING_DEFAULT_KEYS
+        if key in params and params[key] is not None
+    }
 
 
 def _convert_loads_to_protobuf(
@@ -159,6 +178,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         self,
         request_manager: GrpcRequestManager,
         server_args: ServerArgs,
+        model_config: ModelConfig,
         model_info: dict,
         scheduler_info: dict,
         health_servicer: SGLangHealthServicer | None = None,
@@ -166,6 +186,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         """Initialize the standalone gRPC service."""
         self.request_manager = request_manager
         self.server_args = server_args
+        self.model_config = model_config
         self.model_info = model_info
         self.scheduler_info = scheduler_info
         self.start_time = time.time()
@@ -420,6 +441,35 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                 message=str(e),
             )
 
+    def _default_sampling_params_json(self) -> str:
+        defaults = dict(self.model_config.get_default_sampling_params() or {})
+        preferred = self.server_args.preferred_sampling_params
+        if preferred:
+            if isinstance(preferred, str):
+                try:
+                    preferred = json.loads(preferred)
+                except json.JSONDecodeError:
+                    logger.warning("Failed to parse preferred_sampling_params JSON")
+                    preferred = None
+            if isinstance(preferred, dict):
+                defaults.update(preferred)
+            else:
+                logger.warning(
+                    "Ignoring preferred_sampling_params with unsupported type: %s",
+                    type(preferred).__name__,
+                )
+
+        defaults = _filtered_sampling_defaults(defaults)
+        return json.dumps(defaults, separators=(",", ":")) if defaults else ""
+
+    def _preferred_sampling_params_json(self) -> str:
+        preferred = self.server_args.preferred_sampling_params
+        if isinstance(preferred, dict):
+            return json.dumps(preferred, separators=(",", ":"))
+        if isinstance(preferred, str):
+            return preferred
+        return json.dumps(preferred, separators=(",", ":")) if preferred else ""
+
     async def GetModelInfo(
         self,
         _request: sglang_scheduler_pb2.GetModelInfoRequest,
@@ -436,7 +486,8 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             model_path=self.server_args.model_path,
             tokenizer_path=self.server_args.tokenizer_path or "",
             is_generation=is_generation,
-            preferred_sampling_params=(self.server_args.preferred_sampling_params or ""),
+            preferred_sampling_params=self._preferred_sampling_params_json(),
+            default_sampling_params_json=self._default_sampling_params_json(),
             weight_version=self.server_args.weight_version or "",
             served_model_name=self.server_args.served_model_name,
             max_context_length=self.model_info["max_context_length"],

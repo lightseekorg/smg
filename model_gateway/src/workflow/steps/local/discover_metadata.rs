@@ -29,6 +29,15 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("Failed to create HTTP client")
 });
 
+const DEFAULT_SAMPLING_PARAMS_LABEL: &str = "default_sampling_params_json";
+const DEFAULT_SAMPLING_PARAM_KEYS: &[&str] = &[
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+];
+
 // ---------------------------------------------------------------------------
 // HTTP response structs (sglang /server_info, /model_info; vllm /v1/models)
 // ---------------------------------------------------------------------------
@@ -271,6 +280,59 @@ fn normalize_grpc_keys(labels: &mut HashMap<String, String>) {
         "server_type",
     ] {
         labels.remove(key);
+    }
+    normalize_default_sampling_params_label(labels);
+}
+
+fn normalize_default_sampling_params_label(labels: &mut HashMap<String, String>) {
+    let Some(raw) = labels.get(DEFAULT_SAMPLING_PARAMS_LABEL).cloned() else {
+        return;
+    };
+
+    match canonical_default_sampling_params_json(&raw) {
+        Ok(Some(canonical)) => {
+            labels.insert(DEFAULT_SAMPLING_PARAMS_LABEL.to_string(), canonical);
+        }
+        Ok(None) => {
+            labels.remove(DEFAULT_SAMPLING_PARAMS_LABEL);
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Ignoring invalid default sampling params label"
+            );
+            labels.remove(DEFAULT_SAMPLING_PARAMS_LABEL);
+        }
+    }
+}
+
+fn canonical_default_sampling_params_json(raw: &str) -> Result<Option<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| format!("failed to parse sampling defaults JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "sampling defaults JSON must be an object".to_string())?;
+
+    let mut filtered = serde_json::Map::new();
+    for key in DEFAULT_SAMPLING_PARAM_KEYS {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        if !value.is_number() {
+            return Err(format!("sampling default `{key}` must be numeric"));
+        }
+        filtered.insert((*key).to_string(), value.clone());
+    }
+
+    if filtered.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string(&serde_json::Value::Object(filtered))
+            .map(Some)
+            .map_err(|e| format!("failed to serialize sampling defaults JSON: {e}"))
     }
 }
 
