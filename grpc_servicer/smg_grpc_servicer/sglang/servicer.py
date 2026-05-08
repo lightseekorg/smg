@@ -450,7 +450,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
                     preferred = json.loads(preferred)
                 except json.JSONDecodeError:
                     logger.warning("Failed to parse preferred_sampling_params JSON")
-                    preferred = None
+                    preferred = {}
             if isinstance(preferred, dict):
                 defaults.update(preferred)
             else:
@@ -468,7 +468,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             return json.dumps(preferred, separators=(",", ":"))
         if isinstance(preferred, str):
             return preferred
-        return json.dumps(preferred, separators=(",", ":")) if preferred else ""
+        return ""
 
     async def GetModelInfo(
         self,
