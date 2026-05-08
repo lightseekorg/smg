@@ -268,49 +268,6 @@ fn test_epoch_max_wins_preserves_newer_tombstone() {
     assert_eq!(replica.get(key), None);
 }
 
-// ============================================================================
-// Serialization Tests
-// ============================================================================
-
-#[test]
-fn test_operation_log_json_serialization() {
-    init_test_logging();
-    let map = CrdtOrMap::new();
-
-    map.insert("key1".to_string(), b"value1".to_vec());
-    map.insert("key2".to_string(), b"value2".to_vec());
-    map.remove("key1");
-
-    let log = map.get_operation_log();
-
-    // Serialize to bytes
-    let bytes = log.to_bytes().unwrap();
-
-    // Deserialize
-    let deserialized_log = OperationLog::from_bytes(&bytes).unwrap();
-    assert_eq!(log.len(), deserialized_log.len());
-}
-
-#[test]
-fn test_operation_log_binary_serialization() {
-    init_test_logging();
-    let map = CrdtOrMap::new();
-
-    map.insert("key1".to_string(), b"value1".to_vec());
-    map.insert("key2".to_string(), b"value2".to_vec());
-    map.remove("key1");
-
-    let log = map.get_operation_log();
-
-    // Serialize to binary
-    let bytes = log.to_bytes().unwrap();
-    assert!(!bytes.is_empty());
-
-    // Deserialize
-    let deserialized_log = OperationLog::from_bytes(&bytes).unwrap();
-    assert_eq!(log.len(), deserialized_log.len());
-}
-
 #[test]
 fn test_operation_log_merge_deduplicates() {
     init_test_logging();

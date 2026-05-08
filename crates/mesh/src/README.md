@@ -31,9 +31,9 @@ The legacy v1 data-sync modules have been removed:
 - `HEARTBEAT`: keep the bidirectional stream alive.
 - `ACK` / `NACK`: lightweight delivery acknowledgement.
 - `STREAM_BATCH`: ephemeral `StreamNamespace` entries such as `td:`, `tree:req:`, and `tree:page:`.
-- `CRDT_BATCH`: serialized `OperationLog` from the shared `CrdtOrMap`.
+- `CRDT_BATCH`: explicit `CrdtBatchEntry` records derived from the shared `CrdtOrMap`.
 
-`CRDT_BATCH` is intentionally a transport detail. Application code should not build operation logs directly; it should write through `CrdtNamespace`. The operation log exists because `CrdtOrMap` already records inserts/removes as mergeable operations, so this is the smallest v2 transport that preserves LWW and EpochMaxWins semantics without keeping the old v1 `StateStores` collector.
+`CRDT_BATCH` is intentionally a transport detail. Application code should not build CRDT payloads directly; it should write through `CrdtNamespace`. The internal operation log remains a `CrdtOrMap` implementation detail, while the wire format carries explicit key/value/tombstone/timestamp/replica entries so deletes and conflict ordering stay visible at the protocol boundary.
 
 ## Current Files
 
@@ -44,10 +44,10 @@ The legacy v1 data-sync modules have been removed:
 | `controller.rs` | Active | Outbound gossip controller. Chooses peers, sends SWIM-style pings, owns outbound `SyncStream` connections, drains MeshKV once per round, and sends CRDT/stream batches to peers. | Rename to `gossip_controller.rs` or `outbound.rs`; it is both a client and stream sender, so `controller` is vague. |
 | `ping_server.rs` | Active | Inbound gRPC `Gossip` service. Handles `PingServer`, accepts inbound `SyncStream`, applies incoming CRDT/stream batches, and sends server-side batches back on inbound streams. | Rename to `gossip_service.rs` or `inbound.rs`; it is both a server and a stream sender, so `ping_server` understates its role. |
 | `stream_sync.rs` | Active | Shared helpers for SyncStream payload construction/application: heartbeats, ACKs, CRDT batch encode/decode, stream batch chunking, and stream dispatch. | Keep. This was split out so controller and inbound service do not duplicate v2 send/apply logic. |
-| `kv.rs` | Active | Generic MeshKV API. Defines `CrdtNamespace`, `StreamNamespace`, drain callbacks, subscriber registry, stream round collection, CRDT operation-log export, and CRDT merge notification. | Keep. This is the application-agnostic v2 API surface. |
+| `kv.rs` | Active | Generic MeshKV API. Defines `CrdtNamespace`, `StreamNamespace`, drain callbacks, subscriber registry, stream round collection, CRDT entry export, and CRDT merge notification. | Keep. This is the application-agnostic v2 API surface. |
 | `crdt_kv/mod.rs` | Active | Internal CRDT module facade. | Keep. Public re-export only what `lib.rs` needs. |
 | `crdt_kv/crdt.rs` | Active | Observed-remove map, per-key merge strategies, tombstones, compaction, operation-log merge, and EpochMaxWins application. | Keep. This is durable state convergence. |
-| `crdt_kv/operation.rs` | Active | `Operation` and `OperationLog` internals. Logs are serialized only by the mesh transport. | Keep, but keep `Operation` non-public unless a real caller needs it. |
+| `crdt_kv/operation.rs` | Active | `Operation` and `OperationLog` internals. The stream transport converts logs to explicit `CrdtBatchEntry` records at the wire boundary. | Keep, but keep `Operation` non-public unless a real caller needs it. |
 | `crdt_kv/epoch_max_wins.rs` | Active | Binary encoding and merge logic for epoch-scoped counters. Used by rate-limit CRDT keys. | Keep. |
 | `crdt_kv/kv_store.rs` | Active | Local key/value store backing `CrdtOrMap`, including generation counters. | Keep. |
 | `crdt_kv/merge_strategy.rs` | Active | Merge strategy enum (`LastWriterWins`, `MaxValueWins`, `EpochMaxWins`). | Keep. |
@@ -125,9 +125,9 @@ The first two renames are the highest value because the current names obscure th
 
 | Namespace | Mode | Producer | Consumer | Wire payload |
 | --- | --- | --- | --- | --- |
-| `worker:` | CRDT LWW | `WorkerSyncAdapter` | remote `WorkerSyncAdapter` subscriber | `CRDT_BATCH` operation log |
-| `rl:` | CRDT EpochMaxWins | `RateLimitSyncAdapter` | remote `RateLimitSyncAdapter` subscriber | `CRDT_BATCH` operation log |
-| `config:` | CRDT LWW | mesh admin/config callers | config readers | `CRDT_BATCH` operation log |
+| `worker:` | CRDT LWW | `WorkerSyncAdapter` | remote `WorkerSyncAdapter` subscriber | `CRDT_BATCH` entries |
+| `rl:` | CRDT EpochMaxWins | `RateLimitSyncAdapter` | remote `RateLimitSyncAdapter` subscriber | `CRDT_BATCH` entries |
+| `config:` | CRDT LWW | mesh admin/config callers | config readers | `CRDT_BATCH` entries |
 | `td:` | Stream broadcast drain | `TreeSyncAdapter` drain callback | remote TreeSync subscriber | `STREAM_BATCH` |
 | `tree:req:` | Stream targeted | repair requester | target peer TreeSync subscriber | `STREAM_BATCH` |
 | `tree:page:` | Stream targeted | repair responder | requesting peer TreeSync subscriber | `STREAM_BATCH` |

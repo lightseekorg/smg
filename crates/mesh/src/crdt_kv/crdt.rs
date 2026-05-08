@@ -513,8 +513,8 @@ impl CrdtOrMap {
         }
     }
 
-    /// Convenience method: merge from another replica instance
-    /// In distributed systems, prefer using merge(&log) with serialized logs
+    /// Convenience method: merge from another replica instance.
+    /// The network transport converts logs to explicit CRDT batch entries.
     pub fn merge_replica(&self, other: &CrdtOrMap) {
         let other_log = other.get_operation_log();
         self.merge(&other_log);

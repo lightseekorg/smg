@@ -237,14 +237,16 @@ impl Gossip for GossipService {
                             stream_sync::crdt_batch_message(&mesh_kv, &self_name_sender, &sequence)
                         {
                             let batch_size = match &msg.payload {
-                                Some(StreamPayload::CrdtBatch(batch)) => batch.operation_log.len(),
+                                Some(StreamPayload::CrdtBatch(batch)) => {
+                                    stream_sync::crdt_batch_encoded_len(batch)
+                                }
                                 _ => 0,
                             };
                             if let Err(err) = size_validator.validate(batch_size) {
                                 log::warn!(
                                     %err,
                                     max_bytes = size_validator.max_size(),
-                                    "server-side CRDT operation log too large to send"
+                                    "server-side CRDT batch too large to send"
                                 );
                             } else if tx_sender.try_send(Ok(msg)).is_err() {
                                 log::debug!("server-side CRDT batch dropped on backpressure");

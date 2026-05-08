@@ -389,7 +389,7 @@ impl MeshController {
                                 ) {
                                     let batch_size = match &msg.payload {
                                         Some(StreamPayload::CrdtBatch(batch)) => {
-                                            batch.operation_log.len()
+                                            stream_sync::crdt_batch_encoded_len(batch)
                                         }
                                         _ => 0,
                                     };
@@ -398,7 +398,7 @@ impl MeshController {
                                             peer = %peer_name_sender,
                                             %err,
                                             max_bytes = size_validator.max_size(),
-                                            "CRDT operation log too large to send"
+                                            "CRDT batch too large to send"
                                         );
                                     } else if tx_sender.try_send(msg).is_err() {
                                         log::debug!(

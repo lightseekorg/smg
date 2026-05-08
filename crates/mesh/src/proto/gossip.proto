@@ -99,5 +99,13 @@ message StreamBatch {
 }
 
 message CrdtBatch {
-  bytes operation_log = 1;
+  repeated CrdtBatchEntry entries = 1;
+}
+
+message CrdtBatchEntry {
+  string key = 1;
+  bytes value = 2;
+  bool tombstone = 3;
+  uint64 timestamp = 4;
+  string replica_id = 5;
 }

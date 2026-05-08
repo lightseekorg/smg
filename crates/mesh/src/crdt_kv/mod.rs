@@ -13,7 +13,8 @@ mod replica;
 pub use crdt::CrdtOrMap;
 pub use epoch_max_wins::{decode, encode, merge, EpochCount, EPOCH_MAX_WINS_ENCODED_LEN};
 pub use merge_strategy::MergeStrategy;
-pub use operation::OperationLog;
+pub(crate) use operation::{Operation, OperationLog};
+pub(crate) use replica::ReplicaId;
 
 #[cfg(test)]
 mod tests;

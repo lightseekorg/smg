@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
-
 use super::{epoch_max_wins, merge_strategy::MergeStrategy, replica::ReplicaId};
 
 // ============================================================================
@@ -9,7 +7,7 @@ use super::{epoch_max_wins, merge_strategy::MergeStrategy, replica::ReplicaId};
 // ============================================================================
 
 /// CRDT operation type
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operation {
     /// Insert operation: key, value, timestamp, replica_id
     Insert {
@@ -80,7 +78,7 @@ impl Operation {
 // ============================================================================
 
 /// Operation log, recording all state changes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OperationLog {
     operations: Vec<Operation>,
 }
@@ -99,6 +97,10 @@ impl OperationLog {
         Self {
             operations: Vec::new(),
         }
+    }
+
+    pub(crate) fn from_operations(operations: Vec<Operation>) -> Self {
+        Self { operations }
     }
 
     /// Threshold at which auto-compaction triggers. After compaction, the log
@@ -144,16 +146,6 @@ impl OperationLog {
     /// Get all operations
     pub fn operations(&self) -> &[Operation] {
         &self.operations
-    }
-
-    /// Serialize to bincode bytes.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
-        bincode::serialize(self)
-    }
-
-    /// Deserialize from bincode bytes.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<bincode::ErrorKind>> {
-        bincode::deserialize(bytes)
     }
 
     /// Get number of operations
