@@ -55,7 +55,7 @@ WEATHER_TOOL = {
 @pytest.mark.engine("mlx")
 @pytest.mark.gpu(0)  # MLX uses unified memory, no discrete GPU
 @pytest.mark.model("mlx-community/Qwen3-0.6B-4bit")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen"])
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--reasoning-parser", "qwen3"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestMlxBackend:
     """End-to-end tests for the MLX gRPC backend.
@@ -143,14 +143,19 @@ class TestMlxBackend:
             ],
             max_tokens=600,
             temperature=0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
         msg = response.choices[0].message
-        # Qwen3-0.6B may or may not always use thinking mode for trivial questions,
-        # but at minimum the final answer must mention 3.
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""
-        full = content + reasoning
-        assert "3" in full, (
+        # Assert reasoning_content separately from the answer-correctness
+        # check: a regression that dumps the whole <think>...</think> span
+        # into content would otherwise pass silently.
+        assert reasoning.strip(), (
+            f"Expected non-empty reasoning_content with enable_thinking=True, "
+            f"got content={content!r} reasoning={reasoning!r}"
+        )
+        assert "3" in (content + reasoning), (
             f"Expected '3' in response, got content={content!r} reasoning={reasoning!r}"
         )
 
