@@ -4,8 +4,6 @@
 //! function-by-function. Output must be byte-equal to the Python reference;
 //! gated by golden tests in `tests/kimi_k25.rs`.
 
-#![allow(clippy::unwrap_used)]
-
 use std::{collections::HashMap, fmt::Write};
 
 use anyhow::Result;
@@ -51,19 +49,14 @@ pub(crate) fn apply_kimi_k25_tools(
 
     // Build owned kwargs only when we have something to inject; otherwise
     // delegate without allocating.
-    let owned: Option<HashMap<String, Value>> = match (params.template_kwargs, ts_str.as_ref()) {
-        (Some(existing), Some(ts)) => {
-            let mut m = existing.clone();
-            m.insert("tools_ts_str".to_string(), Value::String(ts.clone()));
-            Some(m)
-        }
-        (None, Some(ts)) => {
-            let mut m = HashMap::with_capacity(1);
-            m.insert("tools_ts_str".to_string(), Value::String(ts.clone()));
-            Some(m)
-        }
-        _ => None, // No tools → leave tools_ts_str undefined
-    };
+    let owned: Option<HashMap<String, Value>> = ts_str.map(|ts| {
+        let mut m = match params.template_kwargs {
+            Some(existing) => existing.clone(),
+            None => HashMap::with_capacity(1),
+        };
+        m.insert("tools_ts_str".to_string(), Value::String(ts));
+        m
+    });
 
     let new_params = ChatTemplateParams {
         template_kwargs: owned.as_ref().or(params.template_kwargs),
@@ -119,7 +112,7 @@ fn openai_function_to_typescript(function: &Value) -> String {
                 def_str.push('\n');
             }
         }
-        write!(def_str, "interface {name} {body}").unwrap();
+        write!(def_str, "interface {name} {body}").expect("writing to a String is infallible");
         interfaces.push(def_str);
     }
 
@@ -260,7 +253,7 @@ impl BaseType {
                 .iter()
                 .map(|(k, v)| format!("{k}: {}", json_inline(v)))
                 .collect();
-            writeln!(out, "{indent}// {}", parts.join(", ")).unwrap();
+            writeln!(out, "{indent}// {}", parts.join(", ")).expect("writing to a String is infallible");
         }
         out
     }
@@ -316,7 +309,7 @@ impl Parameter {
                 Value::Number(_) => d.to_string(),
                 _ => serde_json::to_string(d).unwrap_or_else(|_| "null".to_string()),
             };
-            writeln!(out, "{indent}// Default: {repr}").unwrap();
+            writeln!(out, "{indent}// Default: {repr}").expect("writing to a String is infallible");
         }
         let opt_marker = if self.optional { "?" } else { "" };
         write!(
@@ -325,7 +318,7 @@ impl Parameter {
             self.name,
             self.typ.to_typescript(indent, registry)
         )
-        .unwrap();
+        .expect("writing to a String is infallible");
         out
     }
 }
