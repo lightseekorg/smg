@@ -56,7 +56,7 @@ use super::{
     LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::{
-    mesh::adapters::tree_sync::RepairEntry,
+    mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
     worker::{KvEventMonitor, Worker},
 };
 
@@ -742,6 +742,17 @@ pub trait TreeHandle: Send + Sync + std::fmt::Debug {
         model_id: &str,
         tree_kind: TreeKind,
     ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>>;
+
+    /// Apply every entry in `page` to the local `(model_id,
+    /// tree_kind)` tree, creating the tree if it doesn't yet
+    /// exist locally. Returns the number of entries successfully
+    /// applied (entries whose variant doesn't match `tree_kind`
+    /// are logged and skipped, not applied). Idempotent —
+    /// reapplying the same page is a no-op on the tree state
+    /// because the underlying radix tree's `insert_text` /
+    /// `insert_tokens` are themselves idempotent for the same
+    /// `(path, tenant)` pair.
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize;
 }
 
 impl TreeHandle for CacheAwarePolicy {
@@ -819,6 +830,67 @@ impl TreeHandle for CacheAwarePolicy {
                 })))
             }
         }
+    }
+
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize {
+        let model_id = normalize_model_key(&page.model_id);
+        let mut applied: usize = 0;
+        match page.tree_kind {
+            TreeKind::String => {
+                // Create the tree on first repair page if it
+                // doesn't exist yet locally — repair is the
+                // primary cold-start path for a fresh peer.
+                let tree = self
+                    .string_trees
+                    .entry(model_id.to_string())
+                    .or_insert_with(|| Arc::new(Tree::new()))
+                    .clone();
+                for entry in &page.entries {
+                    match entry {
+                        RepairEntry::String { path, tenants } => {
+                            for (tenant, _epoch) in tenants {
+                                tree.insert_text(path, tenant);
+                            }
+                            applied += 1;
+                        }
+                        RepairEntry::Token { .. } => {
+                            warn!(
+                                model_id,
+                                session_id = %page.session_id,
+                                page_index = page.page_index,
+                                "RepairEntry variant mismatch: page kind=String but entry kind=Token; skipping",
+                            );
+                        }
+                    }
+                }
+            }
+            TreeKind::Token => {
+                let tree = self
+                    .token_trees
+                    .entry(model_id.to_string())
+                    .or_insert_with(|| Arc::new(TokenTree::new()))
+                    .clone();
+                for entry in &page.entries {
+                    match entry {
+                        RepairEntry::Token { tokens, tenants } => {
+                            for (tenant, _epoch) in tenants {
+                                tree.insert_tokens(tokens, tenant);
+                            }
+                            applied += 1;
+                        }
+                        RepairEntry::String { .. } => {
+                            warn!(
+                                model_id,
+                                session_id = %page.session_id,
+                                page_index = page.page_index,
+                                "RepairEntry variant mismatch: page kind=Token but entry kind=String; skipping",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        applied
     }
 }
 

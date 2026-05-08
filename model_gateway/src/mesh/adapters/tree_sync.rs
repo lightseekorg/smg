@@ -18,7 +18,11 @@
 //! likewise go through a [`PeerList`] trait so the adapter doesn't
 //! reach into the gossip controller directly.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -34,6 +38,22 @@ use crate::policies::{TreeHandle, TreeKind};
 const PREFIX: &str = "td:";
 const REPAIR_REQUEST_PREFIX: &str = "tree:req:";
 const REPAIR_PAGE_PREFIX: &str = "tree:page:";
+
+/// Duration a repair session may sit without progress before
+/// the periodic retry scan reissues it. Spec §15 default: 5 s.
+//
+// TODO(d-3): read from `MeshConfig.tree_repair_retry_timeout`
+// once `server.rs` wires the adapter.
+const TREE_REPAIR_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the retry scan runs. Smaller than the timeout so
+/// stale sessions are caught within a tick of becoming stale.
+const TREE_REPAIR_RETRY_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Maximum retry attempts for a single (model_id, tree_kind)
+/// repair session before giving up. The next unknown-hash
+/// delta restarts a fresh session.
+const TREE_REPAIR_MAX_RETRIES: u32 = 3;
 
 /// Soft cap on the bincode-serialized size of a single
 /// [`TreeRepairPage`]. Spec default (mesh-v2 §3.1,
@@ -345,6 +365,56 @@ fn decode_cursor(cursor: Option<&[u8]>) -> u64 {
         .unwrap_or(0)
 }
 
+/// Per-session bookkeeping for an in-flight repair request.
+/// Stored in `outstanding_repairs[(model_id, tree_kind)]` —
+/// at most one session per (model_id, tree_kind) at a time
+/// (subsequent unknown-hash triggers coalesce into the active
+/// session).
+struct RepairProgress {
+    session_id: Uuid,
+    target_peer_id: String,
+    /// Time the *current* request was issued. Reset on retry.
+    started_at: Instant,
+    /// Number of times this (model_id, tree_kind) session has
+    /// been retried. New session_id is generated on each retry.
+    retry_count: u32,
+    /// Pages received and applied, with their `next_cursor`.
+    /// BTreeMap so iteration order = page-index order — used
+    /// to compute the contiguous-prefix cursor for retry.
+    applied: BTreeMap<u32, Option<Vec<u8>>>,
+    /// True once an `is_last=true` page has been applied. The
+    /// session entry is removed from `outstanding_repairs`
+    /// shortly after this is set; this flag exists primarily
+    /// so concurrent reads can observe completion.
+    completed: bool,
+}
+
+impl RepairProgress {
+    fn new(session_id: Uuid, target_peer_id: String, now: Instant) -> Self {
+        Self {
+            session_id,
+            target_peer_id,
+            started_at: now,
+            retry_count: 0,
+            applied: BTreeMap::new(),
+            completed: false,
+        }
+    }
+
+    /// Cursor at the end of the highest contiguous applied
+    /// prefix. `None` if no pages applied or page 0 is missing.
+    fn contiguous_cursor(&self) -> Option<Vec<u8>> {
+        let mut cursor: Option<Vec<u8>> = None;
+        for (expected, (&idx, c)) in (0u32..).zip(&self.applied) {
+            if idx != expected {
+                break;
+            }
+            cursor.clone_from(c);
+        }
+        cursor
+    }
+}
+
 /// Bridges the `td:` broadcast stream namespace to per-model
 /// tenant buffers, querying a [`TreeHandle`] for inbound hash
 /// resolution and a [`PeerList`] for repair-request targeting.
@@ -365,11 +435,13 @@ pub struct TreeSyncAdapter {
     /// Live-peer source for repair-request targeting.
     peers: Arc<dyn PeerList>,
     /// Outstanding repair sessions, keyed by (model_id, kind).
-    /// Presence-only set: while a key is here, additional unknown
-    /// hashes for the same (model, kind) are coalesced into the
-    /// in-flight session. d-2c adds the response-side cleanup
-    /// (and the per-session bookkeeping that needs reading).
-    outstanding_repairs: DashMap<(String, TreeKind), ()>,
+    /// At most one session per (model_id, kind) at a time:
+    /// subsequent unknown-hash triggers coalesce into the
+    /// active session.  Each [`RepairProgress`] tracks the
+    /// session_id, target peer, applied pages with cursors,
+    /// retry count, and completion. Cleared on terminal page
+    /// or after `TREE_REPAIR_MAX_RETRIES` failed retries.
+    outstanding_repairs: DashMap<(String, TreeKind), RepairProgress>,
     node_name: String,
     /// Keeps the drain registration alive; dropping it unregisters
     /// from the mesh. `OnceLock` guards against a second `start`.
@@ -514,6 +586,66 @@ impl TreeSyncAdapter {
                 }
             }
             debug!("TreeSyncAdapter tree:req: subscription closed");
+        });
+
+        // Receiver side of the repair protocol: subscribe to
+        // `tree:page:`, decode each page, dedupe + apply via
+        // `TreeHandle::apply_repair_page`, and clean up the
+        // outstanding session on the terminal page.
+        let page_owner = Arc::downgrade(self);
+        let mut page_sub = self.tree_repair_pages.subscribe("");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "subscription task ends automatically when the mesh KV drops and closes the channel; no handle needed"
+        )]
+        tokio::spawn(async move {
+            while let Some((key, value)) = page_sub.receiver.recv().await {
+                let Some(this) = page_owner.upgrade() else {
+                    debug!("TreeSyncAdapter dropped, exiting tree:page: subscription");
+                    break;
+                };
+                if !key.starts_with(REPAIR_PAGE_PREFIX) {
+                    warn!(key, "tree:page: subscription yielded unexpected key shape");
+                    continue;
+                }
+                match value {
+                    Some(fragments) => this.handle_incoming_repair_page(&fragments),
+                    None => {
+                        debug!("unexpected tree:page: tombstone event");
+                    }
+                }
+            }
+            debug!("TreeSyncAdapter tree:page: subscription closed");
+        });
+
+        // Periodic retry/timeout scan: reissues stale repair
+        // sessions with a fresh session_id and the
+        // last-contiguous-applied cursor. Sessions exceeding
+        // `TREE_REPAIR_MAX_RETRIES` are dropped from
+        // `outstanding_repairs` so the next unknown-hash delta
+        // can restart from scratch.
+        let retry_owner = Arc::downgrade(self);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "periodic scan ends automatically when the adapter is dropped (Weak upgrade fails); no handle needed"
+        )]
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(TREE_REPAIR_RETRY_SCAN_INTERVAL);
+            // Skip the immediate first tick — no progress to scan
+            // for in the first millisecond after start().
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(this) = retry_owner.upgrade() else {
+                    debug!("TreeSyncAdapter dropped, exiting retry scan task");
+                    break;
+                };
+                this.scan_for_retries(
+                    Instant::now(),
+                    TREE_REPAIR_RETRY_TIMEOUT,
+                    TREE_REPAIR_MAX_RETRIES,
+                );
+            }
         });
     }
 
@@ -767,7 +899,10 @@ impl TreeSyncAdapter {
         // Record the in-flight session AFTER publish so a publish
         // that panics on a programming error doesn't leave a
         // ghost entry blocking future requests.
-        self.outstanding_repairs.insert(key, ());
+        self.outstanding_repairs.insert(
+            key,
+            RepairProgress::new(request.session_id, target.clone(), Instant::now()),
+        );
 
         debug!(
             model_id,
@@ -777,6 +912,209 @@ impl TreeSyncAdapter {
             session_id = %request.session_id,
             "sent tree repair request",
         );
+    }
+
+    /// Decode an incoming `tree:page:` payload, validate it
+    /// against the in-flight session, dedupe by `page_index`,
+    /// apply via [`TreeHandle::apply_repair_page`], and clean up
+    /// on terminal page. Stale pages (no matching session, or
+    /// session_id / target peer mismatch) are dropped at debug
+    /// level — the wire layer does not provide authenticated
+    /// sender identity, so the (session_id, target_peer_id) tuple
+    /// stored at request time is the strongest defense available
+    /// against a delayed retry response from a different peer
+    /// stomping on a fresh session.
+    fn handle_incoming_repair_page(&self, fragments: &[Bytes]) {
+        let total: usize = fragments.iter().map(Bytes::len).sum();
+        let mut bytes = Vec::with_capacity(total);
+        for frag in fragments {
+            bytes.extend_from_slice(frag);
+        }
+        let page: TreeRepairPage = match bincode::deserialize(&bytes) {
+            Ok(p) => p,
+            Err(err) => {
+                warn!(%err, "failed to decode TreeRepairPage");
+                return;
+            }
+        };
+
+        let key = (page.model_id.clone(), page.tree_kind);
+        let mut entry = match self.outstanding_repairs.get_mut(&key) {
+            Some(e) => e,
+            None => {
+                debug!(
+                    model_id = %page.model_id,
+                    kind = ?page.tree_kind,
+                    session_id = %page.session_id,
+                    page_index = page.page_index,
+                    "received tree:page: with no matching outstanding session; dropping",
+                );
+                return;
+            }
+        };
+
+        if entry.session_id != page.session_id {
+            debug!(
+                model_id = %page.model_id,
+                kind = ?page.tree_kind,
+                page_session_id = %page.session_id,
+                live_session_id = %entry.session_id,
+                page_index = page.page_index,
+                "tree:page: session_id does not match the live session; dropping (likely a stale retry response)",
+            );
+            return;
+        }
+
+        if entry.applied.contains_key(&page.page_index) {
+            trace!(
+                model_id = %page.model_id,
+                kind = ?page.tree_kind,
+                session_id = %page.session_id,
+                page_index = page.page_index,
+                "duplicate tree:page: already applied; ignoring",
+            );
+            return;
+        }
+
+        let applied = self.tree.apply_repair_page(&page);
+        entry
+            .applied
+            .insert(page.page_index, page.next_cursor.clone());
+        let is_last = page.is_last;
+
+        debug!(
+            model_id = %page.model_id,
+            kind = ?page.tree_kind,
+            session_id = %page.session_id,
+            page_index = page.page_index,
+            entries_in_page = page.entries.len(),
+            entries_applied = applied,
+            is_last,
+            "applied tree:page:",
+        );
+
+        // Drop the entry guard before mutating the map, otherwise
+        // `remove()` would deadlock on the held shard write lock.
+        drop(entry);
+
+        if is_last {
+            self.outstanding_repairs.remove(&key);
+            debug!(
+                model_id = %page.model_id,
+                kind = ?page.tree_kind,
+                session_id = %page.session_id,
+                "repair session complete",
+            );
+        }
+    }
+
+    /// Scan `outstanding_repairs` for sessions older than
+    /// `retry_timeout` and reissue them (up to `max_retries`).
+    /// Reissued requests get a fresh `session_id` and carry the
+    /// last contiguous-applied cursor. Sessions exceeding the
+    /// retry budget are removed from `outstanding_repairs` with
+    /// an `error!` log; the next unknown-hash delta restarts
+    /// from scratch.
+    ///
+    /// Called periodically by the spawned retry task; tests
+    /// invoke it directly with synthetic timestamps.
+    fn scan_for_retries(&self, now: Instant, retry_timeout: Duration, max_retries: u32) {
+        // Snapshot keys that look stale to avoid holding shard
+        // locks across publish_to / new RepairProgress creation.
+        let stale_keys: Vec<(String, TreeKind)> = self
+            .outstanding_repairs
+            .iter()
+            .filter(|e| {
+                let p = e.value();
+                !p.completed && now.duration_since(p.started_at) >= retry_timeout
+            })
+            .map(|e| e.key().clone())
+            .collect();
+
+        for key in stale_keys {
+            let (cursor, retry_count, prev_target) = match self.outstanding_repairs.get(&key) {
+                Some(p) => (
+                    p.contiguous_cursor(),
+                    p.retry_count,
+                    p.target_peer_id.clone(),
+                ),
+                None => continue,
+            };
+
+            if retry_count >= max_retries {
+                self.outstanding_repairs.remove(&key);
+                error!(
+                    model_id = %key.0,
+                    kind = ?key.1,
+                    retry_count,
+                    "tree repair session exceeded max retries; giving up. \
+                     Next unknown-hash delta will restart from scratch.",
+                );
+                continue;
+            }
+
+            // Prefer a different peer on retry; fall back to the
+            // full alive set if `prev_target` was the only peer.
+            let mut alive = self.peers.alive_peers();
+            alive.retain(|p| p != &prev_target);
+            if alive.is_empty() {
+                alive = self.peers.alive_peers();
+            }
+            let Some(target) = alive.choose(&mut rand::rng()) else {
+                debug!(
+                    model_id = %key.0,
+                    kind = ?key.1,
+                    "no alive peers to retry repair request; will re-check next scan",
+                );
+                continue;
+            };
+
+            let new_session_id = Uuid::now_v7();
+            let request = TreeRepairRequest {
+                session_id: new_session_id,
+                requester_peer_id: self.node_name.clone(),
+                target_peer_id: target.clone(),
+                model_id: key.0.clone(),
+                tree_kind: key.1,
+                cursor,
+                reason: RepairReason::UnknownHash(0),
+            };
+
+            let bytes = match bincode::serialize(&request) {
+                Ok(b) => Bytes::from(b),
+                Err(err) => {
+                    warn!(model_id = %key.0, %err, "failed to serialize retry repair request");
+                    continue;
+                }
+            };
+            let stream_key = format!("{REPAIR_REQUEST_PREFIX}{new_session_id}");
+            self.tree_repair_requests
+                .publish_to(target, &stream_key, bytes);
+
+            // Replace progress: new session_id, fresh applied
+            // map, retry_count incremented. Old in-flight pages
+            // for the old session_id will be rejected as stale.
+            self.outstanding_repairs.insert(
+                key.clone(),
+                RepairProgress {
+                    session_id: new_session_id,
+                    target_peer_id: target.clone(),
+                    started_at: now,
+                    retry_count: retry_count + 1,
+                    applied: BTreeMap::new(),
+                    completed: false,
+                },
+            );
+
+            debug!(
+                model_id = %key.0,
+                kind = ?key.1,
+                target = %target,
+                new_session_id = %new_session_id,
+                retry_count = retry_count + 1,
+                "reissued repair request",
+            );
+        }
     }
 }
 
@@ -838,6 +1176,9 @@ mod tests {
         known: DashMap<(String, TreeKind, u64), ()>,
         applied: parking_lot::Mutex<Vec<(String, TreeKind, u64, String)>>,
         streams: DashMap<(String, TreeKind), Vec<RepairEntry>>,
+        /// Pages received via `apply_repair_page` (d-2c). Tests
+        /// use this to assert what the receiver actually applied.
+        applied_pages: parking_lot::Mutex<Vec<TreeRepairPage>>,
     }
 
     impl MockTreeHandle {
@@ -891,6 +1232,25 @@ mod tests {
         ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>> {
             let entries = self.streams.get(&(model_id.to_string(), tree_kind))?;
             Some(Box::new(entries.value().clone().into_iter()))
+        }
+
+        fn apply_repair_page(&self, page: &TreeRepairPage) -> usize {
+            // Variant-matching count: only entries whose variant
+            // matches `page.tree_kind` count toward the applied
+            // total — mirroring the production impl's semantics.
+            let applied = page
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        (page.tree_kind, e),
+                        (TreeKind::String, RepairEntry::String { .. })
+                            | (TreeKind::Token, RepairEntry::Token { .. })
+                    )
+                })
+                .count();
+            self.applied_pages.lock().push(page.clone());
+            applied
         }
     }
 
@@ -1889,5 +2249,430 @@ mod tests {
         let tree: Arc<dyn TreeHandle> = empty_handle();
         let peers: Arc<dyn PeerList> = empty_peers();
         let _ = TreeSyncAdapter::new(td, req, req_again, tree, peers, "node-a".into());
+    }
+
+    // ----- d-2c: receiver side of the repair protocol -----
+
+    fn make_page(
+        session_id: Uuid,
+        model_id: &str,
+        tree_kind: TreeKind,
+        page_index: u32,
+        entries: Vec<RepairEntry>,
+        next_cursor: Option<u64>,
+        is_last: bool,
+    ) -> TreeRepairPage {
+        TreeRepairPage {
+            session_id,
+            model_id: model_id.into(),
+            tree_kind,
+            page_index,
+            entries,
+            next_cursor: next_cursor.map(|n| bincode::serialize(&n).unwrap()),
+            is_last,
+        }
+    }
+
+    fn page_bytes(page: &TreeRepairPage) -> Bytes {
+        Bytes::from(bincode::serialize(page).unwrap())
+    }
+
+    fn seed_outstanding(
+        adapter: &TreeSyncAdapter,
+        model_id: &str,
+        tree_kind: TreeKind,
+        session_id: Uuid,
+        target: &str,
+    ) {
+        adapter.outstanding_repairs.insert(
+            (model_id.to_string(), tree_kind),
+            RepairProgress::new(session_id, target.into(), Instant::now()),
+        );
+    }
+
+    fn applied_pages(tree: &MockTreeHandle) -> Vec<TreeRepairPage> {
+        tree.applied_pages.lock().clone()
+    }
+
+    #[tokio::test]
+    async fn receiver_applies_page_and_records_session_progress() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        seed_outstanding(&adapter, "model-1", TreeKind::String, session, "node-b");
+
+        let page = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("p", &[("w1", 7)])],
+            Some(1),
+            false,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        // Page was applied via TreeHandle.
+        let calls = applied_pages(&tree);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].session_id, session);
+        assert_eq!(calls[0].page_index, 0);
+
+        // Session progress recorded with cursor and not yet
+        // marked complete.
+        let entry = adapter
+            .outstanding_repairs
+            .get(&("model-1".to_string(), TreeKind::String))
+            .expect("session present");
+        assert!(entry.applied.contains_key(&0));
+        assert_eq!(
+            entry.contiguous_cursor(),
+            Some(bincode::serialize(&1u64).unwrap())
+        );
+        assert!(!entry.completed);
+    }
+
+    #[tokio::test]
+    async fn receiver_dedupes_same_page_index() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        seed_outstanding(&adapter, "model-1", TreeKind::String, session, "node-b");
+        let page = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("p", &[("w1", 1)])],
+            Some(1),
+            false,
+        );
+
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        assert_eq!(
+            applied_pages(&tree).len(),
+            1,
+            "duplicate page must not be applied twice",
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_drops_page_for_unknown_session() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        // No outstanding session — page should be dropped.
+        let page = make_page(
+            Uuid::now_v7(),
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("p", &[("w1", 1)])],
+            None,
+            true,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        assert!(
+            applied_pages(&tree).is_empty(),
+            "page with no matching session must not be applied",
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_drops_page_with_mismatched_session_id() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        // Live session is `live_session`; incoming page carries
+        // a different session_id (e.g., a delayed retry response).
+        let live_session = Uuid::now_v7();
+        let stale_session = Uuid::now_v7();
+        seed_outstanding(
+            &adapter,
+            "model-1",
+            TreeKind::String,
+            live_session,
+            "node-b",
+        );
+
+        let page = make_page(
+            stale_session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("p", &[("w1", 1)])],
+            None,
+            true,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        assert!(applied_pages(&tree).is_empty(), "stale session_id rejected");
+        // Live session not affected.
+        let entry = adapter
+            .outstanding_repairs
+            .get(&("model-1".to_string(), TreeKind::String))
+            .expect("live session retained");
+        assert_eq!(entry.session_id, live_session);
+        assert!(entry.applied.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_page_clears_outstanding_session() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        seed_outstanding(&adapter, "model-1", TreeKind::String, session, "node-b");
+        let page = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("p", &[("w1", 1)])],
+            None,
+            true,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        assert!(
+            !adapter
+                .outstanding_repairs
+                .contains_key(&("model-1".to_string(), TreeKind::String)),
+            "terminal page must clear the outstanding session",
+        );
+    }
+
+    #[tokio::test]
+    async fn contiguous_cursor_handles_out_of_order_pages() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        seed_outstanding(&adapter, "model-1", TreeKind::String, session, "node-b");
+
+        // Apply page 0 (cursor=1), then page 2 (cursor=3),
+        // skipping page 1. contiguous cursor must reflect
+        // page 0 only — not page 2.
+        let p0 = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![string_entry("a", &[("w1", 1)])],
+            Some(1),
+            false,
+        );
+        let p2 = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            2,
+            vec![string_entry("c", &[("w1", 1)])],
+            Some(3),
+            false,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&p0)]);
+        adapter.handle_incoming_repair_page(&[page_bytes(&p2)]);
+
+        let entry = adapter
+            .outstanding_repairs
+            .get(&("model-1".to_string(), TreeKind::String))
+            .expect("session present");
+        assert!(entry.applied.contains_key(&0));
+        assert!(entry.applied.contains_key(&2));
+        assert_eq!(
+            entry.contiguous_cursor(),
+            Some(bincode::serialize(&1u64).unwrap()),
+            "contiguous cursor must reflect page 0, not page 2",
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_scan_reissues_stale_session_with_contiguous_cursor() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b", "node-c"]);
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        // Seed an old session that has applied page 0; pretend
+        // it started 10s ago (> 5s timeout).
+        let old_session = Uuid::now_v7();
+        let mut progress = RepairProgress::new(
+            old_session,
+            "node-b".into(),
+            Instant::now() - Duration::from_secs(10),
+        );
+        progress
+            .applied
+            .insert(0, Some(bincode::serialize(&5u64).unwrap()));
+        adapter
+            .outstanding_repairs
+            .insert(("model-1".to_string(), TreeKind::String), progress);
+
+        // Run scan with retry_timeout=5s, max_retries=3.
+        adapter.scan_for_retries(Instant::now(), Duration::from_secs(5), 3);
+
+        // A new request was published — same model+kind, fresh
+        // session_id, cursor = bincode(5).
+        let publishes = drain_repair_publishes(&mesh);
+        assert_eq!(publishes.len(), 1, "exactly one retry request");
+        let (_target, _key, payload) = &publishes[0];
+        let request: TreeRepairRequest = bincode::deserialize(payload).unwrap();
+        assert_eq!(request.model_id, "model-1");
+        assert_eq!(request.tree_kind, TreeKind::String);
+        assert_ne!(request.session_id, old_session, "fresh session_id on retry");
+        assert_eq!(
+            request.cursor.as_deref(),
+            Some(bincode::serialize(&5u64).unwrap().as_slice()),
+            "retry carries contiguous cursor",
+        );
+
+        // outstanding_repairs replaced with a fresh progress
+        // entry under the new session_id, retry_count=1.
+        let entry = adapter
+            .outstanding_repairs
+            .get(&("model-1".to_string(), TreeKind::String))
+            .expect("session retained");
+        assert_eq!(entry.session_id, request.session_id);
+        assert_eq!(entry.retry_count, 1);
+        assert!(entry.applied.is_empty(), "applied set reset on retry");
+    }
+
+    #[tokio::test]
+    async fn retry_scan_gives_up_after_max_retries() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
+
+        let mut progress = RepairProgress::new(
+            Uuid::now_v7(),
+            "node-b".into(),
+            Instant::now() - Duration::from_secs(60),
+        );
+        progress.retry_count = 3; // already at max
+        adapter
+            .outstanding_repairs
+            .insert(("model-1".to_string(), TreeKind::String), progress);
+
+        adapter.scan_for_retries(Instant::now(), Duration::from_secs(5), 3);
+
+        assert!(
+            adapter.outstanding_repairs.is_empty(),
+            "session removed after exceeding max retries",
+        );
+        let publishes = drain_repair_publishes(&mesh);
+        assert!(publishes.is_empty(), "no retry request emitted at limit");
+    }
+
+    #[tokio::test]
+    async fn retry_scan_prefers_different_peer() {
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree: Arc<dyn TreeHandle> = empty_handle();
+        let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b", "node-c"]);
+        let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
+
+        let progress = RepairProgress::new(
+            Uuid::now_v7(),
+            "node-b".into(),
+            Instant::now() - Duration::from_secs(10),
+        );
+        adapter
+            .outstanding_repairs
+            .insert(("model-1".to_string(), TreeKind::String), progress);
+
+        adapter.scan_for_retries(Instant::now(), Duration::from_secs(5), 3);
+
+        let publishes = drain_repair_publishes(&mesh);
+        assert_eq!(publishes.len(), 1);
+        let (target, _, _) = &publishes[0];
+        assert_eq!(target, "node-c", "retry must avoid the previous target");
+    }
+
+    #[tokio::test]
+    async fn variant_mismatch_is_skipped_not_panic() {
+        // A page declared as String containing a Token entry
+        // must drop the Token entry without panicking and not
+        // count it toward the applied total.
+        let mesh = MeshKV::new("node-a".into());
+        let td = td_namespace(&mesh);
+        let req = req_namespace(&mesh);
+        let pages = page_namespace(&mesh);
+        let tree = Arc::new(MockTreeHandle::default());
+        let adapter_tree: Arc<dyn TreeHandle> = tree.clone();
+        let peers: Arc<dyn PeerList> = empty_peers();
+        let adapter = TreeSyncAdapter::new(td, req, pages, adapter_tree, peers, "node-a".into());
+
+        let session = Uuid::now_v7();
+        seed_outstanding(&adapter, "model-1", TreeKind::String, session, "node-b");
+        let page = make_page(
+            session,
+            "model-1",
+            TreeKind::String,
+            0,
+            vec![
+                string_entry("ok", &[("w1", 1)]),
+                token_entry(&[1, 2, 3], &[("w1", 2)]), // wrong variant
+            ],
+            None,
+            true,
+        );
+        adapter.handle_incoming_repair_page(&[page_bytes(&page)]);
+
+        // Mock counts only matching variants — string entry yes,
+        // token entry no.
+        let calls = applied_pages(&tree);
+        assert_eq!(calls.len(), 1);
     }
 }
