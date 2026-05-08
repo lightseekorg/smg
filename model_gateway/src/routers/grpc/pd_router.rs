@@ -73,6 +73,8 @@ impl GrpcPDRouter {
             multimodal,
         });
 
+        let enable_message_hash = ctx.router_config.enable_message_hash;
+
         // Create PD pipeline
         let pipeline = RequestPipeline::new_pd(
             worker_registry.clone(),
@@ -81,6 +83,8 @@ impl GrpcPDRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
+            enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Create Messages PD pipeline
@@ -91,11 +95,17 @@ impl GrpcPDRouter {
             reasoning_parser_factory.clone(),
             ctx.configured_tool_parser.clone(),
             ctx.configured_reasoning_parser.clone(),
+            enable_message_hash,
+            ctx.last_token_time.clone(),
         );
 
         // Create Completion PD pipeline
-        let completion_pipeline =
-            RequestPipeline::new_completion_pd(worker_registry.clone(), policy_registry.clone());
+        let completion_pipeline = RequestPipeline::new_completion_pd(
+            worker_registry.clone(),
+            policy_registry.clone(),
+            enable_message_hash,
+            ctx.last_token_time.clone(),
+        );
 
         Ok(GrpcPDRouter {
             worker_registry,

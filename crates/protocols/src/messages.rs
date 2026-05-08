@@ -73,6 +73,10 @@ pub struct CreateMessageRequest {
 
     /// MCP servers to be utilized in this request (beta).
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+
+    /// User-supplied request ID for log correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 impl Normalizable for CreateMessageRequest {
@@ -1843,6 +1847,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            request_id: None,
         }
     }
 

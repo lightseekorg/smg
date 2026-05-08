@@ -132,6 +132,16 @@ message GenerateRequest {
   // When true, stop token IDs are retained in output_token_ids instead of
   // being stripped.
   bool include_stop_token_in_output = 26;
+
+  // Per-message SHA-256 hashes for session reconstruction.
+  repeated MessageHash message_hashes = 27;
+}
+
+// Per-message hash for session reconstruction auditing.
+// Hash is the first 12 hex chars of sha256(role + "\x00" + content).
+message MessageHash {
+  string role = 1;
+  string hash = 2;
 }
 
 // Tokenized input from router

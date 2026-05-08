@@ -497,6 +497,9 @@ impl SglangSchedulerClient {
                     .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
                 constraints.push(proto::sampling_params::Constraint::JsonSchema(schema_str));
             }
+            Some(ResponseFormat::Regex { pattern }) => {
+                constraints.push(proto::sampling_params::Constraint::Regex(pattern.clone()));
+            }
             Some(ResponseFormat::Text) | None => {
                 // No constraint for text format
             }

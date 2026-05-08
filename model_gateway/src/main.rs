@@ -426,6 +426,10 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     disable_health_check: bool,
 
+    /// Timeout in seconds for /health_generate inference probes
+    #[arg(long, default_value_t = 3, help_heading = "Health Checks")]
+    health_generate_timeout_secs: u64,
+
     /// Remove workers from the registry when they are marked unhealthy
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     remove_unhealthy_workers: bool,
@@ -499,6 +503,10 @@ struct CliArgs {
     /// History storage backend
     #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle", "postgres", "redis"], help_heading = "Backend")]
     history_backend: String,
+
+    /// Compute per-message SHA-256 hashes for session reconstruction logging
+    #[arg(long, default_value_t = false, help_heading = "Logging")]
+    enable_message_hash: bool,
 
     /// Enable WebAssembly support
     #[arg(long, default_value_t = false, help_heading = "Backend")]
@@ -1225,6 +1233,7 @@ impl CliArgs {
                 disable_health_check: self.disable_health_check,
                 remove_unhealthy_workers: self.remove_unhealthy_workers,
             })
+            .health_generate_timeout_secs(self.health_generate_timeout_secs)
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
                 l0_max_entries: self.tokenizer_cache_l0_max_entries,
@@ -1263,6 +1272,7 @@ impl CliArgs {
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
+            .enable_message_hash(self.enable_message_hash)
             .enable_wasm(self.enable_wasm)
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::error;
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::routers::{
@@ -10,7 +10,7 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, PreparationOutput, RequestContext},
-        multimodal::assemble_multimodal_data,
+        multimodal::{assemble_multimodal_data, collapse_media_placeholders},
         proto_wrapper::ProtoRequest,
     },
 };
@@ -21,11 +21,15 @@ use crate::routers::{
 /// and CreateMessageRequest sampling parameters.
 pub(crate) struct MessageRequestBuildingStage {
     inject_pd_metadata: bool,
+    enable_message_hash: bool,
 }
 
 impl MessageRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
-        Self { inject_pd_metadata }
+    pub fn new(inject_pd_metadata: bool, enable_message_hash: bool) -> Self {
+        Self {
+            inject_pd_metadata,
+            enable_message_hash,
+        }
     }
 }
 
@@ -61,7 +65,7 @@ impl PipelineStage for MessageRequestBuildingStage {
         };
 
         let PreparationOutput::Messages {
-            token_ids,
+            mut token_ids,
             processed_messages,
             tool_constraints,
         } = prep
@@ -73,8 +77,24 @@ impl PipelineStage for MessageRequestBuildingStage {
             ));
         };
 
-        // Build message request
-        let request_id = format!("msg_{}", Uuid::now_v7());
+        // Build message request — use user-supplied request_id if provided
+        let user_supplied = messages_request.request_id.is_some();
+        let request_id = messages_request
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("msg_{}", Uuid::now_v7()));
+        if user_supplied {
+            info!(target: "smg::request", request_id = %request_id, "Using user-supplied request ID");
+        }
+
+        let message_hashes = if self.enable_message_hash {
+            Some(helpers::compute_and_log_input_message_hashes(
+                &request_id,
+                &messages_request.messages,
+            ))
+        } else {
+            None
+        };
 
         // Reject multimodal for backends that don't support it, before assembling
         if processed_messages.multimodal_intermediate.is_some() && builder_client.is_mlx() {
@@ -84,10 +104,19 @@ impl PipelineStage for MessageRequestBuildingStage {
             ));
         }
 
-        // Assemble backend-specific multimodal data now that the backend is known
+        // Assemble backend-specific multimodal data; collapse placeholders for TRT-LLM
+        let im_token_id = processed_messages
+            .multimodal_intermediate
+            .as_ref()
+            .and_then(|i| i.im_token_id);
         let multimodal_data = processed_messages
             .multimodal_intermediate
             .map(|intermediate| assemble_multimodal_data(intermediate, builder_client));
+        if builder_client.is_trtllm() {
+            if let Some(id) = im_token_id {
+                token_ids = collapse_media_placeholders(&token_ids, id);
+            }
+        }
 
         let mut proto_request = builder_client
             .build_messages_request(
@@ -97,6 +126,7 @@ impl PipelineStage for MessageRequestBuildingStage {
                 token_ids,
                 multimodal_data,
                 tool_constraints,
+                message_hashes,
             )
             .map_err(|e| {
                 error!(function = "MessageRequestBuildingStage::execute", error = %e, "Failed to build generate request");

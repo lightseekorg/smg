@@ -112,6 +112,9 @@ mod health_tests {
 
     #[tokio::test]
     async fn test_health_generate_endpoint() {
+        use std::sync::atomic::Ordering;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         let ctx = AppTestContext::new(vec![MockWorkerConfig {
             port: 18005,
             worker_type: WorkerType::Regular,
@@ -120,6 +123,16 @@ mod health_tests {
             fail_rate: 0.0,
         }])
         .await;
+
+        // Simulate recent traffic so the fast path fires and avoids
+        // a real probe (which would fail since api_port=0 in tests).
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        ctx.app_context
+            .last_token_time
+            .store(now, Ordering::Relaxed);
 
         let app = ctx.create_app();
 
@@ -135,8 +148,124 @@ mod health_tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(body_json.is_object());
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(
+            body_str.contains("workers healthy"),
+            "Expected workers healthy in body, got: {body_str}"
+        );
+
+        ctx.shutdown().await;
+    }
+
+    /// Fast path: if last_token_time is recent (< 10s), the probe is skipped.
+    #[tokio::test]
+    async fn test_health_generate_fast_path_skips_probe() {
+        use std::sync::atomic::Ordering;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let ctx = AppTestContext::new(vec![MockWorkerConfig {
+            port: 18006,
+            worker_type: WorkerType::Regular,
+            health_status: HealthStatus::Healthy,
+            response_delay_ms: 0,
+            fail_rate: 0.0,
+        }])
+        .await;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        ctx.app_context
+            .last_token_time
+            .store(now, Ordering::Relaxed);
+
+        let app = ctx.create_app();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health_generate")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(
+            body_str.contains("probe skipped"),
+            "Expected 'probe skipped' in body, got: {body_str}"
+        );
+
+        ctx.shutdown().await;
+    }
+
+    /// Stale fast path: last_token_time older than 10s falls through to the probe.
+    /// The probe will fail (no real server at api_port=0), returning 503.
+    #[tokio::test]
+    async fn test_health_generate_stale_token_falls_through_to_probe() {
+        use std::sync::atomic::Ordering;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let ctx = AppTestContext::new(vec![MockWorkerConfig {
+            port: 18007,
+            worker_type: WorkerType::Regular,
+            health_status: HealthStatus::Healthy,
+            response_delay_ms: 0,
+            fail_rate: 0.0,
+        }])
+        .await;
+
+        let stale = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(30);
+        ctx.app_context
+            .last_token_time
+            .store(stale, Ordering::Relaxed);
+
+        let app = ctx.create_app();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health_generate")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Probe to api_port=0 will fail → 503
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(
+            !body_str.contains("probe skipped"),
+            "Stale token should not skip probe, got: {body_str}"
+        );
+
+        ctx.shutdown().await;
+    }
+
+    /// No workers → 503 immediately, no probe attempted.
+    #[tokio::test]
+    async fn test_health_generate_no_workers() {
+        let ctx = AppTestContext::new(vec![]).await;
+        let app = ctx.create_app();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health_generate")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         ctx.shutdown().await;
     }

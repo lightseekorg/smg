@@ -3,7 +3,10 @@
 //! This module defines the RequestPipeline orchestrator that coordinates
 //! the execution of pipeline stages from request preparation to response delivery.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{atomic::AtomicU64, Arc},
+    time::Instant,
+};
 
 use axum::response::{IntoResponse, Response};
 use openai_protocol::{
@@ -110,6 +113,10 @@ impl RequestPipeline {
     }
 
     /// Create a regular (single-worker) pipeline
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_regular(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -117,6 +124,8 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        enable_message_hash: bool,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -131,6 +140,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_REGULAR,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -141,7 +151,10 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(
+                false,
+                enable_message_hash,
+            )),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
             Box::new(ChatGenerateResponseProcessingStage::new(
@@ -164,6 +177,7 @@ impl RequestPipeline {
         _reasoning_parser_factory: ReasoningParserFactory,
         _configured_tool_parser: Option<String>,
         _configured_reasoning_parser: Option<String>,
+        enable_message_hash: bool,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
             Box::new(harmony::stages::HarmonyPreparationStage::new()),
@@ -173,7 +187,10 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(false)),
+            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
+                false,
+                enable_message_hash,
+            )),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
             Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
@@ -194,6 +211,7 @@ impl RequestPipeline {
         _reasoning_parser_factory: ReasoningParserFactory,
         _configured_tool_parser: Option<String>,
         _configured_reasoning_parser: Option<String>,
+        enable_message_hash: bool,
     ) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
             Box::new(harmony::stages::HarmonyPreparationStage::new()),
@@ -203,7 +221,10 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(true)),
+            Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
+                true,
+                enable_message_hash,
+            )),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
             Box::new(harmony::stages::HarmonyResponseProcessingStage::new()),
@@ -216,6 +237,10 @@ impl RequestPipeline {
     }
 
     /// Create a PD (prefill-decode) pipeline
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -223,6 +248,8 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        enable_message_hash: bool,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -237,6 +264,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_PD,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -247,7 +275,10 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(ChatGenerateRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(ChatGenerateRequestBuildingStage::new(
+                true,
+                enable_message_hash,
+            )),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
             Box::new(ChatGenerateResponseProcessingStage::new(
@@ -320,6 +351,10 @@ impl RequestPipeline {
     /// Uses Messages-specific stages for preparation, request building, and response
     /// processing. Shares worker selection, client acquisition, dispatch metadata,
     /// and request execution stages with other pipelines.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_messages(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -327,6 +362,8 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        enable_message_hash: bool,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -341,6 +378,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_REGULAR,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -351,7 +389,7 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(MessageRequestBuildingStage::new(false, enable_message_hash)),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
             Box::new(MessageResponseProcessingStage::new(
@@ -367,6 +405,10 @@ impl RequestPipeline {
     }
 
     /// Create a Messages API PD (prefill-decode) pipeline
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all params are distinct required dependencies"
+    )]
     pub fn new_messages_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -374,6 +416,8 @@ impl RequestPipeline {
         reasoning_parser_factory: ReasoningParserFactory,
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
+        enable_message_hash: bool,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             tool_parser_factory.clone(),
@@ -388,6 +432,7 @@ impl RequestPipeline {
             configured_tool_parser,
             configured_reasoning_parser,
             metrics_labels::BACKEND_PD,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -398,7 +443,7 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(MessageRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(MessageRequestBuildingStage::new(true, enable_message_hash)),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
             Box::new(MessageResponseProcessingStage::new(
@@ -421,6 +466,8 @@ impl RequestPipeline {
     pub fn new_completion(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        enable_message_hash: bool,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             ToolParserFactory::default(),
@@ -435,6 +482,7 @@ impl RequestPipeline {
             None,
             None,
             metrics_labels::BACKEND_REGULAR,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -445,7 +493,10 @@ impl RequestPipeline {
                 WorkerSelectionMode::Regular,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(false)), // No PD metadata
+            Box::new(CompletionRequestBuildingStage::new(
+                false,
+                enable_message_hash,
+            )),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::Single)),
             Box::new(CompletionResponseProcessingStage::new(
@@ -464,6 +515,8 @@ impl RequestPipeline {
     pub fn new_completion_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
+        enable_message_hash: bool,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         let processor = processor::ResponseProcessor::new(
             ToolParserFactory::default(),
@@ -478,6 +531,7 @@ impl RequestPipeline {
             None,
             None,
             metrics_labels::BACKEND_PD,
+            last_token_time,
         ));
 
         let stages: Vec<Box<dyn PipelineStage>> = vec![
@@ -488,7 +542,10 @@ impl RequestPipeline {
                 WorkerSelectionMode::PrefillDecode,
             )),
             Box::new(ClientAcquisitionStage),
-            Box::new(CompletionRequestBuildingStage::new(true)), // Inject PD metadata
+            Box::new(CompletionRequestBuildingStage::new(
+                true,
+                enable_message_hash,
+            )),
             Box::new(DispatchMetadataStage),
             Box::new(RequestExecutionStage::new(ExecutionMode::DualDispatch)),
             Box::new(CompletionResponseProcessingStage::new(

@@ -316,6 +316,10 @@ impl GrpcClient {
         clippy::unreachable,
         reason = "assembly stage guarantees matching MultimodalData variant for each backend"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request builder requires all fields for each backend's proto message"
+    )]
     pub fn build_chat_request(
         &self,
         request_id: String,
@@ -324,6 +328,8 @@ impl GrpcClient {
         token_ids: Vec<u32>,
         multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
+        eos_token_ids: &[u32],
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
@@ -368,6 +374,8 @@ impl GrpcClient {
                     token_ids,
                     trtllm_mm,
                     tool_constraints,
+                    eos_token_ids,
+                    message_hashes,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }
@@ -389,6 +397,10 @@ impl GrpcClient {
         clippy::unreachable,
         reason = "assembly stage guarantees matching MultimodalData variant for each backend"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "gRPC request builder needs all fields from the Messages API request"
+    )]
     pub fn build_messages_request(
         &self,
         request_id: String,
@@ -397,6 +409,7 @@ impl GrpcClient {
         token_ids: Vec<u32>,
         multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
+        message_hashes: Option<Vec<(String, String)>>,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
@@ -441,6 +454,7 @@ impl GrpcClient {
                     token_ids,
                     trtllm_mm,
                     tool_constraints,
+                    message_hashes,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
             }

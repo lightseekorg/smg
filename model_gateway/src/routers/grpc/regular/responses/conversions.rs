@@ -111,6 +111,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             messages.push(ChatMessage::Tool {
                                 content: MessageContent::Text(output_text.clone()),
                                 tool_call_id: id.clone(),
+                                name: None,
                             });
                         }
                     }
@@ -140,6 +141,7 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                         messages.push(ChatMessage::Tool {
                             content: MessageContent::Text(output.clone()),
                             tool_call_id: call_id.clone(),
+                            name: None,
                         });
                     }
                     ResponseInputOutputItem::McpApprovalResponse { .. }

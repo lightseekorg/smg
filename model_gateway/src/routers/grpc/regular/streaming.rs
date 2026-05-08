@@ -5,7 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
-    sync::Arc,
+    sync::{atomic::AtomicU64, Arc},
     time::Instant,
 };
 
@@ -18,7 +18,8 @@ use llm_tokenizer::{
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
     common::{
-        FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
+        FunctionCallDelta, ResponseFormat, StringOrArray, Tool, ToolCallDelta, ToolChoice,
+        ToolChoiceValue, Usage,
     },
     completion::{CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
     generate::GenerateRequest,
@@ -36,7 +37,9 @@ use tracing::{debug, error, warn};
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     routers::grpc::{
-        common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
+        common::{
+            response_formatting::CompletionTokenTracker, responses::build_tracked_sse_response,
+        },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
         utils,
@@ -52,6 +55,7 @@ pub(crate) struct StreamingProcessor {
     configured_tool_parser: Option<String>,
     configured_reasoning_parser: Option<String>,
     backend_type: &'static str,
+    last_token_time: Arc<AtomicU64>,
 }
 
 /// Context for generate endpoint streaming - groups config params to reduce function arguments
@@ -70,6 +74,7 @@ impl StreamingProcessor {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
         backend_type: &'static str,
+        last_token_time: Arc<AtomicU64>,
     ) -> Self {
         Self {
             tool_parser_factory,
@@ -77,6 +82,7 @@ impl StreamingProcessor {
             configured_tool_parser,
             configured_reasoning_parser,
             backend_type,
+            last_token_time,
         }
     }
 
@@ -178,7 +184,7 @@ impl StreamingProcessor {
         }
 
         // Return SSE response
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process streaming chunks from a single stream (Regular mode)
@@ -195,8 +201,12 @@ impl StreamingProcessor {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
 
-        // Extract request parameters
-        let separate_reasoning = original_request.separate_reasoning;
+        // Extract request parameters — skip reasoning parsing for structured output
+        let has_structured_output = utils::has_constrained_output(
+            original_request.tool_choice.as_ref(),
+            original_request.response_format.as_ref(),
+        );
+        let separate_reasoning = original_request.separate_reasoning && !has_structured_output;
         let tool_choice = &original_request.tool_choice;
         let tools = &original_request.tools;
         let history_tool_calls_count = utils::get_history_tool_calls_count(&original_request);
@@ -224,6 +234,10 @@ impl StreamingProcessor {
 
         // Reusable SSE formatting buffer to avoid allocations per chunk
         let mut sse_buffer = Vec::with_capacity(512);
+
+        // Tracks whether the previous chunk's backticks were stripped so that
+        // a language tag arriving at the start of the next chunk can be removed.
+        let mut fence_backticks_stripped = false;
 
         // Use dispatch metadata for consistent response fields
         let request_id = &dispatch.request_id;
@@ -272,6 +286,17 @@ impl StreamingProcessor {
         // that the parser must handle.
         let is_specific_function =
             used_json_schema && matches!(tool_choice, Some(ToolChoice::Function { .. }));
+
+        // Skip reasoning parsing when constrained decoding is active AND
+        // reasoning is not expected.  When separate_reasoning is true the
+        // chat template injects <think>, so the model emits thinking
+        // content even with constraints.  The reasoning parser must run.
+        let output_is_constrained = !separate_reasoning
+            && (is_specific_function
+                || utils::has_constrained_output(
+                    tool_choice.as_ref(),
+                    original_request.response_format.as_ref(),
+                ));
 
         let tool_parser_available = tools.is_some()
             && utils::check_tool_parser_availability(
@@ -362,7 +387,10 @@ impl StreamingProcessor {
                     stream_buffer.push_str(&delta);
 
                     // Reasoning content handling
-                    let in_reasoning = if separate_reasoning && reasoning_parser_available {
+                    let in_reasoning = if separate_reasoning
+                        && reasoning_parser_available
+                        && !output_is_constrained
+                    {
                         let (normal_text, reasoning_chunk, in_reasoning) = self
                             .process_reasoning_stream(
                                 &delta,
@@ -396,8 +424,11 @@ impl StreamingProcessor {
                             && tool_choice_enabled
                             && (tool_parser_available || used_json_schema)
                         {
-                            let tool_chunks = if is_specific_function {
-                                // Handle specific function case - emit tool call deltas with arguments
+                            let tool_chunks = if is_specific_function
+                                && (output_is_constrained
+                                    || !(self.configured_tool_parser.is_some()
+                                        && tool_parser_available))
+                            {
                                 Self::process_specific_function_stream(
                                     &delta,
                                     index,
@@ -410,7 +441,14 @@ impl StreamingProcessor {
                                     history_tool_calls_count,
                                 )
                             } else {
-                                // Use incremental parser for regular/required modes
+                                // When reasoning is active the backend may
+                                // not enforce constrained decoding, so the
+                                // model can emit native tool-call tags.
+                                // Use the native parser instead of JSON.
+                                let effective_json_parser = used_json_schema
+                                    && !(separate_reasoning
+                                        && self.configured_tool_parser.is_some()
+                                        && tool_parser_available);
                                 self.process_tool_calls_stream(
                                     &delta,
                                     index,
@@ -422,7 +460,7 @@ impl StreamingProcessor {
                                     created,
                                     system_fingerprint,
                                     history_tool_calls_count,
-                                    used_json_schema,
+                                    effective_json_parser,
                                 )
                                 .await
                             };
@@ -439,7 +477,34 @@ impl StreamingProcessor {
                         }
                     }
 
-                    // Regular content emission
+                    if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        for token in [
+                            "<|im_end|>",
+                            "<|im_start|>",
+                            "<|im_user|>",
+                            "<|im_assistant|>",
+                            "<|im_system|>",
+                            "<|im_middle|>",
+                            "</think>",
+                            "[EOS]",
+                            "[BOS]",
+                        ] {
+                            delta = delta.replace(token, "");
+                        }
+                    }
+
+                    // Strip markdown code fences for JSON responses so
+                    // streamed content is directly parseable.
+                    let is_json_response = matches!(
+                        &original_request.response_format,
+                        Some(ResponseFormat::JsonObject) | Some(ResponseFormat::JsonSchema { .. })
+                    );
+                    if is_json_response {
+                        delta = strip_json_fence(delta, &mut fence_backticks_stripped);
+                    }
+
                     if !delta.is_empty() {
                         let content_chunk =
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -727,7 +792,7 @@ impl StreamingProcessor {
         }
 
         // Return SSE response
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process streaming chunks for generate endpoint (no tool/reasoning parsing)
@@ -1203,12 +1268,26 @@ impl StreamingProcessor {
                 );
             }
 
-            // Emit arguments delta
-            if !delta.is_empty() {
+            // Emit arguments delta, stripping any chatml tokens
+            let mut clean_delta = delta.to_string();
+            for token in [
+                "<|im_end|>",
+                "<|im_start|>",
+                "<|im_user|>",
+                "<|im_assistant|>",
+                "<|im_system|>",
+                "<|im_middle|>",
+                "</think>",
+                "[EOS]",
+                "[BOS]",
+            ] {
+                clean_delta = clean_delta.replace(token, "");
+            }
+            if !clean_delta.is_empty() {
                 chunks.push(
                     ChatCompletionStreamResponse::builder(request_id, model)
                         .created(created)
-                        .add_choice_tool_args(index, delta.to_string())
+                        .add_choice_tool_args(index, clean_delta)
                         .maybe_system_fingerprint(system_fingerprint)
                         .build(),
                 );
@@ -1261,7 +1340,21 @@ impl StreamingProcessor {
 
             match parser.parse_incremental(delta, tools).await {
                 Ok(StreamingParseResult { normal_text, calls }) => {
-                    // Emit normal text if present
+                    let mut normal_text = normal_text;
+                    if self.configured_tool_parser.is_some()
+                        || self.configured_reasoning_parser.is_some()
+                    {
+                        for token in [
+                            "<|im_end|>",
+                            "<|im_start|>",
+                            "<|im_user|>",
+                            "<|im_assistant|>",
+                            "<|im_system|>",
+                            "<|im_middle|>",
+                        ] {
+                            normal_text = normal_text.replace(token, "");
+                        }
+                    }
                     if !normal_text.is_empty() {
                         chunks.push(
                             ChatCompletionStreamResponse::builder(request_id, model)
@@ -1545,7 +1638,7 @@ impl StreamingProcessor {
             }
         }
 
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process Messages API streaming chunks from a single stream.
@@ -1783,7 +1876,9 @@ impl StreamingProcessor {
 
                     // Tool call handling: incremental streaming parser
                     if !in_reasoning && streaming_tool_parser.is_some() {
-                        if is_specific_function {
+                        if is_specific_function
+                            && !(self.configured_tool_parser.is_some() && tool_parser_available)
+                        {
                             // Specific function: entire output is arguments for one tool
                             if !has_tool_calls {
                                 has_tool_calls = true;
@@ -2289,7 +2384,7 @@ impl StreamingProcessor {
             }
         }
 
-        build_sse_response(rx)
+        build_tracked_sse_response(rx, &self.last_token_time)
     }
 
     /// Process completion streaming chunks from a single stream.
@@ -2687,5 +2782,86 @@ impl StreamingProcessor {
             buffer.extend_from_slice(error_msg.as_bytes());
         }
         buffer.extend_from_slice(b"\n\n");
+    }
+}
+
+fn strip_json_fence(mut delta: String, fence_backticks_stripped: &mut bool) -> String {
+    delta = delta
+        .replace("```json", "")
+        .replace("```JSON", "")
+        .replace("```", "");
+    let trimmed = delta.trim();
+    if trimmed == "json" || trimmed == "JSON" {
+        delta = String::new();
+    }
+    // Handle cross-chunk fence split: backticks were
+    // stripped from the previous chunk, language tag
+    // arrives at the start of this one.
+    if *fence_backticks_stripped {
+        for tag in ["json\r\n", "JSON\r\n", "json\n", "JSON\n"] {
+            if delta.starts_with(tag) {
+                delta = delta[tag.len()..].to_string();
+                break;
+            }
+        }
+    }
+    *fence_backticks_stripped = delta.is_empty();
+    delta
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_json_fence;
+
+    fn apply_chunks(chunks: &[&str]) -> String {
+        let mut fence_state = false;
+        let mut result = String::new();
+        for chunk in chunks {
+            let out = strip_json_fence(chunk.to_string(), &mut fence_state);
+            result.push_str(&out);
+        }
+        result
+    }
+
+    #[test]
+    fn full_fence_single_chunk() {
+        let out = apply_chunks(&["```json\n{\"a\":1}\n```"]);
+        assert_eq!(out, "\n{\"a\":1}\n");
+    }
+
+    #[test]
+    fn fence_split_backticks_then_language_tag() {
+        let out = apply_chunks(&["```", "json\n{\"a\":1}\n```"]);
+        assert_eq!(out, "{\"a\":1}\n");
+    }
+
+    #[test]
+    fn fence_split_backticks_then_language_tag_crlf() {
+        let out = apply_chunks(&["```", "json\r\n{\"a\":1}\r\n```"]);
+        assert_eq!(out, "{\"a\":1}\r\n");
+    }
+
+    #[test]
+    fn standalone_json_tag_dropped() {
+        let out = apply_chunks(&["json"]);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn no_fence_passthrough() {
+        let out = apply_chunks(&["{\"a\":", "1}"]);
+        assert_eq!(out, "{\"a\":1}");
+    }
+
+    #[test]
+    fn uppercase_fence() {
+        let out = apply_chunks(&["```JSON\n{\"a\":1}\n```"]);
+        assert_eq!(out, "\n{\"a\":1}\n");
+    }
+
+    #[test]
+    fn cross_chunk_uppercase() {
+        let out = apply_chunks(&["```", "JSON\n{\"a\":1}"]);
+        assert_eq!(out, "{\"a\":1}");
     }
 }

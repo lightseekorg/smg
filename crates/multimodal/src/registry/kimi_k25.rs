@@ -61,6 +61,10 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
+        // Expand to N pad tokens per image. SGLang uses these directly for
+        // embedding lookup. TRT-LLM needs only 1 (it re-expands server-side),
+        // so the router collapses consecutive runs before sending to TRT-LLM
+        // via `collapse_media_placeholders` in multimodal.rs.
         Ok(preprocessed
             .num_img_tokens
             .iter()
@@ -142,7 +146,7 @@ mod tests {
             )
             .unwrap();
 
-        // 256 pad tokens (no start/end wrapper — SGLang handles that in the chat template)
+        // N pad tokens per image (SGLang uses directly; TRT-LLM collapses to 1)
         assert_eq!(replacements[0].tokens.len(), 256);
         assert!(replacements[0].tokens.iter().all(|&t| t == 163605));
     }

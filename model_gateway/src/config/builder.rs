@@ -283,6 +283,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn health_generate_timeout_secs(mut self, timeout: u64) -> Self {
+        self.config.health_generate_timeout_secs = timeout;
+        self
+    }
+
     // ==================== Discovery ====================
 
     pub fn discovery_config(mut self, discovery: DiscoveryConfig) -> Self {
@@ -382,6 +387,13 @@ impl RouterConfigBuilder {
     /// Use proxy mode
     pub fn disable_igw(mut self) -> Self {
         self.config.enable_igw = false;
+        self
+    }
+
+    // ==================== LOGGING ====================
+
+    pub fn enable_message_hash(mut self, enable: bool) -> Self {
+        self.config.enable_message_hash = enable;
         self
     }
 

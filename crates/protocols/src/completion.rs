@@ -140,6 +140,10 @@ pub struct CompletionRequest {
     /// Sampling seed for deterministic outputs
     pub sampling_seed: Option<u64>,
 
+    /// User-supplied request ID for log correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+
     /// Additional fields including bootstrap info for PD routing
     #[serde(flatten)]
     pub other: Map<String, Value>,

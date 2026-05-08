@@ -24,10 +24,13 @@ pub(crate) struct ChatGenerateRequestBuildingStage {
 }
 
 impl ChatGenerateRequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
+    pub fn new(inject_pd_metadata: bool, enable_message_hash: bool) -> Self {
         Self {
-            chat_stage: ChatRequestBuildingStage::new(inject_pd_metadata),
-            generate_stage: GenerateRequestBuildingStage::new(inject_pd_metadata),
+            chat_stage: ChatRequestBuildingStage::new(inject_pd_metadata, enable_message_hash),
+            generate_stage: GenerateRequestBuildingStage::new(
+                inject_pd_metadata,
+                enable_message_hash,
+            ),
         }
     }
 }

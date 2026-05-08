@@ -1237,6 +1237,8 @@ mod tests {
     }
 
     fn create_test_app_context() -> Arc<AppContext> {
+        use std::sync::atomic::AtomicU64;
+
         use crate::{
             config::RouterConfig, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
@@ -1289,6 +1291,7 @@ mod tests {
                 router_config,
             )),
             inflight_tracker: InFlightRequestTracker::new(),
+            last_token_time: Arc::new(AtomicU64::new(0)),
             kv_event_monitor: None,
             realtime_registry: Arc::new(RealtimeRegistry::new()),
             webrtc_bind_addr: None,

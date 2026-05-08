@@ -66,6 +66,7 @@ fn test_chat_message_tagged_by_role_tool() {
         ChatMessage::Tool {
             content,
             tool_call_id,
+            ..
         } => {
             match content {
                 MessageContent::Text(text) => {
