@@ -8,6 +8,7 @@ pub mod common_proto {
     tonic::include_proto!("smg.grpc.common");
 }
 pub mod mlx_engine;
+pub mod sampling_params;
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
 pub mod tokenspeed_scheduler;

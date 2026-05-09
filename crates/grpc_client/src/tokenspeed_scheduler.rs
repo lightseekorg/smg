@@ -37,7 +37,7 @@ use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
 
 use crate::{
-    sglang_scheduler::{proto as sglang, SglangSchedulerClient},
+    sglang_scheduler::proto as sglang,
     BoxedTraceInjector, NoopTraceInjector,
 };
 
@@ -293,7 +293,7 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params = SglangSchedulerClient::build_grpc_sampling_params_from_chat(
+        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_chat(
             body,
             tool_call_constraint,
         )?;
@@ -324,7 +324,7 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
     ) -> Result<sglang::GenerateRequest, String> {
         let sampling_params =
-            SglangSchedulerClient::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
+            crate::sampling_params::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
         Ok(sglang::GenerateRequest {
             request_id,
             tokenized: Some(sglang::TokenizedInput {
@@ -354,7 +354,7 @@ impl TokenSpeedSchedulerClient {
         constraint: Option<(String, String)>,
     ) -> Result<sglang::GenerateRequest, String> {
         let sampling_params =
-            SglangSchedulerClient::build_grpc_sampling_params_from_responses(body, constraint)?;
+            crate::sampling_params::build_grpc_sampling_params_from_responses(body, constraint)?;
         Ok(sglang::GenerateRequest {
             request_id,
             tokenized: Some(sglang::TokenizedInput {
@@ -379,7 +379,7 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params = SglangSchedulerClient::build_grpc_sampling_params_from_messages(
+        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_messages(
             body,
             tool_call_constraint,
         )?;
@@ -407,7 +407,7 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
     ) -> Result<sglang::GenerateRequest, String> {
         let sampling_params =
-            SglangSchedulerClient::build_grpc_sampling_params_from_completion(body)?;
+            crate::sampling_params::build_grpc_sampling_params_from_completion(body)?;
         Ok(sglang::GenerateRequest {
             request_id,
             tokenized: Some(sglang::TokenizedInput {
