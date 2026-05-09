@@ -31,6 +31,13 @@ pub struct EpochCount {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValueWinner {
+    Local,
+    Remote,
+    Equal,
+}
+
 /// Encode `(epoch, count)` to the 16-byte big-endian wire format.
 #[must_use]
 pub fn encode(epoch: u64, count: i64) -> [u8; EPOCH_MAX_WINS_ENCODED_LEN] {
@@ -52,6 +59,27 @@ pub fn decode(bytes: &[u8]) -> Option<EpochCount> {
     Some(EpochCount { epoch, count })
 }
 
+/// Compare two rate-limit values without allocating a merged buffer.
+///
+/// Malformed handling mirrors [`merge`]: a well-formed value wins over a
+/// malformed value, and two malformed values keep local.
+#[must_use]
+pub(super) fn winner(local: &[u8], remote: &[u8]) -> ValueWinner {
+    match (decode(local), decode(remote)) {
+        (Some(l), Some(r)) => match l.epoch.cmp(&r.epoch) {
+            Ordering::Greater => ValueWinner::Local,
+            Ordering::Less => ValueWinner::Remote,
+            Ordering::Equal => match l.count.cmp(&r.count) {
+                Ordering::Greater => ValueWinner::Local,
+                Ordering::Less => ValueWinner::Remote,
+                Ordering::Equal => ValueWinner::Equal,
+            },
+        },
+        (Some(_), None) | (None, None) => ValueWinner::Local,
+        (None, Some(_)) => ValueWinner::Remote,
+    }
+}
+
 /// Merge two rate-limit values per the epoch-max-wins rule.
 ///
 /// Both decode: higher epoch wins; on equal epochs, max count wins.
@@ -61,21 +89,9 @@ pub fn decode(bytes: &[u8]) -> Option<EpochCount> {
 /// Returned `Vec<u8>` so the caller can write it straight back.
 #[must_use]
 pub fn merge(local: &[u8], remote: &[u8]) -> Vec<u8> {
-    match (decode(local), decode(remote)) {
-        (Some(l), Some(r)) => {
-            let winner = match l.epoch.cmp(&r.epoch) {
-                Ordering::Greater => l,
-                Ordering::Less => r,
-                Ordering::Equal => EpochCount {
-                    epoch: l.epoch,
-                    count: l.count.max(r.count),
-                },
-            };
-            encode(winner.epoch, winner.count).to_vec()
-        }
-        (Some(_), None) => local.to_vec(),
-        (None, Some(_)) => remote.to_vec(),
-        (None, None) => local.to_vec(),
+    match winner(local, remote) {
+        ValueWinner::Local | ValueWinner::Equal => local.to_vec(),
+        ValueWinner::Remote => remote.to_vec(),
     }
 }
 

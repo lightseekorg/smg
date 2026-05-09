@@ -180,12 +180,10 @@ impl OperationLog {
                     },
                 ) = (current, candidate)
                 {
-                    let merged = epoch_max_wins::merge(current_value, candidate_value);
-                    if merged == *candidate_value && merged != *current_value {
-                        return true;
-                    }
-                    if merged == *current_value && merged != *candidate_value {
-                        return false;
+                    match epoch_max_wins::winner(current_value, candidate_value) {
+                        epoch_max_wins::ValueWinner::Remote => return true,
+                        epoch_max_wins::ValueWinner::Local => return false,
+                        epoch_max_wins::ValueWinner::Equal => {}
                     }
                 }
             }
