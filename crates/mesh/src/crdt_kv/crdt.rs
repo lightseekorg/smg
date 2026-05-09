@@ -148,9 +148,11 @@ impl CrdtOrMap {
     }
 
     fn append_operation(&self, operation: Operation) {
-        self.operation_log
-            .write()
-            .append_with_strategy(operation, |key| self.merge_strategy_for_key(key));
+        let mut operation_log = self.operation_log.write();
+        let strategies = self.merge_strategies.read().clone();
+        operation_log.append_with_strategy(operation, |key| {
+            Self::merge_strategy_for_key_from(&strategies, key)
+        });
     }
 
     fn key_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
