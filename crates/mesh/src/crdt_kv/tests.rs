@@ -382,6 +382,38 @@ fn test_operation_log_merge_deduplicates() {
 }
 
 #[test]
+fn test_operation_log_snapshot_uses_merge_strategy() {
+    let key = "rl:global:node-a";
+    let stale_newer_timestamp = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        2,
+        ReplicaId::new(),
+    );
+    let epoch_winner_older_timestamp =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 1, ReplicaId::new());
+
+    let mut log = OperationLog::new();
+    log.append(stale_newer_timestamp);
+    log.append(epoch_winner_older_timestamp);
+
+    let snapshot = log.snapshot_and_truncate(|key| {
+        if key.starts_with("rl:") {
+            MergeStrategy::EpochMaxWins
+        } else {
+            MergeStrategy::LastWriterWins
+        }
+    });
+
+    let Operation::Insert { value, .. } = snapshot.get(key).expect("snapshot keeps rl shard")
+    else {
+        panic!("snapshot should keep an insert");
+    };
+    assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
+    assert!(log.is_empty(), "snapshot truncates the source log");
+}
+
+#[test]
 fn test_apply_operation_log() {
     init_test_logging();
     let replica1 = CrdtOrMap::new();

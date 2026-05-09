@@ -248,10 +248,12 @@ impl OperationLog {
             .retain(|operation| operation.timestamp() > watermark);
     }
 
-    /// Build a latest-state snapshot and clear the operation log.
-    pub fn snapshot_and_truncate(&mut self) -> HashMap<String, Operation> {
-        let snapshot =
-            self.latest_operations_by_key_with_strategy(|_| MergeStrategy::LastWriterWins);
+    /// Build a latest-state snapshot with the configured merge strategy and clear the operation log.
+    pub fn snapshot_and_truncate<F>(&mut self, strategy_for_key: F) -> HashMap<String, Operation>
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
+        let snapshot = self.latest_operations_by_key_with_strategy(strategy_for_key);
         self.operations.clear();
         snapshot
     }
