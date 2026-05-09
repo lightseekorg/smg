@@ -293,9 +293,8 @@ pub(crate) fn apply_mlx_stop_sequences(
         return Ok(());
     };
 
-    let token_ids = resolve_mlx_stop_ids(stop, tokenizer)?;
-
     if let ProtoGenerateRequest::Mlx(req) = proto_request {
+        let token_ids = resolve_mlx_stop_ids(stop, tokenizer)?;
         let sampling = req.sampling_params.as_mut().ok_or_else(|| {
             error::internal_error(
                 "mlx_sampling_params_missing",
@@ -305,5 +304,6 @@ pub(crate) fn apply_mlx_stop_sequences(
         sampling.stop_token_ids.extend(token_ids);
     }
 
+    // Non-MLX backends handle string stop sequences natively; no-op for them.
     Ok(())
 }
