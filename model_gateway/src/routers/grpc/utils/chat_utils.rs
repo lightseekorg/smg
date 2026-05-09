@@ -17,7 +17,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tracing::{error, warn};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::routers::{
@@ -421,10 +421,12 @@ pub fn create_stop_decoder(
 
 /// Tokenizes stop strings into token IDs for the MLX backend.
 ///
-/// Returns `Err` if any string encodes to more than one token — the caller
-/// should surface this as an HTTP 400 so the client knows the stop condition
-/// was not honored rather than silently ignoring it.
-/// Strings that encode to zero tokens (unknown vocab) are skipped with a warning.
+/// Returns `Err` for any string that cannot be honored as a stop condition:
+/// - encodes to more than one token
+/// - encodes to zero tokens (not in vocabulary)
+/// - tokenizer returns an error
+///
+/// The caller should surface all errors as HTTP 400.
 pub(crate) fn stop_strings_to_token_ids<'a>(
     stop: impl IntoIterator<Item = &'a str>,
     tokenizer: &dyn Tokenizer,
@@ -441,12 +443,16 @@ pub(crate) fn stop_strings_to_token_ids<'a>(
                         tokens.len()
                     ));
                 }
-                _ => warn!(
-                    stop_string = s,
-                    "stop string produced no tokens for MLX, skipping"
-                ),
+                _ => {
+                    return Err(format!(
+                        "stop string {s:?} produced no tokens; \
+                         it may not be present in the model vocabulary"
+                    ));
+                }
             },
-            Err(e) => warn!(stop_string = s, error = %e, "failed to tokenize stop string for MLX"),
+            Err(e) => {
+                return Err(format!("failed to tokenize stop string {s:?}: {e}"));
+            }
         }
     }
     Ok(ids)
@@ -670,6 +676,7 @@ pub(crate) fn parse_finish_reason(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
     use llm_tokenizer::{chat_template::ChatTemplateContentFormat, MockTokenizer};
     use openai_protocol::{
         chat::{ChatMessage, MessageContent},
@@ -875,7 +882,7 @@ mod tests {
     #[test_case(&["world"],                Some(&[2])    ; "single token another regular")]
     #[test_case(&["<|im_end|>"],           Some(&[1002]) ; "single token special")]
     #[test_case(&["Hello world"],          None          ; "multi token returns err")]
-    #[test_case(&["zzzunknown"],           Some(&[])     ; "unknown vocab skipped")]
+    #[test_case(&["zzzunknown"],           None          ; "unknown vocab returns err")]
     #[test_case(&["Hello", "Hello world"], None          ; "array with multi token err")]
     #[test_case(&["Hello", "test"],        Some(&[1, 3]) ; "array all single token")]
     #[test_case(&[],                       Some(&[])     ; "empty array")]
@@ -889,11 +896,33 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_encode_error_skipped() {
-        // Tokenizer errors are silently skipped; the function returns Ok(empty).
+    fn test_stop_encode_error_returns_err() {
         let tok = MockTokenizer::failing();
         let result = stop_strings_to_token_ids(["Hello", "test"].iter().copied(), &tok);
-        assert!(result.unwrap().is_empty());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_mlx_stop_ids_zero_token_is_400() {
+        let tok = MockTokenizer::new();
+        let stop = StringOrArray::String("zzzunknown".to_string());
+        let resp = resolve_mlx_stop_ids(&stop, Some(&tok)).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_resolve_mlx_stop_ids_tokenizer_error_is_400() {
+        let tok = MockTokenizer::failing();
+        let stop = StringOrArray::String("Hello".to_string());
+        let resp = resolve_mlx_stop_ids(&stop, Some(&tok)).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_resolve_mlx_stop_ids_missing_tokenizer_is_400() {
+        let stop = StringOrArray::String("Hello".to_string());
+        let resp = resolve_mlx_stop_ids(&stop, None).unwrap_err();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     // MockTokenizer vocab: "Hello"→1, "world"→2, "test"→3, "<|im_end|>"→1002.
