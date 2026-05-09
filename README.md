@@ -18,6 +18,7 @@
 High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
   <a href="https://pytorch.org/blog/lightseek-smg/">
     <img src="https://img.shields.io/badge/PyTorch-Technical%20Blog-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch Blog">
   </a>
