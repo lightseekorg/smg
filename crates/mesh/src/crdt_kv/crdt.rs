@@ -127,15 +127,24 @@ impl CrdtOrMap {
     }
 
     fn merge_strategy_for_key(&self, key: &str) -> MergeStrategy {
-        self.merge_strategies
-            .read()
+        let strategies = self.merge_strategies.read();
+        Self::merge_strategy_for_key_from(&strategies, key)
+    }
+
+    fn merge_strategy_for_key_from(
+        strategies: &[(String, MergeStrategy)],
+        key: &str,
+    ) -> MergeStrategy {
+        strategies
             .iter()
             .find_map(|(prefix, strategy)| key.starts_with(prefix).then(|| strategy.clone()))
             .unwrap_or(MergeStrategy::LastWriterWins)
     }
 
     fn compact_operation_log(&self, operation_log: &mut OperationLog) {
-        operation_log.compact_with_strategy(|key| self.merge_strategy_for_key(key));
+        let strategies = self.merge_strategies.read().clone();
+        operation_log
+            .compact_with_strategy(|key| Self::merge_strategy_for_key_from(&strategies, key));
     }
 
     fn append_operation(&self, operation: Operation) {
