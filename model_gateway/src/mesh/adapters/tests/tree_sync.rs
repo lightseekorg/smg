@@ -505,6 +505,31 @@ async fn cold_start_publishes_repair_request_for_each_model_kind() {
 }
 
 #[tokio::test]
+async fn cold_start_normalizes_empty_model_to_default_model() {
+    let mesh = MeshKV::new("node-a".into());
+    let td = td_namespace(&mesh);
+    let req = req_namespace(&mesh);
+    let pages = page_namespace(&mesh);
+    let tree: Arc<dyn TreeHandle> = Arc::new(MockTreeHandle::default());
+    let peers: Arc<dyn PeerList> = MockPeerList::with(&["node-b"]);
+    let adapter = TreeSyncAdapter::new(td, req, pages, tree, peers, "node-a".into());
+
+    let requested = adapter.request_cold_start_repairs(["", ""]);
+
+    assert_eq!(
+        requested, 2,
+        "empty model ids coalesce as the default model"
+    );
+    let publishes = drain_repair_publishes(&mesh);
+    assert_eq!(publishes.len(), 2, "one repair per default-model tree kind");
+    for (_target, _key, payload) in publishes {
+        let request: TreeRepairRequest = bincode::deserialize(&payload).unwrap();
+        assert_eq!(request.model_id, crate::worker::UNKNOWN_MODEL_ID);
+        assert_eq!(request.reason, RepairReason::ColdStart);
+    }
+}
+
+#[tokio::test]
 async fn coalesces_duplicate_repair_for_same_model_kind() {
     // Two unknown hashes for the same (model, kind) within one
     // batch must produce only one repair request — the

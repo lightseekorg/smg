@@ -910,8 +910,8 @@ impl TreeSyncAdapter {
         );
     }
 
-    /// Request both tree kinds for each locally configured model
-    /// during startup. Empty/duplicate model ids are ignored.
+    /// Request both tree kinds for each locally configured model during startup.
+    /// Empty model ids are normalized to the gateway default-model sentinel.
     pub fn request_cold_start_repairs<I, S>(&self, model_ids: I) -> usize
     where
         I: IntoIterator<Item = S>,
@@ -920,8 +920,8 @@ impl TreeSyncAdapter {
         let mut seen = BTreeSet::new();
         let mut requested = 0;
         for model_id in model_ids {
-            let model_id = model_id.as_ref();
-            if model_id.is_empty() || !seen.insert(model_id.to_string()) {
+            let model_id = crate::policies::normalize_model_key(model_id.as_ref());
+            if !seen.insert(model_id.to_string()) {
                 continue;
             }
             requested += usize::from(self.request_repair(
