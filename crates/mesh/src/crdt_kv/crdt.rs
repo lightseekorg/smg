@@ -436,7 +436,7 @@ impl CrdtOrMap {
                     false
                 }
             }
-            MergeStrategy::LastWriterWins | MergeStrategy::MaxValueWins => {
+            MergeStrategy::LastWriterWins => {
                 if self.record_insert_metadata(key, timestamp, replica_id) {
                     self.store.insert(key.to_string(), value);
                     true
