@@ -159,8 +159,6 @@ pub(crate) fn apply_sampling_defaults_to_generate_request(
             };
             apply_mlx_sampling_defaults(params, defaults, mask);
         }
-        // TokenSpeed and TRT-LLM are early-returned above; the arms exist
-        // only to keep the match exhaustive.
         ProtoGenerateRequest::Trtllm(_) | ProtoGenerateRequest::TokenSpeed(_) => {}
     }
 }

@@ -277,9 +277,6 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
-            // TokenSpeed: builder produces a native
-            // ``tokenspeed::GenerateRequest``; multimodal is intentionally
-            // not supported here — the harmony path is text-only today.
             GrpcClient::TokenSpeed(tokenspeed_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {

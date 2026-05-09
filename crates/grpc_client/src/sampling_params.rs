@@ -1,17 +1,7 @@
-//! Backend-neutral OpenAI → sampling-params builders.
-//!
-//! These helpers translate OpenAI request shapes (Chat, Responses, Messages,
-//! Completion, plain `GenerateSamplingParams`) into a sampling-params struct
-//! shared by the SGLang and TokenSpeed gRPC clients. They live here rather
-//! than on `SglangSchedulerClient` because the OpenAI mapping is independent
-//! of the wire backend.
-//!
-//! The return type is currently [`sglang::SamplingParams`] because that proto
-//! happens to be the most permissive shape across our supported backends.
-//! Other backends (TokenSpeed) translate from this shape to their own slimmer
-//! wire format at the boundary. When a backend grows a sampling field SGLang
-//! lacks, this is the place to add it (and consider whether a neutral
-//! intermediate struct is worth introducing).
+//! Backend-neutral OpenAI → sampling-params builders shared by the SGLang
+//! and TokenSpeed gRPC clients. Returns [`sglang::SamplingParams`] (the
+//! most permissive shape today); other backends translate from this at
+//! their wire seam.
 
 use openai_protocol::{
     chat::ChatCompletionRequest,

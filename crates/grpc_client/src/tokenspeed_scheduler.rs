@@ -1,31 +1,11 @@
 //! gRPC client for the TokenSpeed scheduler service.
 //!
-//! TokenSpeed has a fully independent wire definition (see
-//! ``proto/tokenspeed_scheduler.proto``) — distinct package
-//! (``tokenspeed.grpc.scheduler``), distinct service, distinct messages with
-//! intentionally trimmed field sets aimed at the top-tier LLM workloads
-//! (Kimi K2, MiniMax M2, Qwen 3, gpt-oss, DeepSeek V4). Anything SGLang has
-//! that doesn't apply here (PD-disaggregated serving, multimodal inputs,
-//! LoRA hot-swap, hidden-state forwarding, embeddings, classifier outputs,
-//! tokenizer streaming, KV-event subscription) is simply not on TokenSpeed's
-//! wire.
-//!
-//! Request/response types are TokenSpeed-native end-to-end: the stream
-//! yields ``tokenspeed_proto::GenerateResponse`` and ``build_*_request``
-//! produces ``tokenspeed_proto::GenerateRequest``. The router dispatches
-//! through dedicated ``ProtoGenerateRequest::TokenSpeed`` /
-//! ``ProtoGenerateStreamChunk::TokenSpeed`` /
-//! ``ProtoGenerateComplete::TokenSpeed`` arms — same shape as the other
-//! per-backend variants.
-//!
-//! Sampling-params construction reuses the backend-neutral helpers in
-//! ``crate::sampling_params`` (which currently return
-//! ``sglang::SamplingParams``); the [`translate::sampling_params`]
-//! field-mapper converts to TokenSpeed's shape at the seam. The unary RPC
-//! responses (``GetModelInfo``, ``GetServerInfo``, ``GetLoads``) still
-//! return SGLang-shaped types because their consumers ride the
-//! ``ModelInfo`` / ``ServerInfo`` SGLang variants in the router; that's a
-//! separate cleanup.
+//! Wire types are TokenSpeed-native end-to-end (`tokenspeed_proto::*`).
+//! Sampling params come from the shared `crate::sampling_params` helpers
+//! and are field-mapped to TokenSpeed's shape via [`translate::sampling_params`].
+//! The unary RPC adapters (`translate::model_info` / `server_info` / `loads`)
+//! still emit SGLang-shaped types pending dedicated `ModelInfo::TokenSpeed` /
+//! `ServerInfo::TokenSpeed` arms in the router.
 
 use std::{
     pin::Pin,
@@ -52,19 +32,11 @@ pub mod tokenspeed_proto {
     tonic::include_proto!("tokenspeed.grpc.scheduler");
 }
 
-/// Fire-and-forget abort sender used by [`AbortOnDropStream`]. The closure
-/// captures the TokenSpeed client that owns the stream so ``Drop`` can
-/// dispatch the abort RPC over the same connection without ``Drop`` itself
-/// being async. Local to this module — SGLang's equivalent stream type
-/// holds its own client field directly and doesn't need this indirection.
+/// Fire-and-forget abort sender invoked from `Drop`.
 type AbortDispatcher = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Auto-aborting wrapper around the TokenSpeed generate stream.
-///
-/// Yields ``tokenspeed_proto::GenerateResponse`` directly (no translation
-/// at the seam). Sends an Abort RPC on Drop unless ``mark_completed`` was
-/// called first — same lifecycle contract as
-/// ``sglang_scheduler::AbortOnDropStream``.
+/// Sends Abort on Drop unless `mark_completed` ran first.
 pub struct AbortOnDropStream {
     inner: Streaming<tokenspeed_proto::GenerateResponse>,
     request_id: String,
@@ -145,8 +117,7 @@ impl TokenSpeedSchedulerClient {
             endpoint.to_string()
         };
 
-        // Same channel knobs as SglangSchedulerClient — independent of the
-        // service being called and proven load-appropriate in prod.
+        // Channel knobs match the other engine clients.
         let channel = Channel::from_shared(http_endpoint)?
             .http2_keep_alive_interval(Duration::from_secs(30))
             .keep_alive_timeout(Duration::from_secs(10))
@@ -261,12 +232,6 @@ impl TokenSpeedSchedulerClient {
     }
 
     // ── Request builders ──────────────────────────────────────────────
-    //
-    // Produce ``tokenspeed_proto::GenerateRequest`` directly. Sampling-param
-    // construction delegates to ``crate::sampling_params`` (which returns
-    // ``sglang::SamplingParams`` because that proto is the most permissive
-    // shape across our backends); ``translate::sampling_params`` field-maps
-    // it to TokenSpeed's slimmer shape at the seam.
 
     #[expect(
         clippy::unused_self,
@@ -435,29 +400,15 @@ fn tokenspeed_abort_dispatcher(client: TokenSpeedSchedulerClient) -> AbortDispat
     })
 }
 
-// ── Sampling-params translation + unary RPC adapters ─────────────────
-//
-// `sampling_params` field-maps the sglang-shaped sampling params produced
-// by `crate::sampling_params` into TokenSpeed's slimmer wire shape. The
-// other adapters (model_info / server_info / loads) translate unary RPC
-// responses into the SGLang-shaped types the router's metadata wrappers
-// currently consume — that's a follow-up cleanup that can ride on top of
-// the per-backend `ModelInfo` / `ServerInfo` enums.
+// Sampling-params + unary RPC adapters: map between TokenSpeed's wire
+// shape and the SGLang shape the router metadata wrappers consume.
 mod translate {
     use super::{sglang, tokenspeed_proto as ts};
 
     pub(super) fn sampling_params(s: sglang::SamplingParams) -> ts::SamplingParams {
-        // sglang's proto declares numeric scalars as non-optional, so the Rust
-        // router has already substituted semantic defaults (e.g.
-        // ``temperature=1.0``, ``top_p=1.0``, ``repetition_penalty=1.0``)
-        // before getting here. tokenspeed's proto declares the same fields
-        // as ``optional`` so the servicer can use ``HasField()`` to
-        // distinguish presence — wrap the (already-defaulted) sglang values
-        // in ``Some(...)`` to mark them as explicitly set on the wire. This
-        // preserves the pre-fix behavior while letting future direct-to-
-        // tokenspeed clients use ``None`` to mean "let the engine default
-        // apply" (e.g. for health-probe / warmup paths that would otherwise
-        // hit ``top_p must be in (0, 1], got 0.0``).
+        // SGLang scalars are non-optional with semantic defaults already
+        // applied; TokenSpeed wraps in `Some(_)` so the servicer's
+        // `HasField()` checks distinguish "set" from "unset".
         ts::SamplingParams {
             temperature: Some(s.temperature),
             top_p: Some(s.top_p),
@@ -502,8 +453,6 @@ mod translate {
         sglang::GetModelInfoResponse {
             model_path: r.model_path,
             tokenizer_path: r.tokenizer_path,
-            // TokenSpeed only serves generative LLMs at this layer; classifier
-            // / embedding models are out of scope. Hard-code accordingly.
             is_generation: true,
             preferred_sampling_params: r.preferred_sampling_params,
             weight_version: r.weight_version,
@@ -529,13 +478,9 @@ mod translate {
             scheduler_info: r.scheduler_info,
             active_requests: r.active_requests,
             is_paused: r.is_paused,
-            // TokenSpeed scheduler doesn't track this — router doesn't read
-            // it for TokenSpeed either, so a fixed 0 is fine.
             last_receive_timestamp: 0.0,
             uptime_seconds: r.uptime_seconds,
-            // sglang_version field on the SGLang struct is the runtime version;
-            // for TokenSpeed we surface the TokenSpeed version through the same
-            // slot since downstream metric labels keep the field name.
+            // SGLang's `sglang_version` slot carries the runtime version label.
             sglang_version: r.tokenspeed_version,
             server_type: "grpc".to_string(),
             start_time: r.start_time,
@@ -572,9 +517,6 @@ mod translate {
                 graph_gb: m.graph_gb,
                 token_capacity: m.token_capacity,
             }),
-            // TokenSpeed's wire intentionally omits speculative / LoRA /
-            // disaggregation metrics — fill the SGLang-shaped slots with
-            // None so callers ignore them.
             speculative: None,
             lora: None,
             disaggregation: None,

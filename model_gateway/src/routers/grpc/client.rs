@@ -23,10 +23,8 @@ pub struct HealthCheckResponse {
     pub message: String,
 }
 
-/// Wraps the per-backend gRPC clients. TokenSpeed has its own service but
-/// reuses SGLang-shaped wrapper variants where the wire shapes line up
-/// after translation; RPCs absent on a backend's wire return
-/// ``Status::unimplemented``.
+/// Wraps the per-backend gRPC clients. RPCs absent on a backend's wire
+/// return `Status::unimplemented`.
 #[derive(Clone)]
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),
@@ -296,9 +294,6 @@ impl GrpcClient {
             Self::Vllm(client) => client.get_tokenizer().await,
             Self::Trtllm(client) => client.get_tokenizer().await,
             Self::Mlx(client) => client.get_tokenizer().await,
-            // Status::unimplemented (not a String error) so the fallback in
-            // tokenizer_registration's downcast_ref::<tonic::Status>() check
-            // skips TokenSpeed workers silently.
             Self::TokenSpeed(_) => {
                 return Err(Box::new(tonic::Status::unimplemented(
                     "TokenSpeed backend does not support GetTokenizer RPC",
@@ -366,8 +361,6 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedComplete::Vllm(resp))
             }
-            // TokenSpeed dropped the Embed RPC from its wire — top-tier
-            // LLMs aren't embedding models, so the proto doesn't carry one.
             (Self::TokenSpeed(_), _) => Err(tonic::Status::unimplemented(
                 "TokenSpeed backend does not support embedding",
             )),
@@ -452,9 +445,6 @@ impl GrpcClient {
                 )?;
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
-            // TokenSpeed's wire intentionally has no multimodal fields
-            // (top-tier LLMs are text-only today). Reject if the assembly
-            // stage produced any — that's a router-config bug.
             Self::TokenSpeed(client) => {
                 if multimodal_inputs.is_some() {
                     return Err("TokenSpeed backend does not support multimodal inputs".to_string());

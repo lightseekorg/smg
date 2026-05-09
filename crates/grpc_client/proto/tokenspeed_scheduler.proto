@@ -5,34 +5,15 @@ package tokenspeed.grpc.scheduler;
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
-// Service definition for TokenSpeed scheduler communication.
-//
-// TokenSpeed has its own service identity AND its own message shapes — wire
-// definition is fully self-contained, with zero dependencies on
-// ``sglang_scheduler.proto``. The message catalog is intentionally minimal:
-// it covers what TokenSpeed's top-tier LLMs (Kimi K2, MiniMax M2, Qwen 3,
-// gpt-oss, DeepSeek V4) actually need today, and nothing more. Anything
-// SGLang-specific (PD-disaggregated serving, LoRA hot-swap, multimodal,
-// classifier outputs, hidden-state forwarding, embeddings) is deliberately
-// out of scope and lands here only when an explicit TokenSpeed use case
-// shows up.
+// TokenSpeed scheduler gRPC service. Self-contained wire — no dependency
+// on sglang_scheduler.proto. Trimmed to text-generation only (no embed,
+// no multimodal, no PD-disaggregated, no LoRA, no hidden-state forwarding).
 service TokenSpeedScheduler {
-  // Submit a generation request (server-streaming for token-by-token).
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
-
-  // Liveness + readiness probe.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-
-  // Cancel a running request.
   rpc Abort(AbortRequest) returns (AbortResponse);
-
-  // Static info about the loaded model.
   rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
-
-  // Runtime info about the server.
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
-
-  // Per-DP-rank load metrics (used by router for least-load).
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
 }
 
@@ -40,16 +21,9 @@ service TokenSpeedScheduler {
 // Sampling
 // =====================
 
-// IMPORTANT: proto3 numeric defaults (0) do NOT match semantic defaults
-// (temperature=1.0, top_p=1.0, top_k=-1). All sampling scalars are
-// declared ``optional`` so presence is preserved on the wire — the
-// servicer uses ``HasField()`` to distinguish "client explicitly set 0"
-// from "client didn't send anything." Without this, ``temperature=0``
-// (a valid request for greedy decoding) is indistinguishable from the
-// proto3 default and would be silently dropped by truthy-check guards.
-//
-// ``min_new_tokens`` is left non-optional because 0 is its semantic
-// "no minimum" sentinel.
+// Sampling scalars are `optional` so the servicer can distinguish
+// "client set 0" from "client unset" via `HasField()`. `min_new_tokens`
+// stays non-optional because 0 is its semantic "no minimum" sentinel.
 message SamplingParams {
   optional float temperature = 1;
   optional float top_p = 2;
@@ -75,8 +49,7 @@ message SamplingParams {
   // Per-token logit bias.
   map<string, float> logit_bias = 16;
 
-  // Structured generation. Currently xfailed in e2e (tokenspeed#361),
-  // but the wire shape stays so wiring it later doesn't bump the proto.
+  // Structured generation. Currently xfailed in e2e (tokenspeed#361).
   oneof constraint {
     string regex = 17;
     string json_schema = 18;
@@ -84,12 +57,7 @@ message SamplingParams {
     string structural_tag = 20;
   }
 
-  // When true, generation does not strip the trailing matched stop token
-  // from ``output_ids`` (matches SGLang's ``no_stop_trim``). Combined with
-  // ``skip_special_tokens=False`` it lets the gateway-side detokenizer
-  // render the EOS marker in the visible response — required for the
-  // ``test_no_stop_trim_with_skip_special_false`` e2e check and for any
-  // downstream logic that needs the raw stop token in the output stream.
+  // Keep the trailing matched stop token in `output_ids` (SGLang parity).
   bool no_stop_trim = 22;
 
   // Escape hatch for backend-specific knobs without bumping the proto.
@@ -110,8 +78,7 @@ message GenerateRequest {
 
   // Logprob options.
   bool return_logprob = 4;
-  // Optional so the servicer can distinguish "client omitted" (use SGLang's
-  // ``-1`` default = no input logprobs) from an explicit value like 0.
+  // Optional: unset = SGLang's `-1` (no input logprobs); explicit 0 = "from start".
   optional int32 logprob_start_len = 5;
   int32 top_logprobs_num = 6;
   repeated uint32 token_ids_logprob = 7;
@@ -122,9 +89,7 @@ message GenerateRequest {
 
 message TokenizedInput {
   repeated uint32 input_ids = 1;
-  // Original text — purely cosmetic; the tokenizer pass is skipped because
-  // input_ids is set. Used in worker logs for traceability.
-  string original_text = 2;
+  string original_text = 2; // cosmetic, for worker logs
 }
 
 message GenerateResponse {
