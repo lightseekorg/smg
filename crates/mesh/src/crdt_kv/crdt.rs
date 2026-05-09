@@ -177,17 +177,10 @@ impl CrdtOrMap {
         let key_lock = self.key_lock_for(&key);
         let key_guard = key_lock.lock();
 
+        let previous = self.store.get(&key);
         let timestamp = self.clock.tick();
-        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-            let mut prev = None;
-            let value_for_operation = value.clone();
-            let _ = self.store.upsert(key.clone(), |current| {
-                prev = current.map(|bytes| bytes.to_vec());
-                value
-            });
-
-            let operation =
-                Operation::insert(key.clone(), value_for_operation, timestamp, self.replica_id);
+        let operation = Operation::insert(key.clone(), value, timestamp, self.replica_id);
+        let result = if self.apply_insert_locked(&key, operation.clone()) {
             self.append_operation(operation);
 
             debug!(
@@ -195,7 +188,7 @@ impl CrdtOrMap {
                 key, timestamp, self.replica_id
             );
 
-            prev
+            previous
         } else {
             self.store.get(&key).map(|bytes| bytes.to_vec())
         };
@@ -216,19 +209,16 @@ impl CrdtOrMap {
         let current_value = self.store.get(&key);
         let updated_value = updater(current_value.as_deref());
         let timestamp = self.clock.tick();
+        let operation = Operation::insert(
+            key.clone(),
+            updated_value.clone(),
+            timestamp,
+            self.replica_id,
+        );
 
-        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-            let operation = Operation::insert(
-                key.clone(),
-                updated_value.clone(),
-                timestamp,
-                self.replica_id,
-            );
-
-            self.store.insert(key.clone(), updated_value.clone());
+        let result = if self.apply_insert_locked(&key, operation.clone()) {
             self.append_operation(operation);
-
-            updated_value
+            self.store.get(&key).unwrap_or_default()
         } else {
             self.store.get(&key).unwrap_or_default()
         };
@@ -256,19 +246,16 @@ impl CrdtOrMap {
             }
         };
         let timestamp = self.clock.tick();
+        let operation = Operation::insert(
+            key.clone(),
+            updated_value.clone(),
+            timestamp,
+            self.replica_id,
+        );
 
-        let result = if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-            let operation = Operation::insert(
-                key.clone(),
-                updated_value.clone(),
-                timestamp,
-                self.replica_id,
-            );
-
-            self.store.insert(key.clone(), updated_value.clone());
+        let result = if self.apply_insert_locked(&key, operation.clone()) {
             self.append_operation(operation);
-
-            updated_value
+            self.store.get(&key).unwrap_or_default()
         } else {
             self.store.get(&key).unwrap_or_default()
         };
@@ -298,16 +285,15 @@ impl CrdtOrMap {
 
         let (result, changed) = if let Some(updated_value) = maybe_updated_value {
             let timestamp = self.clock.tick();
-            if self.record_insert_metadata(&key, timestamp, self.replica_id) {
-                let operation = Operation::insert(
-                    key.clone(),
-                    updated_value.clone(),
-                    timestamp,
-                    self.replica_id,
-                );
-                self.store.insert(key.clone(), updated_value.clone());
+            let operation = Operation::insert(
+                key.clone(),
+                updated_value.clone(),
+                timestamp,
+                self.replica_id,
+            );
+            if self.apply_insert_locked(&key, operation.clone()) {
                 self.append_operation(operation);
-                (updated_value, true)
+                (self.store.get(&key).unwrap_or_default(), true)
             } else {
                 (self.store.get(&key).unwrap_or_default(), false)
             }
@@ -528,30 +514,45 @@ impl CrdtOrMap {
     fn apply_insert(&self, key: &str, value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) {
         let key_lock = self.key_lock_for(key);
         let key_guard = key_lock.lock();
+        let operation = Operation::insert(key.to_string(), value, timestamp, replica_id);
+
+        self.apply_insert_locked(key, operation);
+
+        drop(key_guard);
+        self.try_cleanup_key_lock(key, &key_lock);
+    }
+
+    fn apply_insert_locked(&self, key: &str, operation: Operation) -> bool {
+        let Operation::Insert {
+            value,
+            timestamp,
+            replica_id,
+            ..
+        } = operation
+        else {
+            return false;
+        };
 
         match self.merge_strategy_for_key(key) {
             MergeStrategy::EpochMaxWins => {
-                if self.record_epoch_insert_metadata(key, timestamp, replica_id) {
-                    let current = self.store.get(key);
-                    let merged = if let Some(local) = current.as_deref() {
-                        epoch_max_wins::merge(local, &value)
-                    } else {
-                        value
-                    };
-                    if current.as_deref() != Some(merged.as_slice()) {
-                        self.store.insert(key.to_string(), merged);
-                    }
+                if let Some(merged) =
+                    self.record_epoch_insert_metadata(key, &value, timestamp, replica_id)
+                {
+                    self.store.insert(key.to_string(), merged);
+                    true
+                } else {
+                    false
                 }
             }
             MergeStrategy::LastWriterWins | MergeStrategy::MaxValueWins => {
                 if self.record_insert_metadata(key, timestamp, replica_id) {
                     self.store.insert(key.to_string(), value);
+                    true
+                } else {
+                    false
                 }
             }
         }
-
-        drop(key_guard);
-        self.try_cleanup_key_lock(key, &key_lock);
     }
 
     fn compact_key_metadata(versions: &mut Vec<ValueMetadata>) {
@@ -602,10 +603,17 @@ impl CrdtOrMap {
     fn record_epoch_insert_metadata(
         &self,
         key: &str,
+        value: &[u8],
         timestamp: u64,
         replica_id: ReplicaId,
-    ) -> bool {
+    ) -> Option<Vec<u8>> {
         let new_metadata = ValueMetadata::new(timestamp, replica_id);
+        let current = self.store.get(key);
+        let merged = current.as_deref().map_or_else(
+            || value.to_vec(),
+            |local| epoch_max_wins::merge(local, value),
+        );
+        let candidate_wins_value = current.as_deref() != Some(merged.as_slice()) || merged == value;
 
         match self.metadata.entry(key.to_string()) {
             MapEntry::Occupied(mut entry) => {
@@ -613,10 +621,10 @@ impl CrdtOrMap {
 
                 let has_existing_entry = versions
                     .iter()
-                    .any(|v| !v.is_tombstone && v.matches_version(timestamp, replica_id));
+                    .any(|v| v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
                     Self::compact_key_metadata(versions);
-                    return false;
+                    return None;
                 }
 
                 let has_newer_tombstone = versions
@@ -624,16 +632,21 @@ impl CrdtOrMap {
                     .any(|v| v.is_tombstone && v.is_newer_than(timestamp, replica_id));
                 if has_newer_tombstone {
                     Self::compact_key_metadata(versions);
-                    return false;
+                    return None;
                 }
 
+                if current.is_some() && !candidate_wins_value {
+                    Self::compact_key_metadata(versions);
+                    return None;
+                }
+
+                versions.clear();
                 versions.push(new_metadata);
-                Self::compact_key_metadata(versions);
-                true
+                Some(merged)
             }
             MapEntry::Vacant(entry) => {
                 entry.insert(vec![new_metadata]);
-                true
+                Some(merged)
             }
         }
     }
