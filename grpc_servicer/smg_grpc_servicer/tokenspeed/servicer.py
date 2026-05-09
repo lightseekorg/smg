@@ -62,36 +62,23 @@ def _lazy_generate_req_input():
 
 
 def _finish_reason_to_dict(reason: Any) -> dict | None:
-    """Normalise a TokenSpeed finish reason into the SGLang on-wire shape.
+    """Normalise a TokenSpeed finish reason into a dict.
 
-    TokenSpeed emits ``BaseFinishReason``-style objects (or an already-normalised
-    dict) in ``meta_info["finish_reason"]``; downstream code expects a dict
-    with at minimum ``{"type": ...}`` and optionally ``{"matched": int|str}``.
-    ``None`` means "still running".
+    TokenSpeed emits ``BaseFinishReason``-style objects (or an already-
+    normalised dict) in ``meta_info["finish_reason"]``; downstream code
+    expects a dict with at minimum ``{"type": ...}`` and optionally
+    ``{"matched": int|str}``. ``None`` means "still running".
 
-    We duck-type on ``to_json()`` rather than importing the concrete
-    ``BaseFinishReason`` class so the servicer module loads without pulling
-    in TokenSpeed's full request-processing graph.
-
-    Raises ``TypeError`` for unknown shapes rather than coercing to a fake
-    ``stop``: silently flipping ``length``/``abort`` to ``stop`` and leaking
-    a debug ``repr()`` into the user-facing ``matched_stop_str`` field would
-    hide real bugs and corrupt the OpenAI ``finish_reason`` semantics. The
-    caller wraps this in ``try/except`` and turns it into ``StatusCode.INTERNAL``.
+    We duck-type on ``to_json()`` so the servicer module loads without
+    pulling in TokenSpeed's full request-processing graph. Unknown shapes
+    raise ``TypeError`` rather than silently flipping ``length`` / ``abort``
+    to ``stop`` — the caller maps that to ``StatusCode.INTERNAL``.
     """
-    if reason is None:
-        return None
-    if isinstance(reason, dict):
+    if reason is None or isinstance(reason, dict):
         return reason
     to_json = getattr(reason, "to_json", None)
     if callable(to_json):
-        try:
-            result = to_json()
-        except Exception as e:  # noqa: BLE001
-            raise TypeError(
-                f"finish_reason of type {type(reason).__name__!r} raised in "
-                f"to_json(); refusing to silently emit a fake stop. {e}"
-            ) from e
+        result = to_json()
         if isinstance(result, dict):
             return result
         raise TypeError(
