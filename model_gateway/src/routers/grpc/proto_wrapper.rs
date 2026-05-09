@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 
 use futures_util::StreamExt;
+use llm_tokenizer::traits::Tokenizer;
+use openai_protocol::common::StringOrArray;
 use smg_grpc_client::{
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
@@ -808,7 +810,7 @@ impl ProtoGenerateComplete {
     }
 
     /// Return the raw matched stop token ID for MLX responses; None for all other backends.
-    pub fn mlx_matched_stop_token_id(&self) -> Option<u32> {
+    fn mlx_matched_stop_token_id(&self) -> Option<u32> {
         match self {
             Self::Mlx(c) => c.matched_stop_token_id,
             _ => None,
@@ -910,6 +912,31 @@ impl ProtoGenerateComplete {
                 TokenSpeedMatchedStop::MatchedTokenId,
                 TokenSpeedMatchedStop::MatchedStopStr
             ),
+            // MLX requires request context to resolve the token ID; use matched_stop_json_with_context.
+            Self::Mlx(_) => unreachable!("matched_stop_json called for MLX backend"),
+        }
+    }
+
+    /// Resolve the matched stop for any backend, using request context for MLX.
+    ///
+    /// MLX only stores a token ID; this maps it back to the user-facing string or integer
+    /// (see `chat_utils::resolve_mlx_matched_stop_json`). All other backends return
+    /// `matched_stop_json()` directly.
+    pub fn matched_stop_json_with_context(
+        &self,
+        stop: Option<&StringOrArray>,
+        stop_token_ids: Option<&Vec<u32>>,
+        tokenizer: &dyn Tokenizer,
+    ) -> Option<serde_json::Value> {
+        if self.is_mlx() {
+            crate::routers::grpc::utils::resolve_mlx_matched_stop_json(
+                self.mlx_matched_stop_token_id(),
+                stop,
+                stop_token_ids,
+                tokenizer,
+            )
+        } else {
+            self.matched_stop_json()
         }
     }
 
