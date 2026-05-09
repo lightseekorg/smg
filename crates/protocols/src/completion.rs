@@ -266,7 +266,7 @@ pub struct CompletionStreamResponse {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionStreamChoice {
     pub text: String,
     pub index: u32,

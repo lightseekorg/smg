@@ -2412,9 +2412,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: std::mem::take(&mut chunk_text),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
-                                matched_stop: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2440,9 +2438,7 @@ impl StreamingProcessor {
                                 choices: vec![CompletionStreamChoice {
                                     text: sfx.to_string(),
                                     index,
-                                    logprobs: None,
-                                    finish_reason: None,
-                                    matched_stop: None,
+                                    ..Default::default()
                                 }],
                                 model: model.clone(),
                                 system_fingerprint: system_fingerprint.map(String::from),
@@ -2458,11 +2454,9 @@ impl StreamingProcessor {
                             object: "text_completion".to_string(),
                             created,
                             choices: vec![CompletionStreamChoice {
-                                text: String::new(),
                                 index,
-                                logprobs: None,
                                 finish_reason: Some("stop".to_string()),
-                                matched_stop: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2495,9 +2489,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: prompt_text.to_string(),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
-                                matched_stop: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2519,9 +2511,7 @@ impl StreamingProcessor {
                                     choices: vec![CompletionStreamChoice {
                                         text,
                                         index,
-                                        logprobs: None,
-                                        finish_reason: None,
-                                        matched_stop: None,
+                                        ..Default::default()
                                     }],
                                     model: model.clone(),
                                     system_fingerprint: system_fingerprint.map(String::from),
@@ -2542,9 +2532,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: sfx.to_string(),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
-                                matched_stop: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
