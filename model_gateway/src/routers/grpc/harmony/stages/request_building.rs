@@ -277,11 +277,9 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 };
                 ProtoGenerateRequest::Mlx(Box::new(req))
             }
-            // TokenSpeed: builder produces an SGLang-shaped request so the
-            // ``ProtoGenerateRequest::Sglang`` plumbing carries it; the
-            // wire-side translation to TokenSpeed shape happens inside the
-            // client's ``generate()``. Multimodal is intentionally not
-            // supported here — the harmony path is text-only today.
+            // TokenSpeed: builder produces a native
+            // ``tokenspeed::GenerateRequest``; multimodal is intentionally
+            // not supported here — the harmony path is text-only today.
             GrpcClient::TokenSpeed(tokenspeed_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
@@ -324,7 +322,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         ));
                     }
                 };
-                ProtoGenerateRequest::Sglang(Box::new(req))
+                ProtoGenerateRequest::TokenSpeed(Box::new(req))
             }
         };
 
@@ -368,6 +366,15 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         debug!(
                             stop_token_count = harmony_stop_ids.len(),
                             "Injected Harmony stop tokens into MLX sampling params"
+                        );
+                    }
+                }
+                ProtoGenerateRequest::TokenSpeed(req) => {
+                    if let Some(params) = req.sampling_params.as_mut() {
+                        params.stop_token_ids.extend_from_slice(&harmony_stop_ids);
+                        debug!(
+                            stop_token_count = harmony_stop_ids.len(),
+                            "Injected Harmony stop tokens into TokenSpeed sampling params"
                         );
                     }
                 }

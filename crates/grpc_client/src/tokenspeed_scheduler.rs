@@ -10,14 +10,22 @@
 //! tokenizer streaming, KV-event subscription) is simply not on TokenSpeed's
 //! wire.
 //!
-//! Internally this client still leverages SGLang's
-//! ``build_grpc_sampling_params_from_*`` helpers because the source-of-truth
-//! is an OpenAI request and most fields map identically. We translate from
-//! the SGLang-shaped ``GenerateRequest`` into a TokenSpeed-shaped one at the
-//! wire boundary, and translate the streamed response back so the router's
-//! ``ProtoGenerateStreamChunk`` / ``ProtoGenerateComplete`` accessors can
-//! operate on a familiar shape. When TokenSpeed needs a field SGLang lacks,
-//! add it to the proto and extend the translator — not the router.
+//! Request/response types are TokenSpeed-native end-to-end: the stream
+//! yields ``tokenspeed_proto::GenerateResponse`` and ``build_*_request``
+//! produces ``tokenspeed_proto::GenerateRequest``. The router dispatches
+//! through dedicated ``ProtoGenerateRequest::TokenSpeed`` /
+//! ``ProtoGenerateStreamChunk::TokenSpeed`` /
+//! ``ProtoGenerateComplete::TokenSpeed`` arms — same shape as the other
+//! per-backend variants.
+//!
+//! Sampling-params construction reuses the backend-neutral helpers in
+//! ``crate::sampling_params`` (which currently return
+//! ``sglang::SamplingParams``); the [`translate::sampling_params`]
+//! field-mapper converts to TokenSpeed's shape at the seam. The unary RPC
+//! responses (``GetModelInfo``, ``GetServerInfo``, ``GetLoads``) still
+//! return SGLang-shaped types because their consumers ride the
+//! ``ModelInfo`` / ``ServerInfo`` SGLang variants in the router; that's a
+//! separate cleanup.
 
 use std::{
     pin::Pin,
@@ -36,10 +44,7 @@ use openai_protocol::{
 use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
 
-use crate::{
-    sglang_scheduler::proto as sglang,
-    BoxedTraceInjector, NoopTraceInjector,
-};
+use crate::{sglang_scheduler::proto as sglang, BoxedTraceInjector, NoopTraceInjector};
 
 #[expect(clippy::allow_attributes)]
 pub mod tokenspeed_proto {
@@ -56,11 +61,9 @@ type AbortDispatcher = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Auto-aborting wrapper around the TokenSpeed generate stream.
 ///
-/// Yields ``sglang::GenerateResponse`` (translated from the on-wire
-/// ``tokenspeed_proto::GenerateResponse``) so the router-side
-/// ``ProtoGenerateStreamChunk`` / ``ProtoGenerateComplete`` accessors can
-/// keep operating on a single shape. Sends an Abort RPC on Drop unless
-/// ``mark_completed`` was called first — same lifecycle contract as
+/// Yields ``tokenspeed_proto::GenerateResponse`` directly (no translation
+/// at the seam). Sends an Abort RPC on Drop unless ``mark_completed`` was
+/// called first — same lifecycle contract as
 /// ``sglang_scheduler::AbortOnDropStream``.
 pub struct AbortOnDropStream {
     inner: Streaming<tokenspeed_proto::GenerateResponse>,
@@ -111,19 +114,10 @@ impl Drop for AbortOnDropStream {
 }
 
 impl futures::Stream for AbortOnDropStream {
-    // Yield SGLang-shaped responses so the router's wrapper enums don't need
-    // a TokenSpeed variant for every chunk-accessor.
-    type Item = Result<sglang::GenerateResponse, tonic::Status>;
+    type Item = Result<tokenspeed_proto::GenerateResponse, tonic::Status>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(Some(Ok(ts_resp))) => {
-                Poll::Ready(Some(Ok(translate::generate_response(ts_resp))))
-            }
-        }
+        Pin::new(&mut self.inner).poll_next(cx)
     }
 }
 
@@ -181,20 +175,14 @@ impl TokenSpeedSchedulerClient {
     }
 
     /// Submit a generation request.
-    ///
-    /// Accepts an SGLang-shaped request for symmetry with the router's
-    /// existing dispatch path; the translation to TokenSpeed's slimmer wire
-    /// shape (drops mm_inputs, disagg, LoRA, hidden-states, etc.) happens
-    /// here at the wire boundary.
     pub async fn generate(
         &self,
-        req: sglang::GenerateRequest,
+        req: tokenspeed_proto::GenerateRequest,
     ) -> Result<AbortOnDropStream, tonic::Status> {
         let request_id = req.request_id.clone();
-        let ts_req = translate::generate_request(req);
 
         let mut client = self.client.clone();
-        let mut request = Request::new(ts_req);
+        let mut request = Request::new(req);
 
         if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
             warn!("Failed to inject trace context: {}", e);
@@ -274,16 +262,15 @@ impl TokenSpeedSchedulerClient {
 
     // ── Request builders ──────────────────────────────────────────────
     //
-    // These produce SGLang-shaped requests so the router's existing
-    // ``ProtoGenerateRequest::Sglang`` plumbing is reused. The wire-side
-    // translation to TokenSpeed shape happens inside ``generate()`` above.
-    //
-    // Sampling-param construction delegates to SglangSchedulerClient's
-    // ``pub(crate)`` helpers — same OpenAI source, same semantics.
+    // Produce ``tokenspeed_proto::GenerateRequest`` directly. Sampling-param
+    // construction delegates to ``crate::sampling_params`` (which returns
+    // ``sglang::SamplingParams`` because that proto is the most permissive
+    // shape across our backends); ``translate::sampling_params`` field-maps
+    // it to TokenSpeed's slimmer shape at the seam.
 
     #[expect(
         clippy::unused_self,
-        reason = "receiver kept for API parity with SglangSchedulerClient"
+        reason = "receiver kept for API parity with the other engine clients"
     )]
     pub fn build_generate_request_from_chat(
         &self,
@@ -292,20 +279,20 @@ impl TokenSpeedSchedulerClient {
         processed_text: String,
         token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>,
-    ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_chat(
+    ) -> Result<tokenspeed_proto::GenerateRequest, String> {
+        let sglang_sampling = crate::sampling_params::build_grpc_sampling_params_from_chat(
             body,
             tool_call_constraint,
         )?;
-        Ok(sglang::GenerateRequest {
+        Ok(tokenspeed_proto::GenerateRequest {
             request_id,
-            tokenized: Some(sglang::TokenizedInput {
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: processed_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(sampling_params),
+            sampling_params: Some(translate::sampling_params(sglang_sampling)),
             return_logprob: body.logprobs,
-            logprob_start_len: -1,
+            logprob_start_len: Some(-1),
             top_logprobs_num: body.top_logprobs.unwrap_or(0) as i32,
             stream: body.stream,
             ..Default::default()
@@ -314,7 +301,7 @@ impl TokenSpeedSchedulerClient {
 
     #[expect(
         clippy::unused_self,
-        reason = "receiver kept for API parity with SglangSchedulerClient"
+        reason = "receiver kept for API parity with the other engine clients"
     )]
     pub fn build_plain_generate_request(
         &self,
@@ -322,28 +309,28 @@ impl TokenSpeedSchedulerClient {
         body: &GenerateRequest,
         original_text: Option<String>,
         token_ids: Vec<u32>,
-    ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params =
-            crate::sampling_params::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
-        Ok(sglang::GenerateRequest {
+    ) -> Result<tokenspeed_proto::GenerateRequest, String> {
+        let sglang_sampling = crate::sampling_params::build_sampling_params_from_plain(
+            body.sampling_params.as_ref(),
+        )?;
+        Ok(tokenspeed_proto::GenerateRequest {
             request_id,
-            tokenized: Some(sglang::TokenizedInput {
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: original_text.unwrap_or_default(),
                 input_ids: token_ids,
             }),
-            sampling_params: Some(sampling_params),
+            sampling_params: Some(translate::sampling_params(sglang_sampling)),
             return_logprob: body.return_logprob.unwrap_or(false),
-            logprob_start_len: body.logprob_start_len.unwrap_or(-1),
+            logprob_start_len: Some(body.logprob_start_len.unwrap_or(-1)),
             top_logprobs_num: body.top_logprobs_num.unwrap_or(0),
             token_ids_logprob: body.token_ids_logprob.clone().unwrap_or_default(),
             stream: body.stream,
-            ..Default::default()
         })
     }
 
     #[expect(
         clippy::unused_self,
-        reason = "receiver kept for API parity with SglangSchedulerClient"
+        reason = "receiver kept for API parity with the other engine clients"
     )]
     pub fn build_generate_request_from_responses(
         &self,
@@ -352,16 +339,16 @@ impl TokenSpeedSchedulerClient {
         processed_text: String,
         token_ids: Vec<u32>,
         constraint: Option<(String, String)>,
-    ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params =
+    ) -> Result<tokenspeed_proto::GenerateRequest, String> {
+        let sglang_sampling =
             crate::sampling_params::build_grpc_sampling_params_from_responses(body, constraint)?;
-        Ok(sglang::GenerateRequest {
+        Ok(tokenspeed_proto::GenerateRequest {
             request_id,
-            tokenized: Some(sglang::TokenizedInput {
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: processed_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(sampling_params),
+            sampling_params: Some(translate::sampling_params(sglang_sampling)),
             stream: body.stream.unwrap_or(false),
             ..Default::default()
         })
@@ -369,7 +356,7 @@ impl TokenSpeedSchedulerClient {
 
     #[expect(
         clippy::unused_self,
-        reason = "receiver kept for API parity with SglangSchedulerClient"
+        reason = "receiver kept for API parity with the other engine clients"
     )]
     pub fn build_generate_request_from_messages(
         &self,
@@ -378,18 +365,18 @@ impl TokenSpeedSchedulerClient {
         processed_text: String,
         token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>,
-    ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_messages(
+    ) -> Result<tokenspeed_proto::GenerateRequest, String> {
+        let sglang_sampling = crate::sampling_params::build_grpc_sampling_params_from_messages(
             body,
             tool_call_constraint,
         )?;
-        Ok(sglang::GenerateRequest {
+        Ok(tokenspeed_proto::GenerateRequest {
             request_id,
-            tokenized: Some(sglang::TokenizedInput {
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: processed_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(sampling_params),
+            sampling_params: Some(translate::sampling_params(sglang_sampling)),
             stream: body.stream.unwrap_or(false),
             ..Default::default()
         })
@@ -397,7 +384,7 @@ impl TokenSpeedSchedulerClient {
 
     #[expect(
         clippy::unused_self,
-        reason = "receiver kept for API parity with SglangSchedulerClient"
+        reason = "receiver kept for API parity with the other engine clients"
     )]
     pub fn build_generate_request_from_completion(
         &self,
@@ -405,18 +392,18 @@ impl TokenSpeedSchedulerClient {
         body: &CompletionRequest,
         original_text: String,
         token_ids: Vec<u32>,
-    ) -> Result<sglang::GenerateRequest, String> {
-        let sampling_params =
+    ) -> Result<tokenspeed_proto::GenerateRequest, String> {
+        let sglang_sampling =
             crate::sampling_params::build_grpc_sampling_params_from_completion(body)?;
-        Ok(sglang::GenerateRequest {
+        Ok(tokenspeed_proto::GenerateRequest {
             request_id,
-            tokenized: Some(sglang::TokenizedInput {
+            tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(sampling_params),
+            sampling_params: Some(translate::sampling_params(sglang_sampling)),
             return_logprob: body.logprobs.is_some(),
-            logprob_start_len: -1,
+            logprob_start_len: Some(-1),
             top_logprobs_num: body.logprobs.unwrap_or(0) as i32,
             stream: body.stream,
             ..Default::default()
@@ -448,15 +435,14 @@ fn tokenspeed_abort_dispatcher(client: TokenSpeedSchedulerClient) -> AbortDispat
     })
 }
 
-// ── Wire-boundary translation ─────────────────────────────────────────
+// ── Sampling-params translation + unary RPC adapters ─────────────────
 //
-// Maps SGLang-shaped types (used internally by the router) to TokenSpeed's
-// slimmer wire types and back. Fields TokenSpeed doesn't carry on the wire
-// (mm_inputs, disagg, LoRA, hidden states, embeddings, etc.) are dropped on
-// the way out; fields TokenSpeed doesn't return are filled with defaults on
-// the way in. When the protocols genuinely diverge — i.e. TokenSpeed needs
-// a field SGLang doesn't have — extend this module rather than threading
-// new variants through proto_wrapper.
+// `sampling_params` field-maps the sglang-shaped sampling params produced
+// by `crate::sampling_params` into TokenSpeed's slimmer wire shape. The
+// other adapters (model_info / server_info / loads) translate unary RPC
+// responses into the SGLang-shaped types the router's metadata wrappers
+// currently consume — that's a follow-up cleanup that can ride on top of
+// the per-backend `ModelInfo` / `ServerInfo` enums.
 mod translate {
     use super::{sglang, tokenspeed_proto as ts};
 
@@ -509,103 +495,6 @@ mod translate {
             sglang::sampling_params::Constraint::StructuralTag(t) => {
                 ts::sampling_params::Constraint::StructuralTag(t)
             }
-        }
-    }
-
-    pub(super) fn generate_request(r: sglang::GenerateRequest) -> ts::GenerateRequest {
-        ts::GenerateRequest {
-            request_id: r.request_id,
-            tokenized: r.tokenized.map(|t| ts::TokenizedInput {
-                input_ids: t.input_ids,
-                original_text: t.original_text,
-            }),
-            sampling_params: r.sampling_params.map(sampling_params),
-            return_logprob: r.return_logprob,
-            // SGLang's wire-side `logprob_start_len` is non-optional `i32`
-            // with `-1` as the "no input logprobs" sentinel; TokenSpeed's
-            // proto makes the field `optional` so the servicer can tell
-            // "unset" from "explicit 0". Always wrap in `Some(...)` so
-            // existing SGLang-shaped callers preserve their sentinel
-            // through to the Python side.
-            logprob_start_len: Some(r.logprob_start_len),
-            top_logprobs_num: r.top_logprobs_num,
-            token_ids_logprob: r.token_ids_logprob,
-            stream: r.stream,
-            // Fields TokenSpeed has no concept of:
-            //   r.mm_inputs, r.disaggregated_params, r.custom_logit_processor,
-            //   r.timestamp, r.input_embeds, r.lora_id, r.data_parallel_rank,
-            //   r.log_metrics, r.return_hidden_states
-            // — silently dropped here. Routing multimodal / disagg / LoRA
-            // requests to a TokenSpeed worker is a router-level config bug,
-            // not something this layer should try to paper over.
-        }
-    }
-
-    pub(super) fn generate_response(r: ts::GenerateResponse) -> sglang::GenerateResponse {
-        let response = r.response.map(|resp| match resp {
-            ts::generate_response::Response::Chunk(c) => {
-                sglang::generate_response::Response::Chunk(stream_chunk(c))
-            }
-            ts::generate_response::Response::Complete(c) => {
-                sglang::generate_response::Response::Complete(complete(c))
-            }
-        });
-        sglang::GenerateResponse {
-            request_id: r.request_id,
-            response,
-        }
-    }
-
-    fn stream_chunk(c: ts::GenerateStreamChunk) -> sglang::GenerateStreamChunk {
-        sglang::GenerateStreamChunk {
-            token_ids: c.token_ids,
-            prompt_tokens: c.prompt_tokens,
-            completion_tokens: c.completion_tokens,
-            cached_tokens: c.cached_tokens,
-            output_logprobs: c.output_logprobs.map(output_logprobs),
-            // Fields not on TokenSpeed's wire — defaulted.
-            hidden_states: vec![],
-            input_logprobs: None,
-            index: c.index,
-        }
-    }
-
-    fn complete(c: ts::GenerateComplete) -> sglang::GenerateComplete {
-        let matched_stop = c.matched_stop.map(|m| match m {
-            ts::generate_complete::MatchedStop::MatchedTokenId(id) => {
-                sglang::generate_complete::MatchedStop::MatchedTokenId(id)
-            }
-            ts::generate_complete::MatchedStop::MatchedStopStr(s) => {
-                sglang::generate_complete::MatchedStop::MatchedStopStr(s)
-            }
-        });
-        sglang::GenerateComplete {
-            output_ids: c.output_ids,
-            finish_reason: c.finish_reason,
-            prompt_tokens: c.prompt_tokens,
-            completion_tokens: c.completion_tokens,
-            cached_tokens: c.cached_tokens,
-            output_logprobs: c.output_logprobs.map(output_logprobs),
-            // Not on TokenSpeed's wire.
-            all_hidden_states: vec![],
-            input_logprobs: None,
-            matched_stop,
-            index: c.index,
-        }
-    }
-
-    fn output_logprobs(o: ts::OutputLogProbs) -> sglang::OutputLogProbs {
-        sglang::OutputLogProbs {
-            token_logprobs: o.token_logprobs,
-            token_ids: o.token_ids,
-            top_logprobs: o
-                .top_logprobs
-                .into_iter()
-                .map(|t| sglang::TopLogProbs {
-                    values: t.values,
-                    token_ids: t.token_ids,
-                })
-                .collect(),
         }
     }
 

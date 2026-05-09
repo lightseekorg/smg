@@ -341,7 +341,7 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Mlx(stream))
             }
-            (Self::TokenSpeed(client), ProtoGenerateRequest::Sglang(boxed_req)) => {
+            (Self::TokenSpeed(client), ProtoGenerateRequest::TokenSpeed(boxed_req)) => {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::TokenSpeed(stream))
             }
@@ -466,7 +466,7 @@ impl GrpcClient {
                     token_ids,
                     tool_constraints,
                 )?;
-                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
             }
         }
     }
@@ -552,7 +552,7 @@ impl GrpcClient {
                     token_ids,
                     tool_constraints,
                 )?;
-                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
             }
         }
     }
@@ -608,7 +608,7 @@ impl GrpcClient {
                     original_text,
                     token_ids,
                 )?;
-                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
             }
         }
     }
@@ -664,7 +664,7 @@ impl GrpcClient {
                     original_text,
                     token_ids,
                 )?;
-                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+                Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
             }
         }
     }

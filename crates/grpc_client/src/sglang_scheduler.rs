@@ -332,8 +332,10 @@ impl SglangSchedulerClient {
         tool_call_constraint: Option<(String, String)>, // (constraint_type, constraint_value)
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling params
-        let sampling_params =
-            crate::sampling_params::build_grpc_sampling_params_from_chat(body, tool_call_constraint)?;
+        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_chat(
+            body,
+            tool_call_constraint,
+        )?;
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -366,8 +368,9 @@ impl SglangSchedulerClient {
         original_text: Option<String>,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
-        let sampling_params =
-            crate::sampling_params::build_sampling_params_from_plain(body.sampling_params.as_ref())?;
+        let sampling_params = crate::sampling_params::build_sampling_params_from_plain(
+            body.sampling_params.as_ref(),
+        )?;
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -443,8 +446,10 @@ impl SglangSchedulerClient {
         multimodal_inputs: Option<proto::MultimodalInputs>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
-        let sampling_params =
-            crate::sampling_params::build_grpc_sampling_params_from_messages(body, tool_call_constraint)?;
+        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_messages(
+            body,
+            tool_call_constraint,
+        )?;
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -477,7 +482,8 @@ impl SglangSchedulerClient {
         original_text: String,
         token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
-        let sampling_params = crate::sampling_params::build_grpc_sampling_params_from_completion(body)?;
+        let sampling_params =
+            crate::sampling_params::build_grpc_sampling_params_from_completion(body)?;
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -497,7 +503,6 @@ impl SglangSchedulerClient {
 
         Ok(grpc_request)
     }
-
 }
 
 // ---------------------------------------------------------------------------

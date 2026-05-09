@@ -89,7 +89,7 @@ pub fn build_grpc_sampling_params_from_responses(
         presence_penalty: request.presence_penalty.unwrap_or(0.0),
         repetition_penalty: request.repetition_penalty,
         max_new_tokens,
-        stop: vec![], // Does not pass through request.stop yet (follow-up fix)
+        stop: vec![],           // Does not pass through request.stop yet (follow-up fix)
         stop_token_ids: vec![], // Handled by Harmony stop tokens
         skip_special_tokens: false, // Keep special tokens for Harmony
         spaces_between_special_tokens: true,
@@ -291,7 +291,9 @@ fn build_constraint_for_chat(
             };
             constraints.push(tool_constraint);
         } else {
-            warn!("Constrained decoding is not compatible with tool calls, dropping tool constraint");
+            warn!(
+                "Constrained decoding is not compatible with tool calls, dropping tool constraint"
+            );
         }
     }
 

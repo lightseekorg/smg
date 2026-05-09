@@ -119,7 +119,10 @@ pub(crate) fn apply_sampling_defaults_to_generate_request(
     request_type: &RequestType,
     workers: Option<&WorkerSelection>,
 ) {
-    if matches!(request, ProtoGenerateRequest::Trtllm(_)) {
+    if matches!(
+        request,
+        ProtoGenerateRequest::Trtllm(_) | ProtoGenerateRequest::TokenSpeed(_)
+    ) {
         return;
     }
 
@@ -156,7 +159,9 @@ pub(crate) fn apply_sampling_defaults_to_generate_request(
             };
             apply_mlx_sampling_defaults(params, defaults, mask);
         }
-        ProtoGenerateRequest::Trtllm(_) => {}
+        // TokenSpeed and TRT-LLM are early-returned above; the arms exist
+        // only to keep the match exhaustive.
+        ProtoGenerateRequest::Trtllm(_) | ProtoGenerateRequest::TokenSpeed(_) => {}
     }
 }
 

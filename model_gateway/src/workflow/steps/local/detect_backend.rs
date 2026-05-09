@@ -43,10 +43,7 @@ async fn detect_grpc_backend(
         }
     }
 
-    // Try each runtime sequentially, ordered by expected frequency so the
-    // common case finishes after one probe. Each backend speaks its own
-    // gRPC service, so order is purely a latency optimisation, not a
-    // correctness condition.
+    // Try each runtime sequentially (most common first), skipping the hint we already tried
     for runtime in &["sglang", "vllm", "trtllm", "tokenspeed", "mlx"] {
         if Some(*runtime) == runtime_hint {
             continue;
