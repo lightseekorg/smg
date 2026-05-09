@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::DashMap;
 
 // ============================================================================
 // High-Performance In-Memory KV Storage - Concurrent-Safe Implementation Based on DashMap
@@ -39,26 +39,6 @@ impl KvStore {
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
         self.generation.fetch_add(1, Ordering::Release);
         self.store.insert(key, value)
-    }
-
-    /// Atomically compute and update a key in a single DashMap entry operation.
-    pub fn upsert<F>(&self, key: String, updater: F) -> Vec<u8>
-    where
-        F: FnOnce(Option<&[u8]>) -> Vec<u8>,
-    {
-        self.generation.fetch_add(1, Ordering::Release);
-        match self.store.entry(key) {
-            Entry::Occupied(mut entry) => {
-                let new_value = updater(Some(entry.get().as_slice()));
-                entry.get_mut().clone_from(&new_value);
-                new_value
-            }
-            Entry::Vacant(entry) => {
-                let new_value = updater(None);
-                entry.insert(new_value.clone());
-                new_value
-            }
-        }
     }
 
     /// Get value by key

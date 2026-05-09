@@ -268,6 +268,56 @@ fn test_epoch_max_wins_preserves_newer_tombstone() {
     assert_eq!(replica.get(key), None);
 }
 
+#[test]
+fn test_epoch_max_wins_local_write_cannot_rewind_epoch() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    replica.insert(key.to_string(), encode(6, 0).to_vec());
+    replica.insert(key.to_string(), encode(5, 100).to_vec());
+
+    let value = replica.get(key).expect("rate-limit shard should exist");
+    assert_eq!(decode(&value), Some(EpochCount { epoch: 6, count: 0 }));
+}
+
+#[test]
+fn test_epoch_max_wins_tombstone_compares_against_epoch_winner() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    let stale_newer_timestamp = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let epoch_winner_older_timestamp =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 90, ReplicaId::new());
+    let tombstone_after_epoch_winner = Operation::remove(key.to_string(), 95, ReplicaId::new());
+
+    let mut stale_log = OperationLog::new();
+    stale_log.append(stale_newer_timestamp);
+    replica.merge(&stale_log);
+
+    let mut reset_log = OperationLog::new();
+    reset_log.append(epoch_winner_older_timestamp);
+    replica.merge(&reset_log);
+    assert_eq!(
+        decode(&replica.get(key).expect("reset should win stale count")),
+        Some(EpochCount { epoch: 6, count: 0 }),
+    );
+
+    let mut tombstone_log = OperationLog::new();
+    tombstone_log.append(tombstone_after_epoch_winner);
+    replica.merge(&tombstone_log);
+
+    assert_eq!(replica.get(key), None);
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================
