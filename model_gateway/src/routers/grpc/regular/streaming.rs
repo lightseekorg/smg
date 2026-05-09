@@ -494,16 +494,11 @@ impl StreamingProcessor {
 
                     matched_stops.insert(
                         index,
-                        if complete.is_mlx() {
-                            utils::resolve_mlx_matched_stop_json(
-                                complete.mlx_matched_stop_token_id(),
-                                original_request.stop.as_ref(),
-                                original_request.stop_token_ids.as_ref(),
-                                tokenizer.as_ref(),
-                            )
-                        } else {
-                            complete.matched_stop_json()
-                        },
+                        complete.matched_stop_json_with_context(
+                            original_request.stop.as_ref(),
+                            original_request.stop_token_ids.as_ref(),
+                            tokenizer.as_ref(),
+                        ),
                     );
 
                     // Don't break - continue reading all Complete messages for n>1
@@ -2586,16 +2581,11 @@ impl StreamingProcessor {
                         }
                     };
 
-                    let matched_stop = if complete.is_mlx() {
-                        utils::resolve_mlx_matched_stop_json(
-                            complete.mlx_matched_stop_token_id(),
-                            completion_request.stop.as_ref(),
-                            completion_request.stop_token_ids.as_ref(),
-                            tokenizer.as_ref(),
-                        )
-                    } else {
-                        complete.matched_stop_json()
-                    };
+                    let matched_stop = complete.matched_stop_json_with_context(
+                        completion_request.stop.as_ref(),
+                        completion_request.stop_token_ids.as_ref(),
+                        tokenizer.as_ref(),
+                    );
 
                     let final_chunk = CompletionStreamResponse {
                         id: request_id.clone(),
