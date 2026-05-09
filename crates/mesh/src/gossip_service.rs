@@ -33,7 +33,7 @@ use super::{
         },
         try_ping, ClusterState,
     },
-    stream_sync,
+    sync_stream_messages,
 };
 
 #[derive(Debug)]
@@ -233,12 +233,14 @@ impl Gossip for GossipService {
                     let crdt_generation = mesh_kv.crdt_generation();
                     if last_crdt_generation != Some(crdt_generation) {
                         last_crdt_generation = Some(crdt_generation);
-                        if let Some(msg) =
-                            stream_sync::crdt_batch_message(&mesh_kv, &self_name_sender, &sequence)
-                        {
+                        if let Some(msg) = sync_stream_messages::crdt_batch_message(
+                            &mesh_kv,
+                            &self_name_sender,
+                            &sequence,
+                        ) {
                             let batch_size = match &msg.payload {
                                 Some(StreamPayload::CrdtBatch(batch)) => {
-                                    stream_sync::crdt_batch_encoded_len(batch)
+                                    sync_stream_messages::crdt_batch_encoded_len(batch)
                                 }
                                 _ => 0,
                             };
@@ -261,7 +263,7 @@ impl Gossip for GossipService {
                     if fresh_batch {
                         last_stream_batch = Some(stream_batch.clone());
                         let peer_for_targeted = learned_peer_sender.read().clone();
-                        for msg in stream_sync::build_stream_messages(
+                        for msg in sync_stream_messages::build_stream_messages(
                             &stream_batch,
                             peer_for_targeted.as_deref(),
                             &self_name_sender,
@@ -332,9 +334,9 @@ impl Gossip for GossipService {
                                 if let (Some(mesh_kv), Some(StreamPayload::CrdtBatch(batch))) =
                                     (&mesh_kv, &msg.payload)
                                 {
-                                    stream_sync::apply_crdt_batch(mesh_kv, batch);
+                                    sync_stream_messages::apply_crdt_batch(mesh_kv, batch);
                                 }
-                                let ack = stream_sync::ack(
+                                let ack = sync_stream_messages::ack(
                                     &self_name,
                                     &sequence,
                                     msg.sequence,
@@ -350,13 +352,13 @@ impl Gossip for GossipService {
                                 if let (Some(mesh_kv), Some(StreamPayload::StreamBatch(batch))) =
                                     (&mesh_kv, msg.payload)
                                 {
-                                    stream_sync::dispatch_stream_payload(
+                                    sync_stream_messages::dispatch_stream_payload(
                                         mesh_kv,
                                         &msg.peer_id,
                                         batch,
                                     );
                                 }
-                                let ack = stream_sync::ack(
+                                let ack = sync_stream_messages::ack(
                                     &self_name,
                                     &sequence,
                                     msg.sequence,
@@ -369,7 +371,8 @@ impl Gossip for GossipService {
                                 }
                             }
                             StreamMessageType::Heartbeat => {
-                                let heartbeat = stream_sync::heartbeat(&self_name, &sequence);
+                                let heartbeat =
+                                    sync_stream_messages::heartbeat(&self_name, &sequence);
                                 if tx.send(Ok(heartbeat)).await.is_err() {
                                     break;
                                 }

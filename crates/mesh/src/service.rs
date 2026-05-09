@@ -28,11 +28,11 @@ use gossip::{
 };
 
 use crate::{
-    controller::MeshController,
+    gossip_controller::MeshController,
+    gossip_service::GossipService,
     mtls::{MTLSConfig, MTLSManager},
-    node_state_machine::{ConvergenceConfig, NodeStateMachine},
     partition::PartitionDetector,
-    ping_server::GossipService,
+    readiness_state_machine::{ConvergenceConfig, ReadinessStateMachine},
 };
 
 pub type ClusterState = Arc<RwLock<BTreeMap<String, NodeState>>>;
@@ -55,7 +55,7 @@ pub struct MeshServerHandler {
     _self_addr: SocketAddr,
     signal_tx: watch::Sender<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
-    state_machine: Option<Arc<NodeStateMachine>>,
+    readiness_state_machine: Option<Arc<ReadinessStateMachine>>,
     /// Shared with the MeshServer so adapters can subscribe to stream
     /// namespaces (broadcast/targeted) and publish values that reach
     /// peers via the gossip loop.
@@ -68,17 +68,17 @@ impl MeshServerHandler {
         self.partition_detector.as_ref()
     }
 
-    /// Get state machine
-    pub fn state_machine(&self) -> Option<&Arc<NodeStateMachine>> {
-        self.state_machine.as_ref()
+    /// Get the local cold-start readiness state machine.
+    pub fn readiness_state_machine(&self) -> Option<&Arc<ReadinessStateMachine>> {
+        self.readiness_state_machine.as_ref()
     }
 
     /// Check if node is ready
     pub fn is_ready(&self) -> bool {
-        self.state_machine
+        self.readiness_state_machine
             .as_ref()
             .map(|sm| sm.is_ready())
-            .unwrap_or(true) // If no state machine, consider ready
+            .unwrap_or(true) // If no readiness state machine, consider ready
     }
 
     /// Check if we should serve (have quorum)
@@ -221,7 +221,8 @@ impl MeshServerBuilder {
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
         let (signal_tx, signal_rx) = watch::channel(false);
         let partition_detector = Arc::new(PartitionDetector::default());
-        let state_machine = Arc::new(NodeStateMachine::new(ConvergenceConfig::default()));
+        let readiness_state_machine =
+            Arc::new(ReadinessStateMachine::new(ConvergenceConfig::default()));
         let mesh_kv = Arc::new(crate::kv::MeshKV::new(self.self_name.clone()));
         (
             MeshServer {
@@ -241,7 +242,7 @@ impl MeshServerBuilder {
                 _self_addr: self.advertise_addr,
                 signal_tx,
                 partition_detector: Some(partition_detector),
-                state_machine: Some(state_machine),
+                readiness_state_machine: Some(readiness_state_machine),
                 mesh_kv,
             },
         )
@@ -272,12 +273,12 @@ pub struct MeshServer {
     signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
-    /// Node-wide MeshKV handle shared by controller + ping_server.
+    /// Node-wide MeshKV handle shared by gossip controller + service.
     mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServer {
-    fn build_ping_server(&self) -> GossipService {
+    fn build_gossip_service(&self) -> GossipService {
         GossipService::new(
             self.state.clone(),
             self.bind_addr,
@@ -338,7 +339,7 @@ impl MeshServer {
         // the same once-per-round MeshKV stream batch as client-side handlers.
         let controller = self.build_controller();
 
-        let mut service = self.build_ping_server();
+        let mut service = self.build_gossip_service();
 
         service = service.with_partition_detector(partition_detector);
 

@@ -8,18 +8,18 @@
 
 mod chunk_assembler;
 mod chunking;
-mod controller;
 mod crdt_kv;
 mod flow_control;
+mod gossip_controller;
+mod gossip_service;
 mod hash;
 pub mod kv;
 mod metrics;
 mod mtls;
-mod node_state_machine;
 mod partition;
-mod ping_server;
+mod readiness_state_machine;
 mod service;
-mod stream_sync;
+mod sync_stream_messages;
 mod topology;
 mod types;
 

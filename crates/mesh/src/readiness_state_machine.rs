@@ -1,4 +1,4 @@
-//! Node state machine for cold start
+//! Readiness state machine for cold start
 //!
 //! Manages node lifecycle: NotReady -> Joining -> SnapshotPull -> Converging -> Ready
 
@@ -10,29 +10,29 @@ use std::{
 use parking_lot::RwLock;
 use tracing::info;
 
-/// Node readiness state
+/// Local cold-start readiness state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NodeReadiness {
-    /// Node is not ready (initial state)
+pub enum ReadinessState {
+    /// Node is not ready (initial state).
     NotReady,
-    /// Node is joining the cluster
+    /// Node is joining the cluster.
     Joining,
-    /// Node is pulling snapshot from peers
+    /// Node is pulling initial CRDT state from peers.
     SnapshotPull,
-    /// Node is converging (applying state updates)
+    /// Node is converging (applying state updates).
     Converging,
-    /// Node is ready to serve traffic
+    /// Node is ready to serve traffic.
     Ready,
 }
 
-impl NodeReadiness {
+impl ReadinessState {
     pub fn as_str(self) -> &'static str {
         match self {
-            NodeReadiness::NotReady => "not_ready",
-            NodeReadiness::Joining => "joining",
-            NodeReadiness::SnapshotPull => "snapshot_pull",
-            NodeReadiness::Converging => "converging",
-            NodeReadiness::Ready => "ready",
+            ReadinessState::NotReady => "not_ready",
+            ReadinessState::Joining => "joining",
+            ReadinessState::SnapshotPull => "snapshot_pull",
+            ReadinessState::Converging => "converging",
+            ReadinessState::Ready => "ready",
         }
     }
 }
@@ -118,19 +118,19 @@ impl ConvergenceTracker {
     }
 }
 
-/// Node state machine for managing cold start
+/// Readiness state machine for managing cold start
 #[derive(Debug)]
-pub struct NodeStateMachine {
-    readiness: Arc<RwLock<NodeReadiness>>,
+pub struct ReadinessStateMachine {
+    readiness: Arc<RwLock<ReadinessState>>,
     config: ConvergenceConfig,
     convergence_tracker: Arc<RwLock<ConvergenceTracker>>,
     snapshot_start_time: Arc<RwLock<Option<Instant>>>,
 }
 
-impl NodeStateMachine {
+impl ReadinessStateMachine {
     pub fn new(config: ConvergenceConfig) -> Self {
         Self {
-            readiness: Arc::new(RwLock::new(NodeReadiness::NotReady)),
+            readiness: Arc::new(RwLock::new(ReadinessState::NotReady)),
             config,
             convergence_tracker: Arc::new(RwLock::new(ConvergenceTracker::new())),
             snapshot_start_time: Arc::new(RwLock::new(None)),
@@ -138,26 +138,26 @@ impl NodeStateMachine {
     }
 
     /// Get current readiness state
-    pub fn readiness(&self) -> NodeReadiness {
+    pub fn readiness(&self) -> ReadinessState {
         *self.readiness.read()
     }
 
     /// Transition to joining state
     pub fn start_joining(&self) {
         let mut readiness = self.readiness.write();
-        if *readiness == NodeReadiness::NotReady {
-            *readiness = NodeReadiness::Joining;
-            info!("Node state: NotReady -> Joining");
+        if *readiness == ReadinessState::NotReady {
+            *readiness = ReadinessState::Joining;
+            info!("Readiness state: NotReady -> Joining");
         }
     }
 
     /// Transition to snapshot pull state
     pub fn start_snapshot_pull(&self) {
         let mut readiness = self.readiness.write();
-        if *readiness == NodeReadiness::Joining {
-            *readiness = NodeReadiness::SnapshotPull;
+        if *readiness == ReadinessState::Joining {
+            *readiness = ReadinessState::SnapshotPull;
             *self.snapshot_start_time.write() = Some(Instant::now());
-            info!("Node state: Joining -> SnapshotPull");
+            info!("Readiness state: Joining -> SnapshotPull");
         }
     }
 
@@ -173,17 +173,17 @@ impl NodeStateMachine {
     /// Transition to converging state
     pub fn start_converging(&self) {
         let mut readiness = self.readiness.write();
-        if *readiness == NodeReadiness::SnapshotPull {
-            *readiness = NodeReadiness::Converging;
+        if *readiness == ReadinessState::SnapshotPull {
+            *readiness = ReadinessState::Converging;
             *self.snapshot_start_time.write() = None;
             self.convergence_tracker.write().reset();
-            info!("Node state: SnapshotPull -> Converging");
+            info!("Readiness state: SnapshotPull -> Converging");
         }
     }
 
     /// Record a state update and check for convergence
     pub fn record_state_update(&self) -> bool {
-        if self.readiness() != NodeReadiness::Converging {
+        if self.readiness() != ReadinessState::Converging {
             return false;
         }
 
@@ -203,15 +203,15 @@ impl NodeStateMachine {
     /// Transition to ready state
     pub fn transition_to_ready(&self) {
         let mut readiness = self.readiness.write();
-        if *readiness == NodeReadiness::Converging {
-            *readiness = NodeReadiness::Ready;
-            info!("Node state: Converging -> Ready");
+        if *readiness == ReadinessState::Converging {
+            *readiness = ReadinessState::Ready;
+            info!("Readiness state: Converging -> Ready");
         }
     }
 
     /// Check if node is ready
     pub fn is_ready(&self) -> bool {
-        self.readiness() == NodeReadiness::Ready
+        self.readiness() == ReadinessState::Ready
     }
 
     /// Calculate a simple hash of current state (for convergence detection)
@@ -228,13 +228,13 @@ impl NodeStateMachine {
 
     /// Reset state machine (for testing or recovery)
     pub fn reset(&self) {
-        *self.readiness.write() = NodeReadiness::NotReady;
+        *self.readiness.write() = ReadinessState::NotReady;
         self.convergence_tracker.write().reset();
         *self.snapshot_start_time.write() = None;
     }
 }
 
-impl Default for NodeStateMachine {
+impl Default for ReadinessStateMachine {
     fn default() -> Self {
         Self::new(ConvergenceConfig::default())
     }
@@ -255,12 +255,12 @@ mod tests {
     }
 
     #[test]
-    fn test_node_readiness_as_str() {
-        assert_eq!(NodeReadiness::NotReady.as_str(), "not_ready");
-        assert_eq!(NodeReadiness::Joining.as_str(), "joining");
-        assert_eq!(NodeReadiness::SnapshotPull.as_str(), "snapshot_pull");
-        assert_eq!(NodeReadiness::Converging.as_str(), "converging");
-        assert_eq!(NodeReadiness::Ready.as_str(), "ready");
+    fn test_readiness_state_as_str() {
+        assert_eq!(ReadinessState::NotReady.as_str(), "not_ready");
+        assert_eq!(ReadinessState::Joining.as_str(), "joining");
+        assert_eq!(ReadinessState::SnapshotPull.as_str(), "snapshot_pull");
+        assert_eq!(ReadinessState::Converging.as_str(), "converging");
+        assert_eq!(ReadinessState::Ready.as_str(), "ready");
     }
 
     #[test]
@@ -272,62 +272,62 @@ mod tests {
     }
 
     #[test]
-    fn test_node_state_machine_initial_state() {
+    fn test_readiness_state_machine_initial_state() {
         let config = create_test_config();
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
-        assert_eq!(sm.readiness(), NodeReadiness::NotReady);
+        assert_eq!(sm.readiness(), ReadinessState::NotReady);
         assert!(!sm.is_ready());
     }
 
     #[test]
     fn test_state_transition_flow() {
         let config = create_test_config();
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         // Start joining
         sm.start_joining();
-        assert_eq!(sm.readiness(), NodeReadiness::Joining);
+        assert_eq!(sm.readiness(), ReadinessState::Joining);
 
         // Start snapshot pull
         sm.start_snapshot_pull();
-        assert_eq!(sm.readiness(), NodeReadiness::SnapshotPull);
+        assert_eq!(sm.readiness(), ReadinessState::SnapshotPull);
         assert!(!sm.is_snapshot_timeout());
 
         // Start converging
         sm.start_converging();
-        assert_eq!(sm.readiness(), NodeReadiness::Converging);
+        assert_eq!(sm.readiness(), ReadinessState::Converging);
 
         // Transition to ready
         sm.transition_to_ready();
-        assert_eq!(sm.readiness(), NodeReadiness::Ready);
+        assert_eq!(sm.readiness(), ReadinessState::Ready);
         assert!(sm.is_ready());
     }
 
     #[test]
     fn test_state_transition_guards() {
         let config = create_test_config();
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         // Cannot start snapshot pull without joining first
         sm.start_snapshot_pull();
-        assert_eq!(sm.readiness(), NodeReadiness::NotReady);
+        assert_eq!(sm.readiness(), ReadinessState::NotReady);
 
         // Cannot start converging without snapshot pull
         sm.start_joining();
         sm.start_converging();
-        assert_eq!(sm.readiness(), NodeReadiness::Joining);
+        assert_eq!(sm.readiness(), ReadinessState::Joining);
 
         // Cannot transition to ready without converging
         sm.transition_to_ready();
-        assert_eq!(sm.readiness(), NodeReadiness::Joining);
+        assert_eq!(sm.readiness(), ReadinessState::Joining);
     }
 
     #[test]
     fn test_snapshot_timeout() {
         let mut config = create_test_config();
         config.snapshot_timeout = Duration::from_millis(50);
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         sm.start_joining();
         sm.start_snapshot_pull();
@@ -341,11 +341,11 @@ mod tests {
     #[test]
     fn test_record_state_update_not_converging() {
         let config = create_test_config();
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         // Should return false when not in converging state
         assert!(!sm.record_state_update());
-        assert_eq!(sm.readiness(), NodeReadiness::NotReady);
+        assert_eq!(sm.readiness(), ReadinessState::NotReady);
     }
 
     #[test]
@@ -353,13 +353,13 @@ mod tests {
         let mut config = create_test_config();
         config.convergence_window = Duration::from_millis(50);
         config.min_stable_updates = 2;
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         // Transition to converging state
         sm.start_joining();
         sm.start_snapshot_pull();
         sm.start_converging();
-        assert_eq!(sm.readiness(), NodeReadiness::Converging);
+        assert_eq!(sm.readiness(), ReadinessState::Converging);
 
         // Record multiple updates with same state
         let converged1 = sm.record_state_update();
@@ -375,7 +375,7 @@ mod tests {
         let converged3 = sm.record_state_update();
         // Should converge after enough stable updates within window
         if converged3 {
-            assert_eq!(sm.readiness(), NodeReadiness::Ready);
+            assert_eq!(sm.readiness(), ReadinessState::Ready);
         }
     }
 
@@ -384,7 +384,7 @@ mod tests {
         let mut config = create_test_config();
         config.convergence_window = Duration::from_millis(100);
         config.min_stable_updates = 2;
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         sm.start_joining();
         sm.start_snapshot_pull();
@@ -404,13 +404,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(110));
         let converged = sm.record_state_update();
         // Should not converge immediately after state change
-        assert!(!converged || sm.readiness() == NodeReadiness::Converging);
+        assert!(!converged || sm.readiness() == ReadinessState::Converging);
     }
 
     #[test]
     fn test_reset() {
         let config = create_test_config();
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         // Go through states
         sm.start_joining();
@@ -418,11 +418,11 @@ mod tests {
         sm.start_converging();
         sm.transition_to_ready();
 
-        assert_eq!(sm.readiness(), NodeReadiness::Ready);
+        assert_eq!(sm.readiness(), ReadinessState::Ready);
 
         // Reset
         sm.reset();
-        assert_eq!(sm.readiness(), NodeReadiness::NotReady);
+        assert_eq!(sm.readiness(), ReadinessState::NotReady);
         assert!(!sm.is_ready());
         assert!(!sm.is_snapshot_timeout());
     }
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn test_calculate_state_hash() {
         let config = create_test_config();
-        let sm = NodeStateMachine::new(config);
+        let sm = ReadinessStateMachine::new(config);
 
         let hash1 = sm.calculate_state_hash();
         sm.start_joining();
@@ -440,8 +440,8 @@ mod tests {
 
     #[test]
     fn test_default_implementation() {
-        let sm = NodeStateMachine::default();
-        assert_eq!(sm.readiness(), NodeReadiness::NotReady);
+        let sm = ReadinessStateMachine::default();
+        assert_eq!(sm.readiness(), ReadinessState::NotReady);
         assert!(!sm.is_ready());
     }
 }

@@ -27,7 +27,7 @@ use super::{
         },
         try_ping, ClusterState,
     },
-    stream_sync,
+    sync_stream_messages,
 };
 
 pub struct MeshController {
@@ -349,7 +349,7 @@ impl MeshController {
 
                 let sequence = Arc::new(AtomicU64::new(0));
                 if tx
-                    .send(stream_sync::heartbeat(&self_name, &sequence))
+                    .send(sync_stream_messages::heartbeat(&self_name, &sequence))
                     .await
                     .is_err()
                 {
@@ -382,14 +382,14 @@ impl MeshController {
                             let crdt_generation = mesh_kv_sender.crdt_generation();
                             if last_crdt_generation != Some(crdt_generation) {
                                 last_crdt_generation = Some(crdt_generation);
-                                if let Some(msg) = stream_sync::crdt_batch_message(
+                                if let Some(msg) = sync_stream_messages::crdt_batch_message(
                                     &mesh_kv_sender,
                                     &self_name_sender,
                                     &sequence_sender,
                                 ) {
                                     let batch_size = match &msg.payload {
                                         Some(StreamPayload::CrdtBatch(batch)) => {
-                                            stream_sync::crdt_batch_encoded_len(batch)
+                                            sync_stream_messages::crdt_batch_encoded_len(batch)
                                         }
                                         _ => 0,
                                     };
@@ -415,7 +415,7 @@ impl MeshController {
                                 .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
                             if fresh_batch {
                                 last_stream_batch = Some(stream_batch.clone());
-                                for msg in stream_sync::build_stream_messages(
+                                for msg in sync_stream_messages::build_stream_messages(
                                     &stream_batch,
                                     Some(&peer_name_sender),
                                     &self_name_sender,
@@ -448,9 +448,9 @@ impl MeshController {
                             match msg.message_type() {
                                 StreamMessageType::CrdtBatch => {
                                     if let Some(StreamPayload::CrdtBatch(batch)) = &msg.payload {
-                                        stream_sync::apply_crdt_batch(&mesh_kv, batch);
+                                        sync_stream_messages::apply_crdt_batch(&mesh_kv, batch);
                                     }
-                                    let ack = stream_sync::ack(
+                                    let ack = sync_stream_messages::ack(
                                         &self_name,
                                         &sequence,
                                         msg.sequence,
@@ -463,13 +463,13 @@ impl MeshController {
                                 }
                                 StreamMessageType::StreamBatch => {
                                     if let Some(StreamPayload::StreamBatch(batch)) = msg.payload {
-                                        stream_sync::dispatch_stream_payload(
+                                        sync_stream_messages::dispatch_stream_payload(
                                             &mesh_kv,
                                             &msg.peer_id,
                                             batch,
                                         );
                                     }
-                                    let ack = stream_sync::ack(
+                                    let ack = sync_stream_messages::ack(
                                         &self_name,
                                         &sequence,
                                         msg.sequence,
@@ -482,7 +482,9 @@ impl MeshController {
                                 }
                                 StreamMessageType::Heartbeat => {
                                     if tx
-                                        .send(stream_sync::heartbeat(&self_name, &sequence))
+                                        .send(sync_stream_messages::heartbeat(
+                                            &self_name, &sequence,
+                                        ))
                                         .await
                                         .is_err()
                                     {
