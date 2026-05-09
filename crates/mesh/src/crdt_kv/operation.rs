@@ -189,7 +189,7 @@ impl OperationLog {
                     }
                 }
             }
-            MergeStrategy::LastWriterWins | MergeStrategy::MaxValueWins => {}
+            MergeStrategy::LastWriterWins => {}
         }
 
         (candidate.timestamp(), candidate.replica_id())
