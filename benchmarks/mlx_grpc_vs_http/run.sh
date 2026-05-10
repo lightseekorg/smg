@@ -103,6 +103,23 @@ wait_for_openai() {
     done
 }
 
+# Wait for a substring to appear in a log file. Used as a readiness gate
+# for processes that bind a port early but aren't actually serving until
+# warmup finishes (mlx-grpc is the case we care about).
+wait_for_log_line() {
+    local file="$1"
+    local pattern="$2"
+    local timeout="${3:-300}"
+    local start=$SECONDS
+    while ! grep -q "$pattern" "$file" 2>/dev/null; do
+        if (( SECONDS - start > timeout )); then
+            log "Timeout waiting for '$pattern' in $file"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 # Run one genai-bench cell against a backend. Tolerates per-cell failure:
 # writes a .failed marker and returns 0 so the loop continues.
 run_bench_cell() {
@@ -174,8 +191,12 @@ run_phase_grpc() {
     local grpc_pid=$!
     PIDS+=("$grpc_pid")
     wait_for_port "$GRPC_PORT" 300
+    # The port binds before warmup, so port-open is necessary but not
+    # sufficient. server.py logs "gRPC server listening on" only after
+    # warmup finishes and the gen loop is running, which is the real
+    # readiness signal the router needs to see before connecting.
+    wait_for_log_line "$RESULTS_DIR/mlx-grpc.log" "gRPC server listening on" 300
     log "MLX gRPC servicer up on :$GRPC_PORT (pid=$grpc_pid)"
-    sleep 5  # let warmup finish before the router connects
 
     "$SMG_BIN" launch \
         --host 127.0.0.1 --port "$ROUTER_PORT" \

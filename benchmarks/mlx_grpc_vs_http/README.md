@@ -135,7 +135,7 @@ Metal GPU access. The `macos-latest` GitHub runner is a VM that
 doesn't reliably expose Apple GPU passthrough — vllm-metal silently
 falls back to a PyTorch CPU/fp32 path that allocates ~6 GB and OOMs
 at startup on the 7 GB runner. To run the three-way comparison,
-either run `local_three_way` on real Apple Silicon, or override
+either run `./benchmarks/mlx_grpc_vs_http/run.sh` on real Apple Silicon (default `PHASES=mlx grpc vllm`), or override
 `PHASES` via `workflow_dispatch` on a self-hosted M-series runner.
 
 ## CI

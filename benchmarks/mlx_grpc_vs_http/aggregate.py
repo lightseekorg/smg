@@ -58,6 +58,11 @@ def _read(folder: Path) -> dict[str, Any] | None:
 
 def collect(results_dir: Path) -> dict[tuple[str, str, int], dict[str, Any]]:
     out: dict[tuple[str, str, int], dict[str, Any]] = {}
+    # Aggregate runs under `if: always()`, so it can fire when no phase
+    # ever created the results dir (e.g., setup failed, or PHASES was
+    # empty). Return an empty result instead of crashing.
+    if not results_dir.is_dir():
+        return out
     for sub in sorted(results_dir.iterdir()):
         if not sub.is_dir():
             continue
