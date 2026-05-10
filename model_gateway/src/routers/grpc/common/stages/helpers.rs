@@ -14,10 +14,6 @@ use smg_grpc_client::{
 use tracing::{debug, warn};
 
 use crate::{
-    routers::grpc::{
-        context::{RequestType, WorkerSelection},
-        proto_wrapper::ProtoGenerateRequest,
-    },
     worker::{
         sampling_defaults::SamplingDefaults, RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT,
         DEFAULT_SAMPLING_PARAMS_LABEL,
@@ -25,11 +21,11 @@ use crate::{
     routers::{
         error,
         grpc::{
-            context::WorkerSelection, proto_wrapper::ProtoGenerateRequest,
+            context::{RequestType, WorkerSelection},
+            proto_wrapper::ProtoGenerateRequest,
             utils::resolve_mlx_stop_ids,
         },
     },
-    worker::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
