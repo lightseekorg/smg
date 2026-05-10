@@ -24,6 +24,8 @@ use smg_grpc_client::{
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
 
+use crate::routers::grpc::utils::resolve_mlx_matched_stop_json;
+
 // =====================
 // Multimodal Data
 // =====================
@@ -879,6 +881,10 @@ impl ProtoGenerateComplete {
     /// - MatchedTokenId → Number
     /// - MatchedStopStr → String
     /// - None → None
+    #[expect(
+        clippy::unreachable,
+        reason = "MLX must use matched_stop_json_with_context"
+    )]
     pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
         macro_rules! convert {
             ($oneof:expr, $token_id:path, $stop_str:path) => {
@@ -929,7 +935,7 @@ impl ProtoGenerateComplete {
         tokenizer: &dyn Tokenizer,
     ) -> Option<serde_json::Value> {
         if self.is_mlx() {
-            crate::routers::grpc::utils::resolve_mlx_matched_stop_json(
+            resolve_mlx_matched_stop_json(
                 self.mlx_matched_stop_token_id(),
                 stop,
                 stop_token_ids,

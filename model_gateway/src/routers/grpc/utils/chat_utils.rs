@@ -683,7 +683,17 @@ mod tests {
         common::{ContentPart, ImageUrl},
     };
     use serde_json::json;
+
     use super::*;
+
+    type StopTokenCase<'a> = (&'a [&'a str], Option<&'a [u32]>, &'a str);
+    type MatchedStopCase<'a> = (
+        Option<u32>,
+        Option<&'a str>,
+        &'a [u32],
+        Option<Value>,
+        &'a str,
+    );
 
     #[test]
     fn test_transform_messages_string_format() {
@@ -878,15 +888,19 @@ mod tests {
     fn test_stop_strings_to_token_ids() {
         // MockTokenizer vocab: "Hello"→1, "world"→2, "test"→3, "<|im_end|>"→1002.
         // expected = None means the call should return Err.
-        let cases: &[(&[&str], Option<&[u32]>, &str)] = &[
-            (&["Hello"],                Some(&[1]),    "single token regular"),
-            (&["world"],                Some(&[2]),    "single token another regular"),
-            (&["<|im_end|>"],           Some(&[1002]), "single token special"),
-            (&["Hello world"],          None,          "multi token returns err"),
-            (&["zzzunknown"],           None,          "unknown vocab returns err"),
-            (&["Hello", "Hello world"], None,          "array with multi token err"),
-            (&["Hello", "test"],        Some(&[1, 3]), "array all single token"),
-            (&[],                       Some(&[]),     "empty array"),
+        let cases: &[StopTokenCase<'_>] = &[
+            (&["Hello"], Some(&[1]), "single token regular"),
+            (&["world"], Some(&[2]), "single token another regular"),
+            (&["<|im_end|>"], Some(&[1002]), "single token special"),
+            (&["Hello world"], None, "multi token returns err"),
+            (&["zzzunknown"], None, "unknown vocab returns err"),
+            (
+                &["Hello", "Hello world"],
+                None,
+                "array with multi token err",
+            ),
+            (&["Hello", "test"], Some(&[1, 3]), "array all single token"),
+            (&[], Some(&[]), "empty array"),
         ];
         let tok = MockTokenizer::new();
         for &(inputs, expected, name) in cases {
@@ -932,12 +946,30 @@ mod tests {
     fn test_resolve_mlx_matched_stop() {
         // MockTokenizer vocab: "Hello"→1, "world"→2, "test"→3, "<|im_end|>"→1002.
         // stop_ids=&[] is treated as None (no user stop_token_ids supplied).
-        let cases: &[(Option<u32>, Option<&str>, &[u32], Option<Value>, &str)] = &[
-            (None,      None,          &[],   None,                                     "no id returns none"),
-            (Some(1),   Some("Hello"), &[],   Some(Value::String("Hello".to_string())), "string match"),
-            (Some(42),  None,          &[42], Some(Value::Number(42u32.into())),        "token id match"),
-            (Some(1),   Some("Hello"), &[1],  Some(Value::String("Hello".to_string())), "string wins over token id"),
-            (Some(999), None,          &[],   None,                                     "eos returns none"),
+        let cases: &[MatchedStopCase<'_>] = &[
+            (None, None, &[], None, "no id returns none"),
+            (
+                Some(1),
+                Some("Hello"),
+                &[],
+                Some(Value::String("Hello".to_string())),
+                "string match",
+            ),
+            (
+                Some(42),
+                None,
+                &[42],
+                Some(Value::Number(42u32.into())),
+                "token id match",
+            ),
+            (
+                Some(1),
+                Some("Hello"),
+                &[1],
+                Some(Value::String("Hello".to_string())),
+                "string wins over token id",
+            ),
+            (Some(999), None, &[], None, "eos returns none"),
         ];
         let tok = MockTokenizer::new();
         for (id, stop_str, stop_ids, expected, name) in cases {
