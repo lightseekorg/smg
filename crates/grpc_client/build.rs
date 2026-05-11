@@ -20,8 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .extern_path(".smg.grpc.common", "crate::common_proto")
         .type_attribute("GetModelInfoResponse", "#[derive(serde::Serialize)]")
-        // vllm + trtllm ServerInfo have only primitive fields.
-        // sglang's and tokenspeed's contain prost_types::{Struct,Timestamp};
+        // Some ServerInfo protos contain prost_types::{Struct, Timestamp};
         // those are handled separately at the wrapper layer.
         .type_attribute(
             "vllm.grpc.engine.GetServerInfoResponse",

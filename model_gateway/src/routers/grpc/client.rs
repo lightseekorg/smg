@@ -236,7 +236,7 @@ impl GrpcClient {
     }
 
     /// Get the full load response from the backend.
-    /// Supported for SGLang and TokenSpeed backends.
+    /// Returns `Unimplemented` for backends without scheduler load metrics.
     pub async fn get_loads(&self) -> Result<WorkerLoadResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => {
@@ -253,7 +253,8 @@ impl GrpcClient {
         }
     }
 
-    /// Subscribe to KV cache events (SGLang / vLLM / TRT-LLM only).
+    /// Subscribe to KV cache events. Returns `Unimplemented` on backends
+    /// without KV-event streaming.
     pub async fn subscribe_kv_events(
         &self,
         start_seq: u64,

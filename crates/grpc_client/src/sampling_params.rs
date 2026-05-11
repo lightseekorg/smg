@@ -1,7 +1,6 @@
-//! Backend-neutral OpenAI → sampling-params builders shared by the SGLang
-//! and TokenSpeed gRPC clients. Returns [`sglang::SamplingParams`] (the
-//! most permissive shape today); other backends translate from this at
-//! their wire seam.
+//! Backend-neutral OpenAI → sampling-params builders. The return type
+//! happens to be [`proto::SamplingParams`] (the most permissive shape
+//! today); other backends translate from this at their wire seam.
 
 use openai_protocol::{
     chat::ChatCompletionRequest,
@@ -267,7 +266,7 @@ fn build_constraint_for_chat(
     }
 
     // If response_format already set a constraint, drop the tool constraint
-    // (matches SGLang HTTP behavior where response_format takes priority).
+    // (response_format takes priority over tool-call constraints).
     if let Some((constraint_type, constraint_value)) = tool_call_constraint {
         if constraints.is_empty() {
             let tool_constraint = match constraint_type.as_str() {

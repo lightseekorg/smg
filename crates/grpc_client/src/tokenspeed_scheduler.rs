@@ -4,8 +4,8 @@
 //! Sampling params come from the shared `crate::sampling_params` helpers
 //! and are field-mapped to TokenSpeed's shape via [`translate::sampling_params`].
 //! The unary RPC adapters (`translate::model_info` / `server_info` / `loads`)
-//! still emit SGLang-shaped types pending dedicated `ModelInfo::TokenSpeed` /
-//! `ServerInfo::TokenSpeed` arms in the router.
+//! still emit the legacy router-side shape pending dedicated
+//! `ModelInfo::TokenSpeed` / `ServerInfo::TokenSpeed` arms in the router.
 
 use std::{
     pin::Pin,
@@ -401,14 +401,14 @@ fn tokenspeed_abort_dispatcher(client: TokenSpeedSchedulerClient) -> AbortDispat
 }
 
 // Sampling-params + unary RPC adapters: map between TokenSpeed's wire
-// shape and the SGLang shape the router metadata wrappers consume.
+// shape and the router-side shape the metadata wrappers consume.
 mod translate {
     use super::{sglang, tokenspeed_proto as ts};
 
     pub(super) fn sampling_params(s: sglang::SamplingParams) -> ts::SamplingParams {
-        // SGLang scalars are non-optional with semantic defaults already
-        // applied; TokenSpeed wraps in `Some(_)` so the servicer's
-        // `HasField()` checks distinguish "set" from "unset".
+        // Source scalars are non-optional with semantic defaults already
+        // applied; wrap in `Some(_)` so the servicer's `HasField()` checks
+        // distinguish "set" from "unset" on the wire.
         ts::SamplingParams {
             temperature: Some(s.temperature),
             top_p: Some(s.top_p),
@@ -480,7 +480,6 @@ mod translate {
             is_paused: r.is_paused,
             last_receive_timestamp: 0.0,
             uptime_seconds: r.uptime_seconds,
-            // SGLang's `sglang_version` slot carries the runtime version label.
             sglang_version: r.tokenspeed_version,
             server_type: "grpc".to_string(),
             start_time: r.start_time,

@@ -1,4 +1,4 @@
-//! Protocol buffer type wrappers for SGLang, vLLM, TensorRT-LLM, MLX, and TokenSpeed backends.
+//! Protocol buffer type wrappers for the supported gRPC backends.
 //!
 //! This module provides unified enums that wrap proto types from each
 //! supported backend, allowing the router to work with any backend
@@ -650,7 +650,7 @@ impl ProtoGenerateStreamChunk {
         }
     }
 
-    /// Get output logprobs (SGLang, vLLM, TensorRT-LLM, MLX, and TokenSpeed)
+    /// Get output logprobs.
     pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
             Self::Sglang(c) => c
@@ -967,7 +967,7 @@ impl ProtoGenerateComplete {
         }
     }
 
-    /// Get output logprobs (SGLang, vLLM, TensorRT-LLM, MLX, and TokenSpeed)
+    /// Get output logprobs.
     pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
             Self::Sglang(c) => c

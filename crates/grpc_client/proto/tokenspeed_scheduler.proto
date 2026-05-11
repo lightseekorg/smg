@@ -5,9 +5,9 @@ package tokenspeed.grpc.scheduler;
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
-// TokenSpeed scheduler gRPC service. Self-contained wire — no dependency
-// on sglang_scheduler.proto. Trimmed to text-generation only (no embed,
-// no multimodal, no PD-disaggregated, no LoRA, no hidden-state forwarding).
+// TokenSpeed scheduler gRPC service. Fully self-contained wire definition.
+// Trimmed to text-generation only (no embed, no multimodal, no
+// PD-disaggregated, no LoRA, no hidden-state forwarding).
 service TokenSpeedScheduler {
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
@@ -57,7 +57,7 @@ message SamplingParams {
     string structural_tag = 20;
   }
 
-  // Keep the trailing matched stop token in `output_ids` (SGLang parity).
+  // Keep the trailing matched stop token in `output_ids`.
   bool no_stop_trim = 22;
 
   // Escape hatch for backend-specific knobs without bumping the proto.
@@ -78,7 +78,7 @@ message GenerateRequest {
 
   // Logprob options.
   bool return_logprob = 4;
-  // Optional: unset = SGLang's `-1` (no input logprobs); explicit 0 = "from start".
+  // Optional: unset = no input logprobs; explicit 0 = "from start".
   optional int32 logprob_start_len = 5;
   int32 top_logprobs_num = 6;
   repeated uint32 token_ids_logprob = 7;
