@@ -1,7 +1,4 @@
-//! gRPC clients for SGLang, vLLM, TensorRT-LLM, and MLX backends
-//!
-//! This crate provides gRPC client implementations for communicating with
-//! SGLang scheduler, vLLM engine, TensorRT-LLM engine, and MLX engine backends.
+//! gRPC clients for the supported inference backends.
 
 pub mod common_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
@@ -20,11 +17,6 @@ use std::sync::Arc;
 
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
-// TokenSpeed has a fully independent wire definition (see
-// ``proto/tokenspeed_scheduler.proto``) — distinct service, distinct
-// messages with intentionally trimmed field sets aimed at top-tier LLM
-// workloads. The client wraps that wire and translates to/from SGLang-shaped
-// types at the boundary so the router's dispatch enums don't proliferate.
 pub use tokenspeed_scheduler::{tokenspeed_proto, TokenSpeedSchedulerClient};
 use tonic::metadata::MetadataMap;
 pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
