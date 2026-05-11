@@ -1,10 +1,9 @@
 //! Kimi-K2.5 tool-declaration encoder. See module-level docs.
 //!
-//! Mirrors `tool_declaration_ts.py` from the Kimi-K2.5 model snapshot
-//! function-by-function. Output must be byte-equal to the Python reference;
-//! gated by golden tests in `tests/kimi_k25.rs`.
-
-#![allow(clippy::unwrap_used)]
+//! Ported from <https://huggingface.co/moonshotai/Kimi-K2.5/blob/main/tool_declaration_ts.py>.
+//! Mirrors the upstream Python reference function-by-function. Output must be
+//! byte-equal to the Python reference; gated by golden tests in
+//! `tests/kimi_k25.rs`.
 
 use std::{collections::HashMap, fmt::Write};
 
@@ -15,6 +14,9 @@ use crate::chat_template::{ChatTemplateParams, ChatTemplateState};
 
 const TS_INDENT: &str = "  ";
 const TS_FIELD_DELIMITER: &str = ",\n";
+
+// On overflow, emit `any` and continue — never panic on adversarial schemas.
+const MAX_RECURSION_DEPTH: usize = 32;
 
 pub fn encode_tools_to_typescript(tools: &[Value]) -> Option<String> {
     if tools.is_empty() {
@@ -49,8 +51,6 @@ pub(crate) fn apply_kimi_k25_tools(
 ) -> Result<String> {
     let ts_str = params.tools.and_then(encode_tools_to_typescript);
 
-    // Build owned kwargs only when we have something to inject; otherwise
-    // delegate without allocating.
     let owned: Option<HashMap<String, Value>> = match (params.template_kwargs, ts_str.as_ref()) {
         (Some(existing), Some(ts)) => {
             let mut m = existing.clone();
@@ -119,7 +119,13 @@ fn openai_function_to_typescript(function: &Value) -> String {
                 def_str.push('\n');
             }
         }
-        write!(def_str, "interface {name} {body}").unwrap();
+        #[expect(
+            clippy::unwrap_used,
+            reason = "write!/writeln! into String cannot fail"
+        )]
+        {
+            write!(def_str, "interface {name} {body}").unwrap();
+        }
         interfaces.push(def_str);
     }
 
@@ -160,6 +166,7 @@ fn openai_function_to_typescript(function: &Value) -> String {
 struct SchemaRegistry {
     definitions: HashMap<String, Value>,
     has_self_ref: bool,
+    depth: usize,
 }
 
 impl SchemaRegistry {
@@ -260,7 +267,13 @@ impl BaseType {
                 .iter()
                 .map(|(k, v)| format!("{k}: {}", json_inline(v)))
                 .collect();
-            writeln!(out, "{indent}// {}", parts.join(", ")).unwrap();
+            #[expect(
+                clippy::unwrap_used,
+                reason = "write!/writeln! into String cannot fail"
+            )]
+            {
+                writeln!(out, "{indent}// {}", parts.join(", ")).unwrap();
+            }
         }
         out
     }
@@ -316,16 +329,28 @@ impl Parameter {
                 Value::Number(_) => d.to_string(),
                 _ => serde_json::to_string(d).unwrap_or_else(|_| "null".to_string()),
             };
-            writeln!(out, "{indent}// Default: {repr}").unwrap();
+            #[expect(
+                clippy::unwrap_used,
+                reason = "write!/writeln! into String cannot fail"
+            )]
+            {
+                writeln!(out, "{indent}// Default: {repr}").unwrap();
+            }
         }
         let opt_marker = if self.optional { "?" } else { "" };
-        write!(
-            out,
-            "{indent}{}{opt_marker}: {}",
-            self.name,
-            self.typ.to_typescript(indent, registry)
-        )
-        .unwrap();
+        #[expect(
+            clippy::unwrap_used,
+            reason = "write!/writeln! into String cannot fail"
+        )]
+        {
+            write!(
+                out,
+                "{indent}{}{opt_marker}: {}",
+                self.name,
+                self.typ.to_typescript(indent, registry)
+            )
+            .unwrap();
+        }
         out
     }
 }
@@ -582,6 +607,16 @@ impl ParameterTypeRef {
 }
 
 fn parse_parameter_type(schema: &Value, registry: &mut SchemaRegistry) -> ParameterType {
+    if registry.depth >= MAX_RECURSION_DEPTH {
+        return ParameterType::Scalar(ParameterTypeScalar::any());
+    }
+    registry.depth += 1;
+    let result = parse_parameter_type_inner(schema, registry);
+    registry.depth -= 1;
+    result
+}
+
+fn parse_parameter_type_inner(schema: &Value, registry: &mut SchemaRegistry) -> ParameterType {
     if schema.is_boolean() {
         return ParameterType::Scalar(ParameterTypeScalar {
             base: BaseType::default(),

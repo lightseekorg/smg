@@ -37,7 +37,7 @@
 {%- endmacro -%}
 
 
-{# Find last non-tool-call assisitant message #}
+{# Find last non-tool-call assistant message #}
 {%- set ns = namespace(last_non_tool_call_assistant_msg=-1) -%}
 {%- for idx in range(messages|length-1, -1, -1) -%}
     {%- if messages[idx]['role'] == 'assistant' and not messages[idx].get('tool_calls') -%}
