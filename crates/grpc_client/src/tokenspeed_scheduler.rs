@@ -450,11 +450,16 @@ mod translate {
     }
 
     pub(super) fn model_info(r: ts::GetModelInfoResponse) -> sglang::GetModelInfoResponse {
+        // Surface TokenSpeed's `preferred_sampling_params` JSON in both label
+        // fields the discovery path may consult, so worker-discovery can
+        // expose model-published defaults (`temperature`, `top_p`, etc.) to
+        // the router's default-injection stage.
+        let preferred = r.preferred_sampling_params;
         sglang::GetModelInfoResponse {
             model_path: r.model_path,
             tokenizer_path: r.tokenizer_path,
             is_generation: true,
-            preferred_sampling_params: r.preferred_sampling_params,
+            preferred_sampling_params: preferred.clone(),
             weight_version: r.weight_version,
             served_model_name: r.served_model_name,
             max_context_length: r.max_context_length,
@@ -468,7 +473,7 @@ mod translate {
             architectures: r.architectures,
             id2label_json: String::new(),
             num_labels: 0,
-            default_sampling_params_json: String::new(),
+            default_sampling_params_json: preferred,
         }
     }
 
