@@ -24,7 +24,7 @@ jobs:
   # same dev<run_number> suffix (e.g. smg==1.4.2.dev42, smg-grpc-servicer==0.5.3.dev42).
   prepare:
     name: Compute dev versions
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     outputs:
       smg_version: ${{ steps.compute.outputs.smg_version }}
       proto_version: ${{ steps.compute.outputs.proto_version }}
@@ -73,7 +73,7 @@ jobs:
     name: Build smg dev wheel
     needs: prepare
     if: ${{ inputs.release_smg }}
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -141,7 +141,7 @@ jobs:
     name: Upload smg to PyPI
     needs: build-smg
     if: ${{ inputs.release_smg && github.repository == 'lightseekorg/smg' }}
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -163,7 +163,7 @@ jobs:
     name: Build smg-grpc-proto dev
     needs: prepare
     if: ${{ inputs.release_proto }}
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -197,7 +197,7 @@ jobs:
     name: Upload smg-grpc-proto to PyPI
     needs: build-proto
     if: ${{ inputs.release_proto && github.repository == 'lightseekorg/smg' }}
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -221,7 +221,7 @@ jobs:
     name: Build smg-grpc-servicer dev
     needs: prepare
     if: ${{ inputs.release_servicer }}
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -257,7 +257,7 @@ jobs:
       && github.repository == 'lightseekorg/smg'
       && needs.build-servicer.result == 'success'
       && (needs.upload-proto.result == 'success' || needs.upload-proto.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -288,7 +288,7 @@ jobs:
       - build-servicer
       - upload-servicer
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ["cpu-e5"]
     steps:
       - run: |
           {
