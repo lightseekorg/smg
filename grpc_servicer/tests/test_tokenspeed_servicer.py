@@ -402,6 +402,61 @@ class TestSamplingParamsConversion:
         out = TokenSpeedSchedulerServicer._sampling_params_from_proto(params)
         assert out[key] == value
 
+    def test_json_schema_no_reasoning_parser_passes_through(self):
+        params = tokenspeed_scheduler_pb2.SamplingParams(json_schema='{"type": "object"}')
+        out = TokenSpeedSchedulerServicer._sampling_params_from_proto(params, reasoning_parser=None)
+        assert out["json_schema"] == '{"type": "object"}'
+        assert "structural_tag" not in out
+
+    def test_json_schema_with_reasoning_parser_wraps_as_structural_tag(self, monkeypatch):
+        import sys
+        import types
+
+        fake_module = types.ModuleType("tokenspeed.runtime.grammar.reasoning_structural_tag")
+        captured: dict[str, Any] = {}
+
+        def _fake_wrap(rp: str, schema: Any) -> str:
+            captured["rp"] = rp
+            captured["schema"] = schema
+            return '{"wrapped": "tag"}'
+
+        fake_module.structural_tag_for_reasoning_json_schema = _fake_wrap
+        monkeypatch.setitem(
+            sys.modules,
+            "tokenspeed.runtime.grammar.reasoning_structural_tag",
+            fake_module,
+        )
+
+        params = tokenspeed_scheduler_pb2.SamplingParams(json_schema='{"type": "object"}')
+        out = TokenSpeedSchedulerServicer._sampling_params_from_proto(
+            params, reasoning_parser="gpt-oss"
+        )
+
+        assert "json_schema" not in out
+        assert out["structural_tag"] == '{"wrapped": "tag"}'
+        assert captured["rp"] == "gpt-oss"
+        assert captured["schema"] == {"type": "object"}
+
+    def test_json_schema_unknown_parser_falls_back_to_raw(self, monkeypatch):
+        import sys
+        import types
+
+        fake_module = types.ModuleType("tokenspeed.runtime.grammar.reasoning_structural_tag")
+        fake_module.structural_tag_for_reasoning_json_schema = lambda rp, s: None
+        monkeypatch.setitem(
+            sys.modules,
+            "tokenspeed.runtime.grammar.reasoning_structural_tag",
+            fake_module,
+        )
+
+        params = tokenspeed_scheduler_pb2.SamplingParams(json_schema='{"type": "object"}')
+        out = TokenSpeedSchedulerServicer._sampling_params_from_proto(
+            params, reasoning_parser="unknown-parser"
+        )
+
+        assert out["json_schema"] == '{"type": "object"}'
+        assert "structural_tag" not in out
+
 
 # ---------------------------------------------------------------------------
 # Generate RPC

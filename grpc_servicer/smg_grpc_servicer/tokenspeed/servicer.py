@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import re
@@ -588,7 +589,10 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if not input_ids:
             raise ValueError("GenerateRequest.tokenized.input_ids is empty")
 
-        sampling = self._sampling_params_from_proto(request.sampling_params)
+        sampling = self._sampling_params_from_proto(
+            request.sampling_params,
+            reasoning_parser=getattr(self.server_args, "reasoning_parser", None),
+        )
 
         GenerateReqInput = _lazy_generate_req_input()
         obj = GenerateReqInput(
@@ -636,6 +640,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     @staticmethod
     def _sampling_params_from_proto(
         params: tokenspeed_scheduler_pb2.SamplingParams,
+        *,
+        reasoning_parser: str | None = None,
     ) -> dict[str, Any]:
         """Build the dict that ``GenerateReqInput.sampling_params`` expects.
 
@@ -703,7 +709,30 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if params.HasField("regex"):
             out["regex"] = params.regex
         elif params.HasField("json_schema"):
-            out["json_schema"] = params.json_schema
+            # Mirror tokenspeed serving_chat.py: when the engine is
+            # running with a reasoning parser that has an xgrammar
+            # template (e.g. ``gpt-oss`` → ``harmony``), wrap the user's
+            # JSON schema as a structural tag so the grammar only
+            # activates inside the response channel. Without this,
+            # xgrammar fights the Harmony channel preamble
+            # (``<|channel|>analysis<|message|>…``) and the model stalls
+            # until ``max_tokens``.
+            wrapped: str | None = None
+            if reasoning_parser:
+                try:
+                    from tokenspeed.runtime.grammar.reasoning_structural_tag import (
+                        structural_tag_for_reasoning_json_schema,
+                    )
+
+                    wrapped = structural_tag_for_reasoning_json_schema(
+                        reasoning_parser, json.loads(params.json_schema)
+                    )
+                except ImportError:
+                    wrapped = None
+            if wrapped is not None:
+                out["structural_tag"] = wrapped
+            else:
+                out["json_schema"] = params.json_schema
         elif params.HasField("ebnf_grammar"):
             out["ebnf"] = params.ebnf_grammar
         elif params.HasField("structural_tag"):
