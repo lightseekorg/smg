@@ -283,7 +283,7 @@ fn test_epoch_max_wins_local_write_cannot_rewind_epoch() {
 }
 
 #[test]
-fn test_epoch_max_wins_tombstone_compares_against_epoch_winner() {
+fn test_epoch_max_wins_tombstone_compares_against_newest_live_version() {
     init_test_logging();
     let replica = CrdtOrMap::new();
     replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
@@ -315,7 +315,14 @@ fn test_epoch_max_wins_tombstone_compares_against_epoch_winner() {
     tombstone_log.append(tombstone_after_epoch_winner);
     replica.merge(&tombstone_log);
 
-    assert_eq!(replica.get(key), None);
+    assert_eq!(
+        decode(
+            &replica
+                .get(key)
+                .expect("newer live version suppresses tombstone")
+        ),
+        Some(EpochCount { epoch: 6, count: 0 }),
+    );
 }
 
 // ============================================================================
