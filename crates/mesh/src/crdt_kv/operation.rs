@@ -166,32 +166,79 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
-    fn candidate_wins(current: &Operation, candidate: &Operation, strategy: MergeStrategy) -> bool {
-        match strategy {
-            MergeStrategy::EpochMaxWins => {
-                if let (
-                    Operation::Insert {
-                        value: current_value,
-                        ..
-                    },
-                    Operation::Insert {
-                        value: candidate_value,
-                        ..
-                    },
-                ) = (current, candidate)
-                {
-                    match epoch_max_wins::winner(current_value, candidate_value) {
-                        epoch_max_wins::ValueWinner::Remote => return true,
-                        epoch_max_wins::ValueWinner::Local => return false,
-                        epoch_max_wins::ValueWinner::Equal => {}
+    fn lww_candidate_wins(current: &Operation, candidate: &Operation) -> bool {
+        (candidate.timestamp(), candidate.replica_id())
+            > (current.timestamp(), current.replica_id())
+    }
+
+    fn epoch_insert_candidate_wins(current: &Operation, candidate: &Operation) -> bool {
+        let (
+            Operation::Insert {
+                value: current_value,
+                ..
+            },
+            Operation::Insert {
+                value: candidate_value,
+                ..
+            },
+        ) = (current, candidate)
+        else {
+            return Self::lww_candidate_wins(current, candidate);
+        };
+
+        match epoch_max_wins::winner(current_value, candidate_value) {
+            epoch_max_wins::ValueWinner::Remote => true,
+            epoch_max_wins::ValueWinner::Local => false,
+            epoch_max_wins::ValueWinner::Equal => Self::lww_candidate_wins(current, candidate),
+        }
+    }
+
+    fn latest_lww_operation<'a, I>(operations: I) -> Option<&'a Operation>
+    where
+        I: IntoIterator<Item = &'a Operation>,
+    {
+        operations
+            .into_iter()
+            .max_by_key(|operation| (operation.timestamp(), operation.replica_id()))
+    }
+
+    fn latest_epoch_max_wins_operation<'a>(
+        operations: impl IntoIterator<Item = &'a Operation>,
+    ) -> Option<&'a Operation> {
+        let mut best_insert: Option<&'a Operation> = None;
+        let mut newest_remove: Option<&'a Operation> = None;
+
+        for operation in operations {
+            match operation {
+                Operation::Insert { .. } => {
+                    if best_insert
+                        .is_none_or(|current| Self::epoch_insert_candidate_wins(current, operation))
+                    {
+                        best_insert = Some(operation);
+                    }
+                }
+                Operation::Remove { .. } => {
+                    if newest_remove
+                        .is_none_or(|current| Self::lww_candidate_wins(current, operation))
+                    {
+                        newest_remove = Some(operation);
                     }
                 }
             }
-            MergeStrategy::LastWriterWins => {}
         }
 
-        (candidate.timestamp(), candidate.replica_id())
-            > (current.timestamp(), current.replica_id())
+        match (best_insert, newest_remove) {
+            (Some(insert), Some(remove)) => {
+                if Self::lww_candidate_wins(insert, remove) {
+                    Some(remove)
+                } else {
+                    Some(insert)
+                }
+            }
+            (Some(insert), None) => Some(insert),
+            (None, Some(remove)) => Some(remove),
+            (None, None) => None,
+        }
     }
 
     fn latest_operations_by_key_with_strategy<F>(
@@ -201,20 +248,27 @@ impl OperationLog {
     where
         F: Fn(&str) -> MergeStrategy,
     {
-        let mut latest_by_key: HashMap<String, Operation> = HashMap::new();
+        let mut operations_by_key: HashMap<String, Vec<&Operation>> = HashMap::new();
 
         for operation in &self.operations {
-            let key = operation.key().to_string();
-            match latest_by_key.get(&key) {
-                Some(current)
-                    if !Self::candidate_wins(current, operation, strategy_for_key(&key)) => {}
-                Some(_) | None => {
-                    latest_by_key.insert(key, operation.clone());
-                }
-            }
+            operations_by_key
+                .entry(operation.key().to_string())
+                .or_default()
+                .push(operation);
         }
 
-        latest_by_key
+        operations_by_key
+            .into_iter()
+            .filter_map(|(key, operations)| {
+                let latest = match strategy_for_key(&key) {
+                    MergeStrategy::LastWriterWins => Self::latest_lww_operation(operations),
+                    MergeStrategy::EpochMaxWins => {
+                        Self::latest_epoch_max_wins_operation(operations)
+                    }
+                }?;
+                Some((key, (*latest).clone()))
+            })
+            .collect()
     }
 
     /// Keep only latest operation per key to bound log growth.
