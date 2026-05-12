@@ -94,20 +94,31 @@ jobs:
         with:
           python-version: "3.13"
 
-      # Patch only Python-side version metadata. Cargo rejects PEP 440 dev
-      # versions like "1.4.2.dev42" (semver requires "1.4.2-dev42"), so we
-      # deliberately leave Cargo.toml versions alone — they aren't published
-      # by this workflow and maturin uses pyproject.toml for the wheel version.
-      - name: Patch dev version (Python files only)
+      # Patches both Python and Rust version sources so the wheel reports a
+      # consistent dev version everywhere — Python metadata, smg.__version__,
+      # and the compiled runtime banner from model_gateway::build.rs.
+      #
+      # Cargo enforces semver and rejects PEP 440 (\"1.4.2.dev42\"), so we map
+      # the Python dev suffix to a semver prerelease (\"1.4.2-dev42\") for
+      # Cargo.toml. Other workspace Cargo manifests reference model_gateway by
+      # path with no version pin, so this is safe.
+      - name: Patch dev version (Python + model_gateway Cargo)
         working-directory: smg-repo
         env:
           SMG_VERSION: ${{ needs.prepare.outputs.smg_version }}
         run: |
           set -euo pipefail
+          # PEP 440 "X.Y.Z.devN" → semver "X.Y.Z-devN" for Cargo.
+          SMG_CARGO_VERSION="${SMG_VERSION/.dev/-dev}"
+
           sed -i.bak "s/^version = \".*\"/version = \"${SMG_VERSION}\"/" bindings/python/pyproject.toml
           sed -i.bak "s/__version__ = \".*\"/__version__ = \"${SMG_VERSION}\"/" bindings/python/src/smg/version.py
-          rm -f bindings/python/pyproject.toml.bak bindings/python/src/smg/version.py.bak
-          echo "Patched smg version to ${SMG_VERSION}"
+          sed -i.bak "s/^version = \".*\"/version = \"${SMG_CARGO_VERSION}\"/" model_gateway/Cargo.toml
+          rm -f bindings/python/pyproject.toml.bak bindings/python/src/smg/version.py.bak model_gateway/Cargo.toml.bak
+
+          echo "Patched smg version:"
+          echo "  pyproject.toml + __version__: ${SMG_VERSION}"
+          echo "  model_gateway/Cargo.toml:     ${SMG_CARGO_VERSION}"
 
       - name: Build manylinux x86_64 wheels
         uses: PyO3/maturin-action@v1
@@ -264,13 +275,28 @@ jobs:
           python-version: "3.12"
       - name: Install build deps
         run: pip install build twine
-      - name: Patch dev version
+      # Pin the servicer's smg-grpc-proto dependency to the exact dev version
+      # built in this same run, so a consumer who installs servicer-dev gets
+      # the matching proto-dev — not a stale stable proto (without --pre) or
+      # an unrelated newer dev (with --pre). Only pin when proto is also being
+      # released in this run; otherwise leave the >=0.4.x range so the dev
+      # servicer can resolve against the stable proto on PyPI.
+      - name: Patch dev version (+ pin proto dep if releasing proto together)
         env:
           SERVICER_VERSION: ${{ needs.prepare.outputs.servicer_version }}
+          PROTO_VERSION: ${{ needs.prepare.outputs.proto_version }}
+          RELEASE_PROTO: ${{ github.event_name == 'pull_request' || inputs.release_proto }}
         run: |
           set -euo pipefail
           sed -i.bak "s/^version = \".*\"/version = \"${SERVICER_VERSION}\"/" \
             grpc_servicer/pyproject.toml
+          if [ "${RELEASE_PROTO}" = "true" ]; then
+            # Matches both the core dep ("smg-grpc-proto>=0.4.6") and the
+            # mlx extra ("smg-grpc-proto>=0.4.7").
+            sed -i.bak -E "s|smg-grpc-proto>=[0-9.]+|smg-grpc-proto==${PROTO_VERSION}|g" \
+              grpc_servicer/pyproject.toml
+            echo "Pinned smg-grpc-proto==${PROTO_VERSION} for dev coherence"
+          fi
           rm -f grpc_servicer/pyproject.toml.bak
       - name: Build package
         run: cd grpc_servicer && python -m build
@@ -284,14 +310,25 @@ jobs:
   upload-servicer:
     name: Upload smg-grpc-servicer to PyPI
     needs: [build-servicer, upload-proto]
-    # Tolerate proto being skipped (release_proto=false); fail-fast if proto was
-    # requested but failed, so we don't publish a half-finished set.
+    # Proto state must be coherent with what was requested:
+    #   - If proto WAS requested (pull_request or release_proto=true):
+    #       upload-proto MUST equal 'success'. A skip here would mean
+    #       build-proto failed, and we don't want a half-finished dev set.
+    #   - If proto was NOT requested (workflow_dispatch + release_proto=false):
+    #       upload-proto naturally becomes 'skipped' and that's fine.
     if: >-
       always()
       && (github.event_name == 'pull_request' || inputs.release_servicer)
       && github.repository == 'lightseekorg/smg'
       && needs.build-servicer.result == 'success'
-      && (needs.upload-proto.result == 'success' || needs.upload-proto.result == 'skipped')
+      && (
+        needs.upload-proto.result == 'success'
+        || (
+          github.event_name == 'workflow_dispatch'
+          && !inputs.release_proto
+          && needs.upload-proto.result == 'skipped'
+        )
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
