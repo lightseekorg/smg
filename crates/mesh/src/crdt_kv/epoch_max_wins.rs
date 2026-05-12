@@ -9,11 +9,12 @@
 //! tombstone cannot be resurrected just because the log compacted to one live
 //! value.
 //!
-//! Raw epoch/count payloads are accepted only at the insert boundary. Stored
-//! and gossiped `rl:` values are always serialized [`RateLimitShard`] states.
-//! Malformed stored input: if one side decodes, it wins. If both fail, keep
-//! `local` per the `MergeStrategy::EpochMaxWins` contract in `kv.rs` - a
-//! no-op on the store.
+//! Stored and gossiped `rl:` values are always serialized [`RateLimitShard`]
+//! states. Raw epoch/count payloads are accepted at the insert boundary and by
+//! the public decoder because local namespace subscribers can observe the
+//! pre-normalized write payload. Malformed stored input: if one side decodes,
+//! it wins. If both fail, keep `local` per the `MergeStrategy::EpochMaxWins`
+//! contract in `kv.rs` - a no-op on the store.
 
 use std::cmp::Ordering;
 
@@ -90,10 +91,13 @@ pub fn encode(epoch: u64, count: i64) -> [u8; EPOCH_MAX_WINS_ENCODED_LEN] {
     buf
 }
 
-/// Decode a normalized CRDT shard state. `None` means malformed.
+/// Decode a normalized CRDT shard state or raw application payload.
+/// `None` means malformed.
 #[must_use]
 pub fn decode(bytes: &[u8]) -> Option<EpochCount> {
-    decode_shard(bytes).and_then(|shard| shard.current_value())
+    decode_shard(bytes)
+        .and_then(|shard| shard.current_value())
+        .or_else(|| decode_raw_epoch_count(bytes))
 }
 
 fn decode_raw_epoch_count(bytes: &[u8]) -> Option<EpochCount> {
@@ -394,8 +398,11 @@ mod tests {
     }
 
     #[test]
-    fn public_decode_rejects_raw_epoch_count_payload() {
-        assert_eq!(decode(&encode(1, 2)), None);
+    fn public_decode_accepts_raw_epoch_count_payload() {
+        assert_eq!(
+            decode(&encode(1, 2)),
+            Some(EpochCount { epoch: 1, count: 2 })
+        );
     }
 
     #[test]
