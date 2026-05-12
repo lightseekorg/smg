@@ -75,11 +75,20 @@ MODEL_SPECS: dict[str, dict] = {
     # Dense Qwen3.5 with the ``enable_thinking`` chat-template toggle. Used
     # by ``TestEnableThinking``. ``Qwen3_5ForConditionalGeneration``
     # architecture, supported by tokenspeed's current registry where the
-    # older ``Qwen3-30B-A3B`` (``Qwen3MoeForCausalLM``) is not.
+    # older ``Qwen3-30B-A3B`` (``Qwen3MoeForCausalLM``) is not. The 256K
+    # native context overflows the KV-cache budget on 1×H100 80GB after the
+    # ~57 GB model load, so cap engines at 16K (matches the ``Qwen2.5-14B``
+    # spec) — the test sends short single-turn chats. Hybrid Mamba +
+    # attention also makes CUDA-graph capture finicky, so force eager mode
+    # on the engines that respect it.
     "Qwen/Qwen3.5-27B": {
         "model": _resolve_model_path("Qwen/Qwen3.5-27B"),
         "tp": 1,
         "features": ["chat", "streaming", "thinking", "reasoning"],
+        "sglang_args": ["--context-length=16384"],
+        "vllm_args": ["--max-model-len=16384", "--enforce-eager"],
+        "tokenspeed_args": ["--max-model-len=16384", "--enforce-eager"],
+        "trtllm_extra_config": {"kv_cache_config": {"free_gpu_memory_fraction": 0.8}},
     },
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
