@@ -2457,22 +2457,8 @@ impl StreamingProcessor {
                                 .map_err(|_| "Channel closed".to_string())?;
                         }
 
-                        let final_chunk = CompletionStreamResponse {
-                            id: request_id.clone(),
-                            object: "text_completion".to_string(),
-                            created,
-                            choices: vec![CompletionStreamChoice {
-                                index,
-                                finish_reason: Some("stop".to_string()),
-                                ..Default::default()
-                            }],
-                            model: model.clone(),
-                            system_fingerprint: system_fingerprint.map(String::from),
-                            usage: None,
-                        };
-                        Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
-                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
-                            .map_err(|_| "Channel closed".to_string())?;
+                        // Defer the finish_reason chunk to the Complete arm so we can
+                        // include matched_stop from the backend Complete message.
                     }
                 }
                 ProtoResponseVariant::Complete(complete) => {
@@ -2482,6 +2468,31 @@ impl StreamingProcessor {
                     total_completion.record_complete(&complete);
 
                     if stopped_indices.contains(&index) {
+                        // Local stop decoder fired first; suffix already emitted. Emit
+                        // finish_reason here (not in the Chunk arm) so matched_stop from
+                        // the backend Complete message can be included.
+                        let matched_stop = complete.matched_stop_json_with_context(
+                            completion_request.stop.as_ref(),
+                            completion_request.stop_token_ids.as_ref(),
+                            tokenizer.as_ref(),
+                        );
+                        let final_chunk = CompletionStreamResponse {
+                            id: request_id.clone(),
+                            object: "text_completion".to_string(),
+                            created,
+                            choices: vec![CompletionStreamChoice {
+                                index,
+                                finish_reason: Some("stop".to_string()),
+                                matched_stop,
+                                ..Default::default()
+                            }],
+                            model: model.clone(),
+                            system_fingerprint: system_fingerprint.map(String::from),
+                            usage: None,
+                        };
+                        Self::format_completion_sse_into(&mut sse_buffer, &final_chunk);
+                        tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                            .map_err(|_| "Channel closed".to_string())?;
                         continue;
                     }
 
