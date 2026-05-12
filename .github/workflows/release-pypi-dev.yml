@@ -1,27 +1,27 @@
-name: Release SMG to PyPI (dev)
+name: Release SMG dev wheels (GitHub Releases)
+
+# Builds dev wheels for smg, smg-grpc-proto, and smg-grpc-servicer and
+# publishes them as a single GitHub Release per workflow run. Avoids the
+# 10 GB PyPI project quota and lets us delete old dev releases freely.
+# Prod releases continue to go to PyPI via release-pypi.yml / release-grpc.yml.
 
 on:
   workflow_dispatch:
     inputs:
       release_smg:
-        description: "Release smg (Rust wheel)"
+        description: "Build & release smg (Rust wheel)"
         type: boolean
         default: true
       release_servicer:
-        description: "Release smg-grpc-servicer"
+        description: "Build & release smg-grpc-servicer"
         type: boolean
         default: true
       release_proto:
-        description: "Release smg-grpc-proto (only if proto files changed)"
+        description: "Build & release smg-grpc-proto"
         type: boolean
-        default: false
-      dry_run:
-        description: "Dry run: build, patch versions, run twine check, but do NOT upload to PyPI"
-        type: boolean
-        default: false
-  # Self-validating: a PR that changes this workflow auto-runs in forced-dry-run
-  # mode (all three packages enabled, no PyPI upload). Lets us catch breakage
-  # before merge.
+        default: true
+  # Self-validating: PRs that touch this workflow file auto-build (no release
+  # is created on pull_request runs; they are pure dry-runs for CI).
   pull_request:
     paths:
       - .github/workflows/release-pypi-dev.yml
@@ -30,8 +30,6 @@ permissions:
   contents: read
 
 jobs:
-  # Compute shared dev versions once so all packages from this run share the
-  # same dev<run_number> suffix (e.g. smg==1.4.2.dev42, smg-grpc-servicer==0.5.3.dev42).
   prepare:
     name: Compute dev versions
     runs-on: ubuntu-latest
@@ -39,6 +37,7 @@ jobs:
       smg_version: ${{ steps.compute.outputs.smg_version }}
       proto_version: ${{ steps.compute.outputs.proto_version }}
       servicer_version: ${{ steps.compute.outputs.servicer_version }}
+      release_tag: ${{ steps.compute.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v6
 
@@ -46,13 +45,13 @@ jobs:
         run: |
           set -euo pipefail
           SUFFIX="dev${{ github.run_number }}"
+          RELEASE_TAG="smg-dev-${{ github.run_number }}"
 
           read_version() {
             grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'
           }
 
-          # Bump patch so dev sorts AFTER current stable.
-          # E.g. base 1.4.1 -> 1.4.2.dev<N> (so --pre picks it as latest).
+          # Bump patch so dev sorts AFTER current stable in PEP 440 ordering.
           bump_patch() {
             local IFS=.
             # shellcheck disable=SC2206
@@ -68,14 +67,17 @@ jobs:
           echo "smg_version=${SMG_VERSION}" >> "$GITHUB_OUTPUT"
           echo "proto_version=${PROTO_VERSION}" >> "$GITHUB_OUTPUT"
           echo "servicer_version=${SERVICER_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Planned dev versions"
-            echo "| Package | Version | Will publish? |"
+            echo "| Package | Version | Will build? |"
             echo "|---|---|---|"
-            echo "| smg | ${SMG_VERSION} | ${{ inputs.release_smg }} |"
-            echo "| smg-grpc-proto | ${PROTO_VERSION} | ${{ inputs.release_proto }} |"
-            echo "| smg-grpc-servicer | ${SERVICER_VERSION} | ${{ inputs.release_servicer }} |"
+            echo "| smg | ${SMG_VERSION} | ${{ github.event_name == 'pull_request' || inputs.release_smg }} |"
+            echo "| smg-grpc-proto | ${PROTO_VERSION} | ${{ github.event_name == 'pull_request' || inputs.release_proto }} |"
+            echo "| smg-grpc-servicer | ${SERVICER_VERSION} | ${{ github.event_name == 'pull_request' || inputs.release_servicer }} |"
+            echo ""
+            echo "Release tag (workflow_dispatch only): \`${RELEASE_TAG}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ── smg (Rust wheel via maturin) — slim matrix: manylinux x86_64 + sdist ──
@@ -94,21 +96,17 @@ jobs:
         with:
           python-version: "3.13"
 
-      # Patches both Python and Rust version sources so the wheel reports a
-      # consistent dev version everywhere — Python metadata, smg.__version__,
-      # and the compiled runtime banner from model_gateway::build.rs.
-      #
-      # Cargo enforces semver and rejects PEP 440 (\"1.4.2.dev42\"), so we map
-      # the Python dev suffix to a semver prerelease (\"1.4.2-dev42\") for
-      # Cargo.toml. Other workspace Cargo manifests reference model_gateway by
-      # path with no version pin, so this is safe.
+      # Patches Python metadata + Rust runtime version so the wheel reports a
+      # consistent dev version everywhere — smg.__version__, the smg.smg_rs
+      # banner from model_gateway::build.rs, and pyproject.toml. PEP 440
+      # (1.4.2.dev42) for Python, semver (1.4.2-dev42) for Cargo. Other
+      # workspace crates reference model_gateway via path with no version pin.
       - name: Patch dev version (Python + model_gateway Cargo)
         working-directory: smg-repo
         env:
           SMG_VERSION: ${{ needs.prepare.outputs.smg_version }}
         run: |
           set -euo pipefail
-          # PEP 440 "X.Y.Z.devN" → semver "X.Y.Z-devN" for Cargo.
           SMG_CARGO_VERSION="${SMG_VERSION/.dev/-dev}"
 
           sed -i.bak "s/^version = \".*\"/version = \"${SMG_VERSION}\"/" bindings/python/pyproject.toml
@@ -126,7 +124,9 @@ jobs:
           working-directory: smg-repo/bindings/python
           target: x86_64
           manylinux: auto
-          args: --release --out dist --features vendored-openssl --interpreter 3.10 3.11 3.12 3.13
+          # PR runs build a single interpreter (3.12) to keep dry-run fast
+          # (~6 min vs ~25 min); workflow_dispatch builds the full matrix.
+          args: --release --out dist --features vendored-openssl --interpreter ${{ github.event_name == 'pull_request' && '3.12' || '3.10 3.11 3.12 3.13' }}
           rust-toolchain: stable
           before-script-linux: |
             if command -v yum &> /dev/null; then
@@ -140,10 +140,8 @@ jobs:
              rm protoc-32.0-linux-x86_64.zip)
             protoc --version
 
-      # The manylinux wheel build above runs inside a Docker container as
-      # root, so files in dist/ end up root-owned. The next step runs on
-      # the host as the runner user and cannot write into that directory.
-      # Fix ownership so the sdist build can land its tarball alongside.
+      # The manylinux wheel build above runs inside Docker as root; dist/ ends
+      # up root-owned. Reclaim ownership so the host-side sdist step can write.
       - name: Reclaim dist ownership from manylinux container
         run: |
           sudo chown -R "$(whoami):$(whoami)" smg-repo/bindings/python/dist
@@ -166,35 +164,6 @@ jobs:
         with:
           name: smg-dev-dist
           path: smg-repo/bindings/python/dist/
-
-  upload-smg:
-    name: Upload smg to PyPI
-    needs: build-smg
-    if: >-
-      (github.event_name == 'pull_request' || inputs.release_smg)
-      && github.repository == 'lightseekorg/smg'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: smg-dev-dist
-          path: dist
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Dry-run notice
-        if: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
-        run: |
-          echo "DRY RUN: skipping PyPI upload for smg"
-          ls -lh dist/
-      - name: Upload
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_ROUTER }}
-        run: |
-          pip install -U twine
-          twine upload dist/* --verbose --skip-existing
 
   # ── smg-grpc-proto (pure Python) ──
   build-proto:
@@ -231,38 +200,7 @@ jobs:
           name: proto-dev-dist
           path: crates/grpc_client/python/dist/
 
-  upload-proto:
-    name: Upload smg-grpc-proto to PyPI
-    needs: build-proto
-    if: >-
-      (github.event_name == 'pull_request' || inputs.release_proto)
-      && github.repository == 'lightseekorg/smg'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: proto-dev-dist
-          path: dist
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Dry-run notice
-        if: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
-        run: |
-          echo "DRY RUN: skipping PyPI upload for smg-grpc-proto"
-          ls -lh dist/
-      - name: Upload
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
-        run: |
-          pip install -U twine
-          twine upload dist/* --verbose --skip-existing
-
   # ── smg-grpc-servicer (pure Python) ──
-  # Builds in parallel with proto; the upload step is what gates on proto
-  # upload completing (so a coherent dev set lands on PyPI together).
   build-servicer:
     name: Build smg-grpc-servicer dev
     needs: prepare
@@ -275,12 +213,8 @@ jobs:
           python-version: "3.12"
       - name: Install build deps
         run: pip install build twine
-      # Pin the servicer's smg-grpc-proto dependency to the exact dev version
-      # built in this same run, so a consumer who installs servicer-dev gets
-      # the matching proto-dev — not a stale stable proto (without --pre) or
-      # an unrelated newer dev (with --pre). Only pin when proto is also being
-      # released in this run; otherwise leave the >=0.4.x range so the dev
-      # servicer can resolve against the stable proto on PyPI.
+      # When proto is also being built in this run, pin the servicer's proto
+      # dep to the exact dev version so consumers get a coherent dev set.
       - name: Patch dev version (+ pin proto dep if releasing proto together)
         env:
           SERVICER_VERSION: ${{ needs.prepare.outputs.servicer_version }}
@@ -307,85 +241,108 @@ jobs:
           name: servicer-dev-dist
           path: grpc_servicer/dist/
 
-  upload-servicer:
-    name: Upload smg-grpc-servicer to PyPI
-    needs: [build-servicer, upload-proto]
-    # Proto state must be coherent with what was requested:
-    #   - If proto WAS requested (pull_request or release_proto=true):
-    #       upload-proto MUST equal 'success'. A skip here would mean
-    #       build-proto failed, and we don't want a half-finished dev set.
-    #   - If proto was NOT requested (workflow_dispatch + release_proto=false):
-    #       upload-proto naturally becomes 'skipped' and that's fine.
+  # ── Create the GitHub Release with all built dev wheels attached ──
+  # Only fires for workflow_dispatch — pull_request runs validate the build
+  # but never create a release.
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build-smg, build-proto, build-servicer]
+    # Conditions:
+    #   - Only on workflow_dispatch (no releases on pull_request runs).
+    #   - prepare must have succeeded so we have a tag/versions.
+    #   - No requested build may have failed.
+    #   - At least one build must have produced artifacts.
     if: >-
       always()
-      && (github.event_name == 'pull_request' || inputs.release_servicer)
+      && github.event_name == 'workflow_dispatch'
       && github.repository == 'lightseekorg/smg'
-      && needs.build-servicer.result == 'success'
+      && needs.prepare.result == 'success'
+      && needs.build-smg.result != 'failure'
+      && needs.build-proto.result != 'failure'
+      && needs.build-servicer.result != 'failure'
       && (
-        needs.upload-proto.result == 'success'
-        || (
-          github.event_name == 'workflow_dispatch'
-          && !inputs.release_proto
-          && needs.upload-proto.result == 'skipped'
-        )
+        needs.build-smg.result == 'success'
+        || needs.build-proto.result == 'success'
+        || needs.build-servicer.result == 'success'
       )
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - name: Download all dev artifacts
+        uses: actions/download-artifact@v8
         with:
-          name: servicer-dev-dist
           path: dist
-      - uses: actions/setup-python@v6
+          pattern: "*-dev-dist"
+          merge-multiple: true
+
+      - name: List collected assets
+        run: ls -lh dist/
+
+      - name: Create dev release
+        uses: softprops/action-gh-release@v2
         with:
-          python-version: "3.12"
-      - name: Dry-run notice
-        if: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
-        run: |
-          echo "DRY RUN: skipping PyPI upload for smg-grpc-servicer"
-          ls -lh dist/
-      - name: Upload
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
-        run: |
-          pip install -U twine
-          twine upload dist/* --verbose --skip-existing
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: "smg dev ${{ github.run_number }}"
+          prerelease: true
+          make_latest: "false"
+          target_commitish: ${{ github.sha }}
+          fail_on_unmatched_files: true
+          body: |
+            Auto-generated dev release from workflow run ${{ github.run_number }}.
+
+            **Versions**
+            - `smg==${{ needs.prepare.outputs.smg_version }}` — build: `${{ needs.build-smg.result }}`
+            - `smg-grpc-proto==${{ needs.prepare.outputs.proto_version }}` — build: `${{ needs.build-proto.result }}`
+            - `smg-grpc-servicer==${{ needs.prepare.outputs.servicer_version }}` — build: `${{ needs.build-servicer.result }}`
+
+            **Install**
+
+            ```bash
+            pip install smg smg-grpc-servicer smg-grpc-proto \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${{ needs.prepare.outputs.release_tag }}
+            ```
+
+            Source commit: `${{ github.sha }}`
+          files: dist/*
 
   # ── Final summary in the run UI ──
-  # Surfaces build and upload results separately so a failed build doesn't
-  # look indistinguishable from an unselected package.
   summary:
     name: Summary
     needs:
       - prepare
       - build-smg
-      - upload-smg
       - build-proto
-      - upload-proto
       - build-servicer
-      - upload-servicer
+      - release
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
           {
-            if [ "${{ inputs.dry_run }}" = "true" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
-              echo "## Dev release summary (DRY RUN — nothing uploaded to PyPI)"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "## Dev build summary (pull_request — no GitHub Release created)"
             else
               echo "## Dev release summary"
             fi
             echo ""
-            echo "| Package | Version | Build | Upload |"
-            echo "|---|---|---|---|"
-            echo "| smg | ${{ needs.prepare.outputs.smg_version }} | ${{ needs.build-smg.result }} | ${{ needs.upload-smg.result }} |"
-            echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.build-proto.result }} | ${{ needs.upload-proto.result }} |"
-            echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.build-servicer.result }} | ${{ needs.upload-servicer.result }} |"
+            echo "| Package | Version | Build |"
+            echo "|---|---|---|"
+            echo "| smg | ${{ needs.prepare.outputs.smg_version }} | ${{ needs.build-smg.result }} |"
+            echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.build-proto.result }} |"
+            echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.build-servicer.result }} |"
             echo ""
-            if [ "${{ inputs.dry_run }}" != "true" ] && [ "${{ github.event_name }}" != "pull_request" ]; then
-              echo "Install (allow pre-releases):"
-              echo '```'
-              echo "pip install --pre smg smg-grpc-servicer"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ needs.release.result }}" = "success" ]; then
+              TAG="${{ needs.prepare.outputs.release_tag }}"
+              REPO="${{ github.repository }}"
+              echo "### Release"
+              echo ""
+              echo "https://github.com/${REPO}/releases/tag/${TAG}"
+              echo ""
+              echo "### Install"
+              echo '```bash'
+              echo "pip install smg smg-grpc-servicer smg-grpc-proto \\"
+              echo "  --find-links https://github.com/${REPO}/releases/expanded_assets/${TAG}"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
