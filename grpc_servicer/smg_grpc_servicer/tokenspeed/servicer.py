@@ -366,12 +366,24 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         # and ``id2label_json`` / ``num_labels`` (not a classifier serving
         # path). The Rust client fills those slots back in when translating
         # to its SGLang-shaped wrapper.
+        # Upstream renamed ``ServerArgs.model_path`` → ``ServerArgs.model``
+        # and ``ServerArgs.tokenizer_path`` → ``ServerArgs.tokenizer``
+        # alongside the ``--model-path`` → ``--model`` flag rename. Old
+        # versions still set the ``_path`` form; new ones set the bare
+        # form. Pick whichever is populated so the servicer works against
+        # both.
+        model_path = getattr(self.server_args, "model", None) or getattr(
+            self.server_args, "model_path", ""
+        )
+        tokenizer_path = getattr(self.server_args, "tokenizer", None) or getattr(
+            self.server_args, "tokenizer_path", ""
+        )
         return tokenspeed_scheduler_pb2.GetModelInfoResponse(
-            model_path=self.server_args.model_path,
-            tokenizer_path=self.server_args.tokenizer_path or "",
+            model_path=model_path,
+            tokenizer_path=tokenizer_path or "",
             preferred_sampling_params=self.server_args.preferred_sampling_params or "",
             weight_version="",
-            served_model_name=(self.server_args.served_model_name or self.server_args.model_path),
+            served_model_name=(self.server_args.served_model_name or model_path),
             max_context_length=int(self.async_llm.context_len),
             vocab_size=int(model_config.vocab_size),
             model_type=(getattr(hf_config, "model_type", "") or "") if hf_config else "",
