@@ -15,6 +15,8 @@ import time
 from concurrent import futures
 
 import grpc
+import mlx.core as mx
+import mlx.nn as nn
 from grpc_health.v1 import health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 from huggingface_hub import snapshot_download
@@ -25,6 +27,49 @@ from smg_grpc_servicer.mlx.health_servicer import MlxHealthServicer
 from smg_grpc_servicer.mlx.servicer import MlxEngineServicer
 
 logger = logging.getLogger(__name__)
+
+
+def _eval_all_module_arrays(module: nn.Module) -> None:
+    """Force-eval every mx.array in the module tree, including private attrs.
+
+    mlx-lm's load_model() calls mx.eval(model.parameters()), but
+    nn.Module.parameters() silently skips underscore-prefixed attributes
+    (e.g. YarnRoPE._freqs, which is computed lazily from mx.arange() and
+    arithmetic operations at module-construction time).  Those unevaluated
+    arrays are scheduled on the main thread's default stream (Stream gpu, 1).
+
+    The generation loop runs inside ``with mx.stream(generation_stream):``
+    (Stream gpu, 0) on a background thread.  When its forward pass tries to
+    materialize KV-cache arrays that transitively depend on an unevaluated
+    _freqs, MLX cannot find Stream(gpu, 1) on that thread and raises::
+
+        RuntimeError: There is no Stream(gpu, 1) in current thread.
+
+    Calling this function right after load() materialises every lazy array
+    on the main thread before the generation thread starts.
+    """
+    arrays: list[mx.array] = []
+
+    def _collect_value(v: object) -> None:
+        if isinstance(v, mx.array):
+            arrays.append(v)
+        elif isinstance(v, nn.Module):
+            # m.items() (MLX's dict-like API) returns ALL module attributes,
+            # including underscore-prefixed ones like _freqs. vars()/.__dict__
+            # is NOT the right API — MLX stores module state internally, so
+            # vars(m) only returns ['_no_grad', '_training'].
+            for _, child in v.items():
+                _collect_value(child)
+        elif isinstance(v, dict):
+            for child in v.values():
+                _collect_value(child)
+        elif isinstance(v, list):
+            for child in v:
+                _collect_value(child)
+
+    _collect_value(module)
+    if arrays:
+        mx.eval(arrays)
 
 
 def parse_args():
@@ -46,6 +91,10 @@ def load_model(args):
     """Load model and tokenizer via mlx-lm."""
     logger.info("Loading model: %s", args.model)
     model, tokenizer = load(args.model, adapter_path=args.adapter_path)
+    # Force-eval non-parameter arrays missed by mlx-lm's mx.eval(model.parameters()).
+    # Needed for models with YaRN/other RoPE variants whose _freqs arrays are
+    # excluded from parameters() due to underscore prefix. See _eval_all_module_arrays.
+    _eval_all_module_arrays(model)
     logger.info("Model loaded successfully")
 
     model_dir = args.model
