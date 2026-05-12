@@ -19,6 +19,12 @@ on:
         description: "Dry run: build, patch versions, run twine check, but do NOT upload to PyPI"
         type: boolean
         default: false
+  # Self-validating: a PR that changes this workflow auto-runs in forced-dry-run
+  # mode (all three packages enabled, no PyPI upload). Lets us catch breakage
+  # before merge.
+  pull_request:
+    paths:
+      - .github/workflows/release-pypi-dev.yml
 
 permissions:
   contents: read
@@ -76,7 +82,7 @@ jobs:
   build-smg:
     name: Build smg dev wheel
     needs: prepare
-    if: ${{ inputs.release_smg }}
+    if: ${{ github.event_name == 'pull_request' || inputs.release_smg }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -144,7 +150,9 @@ jobs:
   upload-smg:
     name: Upload smg to PyPI
     needs: build-smg
-    if: ${{ inputs.release_smg && github.repository == 'lightseekorg/smg' }}
+    if: >-
+      (github.event_name == 'pull_request' || inputs.release_smg)
+      && github.repository == 'lightseekorg/smg'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -155,12 +163,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Dry-run notice
-        if: ${{ inputs.dry_run }}
+        if: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
         run: |
           echo "DRY RUN: skipping PyPI upload for smg"
           ls -lh dist/
       - name: Upload
-        if: ${{ !inputs.dry_run }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_ROUTER }}
@@ -172,7 +180,7 @@ jobs:
   build-proto:
     name: Build smg-grpc-proto dev
     needs: prepare
-    if: ${{ inputs.release_proto }}
+    if: ${{ github.event_name == 'pull_request' || inputs.release_proto }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -206,7 +214,9 @@ jobs:
   upload-proto:
     name: Upload smg-grpc-proto to PyPI
     needs: build-proto
-    if: ${{ inputs.release_proto && github.repository == 'lightseekorg/smg' }}
+    if: >-
+      (github.event_name == 'pull_request' || inputs.release_proto)
+      && github.repository == 'lightseekorg/smg'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -217,12 +227,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Dry-run notice
-        if: ${{ inputs.dry_run }}
+        if: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
         run: |
           echo "DRY RUN: skipping PyPI upload for smg-grpc-proto"
           ls -lh dist/
       - name: Upload
-        if: ${{ !inputs.dry_run }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
@@ -236,7 +246,7 @@ jobs:
   build-servicer:
     name: Build smg-grpc-servicer dev
     needs: prepare
-    if: ${{ inputs.release_servicer }}
+    if: ${{ github.event_name == 'pull_request' || inputs.release_servicer }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -269,7 +279,7 @@ jobs:
     # requested but failed, so we don't publish a half-finished set.
     if: >-
       always()
-      && inputs.release_servicer
+      && (github.event_name == 'pull_request' || inputs.release_servicer)
       && github.repository == 'lightseekorg/smg'
       && needs.build-servicer.result == 'success'
       && (needs.upload-proto.result == 'success' || needs.upload-proto.result == 'skipped')
@@ -283,12 +293,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Dry-run notice
-        if: ${{ inputs.dry_run }}
+        if: ${{ github.event_name == 'pull_request' || inputs.dry_run }}
         run: |
           echo "DRY RUN: skipping PyPI upload for smg-grpc-servicer"
           ls -lh dist/
       - name: Upload
-        if: ${{ !inputs.dry_run }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
@@ -314,7 +324,7 @@ jobs:
     steps:
       - run: |
           {
-            if [ "${{ inputs.dry_run }}" = "true" ]; then
+            if [ "${{ inputs.dry_run }}" = "true" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
               echo "## Dev release summary (DRY RUN — nothing uploaded to PyPI)"
             else
               echo "## Dev release summary"
@@ -326,7 +336,7 @@ jobs:
             echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.build-proto.result }} | ${{ needs.upload-proto.result }} |"
             echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.build-servicer.result }} | ${{ needs.upload-servicer.result }} |"
             echo ""
-            if [ "${{ inputs.dry_run }}" != "true" ]; then
+            if [ "${{ inputs.dry_run }}" != "true" ] && [ "${{ github.event_name }}" != "pull_request" ]; then
               echo "Install (allow pre-releases):"
               echo '```'
               echo "pip install --pre smg smg-grpc-servicer"
