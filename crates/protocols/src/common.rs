@@ -240,6 +240,11 @@ pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_usage: Option<bool>,
 
+    /// Chat Completions / Completions: emit a usage chunk with every streamed
+    /// delta instead of only in the final chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuous_usage_stats: Option<bool>,
+
     /// Responses API: add random chars on `obfuscation` field of delta events
     /// to normalize payload sizes. Defaults to `true` upstream when absent.
     #[serde(skip_serializing_if = "Option::is_none")]

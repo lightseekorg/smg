@@ -687,7 +687,7 @@ struct CliArgs {
     /// STUN server for ICE candidate gathering (host:port).
     /// Set to your own STUN server for enterprise deployments that
     /// restrict outbound traffic to external STUN servers.
-    /// Defaults to `stun.l.google.com:19302` at runtime when omitted.
+    /// Defaults to `stun.l.google.com:19302`. Set to "none" to disable.
     #[arg(long, help_heading = "WebRTC")]
     webrtc_stun_server: Option<String>,
 }

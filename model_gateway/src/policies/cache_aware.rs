@@ -55,7 +55,10 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::worker::{KvEventMonitor, Worker};
+use crate::{
+    mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
+    worker::{KvEventMonitor, Worker},
+};
 
 /// Cache-aware routing policy
 ///
@@ -727,6 +730,29 @@ pub trait TreeHandle: Send + Sync + std::fmt::Debug {
         node_hash: u64,
         worker_url: &str,
     ) -> bool;
+
+    /// Open a stream of `RepairEntry` for one `(model_id,
+    /// tree_kind)`, in the deterministic pre-order produced by
+    /// the underlying tree's `iter_entries`. Returns `None` if
+    /// no tree exists locally for that model. Paging is wire
+    /// shape and lives in the adapter, not on this trait — the
+    /// stream just yields entries one at a time.
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>>;
+
+    /// Apply every entry in `page` to the local `(model_id,
+    /// tree_kind)` tree, creating the tree if it doesn't yet
+    /// exist locally. Returns the number of entries successfully
+    /// applied (entries whose variant doesn't match `tree_kind`
+    /// are logged and skipped, not applied). Idempotent —
+    /// reapplying the same page is a no-op on the tree state
+    /// because the underlying radix tree's `insert_text` /
+    /// `insert_tokens` are themselves idempotent for the same
+    /// `(path, tenant)` pair.
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize;
 }
 
 impl TreeHandle for CacheAwarePolicy {
@@ -782,6 +808,99 @@ impl TreeHandle for CacheAwarePolicy {
                 true
             }
         }
+    }
+
+    fn open_repair_stream(
+        &self,
+        model_id: &str,
+        tree_kind: TreeKind,
+    ) -> Option<Box<dyn Iterator<Item = RepairEntry> + Send>> {
+        let model_id = normalize_model_key(model_id);
+        match tree_kind {
+            TreeKind::String => {
+                let tree = self.string_trees.get(model_id)?.value().clone();
+                Some(Box::new(tree.iter_entries().map(|(path, tenants)| {
+                    RepairEntry::String { path, tenants }
+                })))
+            }
+            TreeKind::Token => {
+                let tree = self.token_trees.get(model_id)?.value().clone();
+                Some(Box::new(tree.iter_entries().map(|(tokens, tenants)| {
+                    RepairEntry::Token { tokens, tenants }
+                })))
+            }
+        }
+    }
+
+    fn apply_repair_page(&self, page: &TreeRepairPage) -> usize {
+        let model_id = normalize_model_key(&page.model_id);
+        let mut applied: usize = 0;
+        match page.tree_kind {
+            TreeKind::String => {
+                // Create the tree on first repair page if it
+                // doesn't exist yet locally — repair is the
+                // primary cold-start path for a fresh peer.
+                let tree = self
+                    .string_trees
+                    .entry(model_id.to_string())
+                    .or_insert_with(|| Arc::new(Tree::new()))
+                    .clone();
+                for entry in &page.entries {
+                    match entry {
+                        RepairEntry::String { path, tenants } => {
+                            for (tenant, _epoch) in tenants {
+                                tree.insert_text(path, tenant);
+                            }
+                            self.hash_index
+                                .entry(model_id.to_string())
+                                .or_default()
+                                .string_tree
+                                .insert(smg_mesh::hash_node_path(path), path.clone());
+                            applied += 1;
+                        }
+                        RepairEntry::Token { .. } => {
+                            warn!(
+                                model_id,
+                                session_id = %page.session_id,
+                                page_index = page.page_index,
+                                "RepairEntry variant mismatch: page kind=String but entry kind=Token; skipping",
+                            );
+                        }
+                    }
+                }
+            }
+            TreeKind::Token => {
+                let tree = self
+                    .token_trees
+                    .entry(model_id.to_string())
+                    .or_insert_with(|| Arc::new(TokenTree::new()))
+                    .clone();
+                for entry in &page.entries {
+                    match entry {
+                        RepairEntry::Token { tokens, tenants } => {
+                            for (tenant, _epoch) in tenants {
+                                tree.insert_tokens(tokens, tenant);
+                            }
+                            self.hash_index
+                                .entry(model_id.to_string())
+                                .or_default()
+                                .token_tree
+                                .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
+                            applied += 1;
+                        }
+                        RepairEntry::String { .. } => {
+                            warn!(
+                                model_id,
+                                session_id = %page.session_id,
+                                page_index = page.page_index,
+                                "RepairEntry variant mismatch: page kind=Token but entry kind=String; skipping",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        applied
     }
 }
 
@@ -1510,6 +1629,57 @@ mod tests {
             "unknown_model",
             TreeKind::String,
             text_hash,
+            "http://w2",
+        ));
+    }
+
+    #[test]
+    fn test_apply_repair_page_seeds_hash_index() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let text = "repaired text";
+        let tokens = vec![1u32; 16];
+
+        let string_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::String,
+            page_index: 0,
+            entries: vec![RepairEntry::String {
+                path: text.to_string(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&string_page), 1);
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::String,
+            smg_mesh::hash_node_path(text),
+            "http://w2",
+        ));
+
+        let token_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::Token,
+            page_index: 0,
+            entries: vec![RepairEntry::Token {
+                tokens: tokens.clone(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&token_page), 1);
+        assert!(policy.apply_known_remote_insert(
+            "model1",
+            TreeKind::Token,
+            smg_mesh::hash_token_path(&tokens),
             "http://w2",
         ));
     }

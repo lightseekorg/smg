@@ -31,7 +31,7 @@ futures.workspace = true
 aho-corasick = "1.1"
 base64 = "0.22"
 rustc-hash = "1.1"
-hf-hub = { version = "0.5.0", features = ["tokio"] }
+hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 rayon = "1.10"

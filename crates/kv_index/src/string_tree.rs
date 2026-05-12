@@ -1101,6 +1101,126 @@ impl Tree {
         }
     }
 
+    /// Lazily walk the tree in pre-order, yielding each node's
+    /// `(prefix, [(tenant, epoch)])` pair without materializing
+    /// the full tree as a single buffer. Empty-tenant nodes are
+    /// skipped (they're routing intermediates, not real entries).
+    /// Children are visited in deterministic char-sorted order so
+    /// callers paging the iterator can resume by re-running and
+    /// skipping the first N items if the tree is unchanged.
+    ///
+    /// Like [`Tree::snapshot`], the walk is not atomic — concurrent
+    /// `insert_text` may split or replace nodes mid-walk; the
+    /// iterator may then reflect a mix of pre- and post-split
+    /// state. Acceptable for mesh sync (eventual consistency).
+    pub fn iter_entries(&self) -> EntriesIter {
+        EntriesIter::new(self)
+    }
+}
+
+/// Iterator yielded by [`Tree::iter_entries`]. Owns `Arc<Node>`
+/// clones for the path it's currently inside so it survives
+/// across awaits or any temporary release of `&Tree`.
+pub struct EntriesIter {
+    /// DFS frame stack. The top frame's `remaining_children` is
+    /// the queue of children we still have to visit at the
+    /// current depth. Frames are pushed when descending, popped
+    /// when their children exhaust.
+    stack: Vec<EntryFrame>,
+    /// Mutable accumulated path-from-root. Pushed when descending
+    /// into a child, truncated when popping a frame.
+    path: String,
+    /// Pre-staged emission. Set when a node with tenants is
+    /// entered; consumed by the next `next()` call before
+    /// continuing the walk.
+    pending: Option<(String, Vec<(TenantId, u64)>)>,
+}
+
+struct EntryFrame {
+    remaining_children: std::vec::IntoIter<NodeRef>,
+    /// Byte length of this frame's edge text — used to truncate
+    /// the path buffer in O(1) when popping. Each descent pushes
+    /// a complete `&str` of this length, so popping the same
+    /// byte count always lands on a UTF-8 char boundary.
+    edge_byte_len: usize,
+}
+
+impl EntriesIter {
+    fn new(tree: &Tree) -> Self {
+        let root_tenants = snapshot_tenants(&tree.root);
+        let pending = (!root_tenants.is_empty()).then(|| (String::new(), root_tenants));
+        Self {
+            stack: vec![EntryFrame {
+                remaining_children: collect_sorted_children(&tree.root).into_iter(),
+                edge_byte_len: 0,
+            }],
+            path: String::new(),
+            pending,
+        }
+    }
+}
+
+impl Iterator for EntriesIter {
+    type Item = (String, Vec<(TenantId, u64)>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.pending.take() {
+            return Some(entry);
+        }
+        loop {
+            let frame = self.stack.last_mut()?;
+            if let Some(child) = frame.remaining_children.next() {
+                // Push the edge directly through the lock guard —
+                // no intermediate clone — and capture its byte
+                // length so we can truncate atomically on pop.
+                let edge_byte_len = {
+                    let guard = child.text.read();
+                    let s = guard.as_str();
+                    self.path.push_str(s);
+                    s.len()
+                };
+
+                let tenants = snapshot_tenants(&child);
+                self.stack.push(EntryFrame {
+                    remaining_children: collect_sorted_children(&child).into_iter(),
+                    edge_byte_len,
+                });
+                if !tenants.is_empty() {
+                    return Some((self.path.clone(), tenants));
+                }
+                // Empty tenants → loop continues, descending into
+                // this child's children on the next iteration.
+            } else {
+                let edge_byte_len = frame.edge_byte_len;
+                self.stack.pop();
+                let new_len = self.path.len().saturating_sub(edge_byte_len);
+                self.path.truncate(new_len);
+            }
+        }
+    }
+}
+
+fn snapshot_tenants(node: &NodeRef) -> Vec<(TenantId, u64)> {
+    let mut tenants: Vec<(TenantId, u64)> = node
+        .tenant_last_access_time
+        .iter()
+        .map(|entry| (Arc::clone(entry.key()), *entry.value()))
+        .collect();
+    tenants.sort_by(|a, b| a.0.cmp(&b.0));
+    tenants
+}
+
+fn collect_sorted_children(node: &NodeRef) -> Vec<NodeRef> {
+    let mut children: Vec<(char, NodeRef)> = node
+        .children
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect();
+    children.sort_by_key(|(c, _)| *c);
+    children.into_iter().map(|(_, n)| n).collect()
+}
+
+impl Tree {
     /// Reconstruct a tree from a snapshot.
     ///
     /// The snapshot must be in pre-order (parent before children) with
@@ -2808,5 +2928,91 @@ mod tests {
         let r2 = tree1.match_prefix_with_counts("Hello there");
         assert_eq!(r2.matched_char_count, 11);
         assert_eq!(r2.tenant.as_ref(), "worker-2");
+    }
+
+    #[test]
+    fn test_iter_entries_empty_tree() {
+        let tree = Tree::new();
+        let entries: Vec<_> = tree.iter_entries().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_iter_entries_single_insert() {
+        let tree = Tree::new();
+        tree.insert_text("hello", "worker-1");
+        let entries: Vec<_> = tree
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t).collect::<Vec<_>>()))
+            .collect();
+        // Worker registration would also tag root with the tenant,
+        // but we only call insert_text. Root has no tenants here;
+        // the leaf "hello" carries `worker-1`.
+        let leaf = entries
+            .iter()
+            .find(|(p, _)| p == "hello")
+            .expect("leaf with tenants");
+        assert_eq!(leaf.1.len(), 1);
+        assert_eq!(leaf.1[0].as_ref(), "worker-1");
+    }
+
+    #[test]
+    fn test_iter_entries_pre_order_and_split_nodes() {
+        // Two inserts that share a prefix produce a split node.
+        // The radix tree registers tenants at root and copies the
+        // tenant map to intermediate split nodes, so every level
+        // along the shared path emits an entry. Pre-order means
+        // "" before "Hello " before its leaves; deterministic
+        // char order gives "Hello there" before "Hello world"
+        // (t < w).
+        let tree = Tree::new();
+        tree.insert_text("Hello world", "w1");
+        tree.insert_text("Hello there", "w2");
+
+        let paths: Vec<String> = tree.iter_entries().map(|(p, _)| p).collect();
+        assert_eq!(paths, vec!["", "Hello ", "Hello there", "Hello world"],);
+    }
+
+    #[test]
+    fn test_iter_entries_round_trips_via_snapshot() {
+        // The walker yields the same `(path, tenants)` set that
+        // building a tree from a snapshot would round-trip.
+        let tree = Tree::new();
+        tree.insert_text("alpha", "w1");
+        tree.insert_text("alpha-beta", "w2");
+        tree.insert_text("zulu", "w3");
+
+        let mut from_iter: Vec<(String, Vec<String>)> = tree
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t.to_string()).collect()))
+            .collect();
+        from_iter.sort();
+
+        let restored = Tree::from_snapshot(&tree.snapshot());
+        let mut from_restored: Vec<(String, Vec<String>)> = restored
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t.to_string()).collect()))
+            .collect();
+        from_restored.sort();
+
+        assert_eq!(from_iter, from_restored);
+    }
+
+    #[test]
+    fn test_iter_entries_preserves_utf8_paths() {
+        // Multi-byte chars must not produce torn paths when the
+        // walker pops a frame. Path is truncated by byte length
+        // — safe because each descent pushes a complete `&str`,
+        // so popping the same byte count always lands on a UTF-8
+        // char boundary (`String::truncate` would panic if not).
+        // Also exercises the split-node case where the shared
+        // "你好" prefix node emits with a clean multi-byte path.
+        let tree = Tree::new();
+        tree.insert_text("你好世界", "w1");
+        tree.insert_text("你好朋友", "w2");
+
+        let mut paths: Vec<String> = tree.iter_entries().map(|(p, _)| p).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["", "你好", "你好世界", "你好朋友"]);
     }
 }

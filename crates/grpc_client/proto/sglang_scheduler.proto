@@ -438,6 +438,10 @@ message GetModelInfoResponse {
   string id2label_json = 16;
   // Number of classification labels (0 if not a classifier)
   int32 num_labels = 17;
+
+  // Resolved sampling defaults from --sampling-defaults + --preferred-sampling-params.
+  // JSON dict, e.g. '{"temperature": 0.6, "top_p": 0.9}'. Empty = no overrides.
+  string default_sampling_params_json = 20;
 }
 
 // Get server information
