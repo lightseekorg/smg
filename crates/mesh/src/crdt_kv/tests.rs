@@ -416,10 +416,10 @@ fn test_operation_log_snapshot_uses_merge_strategy() {
 #[test]
 fn test_operation_log_epoch_max_wins_tombstone_selection_is_order_independent() {
     let key = "rl:global:node-a";
-    let stale_newer_timestamp = Operation::insert(
+    let stale_lower_epoch = Operation::insert(
         key.to_string(),
         encode(5, 100).to_vec(),
-        100,
+        80,
         ReplicaId::new(),
     );
     let epoch_winner_older_timestamp =
@@ -427,34 +427,34 @@ fn test_operation_log_epoch_max_wins_tombstone_selection_is_order_independent() 
     let tombstone_after_epoch_winner = Operation::remove(key.to_string(), 95, ReplicaId::new());
     let orders = [
         [
-            stale_newer_timestamp.clone(),
+            stale_lower_epoch.clone(),
             epoch_winner_older_timestamp.clone(),
             tombstone_after_epoch_winner.clone(),
         ],
         [
-            stale_newer_timestamp.clone(),
+            stale_lower_epoch.clone(),
             tombstone_after_epoch_winner.clone(),
             epoch_winner_older_timestamp.clone(),
         ],
         [
             epoch_winner_older_timestamp.clone(),
-            stale_newer_timestamp.clone(),
+            stale_lower_epoch.clone(),
             tombstone_after_epoch_winner.clone(),
         ],
         [
             epoch_winner_older_timestamp.clone(),
             tombstone_after_epoch_winner.clone(),
-            stale_newer_timestamp.clone(),
+            stale_lower_epoch.clone(),
         ],
         [
             tombstone_after_epoch_winner.clone(),
-            stale_newer_timestamp.clone(),
+            stale_lower_epoch.clone(),
             epoch_winner_older_timestamp.clone(),
         ],
         [
             tombstone_after_epoch_winner.clone(),
             epoch_winner_older_timestamp.clone(),
-            stale_newer_timestamp.clone(),
+            stale_lower_epoch.clone(),
         ],
     ];
 
@@ -476,6 +476,76 @@ fn test_operation_log_epoch_max_wins_tombstone_selection_is_order_independent() 
             panic!("tombstone should win consistently for order {snapshot:?}");
         };
         assert_eq!(*timestamp, 95);
+    }
+}
+
+#[test]
+fn test_operation_log_epoch_max_wins_post_tombstone_insert_revives_key() {
+    let key = "rl:global:node-a";
+    let pre_tombstone_higher_epoch =
+        Operation::insert(key.to_string(), encode(7, 0).to_vec(), 90, ReplicaId::new());
+    let tombstone = Operation::remove(key.to_string(), 95, ReplicaId::new());
+    let post_tombstone_lower_epoch = Operation::insert(
+        key.to_string(),
+        encode(6, 0).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let orders = [
+        [
+            pre_tombstone_higher_epoch.clone(),
+            tombstone.clone(),
+            post_tombstone_lower_epoch.clone(),
+        ],
+        [
+            pre_tombstone_higher_epoch.clone(),
+            post_tombstone_lower_epoch.clone(),
+            tombstone.clone(),
+        ],
+        [
+            tombstone.clone(),
+            pre_tombstone_higher_epoch.clone(),
+            post_tombstone_lower_epoch.clone(),
+        ],
+        [
+            tombstone.clone(),
+            post_tombstone_lower_epoch.clone(),
+            pre_tombstone_higher_epoch.clone(),
+        ],
+        [
+            post_tombstone_lower_epoch.clone(),
+            pre_tombstone_higher_epoch.clone(),
+            tombstone.clone(),
+        ],
+        [
+            post_tombstone_lower_epoch.clone(),
+            tombstone.clone(),
+            pre_tombstone_higher_epoch.clone(),
+        ],
+    ];
+
+    for order in orders {
+        let mut log = OperationLog::new();
+        for operation in order {
+            log.append(operation);
+        }
+
+        let snapshot = log.snapshot_and_truncate(|key| {
+            if key.starts_with("rl:") {
+                MergeStrategy::EpochMaxWins
+            } else {
+                MergeStrategy::LastWriterWins
+            }
+        });
+
+        let Some(Operation::Insert {
+            value, timestamp, ..
+        }) = snapshot.get(key)
+        else {
+            panic!("post-tombstone insert should revive key for order {snapshot:?}");
+        };
+        assert_eq!(*timestamp, 100);
+        assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
     }
 }
 
