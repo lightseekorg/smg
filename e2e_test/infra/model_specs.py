@@ -72,6 +72,15 @@ MODEL_SPECS: dict[str, dict] = {
         "features": ["chat", "streaming", "function_calling", "tool_choice"],
     },
     # Thinking/reasoning model (larger)
+    # Dense Qwen3.5 with the ``enable_thinking`` chat-template toggle. Used
+    # by ``TestEnableThinking``. ``Qwen3_5ForConditionalGeneration``
+    # architecture, supported by tokenspeed's current registry where the
+    # older ``Qwen3-30B-A3B`` (``Qwen3MoeForCausalLM``) is not.
+    "Qwen/Qwen3.5-27B": {
+        "model": _resolve_model_path("Qwen/Qwen3.5-27B"),
+        "tp": 1,
+        "features": ["chat", "streaming", "thinking", "reasoning"],
+    },
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
         "tp": 1,
@@ -246,7 +255,7 @@ FUNCTION_CALLING_MODELS = get_models_with_feature("function_calling")
 DEFAULT_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.1-8B-Instruct"]["model"]
 DEFAULT_SMALL_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.2-1B-Instruct"]["model"]
 DEFAULT_REASONING_MODEL_PATH = MODEL_SPECS["deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"]["model"]
-DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3-30B-A3B"]["model"]
+DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3.5-27B"]["model"]
 DEFAULT_QWEN_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen2.5-7B-Instruct"]["model"]
 DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistralai/Mistral-7B-Instruct-v0.3"][
     "model"
