@@ -129,6 +129,15 @@ jobs:
              rm protoc-32.0-linux-x86_64.zip)
             protoc --version
 
+      # The manylinux wheel build above runs inside a Docker container as
+      # root, so files in dist/ end up root-owned. The next step runs on
+      # the host as the runner user and cannot write into that directory.
+      # Fix ownership so the sdist build can land its tarball alongside.
+      - name: Reclaim dist ownership from manylinux container
+        run: |
+          sudo chown -R "$(whoami):$(whoami)" smg-repo/bindings/python/dist
+          ls -la smg-repo/bindings/python/dist
+
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
