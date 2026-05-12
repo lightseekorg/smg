@@ -281,7 +281,9 @@ class Worker:
             "python3",
             "-m",
             "smg_grpc_servicer.tokenspeed",
-            "--model-path",
+            # Upstream renamed ``--model-path`` to ``--model`` (with the old
+            # name kept only as a positional alias). Use the new flag form.
+            "--model",
             model_path,
             "--host",
             DEFAULT_HOST,
