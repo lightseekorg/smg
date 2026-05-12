@@ -366,6 +366,45 @@ All: {{ data|tojson(ensure_ascii=False, sort_keys=True, indent=2, separators=(',
 }
 
 #[test]
+fn test_tojson_invalid_kwargs_rejected() {
+    fn render_invalid_template(template: &str) -> String {
+        let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
+        let messages: Vec<serde_json::Value> = vec![];
+        let mut template_kwargs = std::collections::HashMap::new();
+        template_kwargs.insert("data".to_string(), serde_json::json!({"k": 1}));
+
+        processor
+            .apply_chat_template(
+                &messages,
+                ChatTemplateParams {
+                    template_kwargs: Some(&template_kwargs),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string()
+    }
+
+    let err = render_invalid_template(r"{{ data|tojson(separators=',') }}");
+    assert!(
+        err.contains("separators must be a two-item sequence"),
+        "unexpected separators error: {err}"
+    );
+
+    let err = render_invalid_template(r"{{ data|tojson(indent=-1) }}");
+    assert!(
+        err.contains("indent cannot be negative"),
+        "unexpected indent error: {err}"
+    );
+
+    let err = render_invalid_template(r"{{ data|tojson(ensure_ascii='yes') }}");
+    assert!(
+        err.contains("ensure_ascii") || err.contains("bool"),
+        "unexpected ensure_ascii error: {err}"
+    );
+}
+
+#[test]
 fn test_content_format_detection() {
     let string_template = r"
 {%- for message in messages -%}
