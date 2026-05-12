@@ -2,7 +2,7 @@
 
 Usage::
 
-    python -m smg_grpc_servicer.tokenspeed --model-path <model> --host 127.0.0.1 --port 50051
+    python -m smg_grpc_servicer.tokenspeed --model <model> --host 127.0.0.1 --port 50051
 
 All :class:`tokenspeed.runtime.utils.server_args.ServerArgs` flags are accepted
 verbatim (we reuse TokenSpeed's own ``prepare_server_args`` so there is no
