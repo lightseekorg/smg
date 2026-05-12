@@ -24,7 +24,7 @@ API_KEY = "not-used"
 
 @pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
-@pytest.mark.model("Qwen/Qwen3.5-27B")
+@pytest.mark.model("Qwen/Qwen3-4B")
 @pytest.mark.gateway(extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
