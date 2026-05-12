@@ -96,6 +96,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn bedrock_mode(mut self, worker_urls: Vec<String>) -> Self {
+        self.config.mode = RoutingMode::Bedrock { worker_urls };
+        self
+    }
+
     pub fn mode(mut self, mode: RoutingMode) -> Self {
         self.config.mode = mode;
         self

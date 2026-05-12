@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::{
     anthropic::AnthropicRouter,
+    bedrock::BedrockRouter,
     gemini::GeminiRouter,
     grpc::{pd_router::GrpcPDRouter, router::GrpcRouter},
     http::{pd_router::PDRouter, router::Router},
@@ -39,6 +40,7 @@ pub mod router_ids {
     pub const HTTP_OPENAI: RouterId = RouterId::new("http-openai");
     pub const HTTP_ANTHROPIC: RouterId = RouterId::new("http-anthropic");
     pub const HTTP_GEMINI: RouterId = RouterId::new("http-gemini");
+    pub const HTTP_BEDROCK: RouterId = RouterId::new("http-bedrock");
     pub const GRPC_REGULAR: RouterId = RouterId::new("grpc-regular");
     pub const GRPC_PD: RouterId = RouterId::new("grpc-pd");
 }
@@ -71,6 +73,9 @@ impl RouterFactory {
                 RoutingMode::Gemini { .. } => {
                     Err("Gemini mode requires HTTP connection_mode".to_string())
                 }
+                RoutingMode::Bedrock { .. } => {
+                    Err("Bedrock mode requires HTTP connection_mode".to_string())
+                }
             },
             ConnectionMode::Http => match &ctx.router_config.mode {
                 RoutingMode::Regular { .. } => Self::create_regular_router(ctx).await,
@@ -90,6 +95,7 @@ impl RouterFactory {
                 RoutingMode::OpenAI { .. } => Self::create_openai_router(ctx).await,
                 RoutingMode::Anthropic { .. } => Self::create_anthropic_router(ctx).await,
                 RoutingMode::Gemini { .. } => Self::create_gemini_router(ctx).await,
+                RoutingMode::Bedrock { .. } => Self::create_bedrock_router(ctx).await,
             },
         }
     }
@@ -201,6 +207,18 @@ impl RouterFactory {
         Ok(Box::new(router))
     }
 
+    /// Create a Bedrock router
+    #[expect(
+        clippy::unused_async,
+        reason = "async for API consistency with other create_* factory methods"
+    )]
+    pub async fn create_bedrock_router(
+        ctx: &Arc<AppContext>,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        let router = BedrockRouter::new(ctx.clone());
+        Ok(Box::new(router))
+    }
+
     /// Create all routers for IGW (multi-router) mode.
     ///
     /// Returns a list of (router_id, label, creation_result) tuples.
@@ -244,6 +262,11 @@ impl RouterFactory {
                 router_ids::HTTP_GEMINI,
                 "Gemini",
                 Self::create_gemini_router(ctx).await,
+            ),
+            (
+                router_ids::HTTP_BEDROCK,
+                "Bedrock",
+                Self::create_bedrock_router(ctx).await,
             ),
         ]
     }

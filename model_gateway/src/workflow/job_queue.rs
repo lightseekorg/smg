@@ -507,7 +507,8 @@ impl JobQueue {
                     }
                     RoutingMode::OpenAI { worker_urls }
                     | RoutingMode::Anthropic { worker_urls }
-                    | RoutingMode::Gemini { worker_urls } => {
+                    | RoutingMode::Gemini { worker_urls }
+                    | RoutingMode::Bedrock { worker_urls } => {
                         let provider_name = router_config.mode_type();
                         return submit_external_worker_jobs(
                             worker_urls,
