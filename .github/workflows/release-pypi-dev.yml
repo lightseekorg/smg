@@ -1,8 +1,9 @@
-name: Release SMG dev wheels (GitHub Releases)
+name: Release SMG dev wheels (whl index)
 
 # Builds dev wheels for smg, smg-grpc-proto, and smg-grpc-servicer and
-# publishes them as a single GitHub Release per workflow run. Avoids the
-# 10 GB PyPI project quota and lets us delete old dev releases freely.
+# publishes them to lightseekorg/whl releases + simple package indexes.
+# Requires a TOKENSPEED_GITHUB_TOKEN secret with write access to lightseekorg/whl.
+# Avoids the 10 GB PyPI project quota and lets us delete old dev releases freely.
 # Prod releases continue to go to PyPI via release-pypi.yml / release-grpc.yml.
 
 on:
@@ -241,11 +242,11 @@ jobs:
           name: servicer-dev-dist
           path: grpc_servicer/dist/
 
-  # ── Create the GitHub Release with all built dev wheels attached ──
+  # ── Publish dev wheels to lightseekorg/whl and update simple indexes ──
   # Only fires for workflow_dispatch — pull_request runs validate the build
-  # but never create a release.
+  # but never publish artifacts or update indexes.
   release:
-    name: Create GitHub Release
+    name: Publish to whl index
     needs: [prepare, build-smg, build-proto, build-servicer]
     # Conditions:
     #   - Only on workflow_dispatch (no releases on pull_request runs).
@@ -266,8 +267,6 @@ jobs:
         || needs.build-servicer.result == 'success'
       )
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download all dev artifacts
         uses: actions/download-artifact@v8
@@ -279,32 +278,134 @@ jobs:
       - name: List collected assets
         run: ls -lh dist/
 
-      - name: Create dev release
-        uses: softprops/action-gh-release@v2
+      - name: Check out smg repo
+        uses: actions/checkout@v6
         with:
-          tag_name: ${{ needs.prepare.outputs.release_tag }}
-          name: "smg dev ${{ github.run_number }}"
-          prerelease: true
-          make_latest: "false"
-          target_commitish: ${{ github.sha }}
-          fail_on_unmatched_files: true
-          body: |
-            Auto-generated dev release from workflow run ${{ github.run_number }}.
+          path: smg-repo
 
-            **Versions**
-            - `smg==${{ needs.prepare.outputs.smg_version }}` — build: `${{ needs.build-smg.result }}`
-            - `smg-grpc-proto==${{ needs.prepare.outputs.proto_version }}` — build: `${{ needs.build-proto.result }}`
-            - `smg-grpc-servicer==${{ needs.prepare.outputs.servicer_version }}` — build: `${{ needs.build-servicer.result }}`
+      - name: Check out whl index repo
+        uses: actions/checkout@v6
+        with:
+          repository: lightseekorg/whl
+          ref: gh-pages
+          path: whl-repo
+          token: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
 
-            **Install**
+      - name: Create whl release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          WHL_REPO: lightseekorg/whl
+          SMG_VERSION: ${{ needs.prepare.outputs.smg_version }}
+          PROTO_VERSION: ${{ needs.prepare.outputs.proto_version }}
+          SERVICER_VERSION: ${{ needs.prepare.outputs.servicer_version }}
+        run: |
+          set -euo pipefail
 
-            ```bash
-            pip install smg smg-grpc-servicer smg-grpc-proto \
-              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${{ needs.prepare.outputs.release_tag }}
-            ```
+          notes_file="$(mktemp)"
+          cat > "${notes_file}" <<EOF
+          Auto-generated dev release from lightseekorg/smg workflow run ${{ github.run_number }}.
 
-            Source commit: `${{ github.sha }}`
-          files: dist/*
+          **Versions**
+          - \`smg==${SMG_VERSION}\` — build: \`${{ needs.build-smg.result }}\`
+          - \`smg-grpc-proto==${PROTO_VERSION}\` — build: \`${{ needs.build-proto.result }}\`
+          - \`smg-grpc-servicer==${SERVICER_VERSION}\` — build: \`${{ needs.build-servicer.result }}\`
+
+          **Install**
+
+          \`\`\`bash
+          pip install smg smg-grpc-servicer smg-grpc-proto \\
+            --extra-index-url https://lightseek.org/whl/cu129/
+          \`\`\`
+
+          Source commit: \`${{ github.sha }}\`
+          EOF
+
+          if gh release view "${RELEASE_TAG}" --repo "${WHL_REPO}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${WHL_REPO}" \
+              --title "smg dev ${{ github.run_number }}" \
+              --prerelease \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${RELEASE_TAG}" \
+              --repo "${WHL_REPO}" \
+              --title "smg dev ${{ github.run_number }}" \
+              --prerelease \
+              --notes-file "${notes_file}"
+          fi
+
+          gh release upload "${RELEASE_TAG}" dist/* --repo "${WHL_REPO}" --clobber
+
+      - name: Update whl package indexes
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          cd whl-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          rm -rf wheelhouse
+          mkdir -p wheelhouse/smg wheelhouse/smg-grpc-proto wheelhouse/smg-grpc-servicer
+          cp ../dist/smg-*.whl wheelhouse/smg/ 2>/dev/null || true
+          cp ../dist/smg_grpc_proto-*.whl wheelhouse/smg-grpc-proto/ 2>/dev/null || true
+          cp ../dist/smg_grpc_servicer-*.whl wheelhouse/smg-grpc-servicer/ 2>/dev/null || true
+
+          # Make workflow re-runs idempotent for the same release tag. The
+          # shared update_whl_index.py script appends wheel links by design.
+          for index_file in \
+            cu129/smg/index.html \
+            cu129/smg-grpc-proto/index.html \
+            cu129/smg-grpc-servicer/index.html \
+            cu130/smg/index.html \
+            cu130/smg-grpc-proto/index.html \
+            cu130/smg-grpc-servicer/index.html \
+            rocm7.2/smg/index.html \
+            rocm7.2/smg-grpc-proto/index.html \
+            rocm7.2/smg-grpc-servicer/index.html; do
+            [ -f "${index_file}" ] && sed -i "\#/${RELEASE_TAG}/#d" "${index_file}"
+          done
+
+          for cuda in 129 130; do
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package smg \
+              --cuda "${cuda}" \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir wheelhouse/smg \
+              --whl-repo-dir .
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package smg-grpc-proto \
+              --cuda "${cuda}" \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir wheelhouse/smg-grpc-proto \
+              --whl-repo-dir .
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package smg-grpc-servicer \
+              --cuda "${cuda}" \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir wheelhouse/smg-grpc-servicer \
+              --whl-repo-dir .
+          done
+
+          for package in smg smg-grpc-proto smg-grpc-servicer; do
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package "${package}" \
+              --rocm 7.2 \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir "wheelhouse/${package}" \
+              --whl-repo-dir .
+          done
+
+          rm -rf wheelhouse
+          git add cu129 cu130 rocm7.2
+          if git diff --cached --quiet; then
+            echo "No whl index changes to commit."
+          else
+            git commit -s -m "Add smg dev ${{ github.run_number }} wheels"
+            git push origin gh-pages
+          fi
 
   # ── Final summary in the run UI ──
   summary:
@@ -337,12 +438,12 @@ jobs:
               REPO="${{ github.repository }}"
               echo "### Release"
               echo ""
-              echo "https://github.com/${REPO}/releases/tag/${TAG}"
+              echo "https://github.com/lightseekorg/whl/releases/tag/${TAG}"
               echo ""
               echo "### Install"
               echo '```bash'
               echo "pip install smg smg-grpc-servicer smg-grpc-proto \\"
-              echo "  --find-links https://github.com/${REPO}/releases/expanded_assets/${TAG}"
+              echo "  --extra-index-url https://lightseek.org/whl/cu129/"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
