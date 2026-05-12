@@ -314,7 +314,13 @@ pub(super) fn compact_operations<'a>(
                 timestamp,
                 replica_id,
                 ..
-            } => state_from_insert_value(value, RateLimitVersion::new(*timestamp, *replica_id))?,
+            } => {
+                match state_from_insert_value(value, RateLimitVersion::new(*timestamp, *replica_id))
+                {
+                    Some(state) => state,
+                    None => continue,
+                }
+            }
             Operation::Remove {
                 timestamp,
                 replica_id,
@@ -556,5 +562,33 @@ mod tests {
                 count: 100
             })
         );
+    }
+
+    #[test]
+    fn compact_operations_skips_malformed_inserts() {
+        let key = "rl:global:node-a".to_string();
+        let malformed = Operation::insert(key.clone(), vec![1, 2, 3], 100, ReplicaId::new());
+        let valid = Operation::insert(key.clone(), encode(5, 42).to_vec(), 10, ReplicaId::new());
+        let compacted =
+            compact_operations([malformed.clone(), valid].iter()).expect("valid insert survives");
+
+        let Operation::Insert { value, .. } = compacted else {
+            panic!("valid insert should remain after skipping malformed insert");
+        };
+        assert_eq!(
+            decode(&value),
+            Some(EpochCount {
+                epoch: 5,
+                count: 42
+            })
+        );
+
+        let tombstone = Operation::remove(key.clone(), 110, ReplicaId::new());
+        let compacted =
+            compact_operations([malformed, tombstone].iter()).expect("tombstone survives");
+        let Operation::Remove { timestamp, .. } = compacted else {
+            panic!("tombstone should remain after skipping malformed insert");
+        };
+        assert_eq!(timestamp, 110);
     }
 }
