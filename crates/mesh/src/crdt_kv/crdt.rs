@@ -516,7 +516,7 @@ impl CrdtOrMap {
             || value.to_vec(),
             |local| epoch_max_wins::merge(local, value),
         );
-        let candidate_wins_value = current.as_deref() != Some(merged.as_slice()) || merged == value;
+        let value_changed = current.as_deref() != Some(merged.as_slice());
 
         match self.metadata.entry(key.to_string()) {
             MapEntry::Occupied(mut entry) => {
@@ -538,9 +538,17 @@ impl CrdtOrMap {
                     return None;
                 }
 
-                if current.is_some() && !candidate_wins_value {
+                if current.is_some() && !value_changed {
+                    if versions
+                        .iter()
+                        .any(|v| v.is_newer_than(timestamp, replica_id))
+                    {
+                        Self::compact_key_metadata(versions);
+                        return None;
+                    }
+                    versions.push(new_metadata);
                     Self::compact_key_metadata(versions);
-                    return None;
+                    return Some(merged);
                 }
 
                 versions.clear();
@@ -611,5 +619,47 @@ impl CrdtOrMap {
 impl Default for CrdtOrMap {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epoch_equal_value_insert_does_not_rewind_metadata() {
+        let replica = CrdtOrMap::new();
+        replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+        let key = "rl:global:node-a";
+        let newer_insert_replica = ReplicaId::new();
+        let older_insert_replica = ReplicaId::new();
+        let tombstone_replica = ReplicaId::new();
+
+        assert!(replica.apply_insert_locked(
+            key,
+            Operation::insert(
+                key.to_string(),
+                epoch_max_wins::encode(6, 0).to_vec(),
+                100,
+                newer_insert_replica
+            ),
+        ));
+        assert!(!replica.apply_insert_locked(
+            key,
+            Operation::insert(
+                key.to_string(),
+                epoch_max_wins::encode(6, 0).to_vec(),
+                10,
+                older_insert_replica
+            ),
+        ));
+
+        assert_eq!(replica.apply_remove(key, 50, tombstone_replica), None);
+        assert_eq!(
+            replica.get(key),
+            Some(epoch_max_wins::encode(6, 0).to_vec()),
+            "older equal-value insert must not let an intermediate tombstone delete the newer live value",
+        );
     }
 }
