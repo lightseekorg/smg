@@ -17,6 +17,10 @@ impl ReplicaId {
         Self(Uuid::now_v7())
     }
 
+    pub(super) fn nil() -> Self {
+        Self(Uuid::nil())
+    }
+
     /// Parse replica ID from string
     pub fn from_string(s: &str) -> Result<Self, uuid::Error> {
         Ok(Self(Uuid::parse_str(s)?))

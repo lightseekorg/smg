@@ -58,6 +58,10 @@ impl ValueMetadata {
         }
     }
 
+    fn from_live_version(version: epoch_max_wins::Version) -> Self {
+        Self::new(version.timestamp, version.replica_id)
+    }
+
     fn tombstone(timestamp: u64, replica_id: ReplicaId) -> Self {
         Self {
             timestamp,
@@ -69,6 +73,10 @@ impl ValueMetadata {
 
     fn version_key(&self) -> (u64, ReplicaId) {
         (self.timestamp, self.replica_id)
+    }
+
+    fn version(&self) -> epoch_max_wins::Version {
+        epoch_max_wins::Version::new(self.timestamp, self.replica_id)
     }
 
     fn matches_version(&self, timestamp: u64, replica_id: ReplicaId) -> bool {
@@ -487,22 +495,21 @@ impl CrdtOrMap {
                 .collect()
         };
 
-        let unseen_operations: Vec<Operation> = {
+        let mut unseen_operations: Vec<Operation> = log
+            .operations()
+            .iter()
+            .filter(|operation| {
+                !seen_operations.contains(&(operation.replica_id(), operation.timestamp()))
+            })
+            .cloned()
+            .collect();
+        unseen_operations.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
+
+        {
             let mut local_log = self.operation_log.write();
             local_log.merge(log);
             self.compact_operation_log(&mut local_log);
-
-            let mut unseen: Vec<Operation> = local_log
-                .operations()
-                .iter()
-                .filter(|operation| {
-                    !seen_operations.contains(&(operation.replica_id(), operation.timestamp()))
-                })
-                .cloned()
-                .collect();
-            unseen.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
-            unseen
-        };
+        }
 
         // Apply only new operations in deterministic order.
         for operation in &unseen_operations {
@@ -577,6 +584,14 @@ impl CrdtOrMap {
         }
     }
 
+    fn newest_tombstone_version(versions: &[ValueMetadata]) -> Option<epoch_max_wins::Version> {
+        versions
+            .iter()
+            .filter(|version| version.is_tombstone)
+            .max_by_key(|version| version.version_key())
+            .map(ValueMetadata::version)
+    }
+
     fn record_insert_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
         let new_metadata = ValueMetadata::new(timestamp, replica_id);
 
@@ -618,13 +633,8 @@ impl CrdtOrMap {
         timestamp: u64,
         replica_id: ReplicaId,
     ) -> Option<Vec<u8>> {
-        let new_metadata = ValueMetadata::new(timestamp, replica_id);
+        let incoming_version = epoch_max_wins::Version::new(timestamp, replica_id);
         let current = self.store.get(key);
-        let merged = current.as_deref().map_or_else(
-            || value.to_vec(),
-            |local| epoch_max_wins::merge(local, value),
-        );
-        let value_changed = current.as_deref() != Some(merged.as_slice());
 
         match self.metadata.entry(key.to_string()) {
             MapEntry::Occupied(mut entry) => {
@@ -638,34 +648,29 @@ impl CrdtOrMap {
                     return None;
                 }
 
-                let has_newer_tombstone = versions
-                    .iter()
-                    .any(|v| v.is_tombstone && v.is_newer_than(timestamp, replica_id));
-                if has_newer_tombstone {
+                let current_tombstone = Self::newest_tombstone_version(versions);
+                let Some(merged) = epoch_max_wins::merge_live_value(
+                    current.as_deref(),
+                    current_tombstone,
+                    value,
+                    incoming_version,
+                ) else {
+                    Self::compact_key_metadata(versions);
+                    return None;
+                };
+
+                if !merged.changed {
                     Self::compact_key_metadata(versions);
                     return None;
                 }
-
-                if current.is_some() && !value_changed {
-                    if versions
-                        .iter()
-                        .any(|v| v.is_newer_than(timestamp, replica_id))
-                    {
-                        Self::compact_key_metadata(versions);
-                        return None;
-                    }
-                    versions.push(new_metadata);
-                    Self::compact_key_metadata(versions);
-                    return Some(merged);
-                }
-
                 versions.clear();
-                versions.push(new_metadata);
-                Some(merged)
+                versions.push(ValueMetadata::from_live_version(merged.live_version));
+                Some(merged.value)
             }
             MapEntry::Vacant(entry) => {
-                entry.insert(vec![new_metadata]);
-                Some(merged)
+                let merged = epoch_max_wins::merge_live_value(None, None, value, incoming_version)?;
+                entry.insert(vec![ValueMetadata::from_live_version(merged.live_version)]);
+                Some(merged.value)
             }
         }
     }
@@ -765,8 +770,8 @@ mod tests {
 
         assert_eq!(replica.apply_remove(key, 50, tombstone_replica), None);
         assert_eq!(
-            replica.get(key),
-            Some(epoch_max_wins::encode(6, 0).to_vec()),
+            replica.get(key).and_then(|value| epoch_max_wins::decode(&value)),
+            Some(epoch_max_wins::EpochCount { epoch: 6, count: 0 }),
             "older equal-value insert must not let an intermediate tombstone delete the newer live value",
         );
     }

@@ -166,33 +166,6 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
-    fn lww_candidate_wins(current: &Operation, candidate: &Operation) -> bool {
-        (candidate.timestamp(), candidate.replica_id())
-            > (current.timestamp(), current.replica_id())
-    }
-
-    fn epoch_insert_candidate_wins(current: &Operation, candidate: &Operation) -> bool {
-        let (
-            Operation::Insert {
-                value: current_value,
-                ..
-            },
-            Operation::Insert {
-                value: candidate_value,
-                ..
-            },
-        ) = (current, candidate)
-        else {
-            return Self::lww_candidate_wins(current, candidate);
-        };
-
-        match epoch_max_wins::winner(current_value, candidate_value) {
-            epoch_max_wins::ValueWinner::Remote => true,
-            epoch_max_wins::ValueWinner::Local => false,
-            epoch_max_wins::ValueWinner::Equal => Self::lww_candidate_wins(current, candidate),
-        }
-    }
-
     fn latest_lww_operation<'a, I>(operations: I) -> Option<&'a Operation>
     where
         I: IntoIterator<Item = &'a Operation>,
@@ -204,31 +177,8 @@ impl OperationLog {
 
     fn latest_epoch_max_wins_operation<'a>(
         operations: impl IntoIterator<Item = &'a Operation>,
-    ) -> Option<&'a Operation> {
-        let operations = operations.into_iter().collect::<Vec<_>>();
-        let mut best_insert: Option<&'a Operation> = None;
-        let newest_remove = Self::latest_lww_operation(
-            operations
-                .iter()
-                .copied()
-                .filter(|operation| matches!(operation, Operation::Remove { .. })),
-        );
-
-        for operation in operations
-            .into_iter()
-            .filter(|operation| matches!(operation, Operation::Insert { .. }))
-            .filter(|operation| {
-                newest_remove.is_none_or(|remove| Self::lww_candidate_wins(remove, operation))
-            })
-        {
-            if best_insert
-                .is_none_or(|current| Self::epoch_insert_candidate_wins(current, operation))
-            {
-                best_insert = Some(operation);
-            }
-        }
-
-        best_insert.or(newest_remove)
+    ) -> Option<Operation> {
+        epoch_max_wins::compact_operations(operations)
     }
 
     fn latest_operations_by_key_with_strategy<F>(
@@ -251,12 +201,14 @@ impl OperationLog {
             .into_iter()
             .filter_map(|(key, operations)| {
                 let latest = match strategy_for_key(&key) {
-                    MergeStrategy::LastWriterWins => Self::latest_lww_operation(operations),
+                    MergeStrategy::LastWriterWins => {
+                        Self::latest_lww_operation(operations).cloned()
+                    }
                     MergeStrategy::EpochMaxWins => {
                         Self::latest_epoch_max_wins_operation(operations)
                     }
                 }?;
-                Some((key, (*latest).clone()))
+                Some((key, latest))
             })
             .collect()
     }
