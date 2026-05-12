@@ -46,11 +46,6 @@ jobs:
     timeout-minutes: ${{ inputs.timeout }}
     permissions:
       contents: read
-    # TokenSpeed lane runs inside the official build-environment image so
-    # the install script doesn't have to apt-install the CUDA toolkit or
-    # the build deps. The expression evaluates to `null` for other engines,
-    # which means "no container" (bare host, as before).
-    container: ${{ inputs.engine == 'tokenspeed' && fromJSON('{"image":"lightseekorg/tokenspeed-runner:cu130-torch-2.11.0","options":"--gpus all --shm-size 32g --ipc=host --volume /models:/models --volume /tmp/tokenspeed-wheel-cache:/tmp/tokenspeed-wheel-cache"}') || null }}
     env:
       E2E_ENGINE: ${{ inputs.engine }}
       E2E_RUNTIME: ${{ inputs.engine }}
