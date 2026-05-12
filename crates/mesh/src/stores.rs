@@ -303,41 +303,11 @@ pub const GLOBAL_RATE_LIMIT_KEY: &str = "global_rate_limit";
 /// Key for global rate limit counter in RateLimitStore
 pub const GLOBAL_RATE_LIMIT_COUNTER_KEY: &str = "global";
 
-/// Worker state entry synced across mesh nodes.
-///
-/// Contains runtime state (`health`, `load`) plus an opaque `spec` blob
-/// carrying the full worker configuration. The mesh crate doesn't interpret
-/// `spec` — the gateway serializes `WorkerSpec` into it on the sending side
-/// and deserializes on the receiving side.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct WorkerState {
-    pub worker_id: String,
-    pub model_id: String,
-    pub url: String,
-    pub health: bool,
-    pub load: f64,
-    pub version: u64,
-    /// Opaque worker specification (bincode-serialized WorkerSpec from the
-    /// gateway). Empty on old nodes that don't populate this field.
-    #[serde(default)]
-    pub spec: Vec<u8>,
-}
-
-// Implement Hash manually for WorkerState (excluding f64)
-impl std::hash::Hash for WorkerState {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.worker_id.hash(state);
-        self.model_id.hash(state);
-        self.url.hash(state);
-        self.health.hash(state);
-        (self.load as i64).hash(state);
-        self.version.hash(state);
-        self.spec.hash(state);
-    }
-}
-
-// Implement Eq manually (f64 comparison with epsilon)
-impl Eq for WorkerState {}
+// `WorkerState` is now defined in `crate::types`; re-exported here
+// so legacy internal modules (sync, collector) keep compiling
+// during the v1 teardown. The whole `stores.rs` file is slated
+// for deletion once those callers are gone.
+pub use crate::types::WorkerState;
 
 /// Policy state entry
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]

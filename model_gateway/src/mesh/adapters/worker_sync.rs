@@ -2,33 +2,27 @@
 //!
 //! Outbound: `on_worker_changed` bincode-serialises a `WorkerState`
 //! and writes it under `worker:{worker_id}`. `on_worker_removed`
-//! writes a tombstone. Both map 1:1 to the v1
-//! `MeshSyncManager::sync_worker_state` / `remove_worker_state`
-//! behaviour but target the typed CRDT namespace instead of the
-//! untyped store.
+//! writes a tombstone.
 //!
 //! Inbound: `start` spawns a task that subscribes to the namespace
 //! and routes each non-tombstone update through
-//! `WorkerRegistry::on_remote_worker_state` — the same sink the v1
-//! `WorkerStateSubscriber` wires up, so registry behaviour
-//! (URL-dedupe, health promotion, `Registered` event fan-out) is
-//! unchanged. Tombstones are logged at debug; the registry does not
-//! yet expose a remote-remove hook, and wiring one belongs in a
-//! later PR together with the v1 mirror teardown.
+//! `WorkerRegistry::on_remote_worker_state`, which performs the
+//! registry-side URL-dedupe, health promotion, and `Registered`
+//! event fan-out. Tombstones are logged at debug; the registry
+//! does not yet expose a remote-remove hook, and wiring one
+//! belongs in a later PR.
 //!
 //! The adapter writes through `CrdtNamespace::put`, which fires
 //! local subscribers in addition to gossiping. A local write
 //! therefore echoes back through `start`'s loop and lands in
 //! `on_remote_worker_state`. That path is idempotent — the URL
 //! lookup short-circuits to a health refresh — so the loop is
-//! self-limiting and matches the v1 behaviour where a local
-//! `sync_worker_state` also re-appears in the same node's store
-//! before gossip fans out.
+//! self-limiting.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
-use smg_mesh::{CrdtNamespace, WorkerState, WorkerStateSubscriber};
+use smg_mesh::{CrdtNamespace, WorkerState};
 use tracing::{debug, warn};
 
 use crate::worker::WorkerRegistry;

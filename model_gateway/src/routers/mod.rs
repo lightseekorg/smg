@@ -36,7 +36,6 @@ pub mod factory;
 pub mod gemini;
 pub mod grpc;
 pub mod http;
-pub mod mesh;
 pub mod openai;
 pub mod parse;
 pub mod responses;
