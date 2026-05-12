@@ -205,40 +205,30 @@ impl OperationLog {
     fn latest_epoch_max_wins_operation<'a>(
         operations: impl IntoIterator<Item = &'a Operation>,
     ) -> Option<&'a Operation> {
+        let operations = operations.into_iter().collect::<Vec<_>>();
         let mut best_insert: Option<&'a Operation> = None;
-        let mut newest_remove: Option<&'a Operation> = None;
+        let newest_remove = Self::latest_lww_operation(
+            operations
+                .iter()
+                .copied()
+                .filter(|operation| matches!(operation, Operation::Remove { .. })),
+        );
 
-        for operation in operations {
-            match operation {
-                Operation::Insert { .. } => {
-                    if best_insert
-                        .is_none_or(|current| Self::epoch_insert_candidate_wins(current, operation))
-                    {
-                        best_insert = Some(operation);
-                    }
-                }
-                Operation::Remove { .. } => {
-                    if newest_remove
-                        .is_none_or(|current| Self::lww_candidate_wins(current, operation))
-                    {
-                        newest_remove = Some(operation);
-                    }
-                }
+        for operation in operations
+            .into_iter()
+            .filter(|operation| matches!(operation, Operation::Insert { .. }))
+            .filter(|operation| {
+                newest_remove.is_none_or(|remove| Self::lww_candidate_wins(remove, operation))
+            })
+        {
+            if best_insert
+                .is_none_or(|current| Self::epoch_insert_candidate_wins(current, operation))
+            {
+                best_insert = Some(operation);
             }
         }
 
-        match (best_insert, newest_remove) {
-            (Some(insert), Some(remove)) => {
-                if Self::lww_candidate_wins(insert, remove) {
-                    Some(remove)
-                } else {
-                    Some(insert)
-                }
-            }
-            (Some(insert), None) => Some(insert),
-            (None, Some(remove)) => Some(remove),
-            (None, None) => None,
-        }
+        best_insert.or(newest_remove)
     }
 
     fn latest_operations_by_key_with_strategy<F>(
