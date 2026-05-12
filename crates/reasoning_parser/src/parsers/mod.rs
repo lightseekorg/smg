@@ -5,6 +5,7 @@ pub mod glm45;
 pub mod kimi;
 pub mod minimax;
 pub mod nano_v3;
+pub mod none;
 pub mod qwen3;
 pub mod step3;
 
@@ -15,5 +16,6 @@ pub use glm45::Glm45Parser;
 pub use kimi::KimiParser;
 pub use minimax::MiniMaxParser;
 pub use nano_v3::NanoV3Parser;
+pub use none::NoneParser;
 pub use qwen3::{Qwen3Parser, QwenThinkingParser};
 pub use step3::Step3Parser;
