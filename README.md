@@ -53,13 +53,13 @@ cargo install smg
 
 ```bash
 # Single worker
-smg --worker-urls http://localhost:8000
+smg launch --worker-urls http://localhost:8000
 
 # Multiple workers with cache-aware routing
-smg --worker-urls http://gpu1:8000 http://gpu2:8000 --policy cache_aware
+smg launch --worker-urls http://gpu1:8000 http://gpu2:8000 --policy cache_aware
 
 # With high availability mesh
-smg --worker-urls http://gpu1:8000 --enable-mesh \
+smg launch --worker-urls http://gpu1:8000 --enable-mesh \
   --mesh-advertise-host 10.0.0.1 --mesh-peer-urls 10.0.0.2:39527
 ```
 
