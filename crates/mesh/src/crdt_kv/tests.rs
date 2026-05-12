@@ -557,7 +557,7 @@ fn test_operation_log_epoch_max_wins_post_tombstone_insert_revives_key() {
 }
 
 #[test]
-fn test_operation_log_epoch_max_wins_equal_insert_uses_newer_timestamp() {
+fn test_operation_log_epoch_max_wins_post_tombstone_insert_wins_over_pre_tombstone_equal_epoch() {
     let key = "rl:global:node-a";
     let newer_insert = Operation::insert(
         key.to_string(),
