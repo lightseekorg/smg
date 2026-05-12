@@ -5,14 +5,15 @@
 # in-tree ``tokenspeed-kernel`` (CUDA), ``tokenspeed-scheduler`` (C++/nanobind),
 # and ``python/`` packages. Mirrors the upstream ``docker/Dockerfile`` pipeline.
 #
-# Prerequisites (expected on k8s-runner-gpu nodes):
-#   - NVIDIA driver 580+ (CUDA 13)
-#   - CUDA 13.0 toolkit at /usr/local/cuda-13.0 or /usr/local/cuda
-#   - H100 GPUs (sm90)
+# Designed to run inside the official
+# ``lightseekorg/tokenspeed-runner:cu130-torch-2.11.0`` container (set by
+# e2e-gpu-job.yml). The image ships CUDA 13.0, Torch 2.11.0, nanobind,
+# cmake, libopenmpi-dev and libssl-dev, so this script skips the
+# host-side toolkit install entirely.
 #
 # Heavy first run (~30 min for kernel CUDA compile); subsequent runs on the
-# same runner hit the pip wheel cache at /tmp/tokenspeed-wheel-cache/ and
-# short-circuit the kernel build.
+# same runner hit the pip wheel cache at /tmp/tokenspeed-wheel-cache/ (host
+# volume-mounted into the container) and short-circuit the kernel build.
 
 set -euo pipefail
 
@@ -21,25 +22,11 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Pin to a tested TokenSpeed SHA so CI is reproducible. Floating against
-# ``main`` has bitten us before (lightseekorg/tokenspeed renamed server_args,
-# the gRPC servicer broke until we caught up). Bump this explicitly when we
-# want a newer runtime, ideally via a scheduled bump-and-CI routine rather
-# than ad hoc.
-#
-# This SHA is from lightseekorg/tokenspeed main; it includes dense
-# ``LlamaForCausalLM`` registration, the Qwen3 / gpt-oss arches the e2e
-# suite (``test_function_calling``, ``test_openai_server`` etc.) runs
-# against, lightseekorg/tokenspeed#598 (defensive ``pad_token_id`` read
-# in ``Qwen3MoeModel.__init__`` so ``Qwen/Qwen3-30B-A3B`` loads),
-# lightseekorg/tokenspeed#578 (FSM absorbs late ``ExtendResultEvent``
-# after a request is terminalized — without this the scheduler crashes
-# under retract pressure on the nightly Qwen3-30B-A3B run), and
-# lightseekorg/tokenspeed#602 (release scheduler slot + cancel
-# non-stream handlers on client disconnect; eliminates the long stream
-# of ``state was deleted in AsyncLLM`` warnings that preceded the
-# crash).
-TOKENSPEED_REF="${TOKENSPEED_REF:-eabeb106a070825d5549fbc84ecd8e11651cf3fe}"
+# Pinned SHA from lightseekorg/tokenspeed main. Bump explicitly (ideally via
+# a scheduled bump-and-CI routine) rather than floating against ``main`` —
+# upstream has renamed APIs before and the gRPC servicer broke until we
+# caught up.
+TOKENSPEED_REF="${TOKENSPEED_REF:-70030b298bc6abf6903348057605cc083bf70746}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
 WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
@@ -51,50 +38,6 @@ if ! command -v uv &> /dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 echo "uv version: $(uv --version)"
-
-# ── CUDA runtime setup ─────────────────────────────────────────────────────
-# k8s-runner-gpu ships the NVIDIA driver + CUDA runtime libs but not the
-# SDK (nvcc, headers). Install them on demand — same approach as
-# ``ci_install_sglang.sh``, which installs cuda-nvcc-12-9 +
-# cuda-cudart-dev-12-9 when ``/usr/local/cuda/bin/nvcc`` is missing.
-# TokenSpeed's Dockerfile targets CUDA 13.0, so install the matching
-# toolkit packages here.
-CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
-    echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
-    curl -fsSL -o /tmp/cuda-keyring.deb \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-    sudo dpkg -i /tmp/cuda-keyring.deb
-    rm /tmp/cuda-keyring.deb
-    sudo apt-get update -qq
-    # cuda-nvcc-13-0:          provides nvcc + cuda_runtime_api.h
-    # cuda-cudart-dev-13-0:    provides cuda_runtime.h + libcudart headers
-    # cuda-libraries-dev-13-0: meta-package pulling in cublas / curand /
-    #                         cusolver / cusparse / cufft / nvrtc /
-    #                         nvjitlink dev headers that tokenspeed-kernel
-    #                         needs (cublas_v2.h, curand.h, cublasLt.h, ...)
-    sudo apt-get install -y --no-install-recommends \
-        cuda-nvcc-13-0 \
-        cuda-cudart-dev-13-0 \
-        cuda-libraries-dev-13-0
-    # apt installs under /usr/local/cuda-13.0; expose the /usr/local/cuda
-    # alias the job-level ``CUDA_HOME: /usr/local/cuda`` env expects.
-    if [ ! -d "${CUDA_HOME}/bin" ] && [ -d "/usr/local/cuda-13.0/bin" ]; then
-        sudo ln -sfn /usr/local/cuda-13.0 "${CUDA_HOME}"
-    fi
-    echo "nvcc installed: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
-else
-    echo "nvcc already available: $(${CUDA_HOME}/bin/nvcc --version | tail -1)"
-fi
-export CUDA_HOME
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
-# Torch's JIT cpp_extension builder compiles some TokenSpeed runtime
-# extensions (e.g. ``tokenspeed_hostfunc_ext``) with plain g++ and
-# doesn't pass ``-I$CUDA_HOME/include``; expose the headers via CPATH /
-# CPLUS_INCLUDE_PATH so the compile picks them up.
-export CPATH="${CUDA_HOME}/include${CPATH:+:$CPATH}"
-export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
 
 # ── Clone TokenSpeed ────────────────────────────────────────────────────────
 # ``git clone --branch`` only accepts branch/tag names, not SHAs, so we
@@ -112,11 +55,6 @@ else
 fi
 
 cd "$TOKENSPEED_DIR"
-
-# ── System dependencies (mirrors docker/Dockerfile) ─────────────────────────
-export DEBIAN_FRONTEND=noninteractive
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends libssl-dev libopenmpi-dev cmake
 
 # ── Kernel + scheduler + engine install ────────────────────────────────────
 # Step 1: plain Python requirements.
@@ -150,21 +88,6 @@ uv pip install tokenspeed-scheduler/
 
 # Step 5: the Python runtime (pure-Python).
 uv pip install "./python" --no-build-isolation
-
-# ── Persist env to subsequent CI steps ─────────────────────────────────────
-if [ -n "${GITHUB_ENV:-}" ]; then
-    echo "CUDA_HOME=$CUDA_HOME" >> "$GITHUB_ENV"
-    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
-    # See note above: needed so torch's JIT C++ extension builder sees
-    # CUDA headers when it bypasses nvcc for .cpp sources.
-    echo "CPATH=$CPATH" >> "$GITHUB_ENV"
-    echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH" >> "$GITHUB_ENV"
-fi
-if [ -n "${GITHUB_PATH:-}" ]; then
-    # Make ``nvcc`` discoverable to downstream steps (pytest spawns the
-    # worker which may trigger CUDA extension builds).
-    echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
-fi
 
 # ── smg gRPC packages (same as other engines: from source so PR changes land) ─
 cd - > /dev/null
