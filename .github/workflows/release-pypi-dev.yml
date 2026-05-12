@@ -84,9 +84,20 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Patch dev version (5 version files)
+      # Patch only Python-side version metadata. Cargo rejects PEP 440 dev
+      # versions like "1.4.2.dev42" (semver requires "1.4.2-dev42"), so we
+      # deliberately leave Cargo.toml versions alone — they aren't published
+      # by this workflow and maturin uses pyproject.toml for the wheel version.
+      - name: Patch dev version (Python files only)
         working-directory: smg-repo
-        run: make bump-version VERSION=${{ needs.prepare.outputs.smg_version }}
+        env:
+          SMG_VERSION: ${{ needs.prepare.outputs.smg_version }}
+        run: |
+          set -euo pipefail
+          sed -i.bak "s/^version = \".*\"/version = \"${SMG_VERSION}\"/" bindings/python/pyproject.toml
+          sed -i.bak "s/__version__ = \".*\"/__version__ = \"${SMG_VERSION}\"/" bindings/python/src/smg/version.py
+          rm -f bindings/python/pyproject.toml.bak bindings/python/src/smg/version.py.bak
+          echo "Patched smg version to ${SMG_VERSION}"
 
       - name: Build manylinux x86_64 wheels
         uses: PyO3/maturin-action@v1
@@ -161,8 +172,11 @@ jobs:
       - name: Install build deps
         run: pip install build twine grpcio-tools
       - name: Patch dev version
+        env:
+          PROTO_VERSION: ${{ needs.prepare.outputs.proto_version }}
         run: |
-          sed -i.bak 's/^version = ".*"/version = "${{ needs.prepare.outputs.proto_version }}"/' \
+          set -euo pipefail
+          sed -i.bak "s/^version = \".*\"/version = \"${PROTO_VERSION}\"/" \
             crates/grpc_client/python/pyproject.toml
           rm -f crates/grpc_client/python/pyproject.toml.bak
       - name: Copy proto files (replace symlink with real files)
@@ -201,14 +215,12 @@ jobs:
           twine upload dist/* --verbose --skip-existing
 
   # ── smg-grpc-servicer (pure Python) ──
-  # Waits for proto upload if proto was selected; otherwise runs in parallel.
+  # Builds in parallel with proto; the upload step is what gates on proto
+  # upload completing (so a coherent dev set lands on PyPI together).
   build-servicer:
     name: Build smg-grpc-servicer dev
-    needs: [prepare, upload-proto]
-    if: >-
-      always()
-      && inputs.release_servicer
-      && (needs.upload-proto.result == 'success' || needs.upload-proto.result == 'skipped')
+    needs: prepare
+    if: ${{ inputs.release_servicer }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -218,8 +230,11 @@ jobs:
       - name: Install build deps
         run: pip install build twine
       - name: Patch dev version
+        env:
+          SERVICER_VERSION: ${{ needs.prepare.outputs.servicer_version }}
         run: |
-          sed -i.bak 's/^version = ".*"/version = "${{ needs.prepare.outputs.servicer_version }}"/' \
+          set -euo pipefail
+          sed -i.bak "s/^version = \".*\"/version = \"${SERVICER_VERSION}\"/" \
             grpc_servicer/pyproject.toml
           rm -f grpc_servicer/pyproject.toml.bak
       - name: Build package
@@ -233,8 +248,15 @@ jobs:
 
   upload-servicer:
     name: Upload smg-grpc-servicer to PyPI
-    needs: build-servicer
-    if: ${{ inputs.release_servicer && github.repository == 'lightseekorg/smg' }}
+    needs: [build-servicer, upload-proto]
+    # Tolerate proto being skipped (release_proto=false); fail-fast if proto was
+    # requested but failed, so we don't publish a half-finished set.
+    if: >-
+      always()
+      && inputs.release_servicer
+      && github.repository == 'lightseekorg/smg'
+      && needs.build-servicer.result == 'success'
+      && (needs.upload-proto.result == 'success' || needs.upload-proto.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -253,9 +275,18 @@ jobs:
           twine upload dist/* --verbose --skip-existing
 
   # ── Final summary in the run UI ──
+  # Surfaces build and upload results separately so a failed build doesn't
+  # look indistinguishable from an unselected package.
   summary:
     name: Summary
-    needs: [prepare, upload-smg, upload-proto, upload-servicer]
+    needs:
+      - prepare
+      - build-smg
+      - upload-smg
+      - build-proto
+      - upload-proto
+      - build-servicer
+      - upload-servicer
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -263,11 +294,11 @@ jobs:
           {
             echo "## Dev release summary"
             echo ""
-            echo "| Package | Version | Status |"
-            echo "|---|---|---|"
-            echo "| smg | ${{ needs.prepare.outputs.smg_version }} | ${{ needs.upload-smg.result }} |"
-            echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.upload-proto.result }} |"
-            echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.upload-servicer.result }} |"
+            echo "| Package | Version | Build | Upload |"
+            echo "|---|---|---|---|"
+            echo "| smg | ${{ needs.prepare.outputs.smg_version }} | ${{ needs.build-smg.result }} | ${{ needs.upload-smg.result }} |"
+            echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.build-proto.result }} | ${{ needs.upload-proto.result }} |"
+            echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.build-servicer.result }} | ${{ needs.upload-servicer.result }} |"
             echo ""
             echo "Install (allow pre-releases):"
             echo '```'
