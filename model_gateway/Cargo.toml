@@ -141,7 +141,7 @@ npyz = { version = "0.9", features = ["npz"] }
 opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
 serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
-jsonwebtoken = "9.3"
+jsonwebtoken = "10.4"
 validator = "0.20.0"
 kv-index.workspace = true
 wasmtime-wasi = { workspace = true }
