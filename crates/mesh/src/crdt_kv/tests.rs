@@ -414,6 +414,108 @@ fn test_operation_log_snapshot_uses_merge_strategy() {
 }
 
 #[test]
+fn test_operation_log_epoch_max_wins_tombstone_selection_is_order_independent() {
+    let key = "rl:global:node-a";
+    let stale_newer_timestamp = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let epoch_winner_older_timestamp =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 90, ReplicaId::new());
+    let tombstone_after_epoch_winner = Operation::remove(key.to_string(), 95, ReplicaId::new());
+    let orders = [
+        [
+            stale_newer_timestamp.clone(),
+            epoch_winner_older_timestamp.clone(),
+            tombstone_after_epoch_winner.clone(),
+        ],
+        [
+            stale_newer_timestamp.clone(),
+            tombstone_after_epoch_winner.clone(),
+            epoch_winner_older_timestamp.clone(),
+        ],
+        [
+            epoch_winner_older_timestamp.clone(),
+            stale_newer_timestamp.clone(),
+            tombstone_after_epoch_winner.clone(),
+        ],
+        [
+            epoch_winner_older_timestamp.clone(),
+            tombstone_after_epoch_winner.clone(),
+            stale_newer_timestamp.clone(),
+        ],
+        [
+            tombstone_after_epoch_winner.clone(),
+            stale_newer_timestamp.clone(),
+            epoch_winner_older_timestamp.clone(),
+        ],
+        [
+            tombstone_after_epoch_winner.clone(),
+            epoch_winner_older_timestamp.clone(),
+            stale_newer_timestamp.clone(),
+        ],
+    ];
+
+    for order in orders {
+        let mut log = OperationLog::new();
+        for operation in order {
+            log.append(operation);
+        }
+
+        let snapshot = log.snapshot_and_truncate(|key| {
+            if key.starts_with("rl:") {
+                MergeStrategy::EpochMaxWins
+            } else {
+                MergeStrategy::LastWriterWins
+            }
+        });
+
+        let Some(Operation::Remove { timestamp, .. }) = snapshot.get(key) else {
+            panic!("tombstone should win consistently for order {snapshot:?}");
+        };
+        assert_eq!(*timestamp, 95);
+    }
+}
+
+#[test]
+fn test_operation_log_epoch_max_wins_equal_insert_uses_newer_timestamp() {
+    let key = "rl:global:node-a";
+    let newer_insert = Operation::insert(
+        key.to_string(),
+        encode(6, 0).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let older_equal_insert =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 10, ReplicaId::new());
+    let tombstone_between = Operation::remove(key.to_string(), 50, ReplicaId::new());
+
+    let mut log = OperationLog::new();
+    log.append(older_equal_insert);
+    log.append(tombstone_between);
+    log.append(newer_insert);
+
+    let snapshot = log.snapshot_and_truncate(|key| {
+        if key.starts_with("rl:") {
+            MergeStrategy::EpochMaxWins
+        } else {
+            MergeStrategy::LastWriterWins
+        }
+    });
+
+    let Some(Operation::Insert {
+        value, timestamp, ..
+    }) = snapshot.get(key)
+    else {
+        panic!("newer equal-value insert should win over intermediate tombstone");
+    };
+    assert_eq!(*timestamp, 100);
+    assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
+}
+
+#[test]
 fn test_apply_operation_log() {
     init_test_logging();
     let replica1 = CrdtOrMap::new();
