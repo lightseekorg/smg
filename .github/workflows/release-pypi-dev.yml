@@ -15,6 +15,10 @@ on:
         description: "Release smg-grpc-proto (only if proto files changed)"
         type: boolean
         default: false
+      dry_run:
+        description: "Dry run: build, patch versions, run twine check, but do NOT upload to PyPI"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -150,7 +154,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Dry-run notice
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "DRY RUN: skipping PyPI upload for smg"
+          ls -lh dist/
       - name: Upload
+        if: ${{ !inputs.dry_run }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_ROUTER }}
@@ -206,7 +216,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Dry-run notice
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "DRY RUN: skipping PyPI upload for smg-grpc-proto"
+          ls -lh dist/
       - name: Upload
+        if: ${{ !inputs.dry_run }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
@@ -266,7 +282,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Dry-run notice
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "DRY RUN: skipping PyPI upload for smg-grpc-servicer"
+          ls -lh dist/
       - name: Upload
+        if: ${{ !inputs.dry_run }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
@@ -292,7 +314,11 @@ jobs:
     steps:
       - run: |
           {
-            echo "## Dev release summary"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "## Dev release summary (DRY RUN — nothing uploaded to PyPI)"
+            else
+              echo "## Dev release summary"
+            fi
             echo ""
             echo "| Package | Version | Build | Upload |"
             echo "|---|---|---|---|"
@@ -300,8 +326,10 @@ jobs:
             echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.build-proto.result }} | ${{ needs.upload-proto.result }} |"
             echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.build-servicer.result }} | ${{ needs.upload-servicer.result }} |"
             echo ""
-            echo "Install (allow pre-releases):"
-            echo '```'
-            echo "pip install --pre smg smg-grpc-servicer"
-            echo '```'
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              echo "Install (allow pre-releases):"
+              echo '```'
+              echo "pip install --pre smg smg-grpc-servicer"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
