@@ -1,0 +1,276 @@
+name: Release SMG to PyPI (dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_smg:
+        description: "Release smg (Rust wheel)"
+        type: boolean
+        default: true
+      release_servicer:
+        description: "Release smg-grpc-servicer"
+        type: boolean
+        default: true
+      release_proto:
+        description: "Release smg-grpc-proto (only if proto files changed)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Compute shared dev versions once so all packages from this run share the
+  # same dev<run_number> suffix (e.g. smg==1.4.2.dev42, smg-grpc-servicer==0.5.3.dev42).
+  prepare:
+    name: Compute dev versions
+    runs-on: ubuntu-latest
+    outputs:
+      smg_version: ${{ steps.compute.outputs.smg_version }}
+      proto_version: ${{ steps.compute.outputs.proto_version }}
+      servicer_version: ${{ steps.compute.outputs.servicer_version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: compute
+        run: |
+          set -euo pipefail
+          SUFFIX="dev${{ github.run_number }}"
+
+          read_version() {
+            grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'
+          }
+
+          # Bump patch so dev sorts AFTER current stable.
+          # E.g. base 1.4.1 -> 1.4.2.dev<N> (so --pre picks it as latest).
+          bump_patch() {
+            local IFS=.
+            # shellcheck disable=SC2206
+            local parts=($1)
+            parts[2]=$(( ${parts[2]} + 1 ))
+            echo "${parts[0]}.${parts[1]}.${parts[2]}"
+          }
+
+          SMG_VERSION="$(bump_patch "$(read_version bindings/python/pyproject.toml)").${SUFFIX}"
+          PROTO_VERSION="$(bump_patch "$(read_version crates/grpc_client/python/pyproject.toml)").${SUFFIX}"
+          SERVICER_VERSION="$(bump_patch "$(read_version grpc_servicer/pyproject.toml)").${SUFFIX}"
+
+          echo "smg_version=${SMG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "proto_version=${PROTO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "servicer_version=${SERVICER_VERSION}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Planned dev versions"
+            echo "| Package | Version | Will publish? |"
+            echo "|---|---|---|"
+            echo "| smg | ${SMG_VERSION} | ${{ inputs.release_smg }} |"
+            echo "| smg-grpc-proto | ${PROTO_VERSION} | ${{ inputs.release_proto }} |"
+            echo "| smg-grpc-servicer | ${SERVICER_VERSION} | ${{ inputs.release_servicer }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── smg (Rust wheel via maturin) — slim matrix: manylinux x86_64 + sdist ──
+  build-smg:
+    name: Build smg dev wheel
+    needs: prepare
+    if: ${{ inputs.release_smg }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: smg-repo
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Patch dev version (5 version files)
+        working-directory: smg-repo
+        run: make bump-version VERSION=${{ needs.prepare.outputs.smg_version }}
+
+      - name: Build manylinux x86_64 wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: smg-repo/bindings/python
+          target: x86_64
+          manylinux: auto
+          args: --release --out dist --features vendored-openssl --interpreter 3.10 3.11 3.12 3.13
+          rust-toolchain: stable
+          before-script-linux: |
+            if command -v yum &> /dev/null; then
+              yum update -y && yum install -y wget unzip gcc gcc-c++ perl-core make
+            elif command -v apt-get &> /dev/null; then
+              apt-get update && apt-get install -y wget unzip gcc g++ perl make
+            fi
+            (cd /tmp && \
+             wget https://github.com/protocolbuffers/protobuf/releases/download/v32.0/protoc-32.0-linux-x86_64.zip && \
+             unzip protoc-32.0-linux-x86_64.zip -d /usr/local && \
+             rm protoc-32.0-linux-x86_64.zip)
+            protoc --version
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: smg-repo/bindings/python
+          command: sdist
+          args: --out dist
+          rust-toolchain: stable
+
+      - name: Check packages
+        run: |
+          pip install -U twine
+          twine check --strict smg-repo/bindings/python/dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smg-dev-dist
+          path: smg-repo/bindings/python/dist/
+
+  upload-smg:
+    name: Upload smg to PyPI
+    needs: build-smg
+    if: ${{ inputs.release_smg && github.repository == 'lightseekorg/smg' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: smg-dev-dist
+          path: dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Upload
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_ROUTER }}
+        run: |
+          pip install -U twine
+          twine upload dist/* --verbose --skip-existing
+
+  # ── smg-grpc-proto (pure Python) ──
+  build-proto:
+    name: Build smg-grpc-proto dev
+    needs: prepare
+    if: ${{ inputs.release_proto }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: pip install build twine grpcio-tools
+      - name: Patch dev version
+        run: |
+          sed -i.bak 's/^version = ".*"/version = "${{ needs.prepare.outputs.proto_version }}"/' \
+            crates/grpc_client/python/pyproject.toml
+          rm -f crates/grpc_client/python/pyproject.toml.bak
+      - name: Copy proto files (replace symlink with real files)
+        run: |
+          rm -f crates/grpc_client/python/smg_grpc_proto/proto
+          mkdir -p crates/grpc_client/python/smg_grpc_proto/proto
+          cp crates/grpc_client/proto/*.proto crates/grpc_client/python/smg_grpc_proto/proto/
+      - name: Build package
+        run: cd crates/grpc_client/python && python -m build
+      - name: Check package
+        run: twine check --strict crates/grpc_client/python/dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: proto-dev-dist
+          path: crates/grpc_client/python/dist/
+
+  upload-proto:
+    name: Upload smg-grpc-proto to PyPI
+    needs: build-proto
+    if: ${{ inputs.release_proto && github.repository == 'lightseekorg/smg' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: proto-dev-dist
+          path: dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Upload
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
+        run: |
+          pip install -U twine
+          twine upload dist/* --verbose --skip-existing
+
+  # ── smg-grpc-servicer (pure Python) ──
+  # Waits for proto upload if proto was selected; otherwise runs in parallel.
+  build-servicer:
+    name: Build smg-grpc-servicer dev
+    needs: [prepare, upload-proto]
+    if: >-
+      always()
+      && inputs.release_servicer
+      && (needs.upload-proto.result == 'success' || needs.upload-proto.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: pip install build twine
+      - name: Patch dev version
+        run: |
+          sed -i.bak 's/^version = ".*"/version = "${{ needs.prepare.outputs.servicer_version }}"/' \
+            grpc_servicer/pyproject.toml
+          rm -f grpc_servicer/pyproject.toml.bak
+      - name: Build package
+        run: cd grpc_servicer && python -m build
+      - name: Check package
+        run: twine check --strict grpc_servicer/dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: servicer-dev-dist
+          path: grpc_servicer/dist/
+
+  upload-servicer:
+    name: Upload smg-grpc-servicer to PyPI
+    needs: build-servicer
+    if: ${{ inputs.release_servicer && github.repository == 'lightseekorg/smg' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: servicer-dev-dist
+          path: dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Upload
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_SERVICER }}
+        run: |
+          pip install -U twine
+          twine upload dist/* --verbose --skip-existing
+
+  # ── Final summary in the run UI ──
+  summary:
+    name: Summary
+    needs: [prepare, upload-smg, upload-proto, upload-servicer]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          {
+            echo "## Dev release summary"
+            echo ""
+            echo "| Package | Version | Status |"
+            echo "|---|---|---|"
+            echo "| smg | ${{ needs.prepare.outputs.smg_version }} | ${{ needs.upload-smg.result }} |"
+            echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.upload-proto.result }} |"
+            echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.upload-servicer.result }} |"
+            echo ""
+            echo "Install (allow pre-releases):"
+            echo '```'
+            echo "pip install --pre smg smg-grpc-servicer"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
