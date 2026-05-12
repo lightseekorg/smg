@@ -12,8 +12,8 @@
 //! `u64` big-endian epoch in bytes 0..8, `i64` big-endian count in
 //! bytes 8..16. The mesh CRDT normalizes stored `rl:` values into a
 //! rate-limit shard state that also remembers live/tombstone merge
-//! metadata. [`decode_epoch_count`] accepts both shapes, so the
-//! adapter only deals in epoch/count.
+//! metadata. [`decode_epoch_count`] reads that shard state back into
+//! plain epoch/count, so the adapter never handles CRDT internals.
 //!
 //! The caller owns the epoch clock — typically
 //! `now.as_secs() / window.as_secs()`. `sync_counter` writes the

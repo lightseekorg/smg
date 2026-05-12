@@ -58,7 +58,7 @@ impl ValueMetadata {
         }
     }
 
-    fn from_live_version(version: epoch_max_wins::Version) -> Self {
+    fn from_rate_limit_live_version(version: epoch_max_wins::RateLimitVersion) -> Self {
         Self::new(version.timestamp, version.replica_id)
     }
 
@@ -75,8 +75,8 @@ impl ValueMetadata {
         (self.timestamp, self.replica_id)
     }
 
-    fn version(&self) -> epoch_max_wins::Version {
-        epoch_max_wins::Version::new(self.timestamp, self.replica_id)
+    fn as_rate_limit_version(&self) -> epoch_max_wins::RateLimitVersion {
+        epoch_max_wins::RateLimitVersion::new(self.timestamp, self.replica_id)
     }
 
     fn matches_version(&self, timestamp: u64, replica_id: ReplicaId) -> bool {
@@ -584,12 +584,14 @@ impl CrdtOrMap {
         }
     }
 
-    fn newest_tombstone_version(versions: &[ValueMetadata]) -> Option<epoch_max_wins::Version> {
+    fn newest_rate_limit_tombstone_version(
+        versions: &[ValueMetadata],
+    ) -> Option<epoch_max_wins::RateLimitVersion> {
         versions
             .iter()
             .filter(|version| version.is_tombstone)
             .max_by_key(|version| version.version_key())
-            .map(ValueMetadata::version)
+            .map(ValueMetadata::as_rate_limit_version)
     }
 
     fn record_insert_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
@@ -633,7 +635,7 @@ impl CrdtOrMap {
         timestamp: u64,
         replica_id: ReplicaId,
     ) -> Option<Vec<u8>> {
-        let incoming_version = epoch_max_wins::Version::new(timestamp, replica_id);
+        let incoming_version = epoch_max_wins::RateLimitVersion::new(timestamp, replica_id);
         let current = self.store.get(key);
 
         match self.metadata.entry(key.to_string()) {
@@ -648,7 +650,7 @@ impl CrdtOrMap {
                     return None;
                 }
 
-                let current_tombstone = Self::newest_tombstone_version(versions);
+                let current_tombstone = Self::newest_rate_limit_tombstone_version(versions);
                 let Some(merged) = epoch_max_wins::merge_live_value(
                     current.as_deref(),
                     current_tombstone,
@@ -664,12 +666,16 @@ impl CrdtOrMap {
                     return None;
                 }
                 versions.clear();
-                versions.push(ValueMetadata::from_live_version(merged.live_version));
+                versions.push(ValueMetadata::from_rate_limit_live_version(
+                    merged.live_version,
+                ));
                 Some(merged.value)
             }
             MapEntry::Vacant(entry) => {
                 let merged = epoch_max_wins::merge_live_value(None, None, value, incoming_version)?;
-                entry.insert(vec![ValueMetadata::from_live_version(merged.live_version)]);
+                entry.insert(vec![ValueMetadata::from_rate_limit_live_version(
+                    merged.live_version,
+                )]);
                 Some(merged.value)
             }
         }
