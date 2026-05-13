@@ -835,10 +835,12 @@ impl ConfigValidator {
                 });
             }
 
-            if !url.starts_with("http://")
-                && !url.starts_with("https://")
-                && !url.starts_with("grpc://")
-                && !url.starts_with("grpcs://")
+            // Perform case-insensitive scheme check
+            let url_lower = url.to_ascii_lowercase();
+            if !url_lower.starts_with("http://")
+                && !url_lower.starts_with("https://")
+                && !url_lower.starts_with("grpc://")
+                && !url_lower.starts_with("grpcs://")
             {
                 return Err(ConfigError::InvalidValue {
                     field: "worker_url".to_string(),
