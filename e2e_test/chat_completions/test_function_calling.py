@@ -452,6 +452,15 @@ class TestOpenAIServerFunctionCalling:
             assert isinstance(city_value, str), (
                 f"Parameter city should be a string, got: {type(city_value)}"
             )
+        elif function_name == "sub":
+            assert "int_a" in args_obj, f"Function arguments should have 'int_a', got: {args_obj}"
+            assert "int_b" in args_obj, f"Function arguments should have 'int_b', got: {args_obj}"
+            assert isinstance(args_obj["int_a"], int), (
+                f"Parameter int_a should be an integer, got: {type(args_obj['int_a'])}"
+            )
+            assert isinstance(args_obj["int_b"], int), (
+                f"Parameter int_b should be an integer, got: {type(args_obj['int_b'])}"
+            )
 
     def test_function_call_specific(self, model, api_client):
         """Test: Whether tool_choice: ToolChoice works as expected.
