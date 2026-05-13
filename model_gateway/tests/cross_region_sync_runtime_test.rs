@@ -43,12 +43,8 @@ fn valid_cross_region_config() -> CrossRegionConfig {
         sync_plane: CrossRegionSyncPlaneConfig::default(),
         peers: vec![CrossRegionPeerConfig {
             region_id: Some("us-chicago-1".to_string()),
-            request_url: Some(
-                "https://smg-region-agent.us-chicago-1.internal:8443".to_string(),
-            ),
-            sync_url: Some(
-                "https://smg-region-agent.us-chicago-1.internal:9443".to_string(),
-            ),
+            request_url: Some("https://smg-region-agent.us-chicago-1.internal:8443".to_string()),
+            sync_url: Some("https://smg-region-agent.us-chicago-1.internal:9443".to_string()),
             realm: Some("oc1".to_string()),
             environment: Some("prod".to_string()),
             ..CrossRegionPeerConfig::default()
@@ -65,7 +61,7 @@ fn valid_cross_region_config() -> CrossRegionConfig {
 
 #[expect(
     clippy::expect_used,
-    reason = "test helper — the fixture is known-valid",
+    reason = "test helper — the fixture is known-valid"
 )]
 fn build_context() -> CrossRegionContext {
     CrossRegionContext::from_router_config(&valid_cross_region_config())
@@ -78,8 +74,8 @@ async fn boot_starts_runtime_with_live_producers_and_publishable_sync_handle() {
     let context = build_context();
     let registry = Arc::new(WorkerRegistry::new());
 
-    let runtime = CrossRegionSyncRuntime::start(&context, registry)
-        .expect("sync runtime should start");
+    let runtime =
+        CrossRegionSyncRuntime::start(&context, registry).expect("sync runtime should start");
 
     // sync() exposes a live handle stamped with the resolved identity.
     assert_eq!(runtime.sync().region_id(), "us-ashburn-1");
@@ -122,8 +118,8 @@ async fn boot_reconcile_loop_publishes_readiness_without_manual_intervention() {
     let context = build_context();
     let registry = Arc::new(WorkerRegistry::new());
 
-    let runtime = CrossRegionSyncRuntime::start(&context, registry)
-        .expect("sync runtime should start");
+    let runtime =
+        CrossRegionSyncRuntime::start(&context, registry).expect("sync runtime should start");
     let sync = runtime.sync();
 
     // The periodic readiness reconcile loop publishes immediately on its
@@ -132,9 +128,10 @@ async fn boot_reconcile_loop_publishes_readiness_without_manual_intervention() {
     let mut readiness_envelope = None;
     for _ in 0..20 {
         let (entries, _) = sync.local_log_snapshot();
-        if let Some(env) = entries.iter().find(|env| {
-            matches!(&env.signal, Some(SignalKind::SmgReadiness(_)))
-        }) {
+        if let Some(env) = entries
+            .iter()
+            .find(|env| matches!(&env.signal, Some(SignalKind::SmgReadiness(_))))
+        {
             readiness_envelope = Some(env.clone());
             break;
         }
@@ -161,8 +158,8 @@ async fn boot_wires_pull_server_state_off_the_runtime_handles() {
     // and peer registry. That's the exact wiring the listener block uses.
     let context = build_context();
     let registry = Arc::new(WorkerRegistry::new());
-    let runtime = CrossRegionSyncRuntime::start(&context, registry)
-        .expect("sync runtime should start");
+    let runtime =
+        CrossRegionSyncRuntime::start(&context, registry).expect("sync runtime should start");
 
     let state = PullServerState::new(runtime.sync(), runtime.peers().clone());
     // The state itself is opaque; the smoke check is that the typed wiring
@@ -187,8 +184,8 @@ async fn boot_attaches_pull_client_orchestrator_through_with_pull_client() {
     // to expose the same sync/peers/producer handles afterward.
     let context = build_context();
     let registry = Arc::new(WorkerRegistry::new());
-    let runtime = CrossRegionSyncRuntime::start(&context, registry)
-        .expect("sync runtime should start");
+    let runtime =
+        CrossRegionSyncRuntime::start(&context, registry).expect("sync runtime should start");
 
     let http_client = reqwest::Client::builder()
         .build()

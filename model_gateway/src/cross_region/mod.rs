@@ -62,8 +62,8 @@ pub use state::{CrossRegionState, SignalVersion};
 pub use sync::{CrossRegionSyncService, Cursor, CursorStale, SignalKind, SyncRetention};
 pub use sync_runtime::CrossRegionSyncRuntime;
 pub use view::{
-    ClientLatencyProjection, RegionReadinessProjection, RemoteRegionView, WorkerLoadResolution,
-    WorkerProjection, WorkerStatusResolution,
+    ClientLatencyProjection, RegionReadinessProjection, RemoteRegionView,
+    RemoteWorkerLoadProjection, WorkerLoadResolution, WorkerProjection, WorkerStatusResolution,
 };
 
 /// Cross-region module result type.

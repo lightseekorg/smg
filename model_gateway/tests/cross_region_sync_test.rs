@@ -19,8 +19,10 @@
 //! 7. `RemoteRegionView` freshness window filters stale entries
 //! 8. candidate ranking + `RemoteRegionView` project consistently
 
-use openai_protocol::model_type::Endpoint;
-use openai_protocol::worker::{WorkerLoadInfo, WorkerStatus};
+use openai_protocol::{
+    model_type::Endpoint,
+    worker::{WorkerLoadInfo, WorkerStatus},
+};
 use smg::{
     config::CrossRegionFailoverMode,
     cross_region::{
@@ -423,18 +425,23 @@ fn single_replica_tombstone_does_not_remove_sibling_replica() {
     b.apply_remote_envelopes(REGION_A, &envs2);
 
     // A1 tombstones its own entry; A2's must survive.
-    a1.remove_signal(worker_health_key(SERVER_A1, "w1")).unwrap();
+    a1.remove_signal(worker_health_key(SERVER_A1, "w1"))
+        .unwrap();
     let (tombstones, _) = a1.local_log_snapshot();
     b.apply_remote_envelopes(REGION_A, &tombstones);
 
     let state = b.state();
     let state = state.read();
     assert!(
-        state.worker_health_replica(REGION_A, "w1", SERVER_A1).is_none(),
+        state
+            .worker_health_replica(REGION_A, "w1", SERVER_A1)
+            .is_none(),
         "A1's tombstone removes its own entry",
     );
     assert!(
-        state.worker_health_replica(REGION_A, "w1", SERVER_A2).is_some(),
+        state
+            .worker_health_replica(REGION_A, "w1", SERVER_A2)
+            .is_some(),
         "A2's replica must survive A1's tombstone",
     );
 }
@@ -491,7 +498,11 @@ fn stale_cursor_triggers_full_resync() {
     .unwrap();
 
     let (envs_before_gc, _) = a.local_log_snapshot();
-    assert_eq!(envs_before_gc.len(), 3, "three publishes produce three entries");
+    assert_eq!(
+        envs_before_gc.len(),
+        3,
+        "three publishes produce three entries"
+    );
     let first_ts = envs_before_gc[0].generated_at_ms;
     // GC at t1 + 30ms: entries 1 + 2 are well past their 10ms window;
     // entry 3 (published after a 50ms sleep) is still fresh.
@@ -633,7 +644,9 @@ fn remote_region_view_projects_consistently_with_candidate_ranking() {
         client_region: Some(REGION_B.to_string()),
         now_ms: now,
     };
-    let output = calculator.build_candidates(input).expect("calculator builds");
+    let output = calculator
+        .build_candidates(input)
+        .expect("calculator builds");
     let remote = output
         .candidates
         .iter()
@@ -648,7 +661,10 @@ fn remote_region_view_projects_consistently_with_candidate_ranking() {
         remote.worker_load, view_load.total,
         "candidate load matches view sum",
     );
-    assert!(remote.has_capacity, "remote worker is routable in both views");
+    assert!(
+        remote.has_capacity,
+        "remote worker is routable in both views"
+    );
 }
 
 fn now_ms() -> i64 {

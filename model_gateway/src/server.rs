@@ -44,7 +44,9 @@ use openai_protocol::{
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     transcription::TranscriptionRequest,
     validated::ValidatedJson,
-    worker::{WorkerSpec, WorkerUpdateRequest},
+    worker::{
+        WorkerLoadInfo, WorkerLoadInfoSource, WorkerLoadsResult, WorkerSpec, WorkerUpdateRequest,
+    },
 };
 use rustls::crypto::ring;
 use serde::Deserialize;
@@ -69,8 +71,8 @@ use crate::{
     cross_region::{
         headers::REQUEST_MODE_HEADER, validate_settled_local_execution, AuthenticatedPeerIdentity,
         CrossRegionContext, CrossRegionError, CrossRegionHeaders, CrossRegionRuntimeConfig,
-        CrossRegionSyncRuntime, RegionPeer, RegionPeerRegistry, SettledRequestContext,
-        UnresolvedRequestContext,
+        CrossRegionSyncRuntime, RegionPeer, RegionPeerRegistry, RemoteRegionView,
+        SettledRequestContext, UnresolvedRequestContext,
     },
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
@@ -1105,9 +1107,114 @@ async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Respo
 }
 
 async fn get_loads(State(state): State<Arc<AppState>>, _req: Request) -> Response {
-    WorkerManager::get_all_worker_loads(&state.context.worker_registry, &state.context.client)
-        .await
-        .into_response()
+    let mut loads =
+        WorkerManager::get_all_worker_loads(&state.context.worker_registry, &state.context.client)
+            .await;
+    append_remote_worker_loads(&state, &mut loads);
+    loads.into_response()
+}
+
+fn append_remote_worker_loads(state: &AppState, loads: &mut WorkerLoadsResult) {
+    let Some(sync_runtime) = state.cross_region_sync.as_ref() else {
+        return;
+    };
+    let Some(local_region) = state
+        .context
+        .router_config
+        .cross_region
+        .region_id
+        .as_deref()
+    else {
+        return;
+    };
+    let sync = sync_runtime.sync();
+    let remote_state = sync.state();
+    let remote_state = remote_state.read();
+    let max_age_ms = seconds_to_millis_saturating(
+        state
+            .context
+            .router_config
+            .cross_region
+            .sync_plane
+            .signal_stale_after_seconds,
+    );
+    let view = RemoteRegionView::new(&remote_state, now_ms(), max_age_ms);
+
+    for region_id in view.regions() {
+        if region_id == local_region {
+            continue;
+        }
+        let mut remote_workers = Vec::new();
+        let mut aggregate_load = 0isize;
+        let mut aggregate_generated_at_ms = None;
+        let mut aggregate_version = None;
+
+        for worker_id in view.worker_ids(region_id) {
+            let Some(worker) = view.worker(region_id, worker_id) else {
+                continue;
+            };
+            for entry in worker.fresh_load_entries() {
+                aggregate_load = aggregate_load.saturating_add(entry.total_load);
+                aggregate_generated_at_ms = Some(
+                    aggregate_generated_at_ms
+                        .unwrap_or(i64::MIN)
+                        .max(entry.generated_at_ms),
+                );
+                aggregate_version = Some(aggregate_version.unwrap_or(0).max(entry.version));
+                remote_workers.push(WorkerLoadInfo {
+                    worker: entry.worker_id.clone(),
+                    worker_type: None,
+                    load: entry.total_load,
+                    details: None,
+                    region_id: Some(entry.region_id),
+                    worker_id: Some(entry.worker_id),
+                    model_id: entry.model_id,
+                    status: entry.status,
+                    generated_at_ms: Some(entry.generated_at_ms),
+                    version: Some(entry.version),
+                    source: Some(WorkerLoadInfoSource::LocalWorker),
+                    remote_workers: None,
+                });
+            }
+        }
+
+        if remote_workers.is_empty() {
+            continue;
+        }
+        remote_workers.sort_by(|a, b| {
+            a.worker
+                .cmp(&b.worker)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+        });
+        loads.total_workers = loads.total_workers.saturating_add(remote_workers.len());
+        loads.successful = loads.successful.saturating_add(remote_workers.len());
+        loads.loads.push(WorkerLoadInfo {
+            worker: format!("region-peer/{region_id}"),
+            worker_type: None,
+            load: aggregate_load,
+            details: None,
+            region_id: Some(region_id.to_string()),
+            worker_id: None,
+            model_id: None,
+            status: None,
+            generated_at_ms: aggregate_generated_at_ms,
+            version: aggregate_version,
+            source: Some(WorkerLoadInfoSource::RemoteSmg),
+            remote_workers: Some(remote_workers),
+        });
+    }
+}
+
+fn seconds_to_millis_saturating(seconds: u64) -> i64 {
+    i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 async fn create_worker(
@@ -1999,59 +2106,55 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // for the lifetime of the server. When `sync_plane.enabled`, the same
     // boot path also spawns a per-peer pull client over mTLS so this region
     // begins consuming peer signals into its materialized state.
-    let cross_region_sync = match CrossRegionContext::from_router_config(
-        &config.router_config.cross_region,
-    ) {
-        Ok(Some(context)) => {
-            let runtime = CrossRegionSyncRuntime::start(
-                &context,
-                app_context.worker_registry.clone(),
-            )
-            .map_err(|error| {
-                format!("Failed to start cross-region sync runtime: {error}")
-            })?;
-            info!(
-                region = %context.config.region_id,
-                server = %context.config.server_name,
-                "Cross-region signal sync producer orchestrator started",
-            );
-            let runtime = if config.router_config.cross_region.sync_plane.enabled {
-                let mtls_manager = cross_region_mtls_manager(&config.router_config)
+    let cross_region_sync =
+        match CrossRegionContext::from_router_config(&config.router_config.cross_region) {
+            Ok(Some(context)) => {
+                let runtime =
+                    CrossRegionSyncRuntime::start(&context, app_context.worker_registry.clone())
+                        .map_err(|error| {
+                            format!("Failed to start cross-region sync runtime: {error}")
+                        })?;
+                info!(
+                    region = %context.config.region_id,
+                    server = %context.config.server_name,
+                    "Cross-region signal sync producer orchestrator started",
+                );
+                let runtime = if config.router_config.cross_region.sync_plane.enabled {
+                    let mtls_manager =
+                        cross_region_mtls_manager(&config.router_config).map_err(|error| {
+                            format!("Invalid cross-region mTLS config for pull client: {error}")
+                        })?;
+                    let client_tls_config =
+                        mtls_manager.load_client_config().await.map_err(|error| {
+                            format!("Failed to load cross-region mTLS client config: {error}")
+                        })?;
+                    let http_client = reqwest::Client::builder()
+                        .use_preconfigured_tls((*client_tls_config).clone())
+                        .build()
+                        .map_err(|error| {
+                            format!("Failed to build cross-region sync pull HTTP client: {error}")
+                        })?;
+                    let orchestrator = crate::cross_region::PullClientOrchestrator::start(
+                        runtime.sync(),
+                        runtime.peers(),
+                        http_client,
+                        crate::cross_region::PullClientConfig::default(),
+                    )
                     .map_err(|error| {
-                        format!("Invalid cross-region mTLS config for pull client: {error}")
+                        format!("Failed to start cross-region sync pull client: {error}")
                     })?;
-                let client_tls_config = mtls_manager.load_client_config().await.map_err(
-                    |error| {
-                        format!("Failed to load cross-region mTLS client config: {error}")
-                    },
-                )?;
-                let http_client = reqwest::Client::builder()
-                    .use_preconfigured_tls((*client_tls_config).clone())
-                    .build()
-                    .map_err(|error| {
-                        format!("Failed to build cross-region sync pull HTTP client: {error}")
-                    })?;
-                let orchestrator = crate::cross_region::PullClientOrchestrator::start(
-                    runtime.sync(),
-                    runtime.peers(),
-                    http_client,
-                    crate::cross_region::PullClientConfig::default(),
-                )
-                .map_err(|error| {
-                    format!("Failed to start cross-region sync pull client: {error}")
-                })?;
-                info!("Cross-region signal sync pull client orchestrator started");
-                runtime.with_pull_client(orchestrator)
-            } else {
-                runtime
-            };
-            Some(Arc::new(runtime))
-        }
-        Ok(None) => None,
-        Err(error) => {
-            return Err(format!("Invalid cross-region runtime config: {error}").into());
-        }
-    };
+                    info!("Cross-region signal sync pull client orchestrator started");
+                    runtime.with_pull_client(orchestrator)
+                } else {
+                    runtime
+                };
+                Some(Arc::new(runtime))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                return Err(format!("Invalid cross-region runtime config: {error}").into());
+            }
+        };
 
     let app_state = Arc::new(AppState {
         router,
@@ -2234,12 +2337,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                 .map_err(|e| format!("Failed to set sync-plane listener nonblocking: {e}"))?;
             let sync_handle = axum_server::Handle::new();
             let server_handle = sync_handle.clone();
-            let mtls_server_config = sync_mtls_manager
-                .load_server_config()
-                .await
-                .map_err(|error| {
-                    format!("Failed to load sync-plane mTLS server config: {error}")
-                })?;
+            let mtls_server_config =
+                sync_mtls_manager
+                    .load_server_config()
+                    .await
+                    .map_err(|error| {
+                        format!("Failed to load sync-plane mTLS server config: {error}")
+                    })?;
             let sync_acceptor =
                 ForwardingPeerIdentityAcceptor::new(RustlsConfig::from_config(mtls_server_config));
             let pull_state = crate::cross_region::PullServerState::new(

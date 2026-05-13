@@ -238,10 +238,7 @@ impl ConfigValidator {
         }
 
         Self::validate_required_string("cross_region.region", config.region_id.as_deref())?;
-        Self::validate_required_string(
-            "cross_region.server_name",
-            config.server_name.as_deref(),
-        )?;
+        Self::validate_required_string("cross_region.server_name", config.server_name.as_deref())?;
         if let Some(server_name) = config.server_name.as_deref() {
             if !server_name
                 .chars()

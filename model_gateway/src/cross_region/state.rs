@@ -383,6 +383,65 @@ impl CrossRegionState {
             }
         }
     }
+
+    /// Remove the materialized value addressed by a tombstone key when the
+    /// tombstone's `(version, actor)` outranks the current live entry.
+    ///
+    /// This preserves apply ordering for delete-after-update races: an older
+    /// tombstone arriving late cannot erase a newer live signal.
+    pub fn remove_key_with_version(&mut self, key: &SignalKey, version: &SignalVersion) {
+        match key {
+            SignalKey::SmgReadiness {
+                region_id,
+                server_name,
+            } => {
+                let storage_key = (region_id.clone(), server_name.clone());
+                if should_replace(self.readiness.get(&storage_key).map(|(_, v)| v), version) {
+                    self.readiness.remove(&storage_key);
+                }
+            }
+            SignalKey::WorkerHealth {
+                region_id,
+                worker_id,
+                server_name,
+            } => {
+                let storage_key = (region_id.clone(), worker_id.clone(), server_name.clone());
+                if should_replace(
+                    self.worker_health.get(&storage_key).map(|(_, v)| v),
+                    version,
+                ) {
+                    self.worker_health.remove(&storage_key);
+                }
+            }
+            SignalKey::WorkerLoad {
+                region_id,
+                worker_id,
+                server_name,
+            } => {
+                let storage_key = (region_id.clone(), worker_id.clone(), server_name.clone());
+                if should_replace(self.worker_load.get(&storage_key).map(|(_, v)| v), version) {
+                    self.worker_load.remove(&storage_key);
+                }
+            }
+            SignalKey::ClientLatency {
+                client_region,
+                target_region,
+                server_name,
+            } => {
+                let storage_key = (
+                    client_region.clone(),
+                    target_region.clone(),
+                    server_name.clone(),
+                );
+                if should_replace(
+                    self.client_latency.get(&storage_key).map(|(_, v)| v),
+                    version,
+                ) {
+                    self.client_latency.remove(&storage_key);
+                }
+            }
+        }
+    }
 }
 
 fn replicas_in_region<'a, S>(

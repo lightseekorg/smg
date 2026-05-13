@@ -24,6 +24,8 @@
 //! `freshness_age_ms` on each projection tracks the **oldest** contributing
 //! replica we trust, so candidate ranking can bound its overall freshness.
 
+use std::collections::BTreeMap;
+
 use openai_protocol::worker::WorkerStatus;
 
 use super::{
@@ -103,11 +105,7 @@ impl<'a> RemoteRegionView<'a> {
     /// Returns `None` when the worker has never been observed; returns
     /// `Some` even when all replicas are stale so callers can read the
     /// `saw_*` discriminants on the worker projection's accessors.
-    pub fn worker(
-        &self,
-        region_id: &'a str,
-        worker_id: &'a str,
-    ) -> Option<WorkerProjection<'a>> {
+    pub fn worker(&self, region_id: &'a str, worker_id: &'a str) -> Option<WorkerProjection<'a>> {
         let has_health = self
             .state
             .worker_health_replicas(region_id, worker_id)
@@ -141,7 +139,10 @@ impl<'a> RemoteRegionView<'a> {
         let mut min_p95 = None;
         let mut age = None;
         let mut signal_owner: Option<&'a ClientLatencySignal> = None;
-        for (signal, version) in self.state.client_latency_replicas(client_region, target_region) {
+        for (signal, version) in self
+            .state
+            .client_latency_replicas(client_region, target_region)
+        {
             if !is_fresh(self.now_ms, version, self.freshness_window_ms) {
                 continue;
             }
@@ -161,15 +162,15 @@ impl<'a> RemoteRegionView<'a> {
                 signal_owner = Some(signal);
             }
         }
-        age.zip(min_p50).zip(min_p95).map(|((freshness_age_ms, p50), p95)| {
-            ClientLatencyProjection {
+        age.zip(min_p50)
+            .zip(min_p95)
+            .map(|((freshness_age_ms, p50), p95)| ClientLatencyProjection {
                 client_region: signal_owner.map(|s| s.client_region.as_str()).unwrap_or(""),
                 target_region: signal_owner.map(|s| s.target_region.as_str()).unwrap_or(""),
                 min_p50_ms: p50,
                 min_p95_ms: p95,
                 freshness_age_ms,
-            }
-        })
+            })
     }
 
     /// True when at least one fresh or stale client-latency replica exists
@@ -284,6 +285,46 @@ impl<'a> WorkerProjection<'a> {
             saw_stale_match,
         }
     }
+
+    /// Aggregated fresh load entries grouped by `model_id` for observability
+    /// projections such as `/get_loads`. This mirrors `load_for_model`'s
+    /// sum-across-replicas rule but returns every fresh model observed for
+    /// the worker.
+    pub fn fresh_load_entries(&self) -> Vec<RemoteWorkerLoadProjection> {
+        let mut entries = BTreeMap::<Option<String>, RemoteWorkerLoadProjection>::new();
+        for (signal, version) in self
+            .state
+            .worker_load_replicas(self.region_id, self.worker_id)
+        {
+            if !is_fresh(self.now_ms, version, self.freshness_window_ms) {
+                continue;
+            }
+            let model_id = signal.load.model_id.clone();
+            let entry =
+                entries
+                    .entry(model_id.clone())
+                    .or_insert_with(|| RemoteWorkerLoadProjection {
+                        region_id: signal.region_id.clone(),
+                        worker_id: signal.worker_id.clone(),
+                        model_id,
+                        total_load: 0,
+                        status: signal.load.status,
+                        generated_at_ms: version.updated_at_ms,
+                        version: version.version,
+                    });
+            entry.total_load = entry.total_load.saturating_add(signal.load.load);
+            if entry.status.is_none_or(|status| !status.is_routable()) {
+                entry.status = signal.load.status;
+            }
+            if version.updated_at_ms > entry.generated_at_ms {
+                entry.generated_at_ms = version.updated_at_ms;
+            }
+            if version.version > entry.version {
+                entry.version = version.version;
+            }
+        }
+        entries.into_values().collect()
+    }
 }
 
 /// Result of resolving an aggregated worker status. Callers consult the
@@ -316,6 +357,18 @@ pub struct WorkerLoadResolution {
     pub saw_model_mismatch: bool,
     /// True when at least one matching-model replica existed but was stale.
     pub saw_stale_match: bool,
+}
+
+/// Fresh remote worker load projection for one worker/model pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWorkerLoadProjection {
+    pub region_id: String,
+    pub worker_id: String,
+    pub model_id: Option<String>,
+    pub total_load: isize,
+    pub status: Option<WorkerStatus>,
+    pub generated_at_ms: i64,
+    pub version: u64,
 }
 
 /// Aggregated client latency for a `(client_region, target_region)` pair.
@@ -372,7 +425,13 @@ mod tests {
         version(1, actor, NOW_MS - WINDOW_MS - 1_000)
     }
 
-    fn upsert_readiness(state: &mut CrossRegionState, region: &str, server: &str, ready: bool, v: SignalVersion) {
+    fn upsert_readiness(
+        state: &mut CrossRegionState,
+        region: &str,
+        server: &str,
+        ready: bool,
+        v: SignalVersion,
+    ) {
         state.upsert_readiness(
             SmgReadinessSignal {
                 region_id: region.to_string(),
@@ -474,7 +533,10 @@ mod tests {
         upsert_readiness(&mut state, "r1", "smg-a", true, stale_version("smg-a"));
 
         let view = RemoteRegionView::new(&state, NOW_MS, WINDOW_MS);
-        assert!(view.readiness("r1").is_none(), "stale replica must not project");
+        assert!(
+            view.readiness("r1").is_none(),
+            "stale replica must not project"
+        );
         assert!(
             view.has_readiness_replica("r1"),
             "discriminant distinguishes stale from absent"
@@ -598,6 +660,48 @@ mod tests {
         let load = projection.load_for_model("model-x");
         assert!(load.total.is_none());
         assert!(load.saw_stale_match);
+    }
+
+    #[test]
+    fn fresh_load_entries_group_by_model_and_sum_replicas() {
+        let mut state = CrossRegionState::new();
+        upsert_worker_load(
+            &mut state,
+            "r1",
+            "w1",
+            "smg-a",
+            Some("model-x"),
+            3,
+            fresh_version("smg-a"),
+        );
+        upsert_worker_load(
+            &mut state,
+            "r1",
+            "w1",
+            "smg-b",
+            Some("model-x"),
+            4,
+            version(2, "smg-b", NOW_MS - 500),
+        );
+        upsert_worker_load(
+            &mut state,
+            "r1",
+            "w1",
+            "smg-c",
+            Some("model-y"),
+            9,
+            stale_version("smg-c"),
+        );
+
+        let view = RemoteRegionView::new(&state, NOW_MS, WINDOW_MS);
+        let projection = view.worker("r1", "w1").expect("worker observed");
+        let entries = projection.fresh_load_entries();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model_id.as_deref(), Some("model-x"));
+        assert_eq!(entries[0].total_load, 7);
+        assert_eq!(entries[0].generated_at_ms, NOW_MS - 500);
+        assert_eq!(entries[0].version, 2);
     }
 
     #[test]

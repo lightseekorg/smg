@@ -219,10 +219,19 @@ impl CrossRegionSyncService {
     /// each typed signal and records the observed max version for any
     /// envelope whose actor matches this replica (so a restarted producer
     /// can compute a version that exceeds peer-cached pre-restart writes).
-    pub fn apply_remote_envelopes(&self, _peer: &str, envelopes: &[SignalEnvelope<SignalKind>]) {
+    pub fn apply_remote_envelopes(&self, peer: &str, envelopes: &[SignalEnvelope<SignalKind>]) {
         let mut state = self.state.write();
         let mut observed = self.observed_remote_max.write();
         for env in envelopes {
+            if let Err(error) = validate_remote_envelope(peer, env) {
+                tracing::warn!(
+                    peer_region = %peer,
+                    key = %env.key.as_path(),
+                    error = %error,
+                    "dropping invalid cross-region signal envelope"
+                );
+                continue;
+            }
             if env.actor == self.server_name {
                 let entry = observed.entry(env.key.clone()).or_insert(0);
                 if env.version > *entry {
@@ -306,6 +315,40 @@ impl CrossRegionSyncService {
         self.log.write().append(envelope.clone());
         // Mirror envelopes into state for the producer's self-view.
         apply_envelope_to_state(&mut self.state.write(), &envelope);
+    }
+}
+
+fn validate_remote_envelope(
+    peer: &str,
+    envelope: &SignalEnvelope<SignalKind>,
+) -> CrossRegionResult<()> {
+    if envelope.key.region_segment() != peer {
+        return Err(CrossRegionError::InvalidConfig {
+            reason: format!(
+                "remote envelope key region segment {:?} does not match peer {:?}",
+                envelope.key.region_segment(),
+                peer,
+            ),
+        });
+    }
+    if envelope.actor != envelope.key.server_name_segment() {
+        return Err(CrossRegionError::InvalidConfig {
+            reason: format!(
+                "remote envelope actor {:?} does not match key server_name {:?}",
+                envelope.actor,
+                envelope.key.server_name_segment(),
+            ),
+        });
+    }
+    match (envelope.removed, envelope.signal.as_ref()) {
+        (true, None) => Ok(()),
+        (true, Some(_)) => Err(CrossRegionError::InvalidConfig {
+            reason: "removed signal envelope must not carry a signal body".to_string(),
+        }),
+        (false, Some(signal)) => validate_body_against_key(&envelope.key, signal),
+        (false, None) => Err(CrossRegionError::InvalidConfig {
+            reason: "live signal envelope must carry a signal body".to_string(),
+        }),
     }
 }
 
@@ -423,15 +466,15 @@ fn validate_identity_segment(field: &str, value: &str) -> CrossRegionResult<()> 
 }
 
 fn apply_envelope_to_state(state: &mut CrossRegionState, envelope: &SignalEnvelope<SignalKind>) {
-    if envelope.removed {
-        state.remove_key(&envelope.key);
-        return;
-    }
     let version = SignalVersion {
         version: envelope.version,
         actor: envelope.actor.clone(),
         updated_at_ms: envelope.generated_at_ms,
     };
+    if envelope.removed {
+        state.remove_key_with_version(&envelope.key, &version);
+        return;
+    }
     match envelope.signal.as_ref() {
         Some(SignalKind::SmgReadiness(s)) => state.upsert_readiness(s.clone(), version),
         Some(SignalKind::WorkerHealth(s)) => state.upsert_worker_health(s.clone(), version),
@@ -765,6 +808,120 @@ mod tests {
     }
 
     #[test]
+    fn apply_remote_envelope_rejects_peer_region_mismatch() {
+        let svc = service();
+        let envelope = SignalEnvelope {
+            key: SignalKey::SmgReadiness {
+                region_id: "us-phoenix-1".to_string(),
+                server_name: "smg-router-peer".to_string(),
+            },
+            version: 42,
+            actor: "smg-router-peer".to_string(),
+            generated_at_ms: 1_700_000_000_000,
+            stale_after_ms: 30_000,
+            removed: false,
+            signal: Some(SignalKind::SmgReadiness(SmgReadinessSignal {
+                region_id: "us-phoenix-1".to_string(),
+                server_name: "smg-router-peer".to_string(),
+                ready: true,
+            })),
+        };
+
+        svc.apply_remote_envelopes("us-chicago-1", &[envelope]);
+
+        let state = svc.state();
+        let state = state.read();
+        assert!(
+            state
+                .readiness_replica("us-phoenix-1", "smg-router-peer")
+                .is_none(),
+            "a peer must not materialize signals for another region"
+        );
+    }
+
+    #[test]
+    fn apply_remote_envelope_rejects_body_key_mismatch() {
+        let svc = service();
+        let envelope = SignalEnvelope {
+            key: SignalKey::SmgReadiness {
+                region_id: "us-chicago-1".to_string(),
+                server_name: "smg-router-peer".to_string(),
+            },
+            version: 42,
+            actor: "smg-router-peer".to_string(),
+            generated_at_ms: 1_700_000_000_000,
+            stale_after_ms: 30_000,
+            removed: false,
+            signal: Some(SignalKind::SmgReadiness(SmgReadinessSignal {
+                region_id: "us-chicago-1".to_string(),
+                server_name: "different-replica".to_string(),
+                ready: true,
+            })),
+        };
+
+        svc.apply_remote_envelopes("us-chicago-1", &[envelope]);
+
+        let state = svc.state();
+        let state = state.read();
+        assert!(
+            state
+                .readiness_replica("us-chicago-1", "different-replica")
+                .is_none(),
+            "body fields must not override the envelope key"
+        );
+        assert!(
+            state
+                .readiness_replica("us-chicago-1", "smg-router-peer")
+                .is_none(),
+            "mismatched live envelopes are dropped rather than partially applied"
+        );
+    }
+
+    #[test]
+    fn older_remote_tombstone_does_not_remove_newer_live_value() {
+        let svc = service();
+        let live = SignalEnvelope {
+            key: SignalKey::SmgReadiness {
+                region_id: "us-chicago-1".to_string(),
+                server_name: "smg-router-peer".to_string(),
+            },
+            version: 10,
+            actor: "smg-router-peer".to_string(),
+            generated_at_ms: 1_700_000_000_100,
+            stale_after_ms: 30_000,
+            removed: false,
+            signal: Some(SignalKind::SmgReadiness(SmgReadinessSignal {
+                region_id: "us-chicago-1".to_string(),
+                server_name: "smg-router-peer".to_string(),
+                ready: true,
+            })),
+        };
+        let old_tombstone = SignalEnvelope {
+            key: SignalKey::SmgReadiness {
+                region_id: "us-chicago-1".to_string(),
+                server_name: "smg-router-peer".to_string(),
+            },
+            version: 9,
+            actor: "smg-router-peer".to_string(),
+            generated_at_ms: 1_700_000_000_000,
+            stale_after_ms: 0,
+            removed: true,
+            signal: None,
+        };
+
+        svc.apply_remote_envelopes("us-chicago-1", &[live, old_tombstone]);
+
+        let state = svc.state();
+        let state = state.read();
+        assert!(
+            state
+                .readiness_replica("us-chicago-1", "smg-router-peer")
+                .expect("newer live value must survive older tombstone")
+                .ready
+        );
+    }
+
+    #[test]
     fn apply_remote_envelope_with_own_actor_seeds_observed_remote_max() {
         // Simulate post-restart: producer pulls peer's cache, sees its own
         // pre-restart write at a high version, then the next publish must
@@ -780,7 +937,7 @@ mod tests {
             removed: false,
             signal: Some(SignalKind::SmgReadiness(readiness_body())),
         };
-        svc.apply_remote_envelopes("peer-x", &[pre_restart_envelope]);
+        svc.apply_remote_envelopes(REGION, &[pre_restart_envelope]);
 
         svc.publish_signal(key, SignalKind::SmgReadiness(readiness_body()), 30_000)
             .unwrap();
