@@ -856,6 +856,14 @@ mod tests {
     }
 
     #[test]
+    fn test_load_tiktoken_config_from_dir_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, value) = load_tiktoken_config_from_dir(dir.path()).unwrap();
+        assert!(value.is_none());
+        assert!(config.added_tokens.is_empty());
+    }
+
+    #[test]
     fn test_decode_lossy_fallback_for_invalid_utf8() {
         // cl100k_base maps individual bytes to token IDs via its byte-level BPE.
         // Encode a multi-byte UTF-8 character, then decode only a prefix of its
