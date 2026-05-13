@@ -1143,9 +1143,17 @@ fn append_remote_worker_loads(state: &AppState, loads: &mut WorkerLoadsResult) {
     // (see `WorkerManager::get_all_worker_loads`). Remote-region projections
     // are additive content under `loads.loads` and must not perturb those
     // counts.
-    for entry in project_remote_worker_loads(&remote_state, local_region, max_age_ms, now_ms()) {
-        loads.loads.push(entry);
-    }
+    append_projected_remote_worker_loads(
+        loads,
+        project_remote_worker_loads(&remote_state, local_region, max_age_ms, now_ms()),
+    );
+}
+
+fn append_projected_remote_worker_loads(
+    loads: &mut WorkerLoadsResult,
+    remote_loads: Vec<WorkerLoadInfo>,
+) {
+    loads.loads.extend(remote_loads);
 }
 
 /// Pure projection of `CrossRegionState` into `/get_loads`-shaped envelopes,
@@ -3202,10 +3210,8 @@ mod tests {
 
         use openai_protocol::worker::{WorkerLoadInfo, WorkerStatus};
 
-        use super::super::project_remote_worker_loads;
-        use crate::cross_region::{
-            CrossRegionState, SignalVersion, WorkerLoadSignal,
-        };
+        use super::super::{append_projected_remote_worker_loads, project_remote_worker_loads};
+        use crate::cross_region::{CrossRegionState, SignalVersion, WorkerLoadSignal};
 
         const NOW_MS: i64 = 10_000_000;
         const WINDOW_MS: i64 = 30_000;
@@ -3322,6 +3328,66 @@ mod tests {
                     "inner observations must be tagged RemoteSmg (regression for bug 1)",
                 );
             }
+        }
+
+        #[test]
+        fn appending_remote_projection_does_not_change_local_worker_counts() {
+            use openai_protocol::worker::WorkerLoadInfoSource;
+
+            let mut loads = openai_protocol::worker::WorkerLoadsResult {
+                loads: vec![WorkerLoadInfo {
+                    worker: "http://local-worker:8000".to_string(),
+                    worker_type: None,
+                    load: 2,
+                    details: None,
+                    region_id: Some(LOCAL_REGION.to_string()),
+                    worker_id: Some("local-w".to_string()),
+                    model_id: Some("cohere.command-r-plus".to_string()),
+                    status: Some(WorkerStatus::Ready),
+                    generated_at_ms: Some(NOW_MS),
+                    version: Some(1),
+                    source: Some(WorkerLoadInfoSource::LocalWorker),
+                    remote_workers: None,
+                }],
+                total_workers: 2,
+                successful: 1,
+                failed: 1,
+            };
+            let remote_projection = vec![WorkerLoadInfo {
+                worker: "region-peer/us-chicago-1".to_string(),
+                worker_type: None,
+                load: 5,
+                details: None,
+                region_id: Some("us-chicago-1".to_string()),
+                worker_id: None,
+                model_id: None,
+                status: None,
+                generated_at_ms: Some(NOW_MS),
+                version: Some(1),
+                source: Some(WorkerLoadInfoSource::RemoteSmg),
+                remote_workers: Some(vec![WorkerLoadInfo {
+                    worker: "w1".to_string(),
+                    worker_type: None,
+                    load: 5,
+                    details: None,
+                    region_id: Some("us-chicago-1".to_string()),
+                    worker_id: Some("w1".to_string()),
+                    model_id: Some("cohere.command-r-plus".to_string()),
+                    status: Some(WorkerStatus::Ready),
+                    generated_at_ms: Some(NOW_MS),
+                    version: Some(1),
+                    source: Some(WorkerLoadInfoSource::RemoteSmg),
+                    remote_workers: None,
+                }]),
+            }];
+
+            append_projected_remote_worker_loads(&mut loads, remote_projection);
+
+            assert_eq!(loads.loads.len(), 2);
+            assert_eq!(loads.total_workers, 2);
+            assert_eq!(loads.successful, 1);
+            assert_eq!(loads.failed, 1);
+            assert_eq!(loads.loads[1].source, Some(WorkerLoadInfoSource::RemoteSmg));
         }
 
         #[test]
