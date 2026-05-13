@@ -14,20 +14,17 @@ use crate::{
         ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
     factory::discover_chat_template_in_dir,
+    kimi_k2_tokenizer,
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
 
 /// Regex pattern for cl100k_base tokenization.
 ///
-/// This pattern is correct for OpenAI models and most open-source tiktoken models (e.g.
-/// DeepSeek, Kimi K2). Some models use a different regex — for example, Kimi K2's native
-/// regex includes `\p{Han}` for Chinese character splitting — but encode/decode roundtrips
-/// still work correctly because BPE vocab handles tokenization; the regex only affects exact
-/// token boundary placement. A future enhancement could parse the regex from HuggingFace's
-/// `generation_config.json` or similar metadata.
-const CL100K_BASE_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+/// This pattern is correct for OpenAI models and most open-source tiktoken models. Models
+/// with a tokenizer-specific regex should build through a specialized tokenizer wrapper.
+pub(crate) const CL100K_BASE_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
-type Rank = u32;
+pub(crate) type Rank = u32;
 
 // ---------------------------------------------------------------------------
 // Tiktoken-specific config parsing (from tokenizer_config.json)
@@ -35,15 +32,15 @@ type Rank = u32;
 
 /// Parsed `tokenizer_config.json` for tiktoken-based models.
 #[derive(Default)]
-struct TiktokenConfig {
-    special_tokens: SpecialTokens,
+pub(crate) struct TiktokenConfig {
+    pub(crate) special_tokens: SpecialTokens,
     /// Token string -> ID mapping from `added_tokens_decoder`
-    added_tokens: HashMap<String, TokenIdType>,
-    chat_template: Option<String>,
+    pub(crate) added_tokens: HashMap<String, TokenIdType>,
+    pub(crate) chat_template: Option<String>,
 }
 
 /// Parse `tokenizer_config.json` for tiktoken-based models.
-fn load_tiktoken_config(config_path: &Path) -> Result<TiktokenConfig> {
+pub(crate) fn load_tiktoken_config(config_path: &Path) -> Result<TiktokenConfig> {
     let content = std::fs::read_to_string(config_path)?;
     let config: serde_json::Value = serde_json::from_str(&content)?;
 
@@ -60,6 +57,15 @@ fn load_tiktoken_config(config_path: &Path) -> Result<TiktokenConfig> {
         added_tokens,
         chat_template,
     })
+}
+
+pub(crate) fn load_tiktoken_config_from_dir(dir: &Path) -> Result<TiktokenConfig> {
+    let config_path = dir.join("tokenizer_config.json");
+    if config_path.exists() {
+        load_tiktoken_config(&config_path)
+    } else {
+        Ok(TiktokenConfig::default())
+    }
 }
 
 /// Parse `added_tokens_decoder` from config JSON.
@@ -213,33 +219,51 @@ impl TiktokenTokenizer {
     }
 
     /// Core loading logic shared by `from_dir` and `from_file` constructors.
+    ///
+    /// Detects Kimi-K2/K2.5/K2.6 directories and specializes the regex and
+    /// reserved-special-token range without exposing a separate public type.
     fn load_from_path(tiktoken_path: &Path, chat_template_path: Option<&str>) -> Result<Self> {
-        // 1. Load BPE encoder from the exact file
         let tiktoken_path_str = tiktoken_path
             .to_str()
             .ok_or_else(|| Error::msg("Tiktoken file path is not valid UTF-8"))?;
         let encoder = load_tiktoken_bpe(tiktoken_path_str)?;
 
-        // 2. Parse tokenizer_config.json from the same directory
         let dir = tiktoken_path
             .parent()
             .ok_or_else(|| Error::msg("Cannot determine parent directory of tiktoken file"))?;
-        let config_path = dir.join("tokenizer_config.json");
-        let config = if config_path.exists() {
-            load_tiktoken_config(&config_path)?
+        let mut config = load_tiktoken_config_from_dir(dir)?;
+
+        let pattern = if kimi_k2_tokenizer::matches_dir(dir) {
+            kimi_k2_tokenizer::apply_reserved_special_tokens(
+                &mut config.added_tokens,
+                encoder.len(),
+            );
+            kimi_k2_tokenizer::KIMI_K2_PATTERN
         } else {
-            TiktokenConfig::default()
+            CL100K_BASE_PATTERN
         };
 
-        // 3. Build special tokens encoder for CoreBPE (needs FxHashMap)
+        Self::from_encoder_and_config(encoder, dir, chat_template_path, pattern, config)
+    }
+
+    /// Build a `TiktokenTokenizer` from already-prepared pieces. Crate-private
+    /// seam used by `load_from_path` after pattern/config specialization.
+    fn from_encoder_and_config(
+        encoder: FxHashMap<Vec<u8>, Rank>,
+        dir: &Path,
+        chat_template_path: Option<&str>,
+        pattern: &str,
+        config: TiktokenConfig,
+    ) -> Result<Self> {
+        // CoreBPE wants its special-tokens map as FxHashMap.
         let special_tokens_encoder: FxHashMap<String, Rank> = config
             .added_tokens
             .iter()
             .map(|(k, &v)| (k.clone(), v))
             .collect();
 
-        // 4. Calculate true vocab size from max token ID (handles sparse/reserved IDs),
-        //    build string-based vocab maps (borrows encoder), then pass encoder by value to CoreBPE
+        // True vocab size = max(token_id) + 1, which correctly handles sparse
+        // reserved-special-token IDs that sit above the dense BPE range.
         let vocab_size = encoder
             .values()
             .copied()
@@ -248,10 +272,11 @@ impl TiktokenTokenizer {
             .map(|id| id as usize + 1)
             .unwrap_or(0);
         let (vocab, reverse_vocab) = build_vocab_maps(&encoder, &config.added_tokens);
-        let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN)?;
+        let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, pattern)?;
 
-        // 5. Load chat template — propagate errors for explicit paths,
-        //    silently fall back for auto-discovery
+        // Chat template: explicit path is authoritative; otherwise prefer the
+        // template embedded in tokenizer_config.json, then fall back to
+        // sibling discovery.
         let chat_template = if let Some(p) = chat_template_path {
             load_chat_template_from_file(p)?
         } else {
@@ -261,7 +286,6 @@ impl TiktokenTokenizer {
             })
         };
 
-        // Load merged EOS token IDs from config.json + generation_config.json
         let eos_token_ids = crate::eos::load_eos_token_ids(dir);
 
         Ok(TiktokenTokenizer {
@@ -343,7 +367,7 @@ impl TiktokenTokenizer {
 /// Parse a .tiktoken / tiktoken.model file into a BPE encoder.
 ///
 /// Format: each line is `<base64-encoded-token-bytes> <rank>`
-fn load_tiktoken_bpe(path: &str) -> Result<FxHashMap<Vec<u8>, Rank>> {
+pub(crate) fn load_tiktoken_bpe(path: &str) -> Result<FxHashMap<Vec<u8>, Rank>> {
     let content = std::fs::read_to_string(path)?;
     let mut encoder =
         FxHashMap::with_capacity_and_hasher(content.lines().count(), Default::default());
@@ -394,7 +418,7 @@ fn build_vocab_maps(
 /// Find a tiktoken model file in the given directory.
 ///
 /// Looks for `tiktoken.model` first, then any `*.tiktoken` file.
-fn find_tiktoken_file(dir: &Path) -> Result<PathBuf> {
+pub(crate) fn find_tiktoken_file(dir: &Path) -> Result<PathBuf> {
     let tiktoken_model = dir.join("tiktoken.model");
     if tiktoken_model.exists() {
         return Ok(tiktoken_model);
@@ -473,6 +497,9 @@ impl Decoder for TiktokenTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
         match self.tokenizer.decode(token_ids.to_vec()) {
             Ok(text) => Ok(text),
+            Err(err) if is_unknown_tiktoken_decode_error(&err) => Err(Error::msg(format!(
+                "tiktoken decode failed for unknown token id: {err}"
+            ))),
             Err(err) => {
                 // Fallback to lossy decoding for incomplete UTF-8 sequences
                 let bytes: Vec<u8> = self
@@ -489,6 +516,17 @@ impl Decoder for TiktokenTokenizer {
             }
         }
     }
+}
+
+/// Detect tiktoken's "unknown token id" error so we can surface a clean error
+/// instead of letting the lossy-decode fallback panic on a missing key.
+///
+/// We match on the `Display` string because tiktoken-rs's `DecodeKeyError` lives
+/// in a private `vendor_tiktoken` module and isn't re-exported (as of 0.9.1),
+/// so a typed `downcast_ref` is not available. The message format is stable —
+/// see `vendor_tiktoken::DecodeKeyError::fmt` upstream.
+fn is_unknown_tiktoken_decode_error(err: &Error) -> bool {
+    err.to_string().starts_with("Invalid token for decoding:")
 }
 
 impl TokenizerTrait for TiktokenTokenizer {
@@ -556,6 +594,21 @@ impl TokenizerTrait for TiktokenTokenizer {
 mod tests {
     use super::*;
     use crate::traits::{Decoder, Encoder, Tokenizer};
+
+    const MINIMAL_TIKTOKEN_MODEL: &str = "YQ== 0\nYg== 1\n";
+
+    fn write_minimal_tiktoken_dir(
+        tokenizer_config: &str,
+        model_config: Option<&str>,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiktoken.model"), MINIMAL_TIKTOKEN_MODEL).unwrap();
+        std::fs::write(dir.path().join("tokenizer_config.json"), tokenizer_config).unwrap();
+        if let Some(model_config) = model_config {
+            std::fs::write(dir.path().join("config.json"), model_config).unwrap();
+        }
+        dir
+    }
 
     #[test]
     fn test_tiktoken_creation() {
@@ -752,6 +805,26 @@ mod tests {
         assert_eq!(tokens.get("[BOS]"), Some(&163584));
         assert_eq!(tokens.get("[EOS]"), Some(&163585));
         assert_eq!(tokens.get("<|im_end|>"), Some(&163586));
+    }
+
+    #[test]
+    fn test_tiktoken_unknown_token_decode_returns_error() {
+        let dir = write_minimal_tiktoken_dir(
+            r#"{
+                "added_tokens_decoder": {
+                    "2": { "content": "[BOS]", "special": true }
+                }
+            }"#,
+            None,
+        );
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        let err = tokenizer.decode(&[4], false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("tiktoken decode failed for unknown token id"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
