@@ -34,8 +34,8 @@ mod tests;
 // v2 API
 pub use chunking::MAX_STREAM_CHUNK_BYTES;
 pub use crdt_kv::{
-    decode as decode_epoch_count, encode as encode_epoch_count, merge as merge_epoch_max_wins,
-    CrdtOrMap, EpochCount, MergeStrategy, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
+    decode as decode_epoch_count, encode as encode_epoch_count, CrdtOrMap, EpochCount,
+    MergeStrategy, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
 };
 pub use kv::{
     CrdtNamespace, DrainHandle, MeshKV, StreamConfig, StreamDrainFn, StreamNamespace,
