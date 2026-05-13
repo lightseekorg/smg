@@ -66,7 +66,6 @@ impl MeshServerHandler {
         self.partition_detector.as_ref()
     }
 
-    /// Get state machine
     /// Check if we should serve (have quorum)
     pub fn should_serve(&self) -> bool {
         self.partition_detector

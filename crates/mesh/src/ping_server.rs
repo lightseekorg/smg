@@ -314,23 +314,50 @@ impl Gossip for GossipService {
             reason = "server-side inbound handler bound to sync_stream lifetime; terminates when the stream closes"
         )]
         tokio::spawn(async move {
+            // Close the stream if no inbound message arrives within
+            // this window — protects against idle clients pinning the
+            // server-side task and mpsc channel indefinitely.
+            const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
             let mut peer_id = String::new();
             update_peer_connections(&peer_id, true);
             let mut sequence: u64 = 0;
 
-            while let Some(result) = incoming.next().await {
-                let msg = match result {
-                    Ok(msg) => msg,
-                    Err(e) => {
+            loop {
+                let msg = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    Ok(Some(Err(e))) => {
                         log::error!("Error receiving stream message: {}", e);
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        log::warn!(
+                            peer = %peer_id,
+                            "sync_stream idle timeout ({STREAM_IDLE_TIMEOUT:?}) — closing"
+                        );
                         break;
                     }
                 };
 
-                if peer_id.is_empty() && !msg.peer_id.is_empty() {
-                    peer_id = msg.peer_id.clone();
-                    update_peer_connections(&peer_id, true);
-                    *learned_peer_inbound.write() = Some(peer_id.clone());
+                // Bind peer_id to the first non-empty inbound id. A later
+                // frame whose msg.peer_id (empty or otherwise) doesn't
+                // match is treated as identity change and closes the
+                // stream. Pre-mTLS-binding defence; mTLS-derived
+                // identity is the authoritative long-term fix.
+                if peer_id.is_empty() {
+                    if !msg.peer_id.is_empty() {
+                        peer_id = msg.peer_id.clone();
+                        update_peer_connections(&peer_id, true);
+                        *learned_peer_inbound.write() = Some(peer_id.clone());
+                    }
+                } else if msg.peer_id != peer_id {
+                    log::warn!(
+                        expected_peer_id = %peer_id,
+                        received_peer_id = %msg.peer_id,
+                        "peer_id changed mid-stream; closing sync_stream"
+                    );
+                    break;
                 }
                 sequence = sequence.max(msg.sequence);
 
