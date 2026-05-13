@@ -23,7 +23,6 @@ mod rate_limit_window;
 mod service;
 mod stores;
 mod sync;
-mod topology;
 mod tree_ops;
 mod types;
 
