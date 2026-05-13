@@ -1200,16 +1200,19 @@ pub struct WebSearchPreviewTool {
 /// Non-preview hosted web search tool configuration.
 ///
 /// Spec: `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
-/// search_context_size?: "low"|"medium"|"high", user_location? }`.
+/// return_token_budget?: "default"|"unlimited", search_context_size?: "low"|"medium"|"high",
+/// user_location? }`.
 ///
 /// Distinct from `WebSearchPreviewTool`: adds `filters.allowed_domains` (domain
-/// allowlist) and pins `search_context_size` to the spec-listed enum.
+/// allowlist), `return_token_budget`, and pins `search_context_size` to the spec-listed enum.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchTool {
     /// Optional domain allowlist applied to candidate sources.
     pub filters: Option<WebSearchFilters>,
+    /// Search-result context token budget. Spec enum: `"default" | "unlimited"`.
+    pub return_token_budget: Option<WebSearchReturnTokenBudget>,
     /// Search context budget. Spec enum: `"low" | "medium" | "high"`.
     pub search_context_size: Option<WebSearchContextSize>,
     /// Approximate user location used to bias results.
@@ -1236,6 +1239,16 @@ pub enum WebSearchContextSize {
     Low,
     Medium,
     High,
+}
+
+/// Search-result token budget for the non-preview `web_search` tool.
+///
+/// Spec: `return_token_budget?: "default" | "unlimited"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchReturnTokenBudget {
+    Default,
+    Unlimited,
 }
 
 /// Approximate user location for the non-preview `web_search` tool.

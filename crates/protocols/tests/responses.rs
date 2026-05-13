@@ -243,13 +243,14 @@ fn test_file_search_tool_round_trip_hybrid_weights_omitted() {
 
 /// Spec fixture (openai-responses-api-spec.md §tools line 439):
 /// `{ type: "web_search" | "web_search_2025_08_26", filters? { allowed_domains? },
-/// search_context_size?: "low"|"medium"|"high", user_location? }`. Covers the
-/// canonical tag, the versioned alias, and full-field nested shape.
+/// return_token_budget?: "default"|"unlimited", search_context_size?: "low"|"medium"|"high",
+/// user_location? }`. Covers the canonical tag, the versioned alias, and full-field nested shape.
 #[test]
 fn test_web_search_tool_round_trip() {
     let payload = json!({
         "type": "web_search",
         "filters": {"allowed_domains": ["example.com", "rust-lang.org"]},
+        "return_token_budget": "default",
         "search_context_size": "high",
         "user_location": {
             "type": "approximate",
@@ -271,6 +272,54 @@ fn test_web_search_tool_round_trip() {
     let alias: ResponseTool = serde_json::from_value(json!({"type": "web_search_2025_08_26"}))
         .expect("web_search_2025_08_26 alias should deserialize");
     assert!(matches!(alias, ResponseTool::WebSearch(_)));
+}
+
+#[test]
+fn test_web_search_response_tool_echo_accepts_return_token_budget() {
+    let payload = json!({
+        "id": "resp_web_echo",
+        "object": "response",
+        "created_at": 1,
+        "status": "completed",
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": null,
+        "model": "gpt-5.4",
+        "output": [],
+        "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "reasoning": null,
+        "store": true,
+        "temperature": 1.0,
+        "text": {"format": {"type": "text"}},
+        "tool_choice": "auto",
+        "tools": [{
+            "type": "web_search",
+            "return_token_budget": "default",
+            "search_context_size": "low",
+            "user_location": {
+                "type": "approximate",
+                "city": null,
+                "country": null,
+                "region": null,
+                "timezone": null
+            }
+        }],
+        "top_p": 1.0,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "metadata": {}
+    });
+
+    let response: ResponsesResponse = serde_json::from_value(payload.clone())
+        .expect("upstream web_search echo with return_token_budget should deserialize");
+    let serialized = serde_json::to_value(&response).expect("serialize response");
+    assert_eq!(
+        serialized["tools"][0]["return_token_budget"],
+        json!("default")
+    );
 }
 
 /// Acceptance: `web_search_call` output item carries an optional typed
