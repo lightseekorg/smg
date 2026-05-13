@@ -340,13 +340,13 @@ pub(super) fn compact_operations<'a>(
     state.and_then(|state| state.into_operation(key?))
 }
 
-/// Merge two stored rate-limit shard values.
-///
-/// Both decode: merge their shard frontiers. One decodes: the well-formed
-/// side wins. Neither decodes: keep `local` (no-op, per the `EpochMaxWins`
-/// contract in `kv.rs`).
+/// Merge two stored rate-limit shard payloads. Production merges go
+/// through [`merge_live_value`] (it carries the live-version metadata
+/// the CRDT needs). This byte-only form exists solely for the unit
+/// tests below.
+#[cfg(test)]
 #[must_use]
-pub fn merge(local: &[u8], remote: &[u8]) -> Vec<u8> {
+fn merge(local: &[u8], remote: &[u8]) -> Vec<u8> {
     match (decode_stored_live(local), decode_stored_live(remote)) {
         (Some(local_state), Some(remote_state)) => {
             let Some(RateLimitState::Live(shard)) =
