@@ -1055,6 +1055,7 @@ class _TestToolChoiceBase:
             model=model,
             messages=messages,
             max_tokens=2048,
+            temperature=0.1,
             tools=tools,
             tool_choice="required",
             stream=True,
