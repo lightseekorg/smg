@@ -69,8 +69,9 @@ use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
     cross_region::{
-        headers::REQUEST_MODE_HEADER, validate_settled_local_execution, AuthenticatedPeerIdentity,
-        CrossRegionContext, CrossRegionError, CrossRegionHeaders, CrossRegionRuntimeConfig,
+        config::seconds_to_millis_saturating, headers::REQUEST_MODE_HEADER,
+        validate_settled_local_execution, AuthenticatedPeerIdentity, CrossRegionContext,
+        CrossRegionError, CrossRegionHeaders, CrossRegionRuntimeConfig, CrossRegionState,
         CrossRegionSyncRuntime, RegionPeer, RegionPeerRegistry, RemoteRegionView,
         SettledRequestContext, UnresolvedRequestContext,
     },
@@ -1138,7 +1139,31 @@ fn append_remote_worker_loads(state: &AppState, loads: &mut WorkerLoadsResult) {
             .sync_plane
             .signal_stale_after_seconds,
     );
-    let view = RemoteRegionView::new(&remote_state, now_ms(), max_age_ms);
+    // `total_workers`/`successful`/`failed` describe the local worker query
+    // (see `WorkerManager::get_all_worker_loads`). Remote-region projections
+    // are additive content under `loads.loads` and must not perturb those
+    // counts.
+    for entry in project_remote_worker_loads(&remote_state, local_region, max_age_ms, now_ms()) {
+        loads.loads.push(entry);
+    }
+}
+
+/// Pure projection of `CrossRegionState` into `/get_loads`-shaped envelopes,
+/// one per remote region with at least one fresh worker-load entry.
+///
+/// Each outer envelope is tagged `WorkerLoadInfoSource::RemoteSmg` and
+/// carries a `region-peer/{region_id}` placeholder URL plus the per-worker
+/// observations nested under `remote_workers`. The inner observations are
+/// also tagged `RemoteSmg` — they were materialized via the cross-region
+/// sync plane, not via the local worker registry.
+fn project_remote_worker_loads(
+    remote_state: &CrossRegionState,
+    local_region: &str,
+    max_age_ms: i64,
+    now_ms: i64,
+) -> Vec<WorkerLoadInfo> {
+    let view = RemoteRegionView::new(remote_state, now_ms, max_age_ms);
+    let mut envelopes = Vec::new();
 
     for region_id in view.regions() {
         if region_id == local_region {
@@ -1172,7 +1197,9 @@ fn append_remote_worker_loads(state: &AppState, loads: &mut WorkerLoadsResult) {
                     status: entry.status,
                     generated_at_ms: Some(entry.generated_at_ms),
                     version: Some(entry.version),
-                    source: Some(WorkerLoadInfoSource::LocalWorker),
+                    // Inner entries describe remote workers observed via the
+                    // sync plane — not the local worker registry.
+                    source: Some(WorkerLoadInfoSource::RemoteSmg),
                     remote_workers: None,
                 });
             }
@@ -1186,9 +1213,7 @@ fn append_remote_worker_loads(state: &AppState, loads: &mut WorkerLoadsResult) {
                 .cmp(&b.worker)
                 .then_with(|| a.model_id.cmp(&b.model_id))
         });
-        loads.total_workers = loads.total_workers.saturating_add(remote_workers.len());
-        loads.successful = loads.successful.saturating_add(remote_workers.len());
-        loads.loads.push(WorkerLoadInfo {
+        envelopes.push(WorkerLoadInfo {
             worker: format!("region-peer/{region_id}"),
             worker_type: None,
             load: aggregate_load,
@@ -1203,10 +1228,8 @@ fn append_remote_worker_loads(state: &AppState, loads: &mut WorkerLoadsResult) {
             remote_workers: Some(remote_workers),
         });
     }
-}
 
-fn seconds_to_millis_saturating(seconds: u64) -> i64 {
-    i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
+    envelopes
 }
 
 fn now_ms() -> i64 {
@@ -3161,5 +3184,214 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(router.responses_calls.load(Ordering::SeqCst), 0);
+    }
+
+    mod remote_worker_loads_projection {
+        //! Regression tests for `project_remote_worker_loads` (the pure
+        //! projection inside `/get_loads`).
+        //!
+        //! Two earlier bugs the tests guard against:
+        //!   1. Inner `remote_workers` entries were tagged `LocalWorker`
+        //!      when they were observed via the cross-region sync plane.
+        //!   2. `total_workers` / `successful` in the response were being
+        //!      incremented by the number of projection *entries*, which
+        //!      breaks the LOCAL-worker semantic of those counters.
+        //!
+        //! Both are fixed in the function under test; these tests pin the
+        //! behavior so a future change can't silently regress them.
+
+        use openai_protocol::worker::{WorkerLoadInfo, WorkerStatus};
+
+        use super::super::project_remote_worker_loads;
+        use crate::cross_region::{
+            CrossRegionState, SignalVersion, WorkerLoadSignal,
+        };
+
+        const NOW_MS: i64 = 10_000_000;
+        const WINDOW_MS: i64 = 30_000;
+        const LOCAL_REGION: &str = "us-ashburn-1";
+
+        fn version(version: u64, actor: &str) -> SignalVersion {
+            SignalVersion {
+                version,
+                actor: actor.to_string(),
+                updated_at_ms: NOW_MS - 1_000,
+            }
+        }
+
+        fn upsert_load(
+            state: &mut CrossRegionState,
+            region: &str,
+            worker: &str,
+            server: &str,
+            model_id: &str,
+            load: isize,
+            v: SignalVersion,
+        ) {
+            state.upsert_worker_load(
+                WorkerLoadSignal {
+                    region_id: region.to_string(),
+                    worker_id: worker.to_string(),
+                    server_name: server.to_string(),
+                    load: WorkerLoadInfo {
+                        worker: worker.to_string(),
+                        worker_type: None,
+                        load,
+                        details: None,
+                        region_id: Some(region.to_string()),
+                        worker_id: Some(worker.to_string()),
+                        model_id: Some(model_id.to_string()),
+                        status: Some(WorkerStatus::Ready),
+                        generated_at_ms: Some(NOW_MS - 1_000),
+                        version: Some(v.version),
+                        source: None,
+                        remote_workers: None,
+                    },
+                },
+                v,
+            );
+        }
+
+        #[test]
+        fn skips_local_region_and_groups_per_remote_region() {
+            let mut state = CrossRegionState::new();
+            // Local region's own entry — must be filtered out.
+            upsert_load(
+                &mut state,
+                LOCAL_REGION,
+                "local-w",
+                "smg-local",
+                "cohere.command-r-plus",
+                1,
+                version(1, "smg-local"),
+            );
+            // Remote region entry that should appear.
+            upsert_load(
+                &mut state,
+                "us-chicago-1",
+                "w1",
+                "smg-chi-a",
+                "cohere.command-r-plus",
+                3,
+                version(1, "smg-chi-a"),
+            );
+
+            let envelopes = project_remote_worker_loads(&state, LOCAL_REGION, WINDOW_MS, NOW_MS);
+
+            assert_eq!(envelopes.len(), 1, "only the remote region should project");
+            let envelope = &envelopes[0];
+            assert_eq!(envelope.region_id.as_deref(), Some("us-chicago-1"));
+            assert_eq!(envelope.worker, "region-peer/us-chicago-1");
+            assert_eq!(envelope.load, 3);
+        }
+
+        #[test]
+        fn inner_remote_workers_are_tagged_remote_smg_not_local() {
+            // Regression for bug 1: inner entries described workers observed
+            // via cross-region sync; they must NOT be `LocalWorker`.
+            use openai_protocol::worker::WorkerLoadInfoSource;
+
+            let mut state = CrossRegionState::new();
+            upsert_load(
+                &mut state,
+                "us-chicago-1",
+                "w1",
+                "smg-chi-a",
+                "cohere.command-r-plus",
+                5,
+                version(1, "smg-chi-a"),
+            );
+
+            let envelopes = project_remote_worker_loads(&state, LOCAL_REGION, WINDOW_MS, NOW_MS);
+
+            assert_eq!(envelopes.len(), 1);
+            let envelope = &envelopes[0];
+            assert_eq!(envelope.source, Some(WorkerLoadInfoSource::RemoteSmg));
+            let remote_workers = envelope
+                .remote_workers
+                .as_ref()
+                .expect("envelope must carry per-worker observations");
+            assert!(
+                !remote_workers.is_empty(),
+                "the envelope must include the projected worker",
+            );
+            for inner in remote_workers {
+                assert_eq!(
+                    inner.source,
+                    Some(WorkerLoadInfoSource::RemoteSmg),
+                    "inner observations must be tagged RemoteSmg (regression for bug 1)",
+                );
+            }
+        }
+
+        #[test]
+        fn aggregates_load_across_replicas_for_same_worker() {
+            // Two SMG replicas in us-chicago-1 each observe worker w1.
+            // Phase F's `fresh_load_entries` sums their loads.
+            let mut state = CrossRegionState::new();
+            upsert_load(
+                &mut state,
+                "us-chicago-1",
+                "w1",
+                "smg-chi-a",
+                "cohere.command-r-plus",
+                4,
+                version(1, "smg-chi-a"),
+            );
+            upsert_load(
+                &mut state,
+                "us-chicago-1",
+                "w1",
+                "smg-chi-b",
+                "cohere.command-r-plus",
+                3,
+                version(1, "smg-chi-b"),
+            );
+
+            let envelopes = project_remote_worker_loads(&state, LOCAL_REGION, WINDOW_MS, NOW_MS);
+            assert_eq!(envelopes.len(), 1);
+            let envelope = &envelopes[0];
+            assert_eq!(envelope.load, 7, "sum of replica loads");
+            let remote_workers = envelope.remote_workers.as_ref().unwrap();
+            assert_eq!(remote_workers.len(), 1, "one (worker, model) entry");
+            assert_eq!(remote_workers[0].load, 7);
+        }
+
+        #[test]
+        fn empty_state_returns_no_envelopes() {
+            let envelopes = project_remote_worker_loads(
+                &CrossRegionState::new(),
+                LOCAL_REGION,
+                WINDOW_MS,
+                NOW_MS,
+            );
+            assert!(envelopes.is_empty());
+        }
+
+        #[test]
+        fn stale_loads_are_filtered_out() {
+            let mut state = CrossRegionState::new();
+            // Entry older than the freshness window.
+            let stale = SignalVersion {
+                version: 1,
+                actor: "smg-chi-a".to_string(),
+                updated_at_ms: NOW_MS - WINDOW_MS - 1_000,
+            };
+            upsert_load(
+                &mut state,
+                "us-chicago-1",
+                "w1",
+                "smg-chi-a",
+                "cohere.command-r-plus",
+                5,
+                stale,
+            );
+
+            let envelopes = project_remote_worker_loads(&state, LOCAL_REGION, WINDOW_MS, NOW_MS);
+            assert!(
+                envelopes.is_empty(),
+                "stale entries must not produce projection envelopes",
+            );
+        }
     }
 }

@@ -117,7 +117,11 @@ impl CrossRegionRuntimeConfig {
     }
 }
 
-fn seconds_to_millis_saturating(seconds: u64) -> i64 {
+/// Convert a seconds value to milliseconds, saturating at `i64::MAX` instead
+/// of overflowing. Used by both retention plumbing (`sync_retention`) and the
+/// `/get_loads` cross-region projection (`signal_stale_after_seconds` →
+/// freshness window).
+pub(crate) fn seconds_to_millis_saturating(seconds: u64) -> i64 {
     i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
 }
 
