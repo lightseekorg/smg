@@ -429,6 +429,7 @@ fn apply_envelope_to_state(state: &mut CrossRegionState, envelope: &SignalEnvelo
     }
     let version = SignalVersion {
         version: envelope.version,
+        actor: envelope.actor.clone(),
         updated_at_ms: envelope.generated_at_ms,
     };
     match envelope.signal.as_ref() {
@@ -601,7 +602,7 @@ mod tests {
         let state = svc.state();
         let state = state.read();
         assert!(
-            state.readiness(REGION).is_none(),
+            state.readiness_replica(REGION, SERVER).is_none(),
             "tombstone should remove the materialized value immediately"
         );
     }
@@ -758,7 +759,7 @@ mod tests {
         let state = svc.state();
         let state = state.read();
         let signal = state
-            .readiness("us-chicago-1")
+            .readiness_replica("us-chicago-1", "smg-router-peer")
             .expect("peer readiness must be materialized");
         assert!(signal.ready);
     }
@@ -802,7 +803,7 @@ mod tests {
         .unwrap();
         let state = svc.state();
         let state = state.read();
-        assert!(state.readiness(REGION).is_some());
+        assert!(state.readiness_replica(REGION, SERVER).is_some());
     }
 
     #[test]
@@ -850,5 +851,29 @@ mod tests {
         let (entries, _) = svc.local_log_snapshot();
         assert_eq!(entries.len(), 1, "tombstone should outlive live retention");
         assert!(entries[0].removed);
+    }
+
+    #[test]
+    fn gc_drops_tombstones_past_tombstone_retention() {
+        let svc = CrossRegionSyncService::new_with_retention(
+            REGION.to_string(),
+            SERVER.to_string(),
+            SyncRetention {
+                tombstone_retention_ms: 100,
+                dead_replica_retention_ms: 50,
+            },
+        )
+        .unwrap();
+        svc.remove_signal(readiness_key()).unwrap();
+        let (entries, _) = svc.local_log_snapshot();
+        let tombstone_ts = entries[0].generated_at_ms;
+
+        svc.gc_log(tombstone_ts + 101);
+
+        let (entries, _) = svc.local_log_snapshot();
+        assert!(
+            entries.is_empty(),
+            "tombstone should be GC'd after tombstone retention expires"
+        );
     }
 }

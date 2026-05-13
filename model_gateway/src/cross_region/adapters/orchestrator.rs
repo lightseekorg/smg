@@ -14,7 +14,7 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use super::{ClientLatencyAdapter, RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter};
 use crate::{
-    cross_region::{CrossRegionResult, CrossRegionSyncService},
+    cross_region::{CrossRegionResult, CrossRegionSyncService, SyncRetention},
     worker::WorkerRegistry,
 };
 
@@ -56,6 +56,21 @@ impl CrossRegionProducers {
     /// `region_id` / `server_name` in.
     pub fn new(region_id: String, server_name: String) -> CrossRegionResult<Self> {
         let sync = Arc::new(CrossRegionSyncService::new(region_id, server_name)?);
+        Ok(Self::from_sync(sync))
+    }
+
+    /// Build adapters wrapping a fresh sync service with explicit log
+    /// retention windows from runtime config.
+    pub fn new_with_retention(
+        region_id: String,
+        server_name: String,
+        retention: SyncRetention,
+    ) -> CrossRegionResult<Self> {
+        let sync = Arc::new(CrossRegionSyncService::new_with_retention(
+            region_id,
+            server_name,
+            retention,
+        )?);
         Ok(Self::from_sync(sync))
     }
 

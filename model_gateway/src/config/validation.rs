@@ -238,6 +238,24 @@ impl ConfigValidator {
         }
 
         Self::validate_required_string("cross_region.region", config.region_id.as_deref())?;
+        Self::validate_required_string(
+            "cross_region.server_name",
+            config.server_name.as_deref(),
+        )?;
+        if let Some(server_name) = config.server_name.as_deref() {
+            if !server_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.server_name".to_string(),
+                    value: server_name.to_string(),
+                    reason:
+                        "must match [A-Za-z0-9._-]+ to be safe in cross-region signal key path segments"
+                            .to_string(),
+                });
+            }
+        }
         Self::validate_required_string("cross_region.realm", config.realm.as_deref())?;
         Self::validate_required_string("cross_region.environment", config.environment.as_deref())?;
 
@@ -277,6 +295,20 @@ impl ConfigValidator {
                 return Err(ConfigError::InvalidValue {
                     field: "cross_region.sync_plane.signal_stale_after_seconds".to_string(),
                     value: config.sync_plane.signal_stale_after_seconds.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+            if config.sync_plane.tombstone_retention_seconds == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.sync_plane.tombstone_retention_seconds".to_string(),
+                    value: config.sync_plane.tombstone_retention_seconds.to_string(),
+                    reason: "Must be > 0".to_string(),
+                });
+            }
+            if config.sync_plane.dead_replica_retention_seconds == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "cross_region.sync_plane.dead_replica_retention_seconds".to_string(),
+                    value: config.sync_plane.dead_replica_retention_seconds.to_string(),
                     reason: "Must be > 0".to_string(),
                 });
             }
@@ -1135,6 +1167,7 @@ mod tests {
         CrossRegionConfig {
             enabled: true,
             region_id: Some("us-ashburn-1".to_string()),
+            server_name: Some("smg-router-a".to_string()),
             realm: Some("oc1".to_string()),
             environment: Some("prod".to_string()),
             peers: vec![CrossRegionPeerConfig {
@@ -1191,6 +1224,28 @@ mod tests {
         let config = router_config_with_cross_region();
 
         assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_cross_region_rejects_zero_sync_retention_fields() {
+        let mut config = router_config_with_cross_region();
+        config.cross_region.sync_plane.tombstone_retention_seconds = 0;
+
+        let error =
+            ConfigValidator::validate(&config).expect_err("zero tombstone retention should fail");
+        assert!(format!("{error}").contains("cross_region.sync_plane.tombstone_retention_seconds"));
+
+        let mut config = router_config_with_cross_region();
+        config
+            .cross_region
+            .sync_plane
+            .dead_replica_retention_seconds = 0;
+
+        let error = ConfigValidator::validate(&config)
+            .expect_err("zero dead replica retention should fail");
+        assert!(
+            format!("{error}").contains("cross_region.sync_plane.dead_replica_retention_seconds")
+        );
     }
 
     #[test]

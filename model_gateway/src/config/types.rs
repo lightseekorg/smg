@@ -147,6 +147,8 @@ pub struct CrossRegionSyncPlaneConfig {
     pub listen_port: u16,
     pub full_resync_interval_seconds: u64,
     pub signal_stale_after_seconds: u64,
+    pub tombstone_retention_seconds: u64,
+    pub dead_replica_retention_seconds: u64,
 }
 
 impl Default for CrossRegionSyncPlaneConfig {
@@ -156,6 +158,8 @@ impl Default for CrossRegionSyncPlaneConfig {
             listen_port: 9443,
             full_resync_interval_seconds: 300,
             signal_stale_after_seconds: 30,
+            tombstone_retention_seconds: 24 * 60 * 60,
+            dead_replica_retention_seconds: 6 * 60 * 60,
         }
     }
 }
@@ -225,6 +229,11 @@ pub struct CrossRegionConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region_id: Option<String>,
+    /// This replica's cross-region identifier. Resolved by the CLI layer
+    /// (CLI flag → mesh self-name → generated default) so the runtime config
+    /// always sees a concrete value when `enabled` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub realm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +250,7 @@ impl Default for CrossRegionConfig {
         Self {
             enabled: false,
             region_id: None,
+            server_name: None,
             realm: None,
             environment: None,
             local_only_on_degraded_sync: true,
@@ -937,6 +947,7 @@ mod tests {
         CrossRegionConfig {
             enabled: true,
             region_id: Some("us-ashburn-1".to_string()),
+            server_name: Some("smg-router-a".to_string()),
             realm: Some("oc1".to_string()),
             environment: Some("prod".to_string()),
             peers: vec![CrossRegionPeerConfig {
@@ -1009,6 +1020,8 @@ mod tests {
         assert_eq!(config.sync_plane.listen_port, 9443);
         assert_eq!(config.sync_plane.full_resync_interval_seconds, 300);
         assert_eq!(config.sync_plane.signal_stale_after_seconds, 30);
+        assert_eq!(config.sync_plane.tombstone_retention_seconds, 86_400);
+        assert_eq!(config.sync_plane.dead_replica_retention_seconds, 21_600);
         assert!(config.peers.is_empty());
     }
 

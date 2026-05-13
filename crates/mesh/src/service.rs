@@ -606,8 +606,7 @@ pub(crate) async fn configure_mtls_endpoint_for_peer(
                 anyhow::anyhow!("Failed to configure expected mTLS server identity: {e}")
             })?;
 
-        return endpoint
-            .tls_config_with_verifier(tls_config, verifier)
+        return crate::mtls::endpoint_tls_config_with_verifier(endpoint, tls_config, verifier)
             .map_err(|e| anyhow::anyhow!("Failed to configure TLS endpoint: {e}"));
     }
 

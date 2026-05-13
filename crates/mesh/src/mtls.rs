@@ -599,6 +599,32 @@ impl MTLSManager {
 /// Optional mTLS manager
 pub type OptionalMTLSManager = Option<Arc<MTLSManager>>;
 
+/// Stub for `tonic::transport::Endpoint::tls_config_with_verifier`, which is
+/// referenced by `service.rs::configure_mtls_endpoint_for_peer` but does not
+/// exist in the workspace-pinned tonic 0.14.2.
+///
+/// **TODO(cross-region mTLS)**: Properly install `verifier` into the rustls
+/// `ClientConfig` and feed that into tonic via a custom `Connector` (or
+/// upgrade tonic to a version that exposes the verifier hook directly).
+/// Today this stub silently drops the verifier and only applies the base
+/// `ClientTlsConfig`, which means SPIFFE-identity enforcement is **off** on
+/// outbound mesh connections that went through this path.
+///
+/// Returning `Result` keeps the call-site shape identical to what the
+/// missing tonic API would have provided, so the eventual fix only touches
+/// this function's body.
+pub fn endpoint_tls_config_with_verifier(
+    endpoint: tonic::transport::Endpoint,
+    tls_config: ClientTlsConfig,
+    _verifier: Arc<dyn ServerCertVerifier>,
+) -> std::result::Result<tonic::transport::Endpoint, tonic::transport::Error> {
+    warn!(
+        "endpoint_tls_config_with_verifier: SPIFFE server-cert verifier not enforced \
+         (tonic 0.14.2 stub); see mtls.rs TODO"
+    );
+    endpoint.tls_config(tls_config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

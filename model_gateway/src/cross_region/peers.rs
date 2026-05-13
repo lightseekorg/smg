@@ -130,6 +130,45 @@ impl RegionPeerRequestTarget {
     }
 }
 
+/// Resolved sync-plane target for a remote SMG Region Agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionPeerSyncTarget {
+    region_id: String,
+    sync_url: Url,
+    expected_mtls_identity: String,
+}
+
+impl RegionPeerSyncTarget {
+    /// Build a sync target from a validated, enabled region peer.
+    fn from_peer(peer: &RegionPeer) -> CrossRegionResult<Self> {
+        let sync_url = Url::parse(&peer.sync_url).map_err(|e| CrossRegionError::InvalidPeer {
+            region_id: peer.region_id.clone(),
+            reason: format!("sync_url has invalid URL format: {e}"),
+        })?;
+
+        Ok(Self {
+            region_id: peer.region_id.clone(),
+            sync_url,
+            expected_mtls_identity: peer.expected_mtls_identity.clone(),
+        })
+    }
+
+    /// Return the peer region id.
+    pub(crate) fn region_id(&self) -> &str {
+        &self.region_id
+    }
+
+    /// Return the internally configured sync-plane Region Agent URL.
+    pub(crate) fn sync_url(&self) -> &Url {
+        &self.sync_url
+    }
+
+    /// Return the mTLS URI SAN expected for the target peer.
+    pub(crate) fn expected_mtls_identity(&self) -> &str {
+        &self.expected_mtls_identity
+    }
+}
+
 /// Registry that resolves a target region into a remote SMG Region Agent peer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionPeerRegistry {
@@ -187,6 +226,25 @@ impl RegionPeerRegistry {
         region_id: &str,
     ) -> CrossRegionResult<RegionPeerRequestTarget> {
         RegionPeerRequestTarget::from_peer(self.get(region_id)?)
+    }
+
+    /// Resolve a remote region to the sync-plane Region Agent target.
+    pub(crate) fn sync_target(&self, region_id: &str) -> CrossRegionResult<RegionPeerSyncTarget> {
+        RegionPeerSyncTarget::from_peer(self.get(region_id)?)
+    }
+
+    /// Return enabled sync-plane Region Agent targets in stable region order.
+    pub(crate) fn sync_targets(&self) -> CrossRegionResult<Vec<RegionPeerSyncTarget>> {
+        self.regions()
+            .into_iter()
+            .filter(|region_id| self.is_enabled(region_id))
+            .map(|region_id| self.sync_target(region_id))
+            .collect()
+    }
+
+    /// Return the expected mTLS URI SAN for an enabled peer.
+    pub(crate) fn expected_mtls_identity(&self, region_id: &str) -> CrossRegionResult<&str> {
+        Ok(self.get(region_id)?.expected_mtls_identity())
     }
 
     /// Return true when a region is present in the peer registry.

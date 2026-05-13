@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CandidateGatedReason, CrossRegionBreaker, CrossRegionError, CrossRegionResult,
-    CrossRegionState, ModalityPolicy, RegionPeerRegistry, RequestMode, RoutingProfileContext,
-    SignalVersion,
+    CrossRegionState, ModalityPolicy, RegionPeerRegistry, RemoteRegionView, RequestMode,
+    RoutingProfileContext,
 };
 use crate::{
     config::CrossRegionFailoverMode,
@@ -303,22 +303,27 @@ impl CandidateCalculator {
             return Err(CandidateRejectionReason::ModalityUnsupported);
         }
 
-        let (readiness, readiness_version) =
-            input
-                .remote_state
-                .readiness_with_version(region_id)
-                .ok_or(CandidateRejectionReason::MissingRemoteSignal)?;
-        let mut freshness_age_ms = signal_age_ms(input.now_ms, readiness_version)
-            .ok_or(CandidateRejectionReason::StaleRemoteSignal)?;
-        if !is_fresh(
+        // Phase F: route every read through `RemoteRegionView`. The view
+        // applies the per-replica aggregation rules (any-fresh-ready,
+        // any-fresh-routable, sum loads by model, min p50 latency) and the
+        // freshness window in one place. `freshness_age_ms` here is the
+        // worst-case (oldest) contributor across every projection we consult.
+        let view = RemoteRegionView::new(
+            input.remote_state,
             input.now_ms,
-            readiness_version,
             self.remote_signal_max_age_ms,
-        ) {
-            return Err(CandidateRejectionReason::StaleRemoteSignal);
-        }
+        );
 
-        let worker_ids = input.remote_state.worker_ids(region_id);
+        let Some(readiness) = view.readiness(region_id) else {
+            if view.has_readiness_replica(region_id) {
+                return Err(CandidateRejectionReason::StaleRemoteSignal);
+            }
+            return Err(CandidateRejectionReason::MissingRemoteSignal);
+        };
+        let readiness_ready = readiness.ready;
+        let mut freshness_age_ms = readiness.freshness_age_ms;
+
+        let worker_ids = view.worker_ids(region_id);
         if worker_ids.is_empty() {
             return Err(CandidateRejectionReason::MissingRemoteSignal);
         }
@@ -329,41 +334,37 @@ impl CandidateCalculator {
         let mut saw_stale_signal = false;
 
         for worker_id in worker_ids {
-            let Some((load_signal, load_version)) = input
-                .remote_state
-                .worker_load_with_version(region_id, worker_id)
-            else {
+            let Some(projection) = view.worker(region_id, worker_id) else {
                 continue;
             };
 
-            match load_signal.load.model_id.as_deref() {
-                Some(remote_model_id) if remote_model_id == model_id => {}
-                Some(_) => {
+            let load_resolution = projection.load_for_model(model_id);
+            let Some(load_total) = load_resolution.total else {
+                if load_resolution.saw_model_mismatch {
                     saw_model_mismatch = true;
-                    continue;
                 }
-                None => continue,
-            }
-
-            let Some((health_signal, health_version)) = input
-                .remote_state
-                .worker_health_with_version(region_id, worker_id)
-            else {
+                if load_resolution.saw_stale_match {
+                    saw_stale_signal = true;
+                }
                 continue;
             };
-
-            if !is_fresh(input.now_ms, load_version, self.remote_signal_max_age_ms)
-                || !is_fresh(input.now_ms, health_version, self.remote_signal_max_age_ms)
-            {
-                saw_stale_signal = true;
-                continue;
+            if let Some(age) = load_resolution.freshness_age_ms {
+                freshness_age_ms = freshness_age_ms.max(age);
             }
 
-            freshness_age_ms = freshness_age_ms
-                .max(signal_age_ms(input.now_ms, load_version).unwrap_or(0))
-                .max(signal_age_ms(input.now_ms, health_version).unwrap_or(0));
-            selected_statuses.push(health_signal.status);
-            selected_load = selected_load.saturating_add(load_signal.load.load);
+            let status_resolution = projection.aggregated_status();
+            let Some(status) = status_resolution.status else {
+                if status_resolution.saw_stale_only {
+                    saw_stale_signal = true;
+                }
+                continue;
+            };
+            if let Some(age) = status_resolution.freshness_age_ms {
+                freshness_age_ms = freshness_age_ms.max(age);
+            }
+
+            selected_statuses.push(status);
+            selected_load = selected_load.saturating_add(load_total);
         }
 
         if selected_statuses.is_empty() {
@@ -378,29 +379,29 @@ impl CandidateCalculator {
 
         let mut client_latency_hint_ms = None;
         if let Some(client_region) = input.client_region.as_deref() {
-            if let Some((latency, latency_version)) = input
-                .remote_state
-                .client_latency_with_version(client_region, region_id)
-            {
-                if !is_fresh(input.now_ms, latency_version, self.remote_signal_max_age_ms) {
-                    return Err(CandidateRejectionReason::StaleRemoteSignal);
+            match view.client_latency(client_region, region_id) {
+                Some(latency) => {
+                    freshness_age_ms = freshness_age_ms.max(latency.freshness_age_ms);
+                    client_latency_hint_ms = Some(latency.min_p50_ms);
                 }
-                freshness_age_ms =
-                    freshness_age_ms.max(signal_age_ms(input.now_ms, latency_version).unwrap_or(0));
-                client_latency_hint_ms = Some(latency.p50_latency_ms);
+                None => {
+                    if view.has_client_latency_replica(client_region, region_id) {
+                        return Err(CandidateRejectionReason::StaleRemoteSignal);
+                    }
+                }
             }
         }
 
         let total_workers = selected_statuses.len();
         let worker_health = worker_health_summary(selected_statuses, total_workers);
-        let healthy = readiness.ready && worker_health.ready_workers > 0;
+        let healthy = readiness_ready && worker_health.ready_workers > 0;
 
         Ok(RegionCandidate {
             region_id: region_id.to_string(),
             model_id: model_id.to_string(),
             endpoint_type: input.endpoint_type,
             modality: input.profile.modality.clone(),
-            readiness: readiness.ready,
+            readiness: readiness_ready,
             worker_health,
             healthy,
             has_capacity: worker_health.ready_workers > 0,
@@ -545,16 +546,6 @@ fn worker_health_summary(
         ready_workers,
         total_workers,
     }
-}
-
-/// Return true when a signal version is within the accepted remote freshness window.
-fn is_fresh(now_ms: i64, version: SignalVersion, max_age_ms: i64) -> bool {
-    signal_age_ms(now_ms, version).is_some_and(|age_ms| age_ms <= max_age_ms)
-}
-
-/// Return a non-negative signal age, or None when the input timestamp is invalid.
-fn signal_age_ms(now_ms: i64, version: SignalVersion) -> Option<i64> {
-    (version.updated_at_ms >= 0).then_some(now_ms.saturating_sub(version.updated_at_ms).max(0))
 }
 
 /// Convert a usize load counter into isize without overflowing.
@@ -1375,6 +1366,126 @@ mod tests {
     }
 
     #[test]
+    fn remote_candidate_aggregates_across_two_replicas_observing_same_worker() {
+        // Two SMG replicas in us-chicago-1 each observe one worker (`w1`).
+        // Per Phase B aggregation: any-fresh-ready readiness, sum loads,
+        // any-fresh-routable status — region should produce one candidate
+        // with the summed load and a single ready worker.
+        let registry = registry_with_worker(
+            "http://local-worker:8000",
+            model_card("cohere.command-r-plus", ModelType::LLM),
+            WorkerStatus::Ready,
+            0,
+        );
+        let mut remote_state = CrossRegionState::new();
+        let v_a = SignalVersion {
+            version: 1,
+            actor: "smg-a".to_string(),
+            updated_at_ms: NOW_MS,
+        };
+        let v_b = SignalVersion {
+            version: 1,
+            actor: "smg-b".to_string(),
+            updated_at_ms: NOW_MS,
+        };
+        for (server_name, version) in [("smg-a", &v_a), ("smg-b", &v_b)] {
+            remote_state.upsert_readiness(
+                SmgReadinessSignal {
+                    region_id: "us-chicago-1".to_string(),
+                    server_name: server_name.to_string(),
+                    ready: true,
+                },
+                version.clone(),
+            );
+            remote_state.upsert_worker_health(
+                WorkerHealthSignal {
+                    region_id: "us-chicago-1".to_string(),
+                    worker_id: "w1".to_string(),
+                    server_name: server_name.to_string(),
+                    status: WorkerStatus::Ready,
+                },
+                version.clone(),
+            );
+        }
+        remote_state.upsert_worker_load(
+            WorkerLoadSignal {
+                region_id: "us-chicago-1".to_string(),
+                worker_id: "w1".to_string(),
+                server_name: "smg-a".to_string(),
+                load: WorkerLoadInfo {
+                    worker: "w1".to_string(),
+                    worker_type: None,
+                    load: 4,
+                    details: None,
+                    region_id: Some("us-chicago-1".to_string()),
+                    worker_id: Some("w1".to_string()),
+                    model_id: Some("cohere.command-r-plus".to_string()),
+                    status: Some(WorkerStatus::Ready),
+                    generated_at_ms: Some(NOW_MS),
+                    version: Some(1),
+                    source: None,
+                    remote_workers: None,
+                },
+            },
+            v_a,
+        );
+        remote_state.upsert_worker_load(
+            WorkerLoadSignal {
+                region_id: "us-chicago-1".to_string(),
+                worker_id: "w1".to_string(),
+                server_name: "smg-b".to_string(),
+                load: WorkerLoadInfo {
+                    worker: "w1".to_string(),
+                    worker_type: None,
+                    load: 5,
+                    details: None,
+                    region_id: Some("us-chicago-1".to_string()),
+                    worker_id: Some("w1".to_string()),
+                    model_id: Some("cohere.command-r-plus".to_string()),
+                    status: Some(WorkerStatus::Ready),
+                    generated_at_ms: Some(NOW_MS),
+                    version: Some(1),
+                    source: None,
+                    remote_workers: None,
+                },
+            },
+            v_b,
+        );
+
+        let output = build_candidates(
+            &registry,
+            &remote_state,
+            peer_registry(&["us-chicago-1"]),
+            CrossRegionBreaker::new(),
+            profile(
+                &["us-ashburn-1", "us-chicago-1"],
+                "cohere.command-r-plus",
+                ModalityPolicy::default(),
+            ),
+            Endpoint::Chat,
+        );
+        let remote = output
+            .candidates
+            .iter()
+            .find(|candidate| candidate.region_id == "us-chicago-1")
+            .expect("remote candidate should be built from per-replica aggregation");
+
+        assert!(remote.readiness);
+        assert!(remote.healthy);
+        assert!(remote.has_capacity);
+        assert_eq!(
+            remote.worker_health.ready_workers, 1,
+            "two replicas observing one worker must count as one ready worker, not two",
+        );
+        assert_eq!(remote.worker_health.total_workers, 1);
+        assert_eq!(
+            remote.worker_load,
+            Some(9),
+            "loads from two replicas observing the same worker must sum (4 + 5)",
+        );
+    }
+
+    #[test]
     fn remote_candidate_rejects_when_only_other_models_have_signals() {
         let registry = registry_with_worker(
             "http://local-worker:8000",
@@ -1486,6 +1597,7 @@ mod tests {
             },
             SignalVersion {
                 version: 2,
+                actor: "test-actor".to_string(),
                 updated_at_ms: NOW_MS,
             },
         );
@@ -1630,6 +1742,7 @@ mod tests {
     fn signal_version(updated_at_ms: i64) -> SignalVersion {
         SignalVersion {
             version: 1,
+            actor: "test-actor".to_string(),
             updated_at_ms,
         }
     }
@@ -1652,7 +1765,7 @@ mod tests {
                 server_name: server_name.clone(),
                 ready: true,
             },
-            version,
+            version.clone(),
         );
         state.upsert_worker_health(
             WorkerHealthSignal {
@@ -1661,7 +1774,7 @@ mod tests {
                 server_name: server_name.clone(),
                 status,
             },
-            version,
+            version.clone(),
         );
         state.upsert_worker_load(
             WorkerLoadSignal {

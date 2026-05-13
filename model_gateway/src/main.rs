@@ -745,6 +745,22 @@ struct CliArgs {
     #[arg(long, help_heading = "Cross-Region Smart Router")]
     cross_region_sync_plane_signal_stale_after_seconds: Option<u64>,
 
+    /// Tombstone retention interval in seconds for removed cross-region signals.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_sync_plane_tombstone_retention_seconds: Option<u64>,
+
+    /// Live dead-replica retention interval in seconds for unrefreshed signals.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_sync_plane_dead_replica_retention_seconds: Option<u64>,
+
+    /// This replica's identifier for cross-region signals (the `actor` stamped
+    /// on every published envelope and the trailing segment of per-replica
+    /// signal keys). Falls back to `--mesh-server-name` when unset and mesh is
+    /// enabled, otherwise an `smg-<random>` value is generated at boot.
+    /// Must match `[A-Za-z0-9._-]+` to be safe in key path segments.
+    #[arg(long, help_heading = "Cross-Region Smart Router")]
+    cross_region_server_name: Option<String>,
+
     /// Peer Region Agent mapping: region_id=...,request_url=https://host:8443,sync_url=https://host:9443,realm=...,environment=...
     #[arg(long = "cross-region-peer", action = ArgAction::Append, value_parser = parse_cross_region_peer, help_heading = "Cross-Region Smart Router")]
     cross_region_peers: Vec<CrossRegionPeerConfig>,
@@ -1008,10 +1024,16 @@ impl CliArgs {
     fn build_cross_region_config(&self) -> CrossRegionConfig {
         let request_plane_defaults = CrossRegionRequestPlaneConfig::default();
         let sync_plane_defaults = CrossRegionSyncPlaneConfig::default();
+        let server_name = if self.cross_region_enabled {
+            Some(self.resolve_cross_region_server_name())
+        } else {
+            self.cross_region_server_name.clone()
+        };
 
         CrossRegionConfig {
             enabled: self.cross_region_enabled,
             region_id: self.cross_region_region_id.clone(),
+            server_name,
             realm: self.cross_region_realm.clone(),
             environment: self.cross_region_environment.clone(),
             local_only_on_degraded_sync: self
@@ -1047,6 +1069,12 @@ impl CliArgs {
                 signal_stale_after_seconds: self
                     .cross_region_sync_plane_signal_stale_after_seconds
                     .unwrap_or(sync_plane_defaults.signal_stale_after_seconds),
+                tombstone_retention_seconds: self
+                    .cross_region_sync_plane_tombstone_retention_seconds
+                    .unwrap_or(sync_plane_defaults.tombstone_retention_seconds),
+                dead_replica_retention_seconds: self
+                    .cross_region_sync_plane_dead_replica_retention_seconds
+                    .unwrap_or(sync_plane_defaults.dead_replica_retention_seconds),
             },
             peers: self.cross_region_peers.clone(),
             mtls: CrossRegionMtlsConfig {
@@ -1057,6 +1085,22 @@ impl CliArgs {
                 client_key_path: self.cross_region_mtls_client_key_path.clone(),
             },
         }
+    }
+
+    /// Resolve this replica's cross-region `server_name`. Resolution order:
+    /// explicit `--cross-region-server-name` → `--mesh-server-name` →
+    /// generated `smg-<random>` so a co-deployed mesh/cross-region pair shares
+    /// identity by default without forcing the operator to set both flags.
+    fn resolve_cross_region_server_name(&self) -> String {
+        if let Some(name) = &self.cross_region_server_name {
+            return name.to_string();
+        }
+        if let Some(name) = &self.mesh_server_name {
+            return name.to_string();
+        }
+        let mut rng = rand::rng();
+        let random_string: String = (0..4).map(|_| rng.sample(Alphanumeric) as char).collect();
+        format!("smg-{random_string}")
     }
 
     fn parse_mesh_socket_addr(
@@ -1938,6 +1982,10 @@ mod tests {
             "600",
             "--cross-region-sync-plane-signal-stale-after-seconds",
             "45",
+            "--cross-region-sync-plane-tombstone-retention-seconds",
+            "90000",
+            "--cross-region-sync-plane-dead-replica-retention-seconds",
+            "23000",
             "--cross-region-peer",
             "region_id=us-chicago-1,request_url=https://smg-region-agent.us-chicago-1.internal:8443,sync_url=https://smg-region-agent.us-chicago-1.internal:9443,realm=oc1,environment=prod",
             "--cross-region-mtls-ca-cert-path",
@@ -1978,6 +2026,34 @@ mod tests {
                 .local_first_tie_break
         );
         assert_eq!(router_config.cross_region.sync_plane.listen_port, 19443);
+        assert_eq!(
+            router_config
+                .cross_region
+                .sync_plane
+                .full_resync_interval_seconds,
+            600
+        );
+        assert_eq!(
+            router_config
+                .cross_region
+                .sync_plane
+                .signal_stale_after_seconds,
+            45
+        );
+        assert_eq!(
+            router_config
+                .cross_region
+                .sync_plane
+                .tombstone_retention_seconds,
+            90_000
+        );
+        assert_eq!(
+            router_config
+                .cross_region
+                .sync_plane
+                .dead_replica_retention_seconds,
+            23_000
+        );
         assert_eq!(router_config.cross_region.peers.len(), 1);
 
         let server_config = args

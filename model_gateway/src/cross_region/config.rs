@@ -1,4 +1,4 @@
-use super::{CrossRegionError, CrossRegionResult, RegionPeer, RegionPeerRegistry};
+use super::{CrossRegionError, CrossRegionResult, RegionPeer, RegionPeerRegistry, SyncRetention};
 use crate::config::{CrossRegionConfig, CrossRegionFailoverMode};
 
 /// Runtime-friendly request-plane settings derived from RouterConfig.
@@ -18,6 +18,8 @@ pub struct SyncPlaneRuntimeConfig {
     pub listen_port: u16,
     pub full_resync_interval_seconds: u64,
     pub signal_stale_after_seconds: u64,
+    pub tombstone_retention_seconds: u64,
+    pub dead_replica_retention_seconds: u64,
 }
 
 /// Runtime mTLS file paths for cross-region request and sync planes.
@@ -34,6 +36,10 @@ pub struct CrossRegionMtlsRuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrossRegionRuntimeConfig {
     pub region_id: String,
+    /// Writing-replica identifier stamped onto every published envelope and
+    /// the trailing segment of per-replica signal keys. Resolved by the CLI
+    /// layer (CLI flag → mesh self-name → generated default).
+    pub server_name: String,
     pub realm: String,
     pub environment: String,
     pub local_only_on_degraded_sync: bool,
@@ -51,6 +57,7 @@ impl CrossRegionRuntimeConfig {
 
         Ok(Some(Self {
             region_id: required("region", config.region_id.as_deref())?.to_string(),
+            server_name: required("server_name", config.server_name.as_deref())?.to_string(),
             realm: required("realm", config.realm.as_deref())?.to_string(),
             environment: required("environment", config.environment.as_deref())?.to_string(),
             local_only_on_degraded_sync: config.local_only_on_degraded_sync,
@@ -66,6 +73,8 @@ impl CrossRegionRuntimeConfig {
                 listen_port: config.sync_plane.listen_port,
                 full_resync_interval_seconds: config.sync_plane.full_resync_interval_seconds,
                 signal_stale_after_seconds: config.sync_plane.signal_stale_after_seconds,
+                tombstone_retention_seconds: config.sync_plane.tombstone_retention_seconds,
+                dead_replica_retention_seconds: config.sync_plane.dead_replica_retention_seconds,
             },
             mtls: CrossRegionMtlsRuntimeConfig {
                 ca_cert_path: required("mtls.ca_cert_path", config.mtls.ca_cert_path.as_deref())?
@@ -93,6 +102,23 @@ impl CrossRegionRuntimeConfig {
             },
         }))
     }
+
+    /// Convert runtime sync-plane retention settings into the sync service's
+    /// millisecond retention windows.
+    pub fn sync_retention(&self) -> SyncRetention {
+        SyncRetention {
+            tombstone_retention_ms: seconds_to_millis_saturating(
+                self.sync_plane.tombstone_retention_seconds,
+            ),
+            dead_replica_retention_ms: seconds_to_millis_saturating(
+                self.sync_plane.dead_replica_retention_seconds,
+            ),
+        }
+    }
+}
+
+fn seconds_to_millis_saturating(seconds: u64) -> i64 {
+    i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
 }
 
 /// Top-level cross-region runtime context consumed by later service wiring tasks.
@@ -148,6 +174,7 @@ mod tests {
         CrossRegionConfig {
             enabled: true,
             region_id: Some("us-ashburn-1".to_string()),
+            server_name: Some("smg-router-a".to_string()),
             realm: Some("oc1".to_string()),
             environment: Some("prod".to_string()),
             local_only_on_degraded_sync: true,
@@ -188,6 +215,22 @@ mod tests {
             .expect("context should be present");
 
         assert_eq!(context.config.region_id, "us-ashburn-1");
+        assert_eq!(
+            context.config.sync_plane.tombstone_retention_seconds,
+            86_400
+        );
+        assert_eq!(
+            context.config.sync_plane.dead_replica_retention_seconds,
+            21_600
+        );
+        assert_eq!(
+            context.config.sync_retention().tombstone_retention_ms,
+            86_400_000
+        );
+        assert_eq!(
+            context.config.sync_retention().dead_replica_retention_ms,
+            21_600_000
+        );
         assert!(context.peers.contains_region("us-chicago-1"));
         assert!(context.peers.is_enabled("us-chicago-1"));
     }

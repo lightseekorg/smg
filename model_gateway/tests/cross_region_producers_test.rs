@@ -206,7 +206,7 @@ fn lifecycle_event_publishes_then_tombstones() {
     // Tombstones remove the materialized worker immediately.
     let state = producers.sync.state();
     let state = state.read();
-    let health = state.worker_health(REGION, worker_id.as_str());
+    let health = state.worker_health_replica(REGION, worker_id.as_str(), SERVER);
     assert!(health.is_none());
 }
 

@@ -106,6 +106,7 @@ pub fn create_test_app(
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        cross_region_sync: None,
     });
 
     // Configure request ID headers (use defaults if not specified)
@@ -148,6 +149,7 @@ pub fn create_test_app_with_context(
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
+        cross_region_sync: None,
     });
 
     // Get config from the context

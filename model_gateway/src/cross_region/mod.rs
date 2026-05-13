@@ -12,10 +12,14 @@ pub mod headers;
 pub mod metrics;
 pub mod peers;
 pub mod profile;
+pub mod pull_client;
+pub mod pull_server;
 pub mod settled;
 pub mod signals;
 pub mod state;
 pub mod sync;
+pub mod sync_runtime;
+pub mod view;
 
 pub use adapters::{
     ClientLatencyAdapter, CrossRegionProducers, ProducerCadences, ProducerHandles,
@@ -41,6 +45,14 @@ pub use metrics::{
 };
 pub use peers::{RegionPeer, RegionPeerRegistry};
 pub use profile::{FailoverPolicy, ModalityPolicy, RoutingProfileContext};
+pub use pull_client::{
+    HttpPullTransport, PeerPullTask, PullClientConfig, PullClientError, PullClientOrchestrator,
+    PullStepOutcome, PullTransport, PullTransportResponse,
+};
+pub use pull_server::{
+    handle_pull, pull_signals, router as pull_router, PullErrorResponse, PullRequest, PullResponse,
+    PullServerError, PullServerState,
+};
 pub use settled::{validate_settled_local_execution, AuthenticatedPeerIdentity};
 pub use signals::{
     ClientLatencySignal, SignalEnvelope, SignalKey, SmgReadinessSignal, WorkerHealthSignal,
@@ -48,6 +60,11 @@ pub use signals::{
 };
 pub use state::{CrossRegionState, SignalVersion};
 pub use sync::{CrossRegionSyncService, Cursor, CursorStale, SignalKind, SyncRetention};
+pub use sync_runtime::CrossRegionSyncRuntime;
+pub use view::{
+    ClientLatencyProjection, RegionReadinessProjection, RemoteRegionView, WorkerLoadResolution,
+    WorkerProjection, WorkerStatusResolution,
+};
 
 /// Cross-region module result type.
 pub type CrossRegionResult<T> = Result<T, CrossRegionError>;
