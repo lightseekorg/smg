@@ -17,6 +17,10 @@ pub mod signals;
 pub mod state;
 pub mod sync;
 
+pub use adapters::{
+    ClientLatencyAdapter, CrossRegionProducers, ProducerCadences, ProducerHandles,
+    RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter,
+};
 pub use breaker::{BreakerState, CrossRegionBreaker};
 pub use candidate_calculation::{
     CandidateCalculationInput, CandidateCalculationOutput, CandidateCalculator, CandidateRejection,
@@ -43,13 +47,7 @@ pub use signals::{
     WorkerLoadSignal, SIGNAL_CONTRACT_VERSION,
 };
 pub use state::{CrossRegionState, SignalVersion};
-pub use adapters::{
-    ClientLatencyAdapter, CrossRegionProducers, ProducerCadences, ProducerHandles,
-    RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter,
-};
-pub use sync::{
-    CrossRegionSyncService, Cursor, CursorStale, SignalKind, SyncRetention,
-};
+pub use sync::{CrossRegionSyncService, Cursor, CursorStale, SignalKind, SyncRetention};
 
 /// Cross-region module result type.
 pub type CrossRegionResult<T> = Result<T, CrossRegionError>;

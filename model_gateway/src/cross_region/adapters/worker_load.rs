@@ -76,8 +76,11 @@ impl WorkerLoadAdapter {
             server_name,
             load: load_info,
         };
-        self.sync
-            .publish_signal(key, SignalKind::WorkerLoad(body), self.stale_after_ms)
+        self.sync.publish_signal(
+            key,
+            SignalKind::WorkerLoad(Box::new(body)),
+            self.stale_after_ms,
+        )
     }
 
     /// Republish load for every registered worker. Invoked by the gateway's
@@ -131,7 +134,9 @@ mod tests {
         let (registry, worker_id) = registry_with_load("http://w1:8000", 7);
         let worker = registry.get(&worker_id).expect("registered");
 
-        adapter.publish_for(&worker_id, &worker).expect("publish ok");
+        adapter
+            .publish_for(&worker_id, &worker)
+            .expect("publish ok");
 
         let (entries, _) = svc.local_log_snapshot();
         assert_eq!(entries.len(), 1);
@@ -163,7 +168,7 @@ mod tests {
         let registry = Arc::new(WorkerRegistry::new());
         for i in 0..3 {
             let worker = Arc::new(
-                BasicWorkerBuilder::new(&format!("http://w{i}:8000"))
+                BasicWorkerBuilder::new(format!("http://w{i}:8000"))
                     .model(ModelCard::new("cohere.command-r-plus"))
                     .status(WorkerStatus::Ready)
                     .build(),

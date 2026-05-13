@@ -2,7 +2,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ClientLatencySignal, SmgReadinessSignal, WorkerHealthSignal, WorkerLoadSignal};
+use super::{
+    ClientLatencySignal, SignalKey, SmgReadinessSignal, WorkerHealthSignal, WorkerLoadSignal,
+};
 
 /// Version and freshness metadata for a materialized signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,33 +141,84 @@ impl CrossRegionState {
 
     /// Insert or replace a readiness signal in the materialized view.
     pub fn upsert_readiness(&mut self, signal: SmgReadinessSignal, version: SignalVersion) {
-        self.readiness
-            .insert(signal.region_id.clone(), (signal, version));
+        let key = signal.region_id.clone();
+        if should_replace(
+            self.readiness.get(&key).map(|(_, version)| *version),
+            version,
+        ) {
+            self.readiness.insert(key, (signal, version));
+        }
     }
 
     /// Insert or replace a worker health signal in the materialized view.
     pub fn upsert_worker_health(&mut self, signal: WorkerHealthSignal, version: SignalVersion) {
-        self.worker_health.insert(
-            (signal.region_id.clone(), signal.worker_id.clone()),
-            (signal, version),
-        );
+        let key = (signal.region_id.clone(), signal.worker_id.clone());
+        if should_replace(
+            self.worker_health.get(&key).map(|(_, version)| *version),
+            version,
+        ) {
+            self.worker_health.insert(key, (signal, version));
+        }
     }
 
     /// Insert or replace a worker load signal in the materialized view.
     pub fn upsert_worker_load(&mut self, signal: WorkerLoadSignal, version: SignalVersion) {
-        self.worker_load.insert(
-            (signal.region_id.clone(), signal.worker_id.clone()),
-            (signal, version),
-        );
+        let key = (signal.region_id.clone(), signal.worker_id.clone());
+        if should_replace(
+            self.worker_load.get(&key).map(|(_, version)| *version),
+            version,
+        ) {
+            self.worker_load.insert(key, (signal, version));
+        }
     }
 
     /// Insert or replace a client latency signal in the materialized view.
     pub fn upsert_client_latency(&mut self, signal: ClientLatencySignal, version: SignalVersion) {
-        self.client_latency.insert(
-            (signal.client_region.clone(), signal.target_region.clone()),
-            (signal, version),
-        );
+        let key = (signal.client_region.clone(), signal.target_region.clone());
+        if should_replace(
+            self.client_latency.get(&key).map(|(_, version)| *version),
+            version,
+        ) {
+            self.client_latency.insert(key, (signal, version));
+        }
     }
+
+    /// Remove the materialized value addressed by a tombstone key.
+    pub fn remove_key(&mut self, key: &SignalKey) {
+        match key {
+            SignalKey::SmgReadiness { region_id, .. } => {
+                self.readiness.remove(region_id);
+            }
+            SignalKey::WorkerHealth {
+                region_id,
+                worker_id,
+                ..
+            } => {
+                self.worker_health
+                    .remove(&(region_id.clone(), worker_id.clone()));
+            }
+            SignalKey::WorkerLoad {
+                region_id,
+                worker_id,
+                ..
+            } => {
+                self.worker_load
+                    .remove(&(region_id.clone(), worker_id.clone()));
+            }
+            SignalKey::ClientLatency {
+                client_region,
+                target_region,
+                ..
+            } => {
+                self.client_latency
+                    .remove(&(client_region.clone(), target_region.clone()));
+            }
+        }
+    }
+}
+
+fn should_replace(current: Option<SignalVersion>, incoming: SignalVersion) -> bool {
+    current.is_none_or(|current| incoming.version > current.version)
 }
 
 #[cfg(test)]
@@ -178,5 +231,73 @@ mod tests {
 
         assert!(state.is_empty());
         assert!(state.readiness("us-chicago-1").is_none());
+    }
+
+    #[test]
+    fn upsert_readiness_ignores_stale_or_equal_versions() {
+        let mut state = CrossRegionState::new();
+        let region_id = "us-ashburn-1".to_string();
+
+        state.upsert_readiness(
+            SmgReadinessSignal {
+                region_id: region_id.clone(),
+                server_name: "smg-router-a".to_string(),
+                ready: true,
+            },
+            SignalVersion {
+                version: 10,
+                updated_at_ms: 100,
+            },
+        );
+        state.upsert_readiness(
+            SmgReadinessSignal {
+                region_id: region_id.clone(),
+                server_name: "smg-router-a".to_string(),
+                ready: false,
+            },
+            SignalVersion {
+                version: 9,
+                updated_at_ms: 90,
+            },
+        );
+        state.upsert_readiness(
+            SmgReadinessSignal {
+                region_id: region_id.clone(),
+                server_name: "smg-router-a".to_string(),
+                ready: false,
+            },
+            SignalVersion {
+                version: 10,
+                updated_at_ms: 110,
+            },
+        );
+
+        assert!(
+            state
+                .readiness(&region_id)
+                .expect("readiness should exist")
+                .ready,
+            "stale and equal versions must not overwrite current state"
+        );
+
+        state.upsert_readiness(
+            SmgReadinessSignal {
+                region_id: region_id.clone(),
+                server_name: "smg-router-a".to_string(),
+                ready: false,
+            },
+            SignalVersion {
+                version: 11,
+                updated_at_ms: 120,
+            },
+        );
+
+        assert!(
+            !state
+                .readiness(&region_id)
+                .expect("readiness should exist")
+                .ready,
+            "newer versions should replace current state"
+        );
     }
 }

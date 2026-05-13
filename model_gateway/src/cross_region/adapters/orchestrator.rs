@@ -13,9 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
-use super::{
-    ClientLatencyAdapter, RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter,
-};
+use super::{ClientLatencyAdapter, RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter};
 use crate::{
     cross_region::{CrossRegionResult, CrossRegionSyncService},
     worker::WorkerRegistry,
@@ -91,10 +89,8 @@ impl CrossRegionProducers {
             self.region_readiness.clone(),
             cadences.readiness_reconcile_interval,
         );
-        let health_event_handle = spawn_worker_health_event_loop(
-            self.worker_health.clone(),
-            worker_registry.clone(),
-        );
+        let health_event_handle =
+            spawn_worker_health_event_loop(self.worker_health.clone(), worker_registry.clone());
         let health_reconcile_handle = spawn_worker_health_reconcile_loop(
             self.worker_health.clone(),
             worker_registry.clone(),
@@ -238,10 +234,7 @@ fn spawn_worker_load_loop(
     clippy::disallowed_methods,
     reason = "task is bounded by ProducerHandles which aborts on drop"
 )]
-fn spawn_client_latency_loop(
-    adapter: ClientLatencyAdapter,
-    interval: Duration,
-) -> JoinHandle<()> {
+fn spawn_client_latency_loop(adapter: ClientLatencyAdapter, interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

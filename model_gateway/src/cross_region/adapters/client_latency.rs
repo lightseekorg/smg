@@ -7,10 +7,7 @@
 //! histogram (design §1) is a follow-up so the per-replica → consumer
 //! aggregation does correct percentile math instead of averaging.
 
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::Mutex;
 
@@ -166,6 +163,7 @@ mod tests {
         let (p50, p95) = obs.drain_summary().expect("samples present");
         assert_eq!(p50, 60); // index len/2 = 5 → sorted[5] = 60
         assert_eq!(p95, 100); // ceil(10*0.95)=10 → sorted[9] = 100
+
         // Buffer was consumed.
         assert!(obs.drain_summary().is_none());
     }

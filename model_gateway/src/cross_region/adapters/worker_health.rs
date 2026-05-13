@@ -20,7 +20,7 @@ use crate::{
     cross_region::{
         CrossRegionResult, CrossRegionSyncService, SignalKey, SignalKind, WorkerHealthSignal,
     },
-    worker::{event::WorkerEvent, registry::WorkerId, WorkerRegistry},
+    worker::{event::WorkerEvent, WorkerRegistry},
 };
 
 /// Default freshness window (design §4): worker-health uses 60 s with a 20 s
@@ -116,7 +116,7 @@ mod tests {
     use openai_protocol::model_card::ModelCard;
 
     use super::*;
-    use crate::worker::BasicWorkerBuilder;
+    use crate::worker::{registry::WorkerId, BasicWorkerBuilder};
 
     fn service() -> Arc<CrossRegionSyncService> {
         Arc::new(
@@ -133,7 +133,11 @@ mod tests {
                 .status(status)
                 .build(),
         );
-        let id = registry.register(worker).expect("register").as_str().to_string();
+        let id = registry
+            .register(worker)
+            .expect("register")
+            .as_str()
+            .to_string();
         (registry, id)
     }
 
@@ -160,7 +164,10 @@ mod tests {
             }
             _ => panic!("unexpected key shape: {:?}", entries[0].key),
         }
-        assert_eq!(entries[0].stale_after_ms, DEFAULT_WORKER_HEALTH_STALE_AFTER_MS);
+        assert_eq!(
+            entries[0].stale_after_ms,
+            DEFAULT_WORKER_HEALTH_STALE_AFTER_MS
+        );
         assert!(!entries[0].removed);
     }
 
@@ -247,7 +254,7 @@ mod tests {
         let registry = Arc::new(WorkerRegistry::new());
         for i in 0..3 {
             let worker = Arc::new(
-                BasicWorkerBuilder::new(&format!("http://w{i}:8000"))
+                BasicWorkerBuilder::new(format!("http://w{i}:8000"))
                     .model(ModelCard::new("cohere.command-r-plus"))
                     .status(WorkerStatus::Ready)
                     .build(),

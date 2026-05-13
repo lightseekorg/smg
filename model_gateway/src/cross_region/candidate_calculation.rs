@@ -1484,7 +1484,10 @@ mod tests {
                 server_name: "remote-us-chicago-1".to_string(),
                 ready: false,
             },
-            signal_version(NOW_MS),
+            SignalVersion {
+                version: 2,
+                updated_at_ms: NOW_MS,
+            },
         );
         let output = build_candidates(
             &registry,

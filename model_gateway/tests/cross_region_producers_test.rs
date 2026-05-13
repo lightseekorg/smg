@@ -11,10 +11,8 @@ use std::{sync::Arc, time::Duration};
 
 use openai_protocol::{model_card::ModelCard, worker::WorkerStatus};
 use smg::{
-    cross_region::{
-        CrossRegionProducers, ProducerCadences, SignalKey, SignalKind,
-    },
-    worker::{BasicWorkerBuilder, Worker, WorkerRegistry},
+    cross_region::{CrossRegionProducers, ProducerCadences, SignalKey, SignalKind},
+    worker::{event::WorkerEvent, BasicWorkerBuilder, Worker, WorkerRegistry},
 };
 
 const REGION: &str = "us-ashburn-1";
@@ -69,9 +67,7 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
     producers.worker_load.reconcile(&registry);
 
     // 4. Client latency.
-    producers
-        .client_latency
-        .record_latency("us-chicago-1", 42);
+    producers.client_latency.record_latency("us-chicago-1", 42);
     producers
         .client_latency
         .drain_and_publish()
@@ -93,13 +89,21 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
     kinds.sort_unstable();
     assert_eq!(
         kinds,
-        vec!["client-latency", "readiness", "worker-health", "worker-load"]
+        vec![
+            "client-latency",
+            "readiness",
+            "worker-health",
+            "worker-load"
+        ]
     );
 
     // Each envelope's actor is this replica's server_name; key segments
     // match the local region + server_name + (worker_id where applicable).
     for env in &entries {
-        assert_eq!(env.actor, SERVER, "every envelope's actor is local server_name");
+        assert_eq!(
+            env.actor, SERVER,
+            "every envelope's actor is local server_name"
+        );
         assert_eq!(
             env.key.region_segment(),
             REGION,
@@ -158,7 +162,7 @@ fn lifecycle_event_publishes_then_tombstones() {
     // adapter (mirrors what the orchestrator's event subscriber does).
     producers
         .worker_health
-        .handle_event(&smg::worker::event::WorkerEvent::Registered {
+        .handle_event(&WorkerEvent::Registered {
             worker_id: worker_id.clone(),
             worker: worker.clone(),
         })
@@ -166,7 +170,7 @@ fn lifecycle_event_publishes_then_tombstones() {
     worker.set_status(WorkerStatus::Ready);
     producers
         .worker_health
-        .handle_event(&smg::worker::event::WorkerEvent::StatusChanged {
+        .handle_event(&WorkerEvent::StatusChanged {
             worker_id: worker_id.clone(),
             worker: worker.clone(),
             old_status: WorkerStatus::Pending,
@@ -175,7 +179,7 @@ fn lifecycle_event_publishes_then_tombstones() {
         .expect("status changed");
     producers
         .worker_health
-        .handle_event(&smg::worker::event::WorkerEvent::Removed {
+        .handle_event(&WorkerEvent::Removed {
             worker_id: worker_id.clone(),
             worker: worker.clone(),
         })
@@ -199,14 +203,11 @@ fn lifecycle_event_publishes_then_tombstones() {
     assert!(tombstone.signal.is_none());
     assert_eq!(tombstone.stale_after_ms, 0);
 
-    // Pre-tombstone envelopes mirror the worker's status into the local state.
+    // Tombstones remove the materialized worker immediately.
     let state = producers.sync.state();
     let state = state.read();
     let health = state.worker_health(REGION, worker_id.as_str());
-    // The tombstone path isn't mirrored into state today (see sync.rs comment),
-    // so the most recent live status (Ready) is what we should see.
-    assert!(health.is_some());
-    assert_eq!(health.unwrap().status, WorkerStatus::Ready);
+    assert!(health.is_none());
 }
 
 #[test]
@@ -222,10 +223,7 @@ fn cursor_delta_streams_envelopes_in_order() {
         .publish_for("us-chicago-1", 30, 80)
         .unwrap();
 
-    let (delta, c1) = producers
-        .sync
-        .local_log_delta(c0)
-        .expect("cursor is fresh");
+    let (delta, c1) = producers.sync.local_log_delta(c0).expect("cursor is fresh");
     assert_eq!(delta.len(), 2);
     assert!(c1 > c0);
 
@@ -243,7 +241,7 @@ fn cursor_delta_streams_envelopes_in_order() {
     let err = producers
         .region_readiness
         .publish_ready(true)
-        .and_then(|_| {
+        .and_then(|()| {
             // Build a deliberately wrong-region client-latency key by going
             // around the adapter, to confirm the sync service rejects.
             producers.sync.publish_signal(

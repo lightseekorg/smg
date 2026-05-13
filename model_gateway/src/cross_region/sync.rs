@@ -44,7 +44,7 @@ pub struct CursorStale;
 pub enum SignalKind {
     SmgReadiness(SmgReadinessSignal),
     WorkerHealth(WorkerHealthSignal),
-    WorkerLoad(WorkerLoadSignal),
+    WorkerLoad(Box<WorkerLoadSignal>),
     ClientLatency(ClientLatencySignal),
 }
 
@@ -219,11 +219,7 @@ impl CrossRegionSyncService {
     /// each typed signal and records the observed max version for any
     /// envelope whose actor matches this replica (so a restarted producer
     /// can compute a version that exceeds peer-cached pre-restart writes).
-    pub fn apply_remote_envelopes(
-        &self,
-        _peer: &str,
-        envelopes: &[SignalEnvelope<SignalKind>],
-    ) {
+    pub fn apply_remote_envelopes(&self, _peer: &str, envelopes: &[SignalEnvelope<SignalKind>]) {
         let mut state = self.state.write();
         let mut observed = self.observed_remote_max.write();
         for env in envelopes {
@@ -276,7 +272,13 @@ impl CrossRegionSyncService {
         removed: bool,
     ) -> SignalEnvelope<SignalKind> {
         let now = now_ms();
-        let prev = self.log.read().latest_per_key.get(&key).copied().unwrap_or(0);
+        let prev = self
+            .log
+            .read()
+            .latest_per_key
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
         let observed = self
             .observed_remote_max
             .read()
@@ -285,7 +287,9 @@ impl CrossRegionSyncService {
             .unwrap_or(0);
         // Wall-clock-anchored, multi-writer-safe version (design §2c).
         let now_u64 = u64::try_from(now.max(0)).unwrap_or(0);
-        let version = now_u64.max(prev.saturating_add(1)).max(observed.saturating_add(1));
+        let version = now_u64
+            .max(prev.saturating_add(1))
+            .max(observed.saturating_add(1));
         SignalEnvelope {
             key,
             version,
@@ -300,14 +304,8 @@ impl CrossRegionSyncService {
     fn append_and_mirror(&self, envelope: SignalEnvelope<SignalKind>) {
         // Append to log first (so any reader sees a consistent log+state).
         self.log.write().append(envelope.clone());
-        // Mirror live envelopes into state for the producer's self-view.
-        // Tombstones are not mirrored — state.rs has no remove path yet;
-        // freshness gating in consumers will exclude the prior live entry
-        // once it ages past stale_after_ms, and the producer never reads
-        // its own outgoing tombstones for routing.
-        if !envelope.removed {
-            apply_envelope_to_state(&mut self.state.write(), &envelope);
-        }
+        // Mirror envelopes into state for the producer's self-view.
+        apply_envelope_to_state(&mut self.state.write(), &envelope);
     }
 }
 
@@ -316,9 +314,7 @@ impl CrossRegionSyncService {
 /// this from accidentally diverging.
 fn validate_body_against_key(key: &SignalKey, signal: &SignalKind) -> CrossRegionResult<()> {
     let mismatch = |field: &str, key_val: &str, body_val: &str| CrossRegionError::InvalidConfig {
-        reason: format!(
-            "signal body {field} {body_val:?} does not match key {field} {key_val:?}",
-        ),
+        reason: format!("signal body {field} {body_val:?} does not match key {field} {key_val:?}",),
     };
     match (key, signal) {
         (
@@ -383,10 +379,18 @@ fn validate_body_against_key(key: &SignalKey, signal: &SignalKind) -> CrossRegio
             SignalKind::ClientLatency(body),
         ) => {
             if &body.client_region != client_region {
-                return Err(mismatch("client_region", client_region, &body.client_region));
+                return Err(mismatch(
+                    "client_region",
+                    client_region,
+                    &body.client_region,
+                ));
             }
             if &body.target_region != target_region {
-                return Err(mismatch("target_region", target_region, &body.target_region));
+                return Err(mismatch(
+                    "target_region",
+                    target_region,
+                    &body.target_region,
+                ));
             }
             if &body.server_name != server_name {
                 return Err(mismatch("server_name", server_name, &body.server_name));
@@ -418,14 +422,9 @@ fn validate_identity_segment(field: &str, value: &str) -> CrossRegionResult<()> 
     Ok(())
 }
 
-fn apply_envelope_to_state(
-    state: &mut CrossRegionState,
-    envelope: &SignalEnvelope<SignalKind>,
-) {
+fn apply_envelope_to_state(state: &mut CrossRegionState, envelope: &SignalEnvelope<SignalKind>) {
     if envelope.removed {
-        // State.rs has no remove path; freshness gating in candidate
-        // calculation excludes the stale entry. Phase-later TODO: add
-        // remove_* on CrossRegionState that drops keys explicitly.
+        state.remove_key(&envelope.key);
         return;
     }
     let version = SignalVersion {
@@ -435,7 +434,7 @@ fn apply_envelope_to_state(
     match envelope.signal.as_ref() {
         Some(SignalKind::SmgReadiness(s)) => state.upsert_readiness(s.clone(), version),
         Some(SignalKind::WorkerHealth(s)) => state.upsert_worker_health(s.clone(), version),
-        Some(SignalKind::WorkerLoad(s)) => state.upsert_worker_load(s.clone(), version),
+        Some(SignalKind::WorkerLoad(s)) => state.upsert_worker_load(s.as_ref().clone(), version),
         Some(SignalKind::ClientLatency(s)) => state.upsert_client_latency(s.clone(), version),
         None => {}
     }
@@ -598,6 +597,13 @@ mod tests {
         assert_eq!(tombstone.stale_after_ms, 0);
         assert!(tombstone.signal.is_none());
         assert!(tombstone.version > entries[0].version);
+
+        let state = svc.state();
+        let state = state.read();
+        assert!(
+            state.readiness(REGION).is_none(),
+            "tombstone should remove the materialized value immediately"
+        );
     }
 
     #[test]
