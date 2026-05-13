@@ -31,13 +31,18 @@ pub fn hash_node_path(path: &str) -> u64 {
 
 /// Compute a compact 8-byte hash of a token-id sequence. Returns
 /// a non-zero hash; `0` is reserved for [`GLOBAL_EVICTION_HASH`].
+/// Streams into the hasher to avoid an intermediate `Vec<u8>`
+/// (~128 KB at 32K tokens).
 #[expect(
     clippy::unwrap_used,
     reason = "blake3 always returns 32 bytes; [..8] into [u8; 8] cannot fail"
 )]
 pub fn hash_token_path(tokens: &[u32]) -> u64 {
-    let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
-    let hash = blake3::hash(&bytes);
+    let mut hasher = blake3::Hasher::new();
+    for t in tokens {
+        hasher.update(&t.to_le_bytes());
+    }
+    let hash = hasher.finalize();
     let h = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
     if h == GLOBAL_EVICTION_HASH {
         1
@@ -72,5 +77,21 @@ mod tests {
     fn hash_is_deterministic() {
         assert_eq!(hash_node_path("a"), hash_node_path("a"));
         assert_eq!(hash_token_path(&[1, 2, 3]), hash_token_path(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn hash_token_path_matches_concat_then_hash() {
+        // Lock in wire-compatibility with the prior allocating version.
+        for tokens in [&[][..], &[42][..], &[1, 2, 3, 4][..], &[0u32; 64][..]] {
+            let concat: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+            let expected_full = blake3::hash(&concat);
+            let expected = u64::from_le_bytes(expected_full.as_bytes()[..8].try_into().unwrap());
+            let expected = if expected == GLOBAL_EVICTION_HASH {
+                1
+            } else {
+                expected
+            };
+            assert_eq!(hash_token_path(tokens), expected);
+        }
     }
 }
