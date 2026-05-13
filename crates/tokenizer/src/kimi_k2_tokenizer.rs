@@ -27,16 +27,15 @@ pub(crate) const KIMI_K2_PATTERN: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\
 
 /// Returns true if `dir` looks like a Kimi K2/K2.5/K2.6 model directory.
 ///
-/// Primary signal: `tokenizer_config.json` references `tokenization_kimi`
-/// (via `auto_map`, `tokenizer_class`, etc.). Fallback: `config.json::model_type`
-/// is one of the known Kimi values.
-pub(crate) fn matches_dir(dir: &Path) -> bool {
-    if let Some(config) = read_json(&dir.join("tokenizer_config.json")) {
-        if value_mentions_kimi_tokenizer(&config) {
-            return true;
-        }
+/// Primary signal: the already-parsed `tokenizer_config.json` references
+/// `tokenization_kimi` (via `auto_map`, `tokenizer_class`, etc.). Callers pass
+/// the parsed JSON so we don't re-read the file the tiktoken loader already
+/// parsed. Fallback: read sibling `config.json` and check `model_type` ∈
+/// `{kimi_k2, kimi_k25}`.
+pub(crate) fn matches(tokenizer_config: Option<&Value>, dir: &Path) -> bool {
+    if tokenizer_config.is_some_and(value_mentions_kimi_tokenizer) {
+        return true;
     }
-
     read_json(&dir.join("config.json")).is_some_and(|config| model_config_is_kimi(&config))
 }
 
@@ -83,11 +82,18 @@ fn model_config_is_kimi(config: &Value) -> bool {
 
 fn value_mentions_kimi_tokenizer(value: &Value) -> bool {
     match value {
-        Value::String(s) => s.contains("tokenization_kimi"),
+        Value::String(s) => mentions_kimi_tokenizer_module(s),
         Value::Array(values) => values.iter().any(value_mentions_kimi_tokenizer),
         Value::Object(map) => map.values().any(value_mentions_kimi_tokenizer),
         _ => false,
     }
+}
+
+/// Match the dotted-path identifier `tokenization_kimi` as a whole segment,
+/// not a substring — so `tokenization_kimi.TikTokenTokenizer` matches but
+/// `tokenization_kimi_v2` or `my_tokenization_kimi_helper` do not.
+fn mentions_kimi_tokenizer_module(s: &str) -> bool {
+    s.split('.').any(|seg| seg == "tokenization_kimi")
 }
 
 #[cfg(test)]
@@ -135,6 +141,12 @@ mod tests {
         }
     }"#;
 
+    /// Read tokenizer_config.json from `dir`, mirroring what the real loader
+    /// hands to `matches`. Used so each test exercises the same call shape.
+    fn tokenizer_config(dir: &Path) -> Option<Value> {
+        read_json(&dir.join("tokenizer_config.json"))
+    }
+
     #[test]
     fn reserved_special_tokens_are_synthesized() {
         let dir = write_kimi_dir(
@@ -180,7 +192,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches_dir(dir.path()));
+        assert!(matches(tokenizer_config(dir.path()).as_ref(), dir.path()));
         // Round-trip a synthetic reserved token to confirm Kimi load path was taken.
         let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
         assert_eq!(
@@ -204,7 +216,25 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches_dir(dir.path()));
+        assert!(matches(tokenizer_config(dir.path()).as_ref(), dir.path()));
+    }
+
+    #[test]
+    fn substring_does_not_falsely_match_kimi() {
+        // Names that *contain* "tokenization_kimi" as a substring but aren't
+        // the module identifier itself must not trigger Kimi detection.
+        assert!(!mentions_kimi_tokenizer_module("tokenization_kimi_v2"));
+        assert!(!mentions_kimi_tokenizer_module(
+            "my_tokenization_kimi_helper"
+        ));
+        // Real upstream forms should still match.
+        assert!(mentions_kimi_tokenizer_module("tokenization_kimi"));
+        assert!(mentions_kimi_tokenizer_module(
+            "tokenization_kimi.TikTokenTokenizer"
+        ));
+        assert!(mentions_kimi_tokenizer_module(
+            "pkg.tokenization_kimi.TikTokenTokenizer"
+        ));
     }
 
     #[test]

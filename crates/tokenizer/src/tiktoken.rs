@@ -39,33 +39,32 @@ struct TiktokenConfig {
     chat_template: Option<String>,
 }
 
-/// Parse `tokenizer_config.json` for tiktoken-based models.
-fn load_tiktoken_config(config_path: &Path) -> Result<TiktokenConfig> {
-    let content = std::fs::read_to_string(config_path)?;
-    let config: serde_json::Value = serde_json::from_str(&content)?;
-
-    let added_tokens = parse_added_tokens_decoder(&config);
-    let special_tokens = parse_special_tokens(&config);
-
-    let chat_template = config
-        .get("chat_template")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    Ok(TiktokenConfig {
-        special_tokens,
-        added_tokens,
-        chat_template,
-    })
+/// Parse an already-loaded `tokenizer_config.json` value into a `TiktokenConfig`.
+fn parse_tiktoken_config(value: &serde_json::Value) -> TiktokenConfig {
+    TiktokenConfig {
+        special_tokens: parse_special_tokens(value),
+        added_tokens: parse_added_tokens_decoder(value),
+        chat_template: value
+            .get("chat_template")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    }
 }
 
-fn load_tiktoken_config_from_dir(dir: &Path) -> Result<TiktokenConfig> {
+/// Load `tokenizer_config.json` from `dir`, returning both the parsed
+/// `TiktokenConfig` and the raw JSON value (so callers like Kimi detection
+/// can inspect the same parse without re-reading the file).
+fn load_tiktoken_config_from_dir(
+    dir: &Path,
+) -> Result<(TiktokenConfig, Option<serde_json::Value>)> {
     let config_path = dir.join("tokenizer_config.json");
-    if config_path.exists() {
-        load_tiktoken_config(&config_path)
-    } else {
-        Ok(TiktokenConfig::default())
+    if !config_path.exists() {
+        return Ok((TiktokenConfig::default(), None));
     }
+    let content = std::fs::read_to_string(&config_path)?;
+    let value: serde_json::Value = serde_json::from_str(&content)?;
+    let config = parse_tiktoken_config(&value);
+    Ok((config, Some(value)))
 }
 
 /// Parse `added_tokens_decoder` from config JSON.
@@ -230,12 +229,13 @@ impl TiktokenTokenizer {
         let dir = tiktoken_path
             .parent()
             .ok_or_else(|| Error::msg("Cannot determine parent directory of tiktoken file"))?;
-        let mut config = load_tiktoken_config_from_dir(dir)?;
+        let (mut config, tokenizer_config_value) = load_tiktoken_config_from_dir(dir)?;
 
         // Kimi-K2/K2.5/K2.6 specialize the regex and pre-fill 256 reserved
         // special-token slots starting at `len(mergeable_ranks)`; all other
-        // tiktoken models use the cl100k pattern unchanged.
-        let pattern = if kimi_k2_tokenizer::matches_dir(dir) {
+        // tiktoken models use the cl100k pattern unchanged. Reuse the
+        // already-parsed tokenizer_config.json so we don't re-read it.
+        let pattern = if kimi_k2_tokenizer::matches(tokenizer_config_value.as_ref(), dir) {
             kimi_k2_tokenizer::apply_reserved_special_tokens(
                 &mut config.added_tokens,
                 encoder.len(),
