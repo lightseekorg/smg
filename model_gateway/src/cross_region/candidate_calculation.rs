@@ -1074,6 +1074,7 @@ mod tests {
             crate::cross_region::ClientLatencySignal {
                 client_region: "iad".to_string(),
                 target_region: "us-chicago-1".to_string(),
+                server_name: "remote-iad".to_string(),
                 p50_latency_ms: 34,
                 p95_latency_ms: 80,
             },
@@ -1433,6 +1434,7 @@ mod tests {
             crate::cross_region::ClientLatencySignal {
                 client_region: "iad".to_string(),
                 target_region: "us-chicago-1".to_string(),
+                server_name: "remote-iad".to_string(),
                 p50_latency_ms: 34,
                 p95_latency_ms: 80,
             },
@@ -1479,6 +1481,7 @@ mod tests {
         remote_state.upsert_readiness(
             SmgReadinessSignal {
                 region_id: "us-chicago-1".to_string(),
+                server_name: "remote-us-chicago-1".to_string(),
                 ready: false,
             },
             signal_version(NOW_MS),
@@ -1639,9 +1642,11 @@ mod tests {
         updated_at_ms: i64,
     ) {
         let version = signal_version(updated_at_ms);
+        let server_name = format!("remote-{region_id}");
         state.upsert_readiness(
             SmgReadinessSignal {
                 region_id: region_id.to_string(),
+                server_name: server_name.clone(),
                 ready: true,
             },
             version,
@@ -1650,6 +1655,7 @@ mod tests {
             WorkerHealthSignal {
                 region_id: region_id.to_string(),
                 worker_id: worker_id.to_string(),
+                server_name: server_name.clone(),
                 status,
             },
             version,
@@ -1658,6 +1664,7 @@ mod tests {
             WorkerLoadSignal {
                 region_id: region_id.to_string(),
                 worker_id: worker_id.to_string(),
+                server_name,
                 load: WorkerLoadInfo {
                     worker: worker_id.to_string(),
                     worker_type: None,

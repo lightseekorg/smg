@@ -3,6 +3,7 @@
 //! Serving paths opt into these helpers as individual request-plane and
 //! sync-plane tasks are implemented.
 
+pub mod adapters;
 pub mod breaker;
 pub mod candidate_calculation;
 pub mod config;
@@ -42,7 +43,13 @@ pub use signals::{
     WorkerLoadSignal, SIGNAL_CONTRACT_VERSION,
 };
 pub use state::{CrossRegionState, SignalVersion};
-pub use sync::{CrossRegionSyncService, SyncEvent};
+pub use adapters::{
+    ClientLatencyAdapter, CrossRegionProducers, ProducerCadences, ProducerHandles,
+    RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter,
+};
+pub use sync::{
+    CrossRegionSyncService, Cursor, CursorStale, SignalKind, SyncRetention,
+};
 
 /// Cross-region module result type.
 pub type CrossRegionResult<T> = Result<T, CrossRegionError>;
