@@ -325,6 +325,79 @@ fn test_epoch_max_wins_tombstone_compares_against_newest_live_version() {
     );
 }
 
+#[test]
+fn test_epoch_max_wins_snapshot_only_propagation_preserves_tombstone_boundary() {
+    // Snapshot-only path: the source replica compacts its log so a
+    // peer receives just one Insert per key (with the shard's
+    // `tombstone_version` embedded), never the original Remove op.
+    // A late peer that still holds the pre-tombstone high-epoch
+    // insert must not be able to resurrect it.
+    init_test_logging();
+    let key = "rl:global:node-a";
+
+    // Source: pre-tombstone high-epoch insert, then tombstone, then
+    // post-tombstone lower-epoch insert. After merge+compact, the
+    // log holds a single shard insert with tombstone_version=65.
+    let source = CrdtOrMap::new();
+    source.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    let mut source_log = OperationLog::new();
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    source_log.append(Operation::remove(key.to_string(), 65, ReplicaId::new()));
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(6, 1).to_vec(),
+        70,
+        ReplicaId::new(),
+    ));
+    source.merge(&source_log);
+
+    let snapshot_log = source.get_operation_log();
+    assert_eq!(
+        snapshot_log.operations().len(),
+        1,
+        "compaction must reduce to a single shard insert",
+    );
+
+    // Receiver applies the snapshot — gets the shard with
+    // tombstone_version embedded but no Remove op in its log.
+    let receiver = CrdtOrMap::new();
+    receiver.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    receiver.merge(&snapshot_log);
+    assert_eq!(
+        decode(&receiver.get(key).expect("post-tombstone insert applied")),
+        Some(EpochCount { epoch: 6, count: 1 }),
+    );
+
+    // Late peer that never saw the Remove gossips the original
+    // pre-tombstone high-epoch insert. The receiver must reject it
+    // — the shard's embedded tombstone_version (65) > the late
+    // insert's version (60), so it gets filtered.
+    let mut late_log = OperationLog::new();
+    late_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    receiver.merge(&late_log);
+
+    assert_eq!(
+        decode(
+            &receiver
+                .get(key)
+                .expect("post-tombstone state must survive late pre-tombstone insert")
+        ),
+        Some(EpochCount { epoch: 6, count: 1 }),
+        "pre-tombstone insert must not resurrect when only the snapshot \
+         (no Remove op) has reached the receiver",
+    );
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================
