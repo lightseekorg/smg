@@ -628,6 +628,15 @@ impl CrdtOrMap {
         }
     }
 
+    // Tombstones for EpochMaxWins keys are tracked in two places:
+    //   (a) `ValueMetadata { is_tombstone: true, .. }` in `metadata`
+    //       — used locally for LWW ordering + tombstone GC.
+    //   (b) `tombstone_version` embedded in the stored shard payload
+    //       — propagates across replicas via snapshot/compaction so
+    //       a peer that receives only the post-tombstone Insert
+    //       (the Remove op gone after compaction) still filters
+    //       pre-tombstone inserts. See
+    //       `test_epoch_max_wins_snapshot_only_propagation_preserves_tombstone_boundary`.
     fn record_epoch_insert_metadata(
         &self,
         key: &str,
