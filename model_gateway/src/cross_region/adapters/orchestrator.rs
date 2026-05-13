@@ -10,8 +10,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::StreamExt;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use super::{ClientLatencyAdapter, RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter};
 use crate::{
