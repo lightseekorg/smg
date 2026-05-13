@@ -7,8 +7,6 @@
 
 mod chunk_assembler;
 mod chunking;
-mod collector;
-mod consistent_hash;
 mod controller;
 mod crdt_kv;
 mod flow_control;
@@ -16,14 +14,9 @@ mod hash;
 pub mod kv;
 mod metrics;
 mod mtls;
-mod node_state_machine;
 mod partition;
 mod ping_server;
-mod rate_limit_window;
 mod service;
-mod stores;
-mod sync;
-mod tree_ops;
 mod types;
 
 // Internal tests module with full access to private types

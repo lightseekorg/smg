@@ -53,59 +53,6 @@ impl Default for BackpressureController {
     }
 }
 
-/// Message size validator
-#[derive(Debug, Clone)]
-pub struct MessageSizeValidator {
-    max_size: usize,
-}
-
-impl MessageSizeValidator {
-    pub fn new(max_size: usize) -> Self {
-        Self { max_size }
-    }
-
-    /// Validate message size
-    pub fn validate(&self, size: usize) -> Result<(), MessageSizeError> {
-        if size > self.max_size {
-            Err(MessageSizeError::TooLarge {
-                size,
-                max: self.max_size,
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Get maximum allowed size
-    pub fn max_size(&self) -> usize {
-        self.max_size
-    }
-}
-
-impl Default for MessageSizeValidator {
-    fn default() -> Self {
-        Self::new(MAX_MESSAGE_SIZE)
-    }
-}
-
-/// Message size validation error
-#[derive(Debug, Clone)]
-pub enum MessageSizeError {
-    TooLarge { size: usize, max: usize },
-}
-
-impl std::fmt::Display for MessageSizeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MessageSizeError::TooLarge { size, max } => {
-                write!(f, "Message size {size} exceeds maximum {max}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for MessageSizeError {}
-
 /// Exponential backoff calculator for reconnection
 #[derive(Debug, Clone)]
 pub struct ExponentialBackoff {
