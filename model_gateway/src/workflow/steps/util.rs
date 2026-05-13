@@ -6,29 +6,68 @@ use reqwest::Client;
 
 use crate::routers::grpc::client::GrpcClient;
 
-/// Strip protocol prefix (http://, https://, grpc://) from URL.
-pub(crate) fn strip_protocol(url: &str) -> String {
-    url.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_start_matches("grpc://")
-        .to_string()
+fn strip_scheme<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
+    url.get(..scheme.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        .map(|_| &url[scheme.len()..])
 }
 
-/// Ensure URL has an HTTP(S) scheme — handles bare `host:port` and `grpc://` inputs.
+fn url_scheme(url: &str) -> Option<String> {
+    url.split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+}
+
+/// Strip protocol prefix (http://, https://, grpc://, grpcs://) from URL.
+pub(crate) fn strip_protocol(url: &str) -> String {
+    for scheme in ["http://", "https://", "grpc://", "grpcs://"] {
+        if let Some(rest) = strip_scheme(url, scheme) {
+            return rest.to_string();
+        }
+    }
+    url.to_string()
+}
+
+/// Ensure URL has an HTTP(S) scheme — handles bare `host:port` and gRPC inputs.
 pub(crate) fn http_base_url(url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
+    if strip_scheme(url, "http://").is_some() || strip_scheme(url, "https://").is_some() {
         url.trim_end_matches('/').to_string()
     } else {
         format!("http://{}", strip_protocol(url).trim_end_matches('/'))
     }
 }
 
-/// Ensure URL has a gRPC scheme — handles bare `host:port` and `http://` inputs.
+/// Ensure URL has a gRPC scheme — handles bare `host:port` and HTTP(S) inputs.
 pub(crate) fn grpc_base_url(url: &str) -> String {
-    if url.starts_with("grpc://") {
+    if strip_scheme(url, "grpc://").is_some() || strip_scheme(url, "grpcs://").is_some() {
         url.trim_end_matches('/').to_string()
     } else {
         format!("grpc://{}", strip_protocol(url).trim_end_matches('/'))
+    }
+}
+
+fn http_health_url(url: &str) -> Result<String, String> {
+    match url_scheme(url).as_deref() {
+        Some("http") | Some("https") => Ok(format!("{}/health", url.trim_end_matches('/'))),
+        Some("grpc") | Some("grpcs") => Err(format!(
+            "HTTP health check does not accept gRPC URL scheme: {url}"
+        )),
+        Some(scheme) => Err(format!(
+            "HTTP health check does not accept URL scheme '{scheme}': {url}"
+        )),
+        None => Ok(format!("http://{}/health", url.trim_end_matches('/'))),
+    }
+}
+
+fn grpc_reachable_url(url: &str) -> Result<String, String> {
+    match url_scheme(url).as_deref() {
+        Some("grpc") | Some("grpcs") => Ok(url.trim_end_matches('/').to_string()),
+        Some("http") | Some("https") => Err(format!(
+            "gRPC health check does not accept HTTP URL scheme: {url}"
+        )),
+        Some(scheme) => Err(format!(
+            "gRPC health check does not accept URL scheme '{scheme}': {url}"
+        )),
+        None => Ok(format!("grpc://{}", url.trim_end_matches('/'))),
     }
 }
 
@@ -38,10 +77,7 @@ pub(crate) async fn try_http_reachable(
     timeout_secs: u64,
     client: &Client,
 ) -> Result<(), String> {
-    let is_https = url.starts_with("https://");
-    let protocol = if is_https { "https" } else { "http" };
-    let clean_url = strip_protocol(url);
-    let health_url = format!("{protocol}://{clean_url}/health");
+    let health_url = http_health_url(url)?;
 
     client
         .get(&health_url)
@@ -82,11 +118,7 @@ pub(crate) async fn do_grpc_health_check(
 /// We don't care which runtime it is here — that's `DetectBackendStep`'s job.
 /// We just need to know: does this endpoint speak gRPC at all?
 pub(crate) async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> {
-    let grpc_url = if url.starts_with("grpc://") {
-        url.to_string()
-    } else {
-        format!("grpc://{}", strip_protocol(url))
-    };
+    let grpc_url = grpc_reachable_url(url)?;
 
     let (sglang, vllm, trtllm, mlx) = tokio::join!(
         do_grpc_health_check(&grpc_url, timeout_secs, "sglang"),
@@ -100,5 +132,54 @@ pub(crate) async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(
         (Err(e1), Err(e2), Err(e3), Err(e4)) => Err(format!(
             "gRPC not reachable (tried sglang, vllm, trtllm, mlx): sglang={e1}, vllm={e2}, trtllm={e3}, mlx={e4}",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_health_url_accepts_http_https_and_bare_urls() {
+        assert_eq!(
+            http_health_url("http://localhost:30000").unwrap(),
+            "http://localhost:30000/health"
+        );
+        assert_eq!(
+            http_health_url("https://example.com/").unwrap(),
+            "https://example.com/health"
+        );
+        assert_eq!(
+            http_health_url("localhost:30000").unwrap(),
+            "http://localhost:30000/health"
+        );
+    }
+
+    #[test]
+    fn http_health_url_rejects_grpc_schemes() {
+        assert!(http_health_url("grpc://localhost:30001").is_err());
+        assert!(http_health_url("grpcs://localhost:30001").is_err());
+    }
+
+    #[test]
+    fn grpc_reachable_url_accepts_grpc_grpcs_and_bare_urls() {
+        assert_eq!(
+            grpc_reachable_url("grpc://localhost:30001").unwrap(),
+            "grpc://localhost:30001"
+        );
+        assert_eq!(
+            grpc_reachable_url("grpcs://localhost:30001/").unwrap(),
+            "grpcs://localhost:30001"
+        );
+        assert_eq!(
+            grpc_reachable_url("localhost:30001").unwrap(),
+            "grpc://localhost:30001"
+        );
+    }
+
+    #[test]
+    fn grpc_reachable_url_rejects_http_schemes() {
+        assert!(grpc_reachable_url("http://localhost:30000").is_err());
+        assert!(grpc_reachable_url("https://localhost:30000").is_err());
     }
 }

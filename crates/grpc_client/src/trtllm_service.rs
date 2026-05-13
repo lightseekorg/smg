@@ -141,9 +141,11 @@ impl TrtllmServiceClient {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         debug!("Connecting to TensorRT-LLM gRPC server at {}", endpoint);
 
-        // Convert grpc:// to http:// for tonic
+        // Convert gRPC schemes to tonic-compatible HTTP(S) endpoints.
         let http_endpoint = if let Some(addr) = endpoint.strip_prefix("grpc://") {
             format!("http://{addr}")
+        } else if let Some(addr) = endpoint.strip_prefix("grpcs://") {
+            format!("https://{addr}")
         } else {
             endpoint.to_string()
         };

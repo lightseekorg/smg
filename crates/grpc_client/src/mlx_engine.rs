@@ -124,6 +124,8 @@ impl MlxEngineClient {
 
         let http_endpoint = if let Some(addr) = endpoint.strip_prefix("grpc://") {
             format!("http://{addr}")
+        } else if let Some(addr) = endpoint.strip_prefix("grpcs://") {
+            format!("https://{addr}")
         } else {
             endpoint.to_string()
         };
