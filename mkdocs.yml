@@ -155,6 +155,7 @@ nav:
           - Tokenization and Parsing APIs: getting-started/tokenization-and-parsing.md
       - Advanced Features:
           - Load Balancing: getting-started/load-balancing.md
+          - KV Events Cache-Aware Routing: getting-started/kv-events-cache-aware.md
           - Tokenizer Caching: getting-started/tokenizer-caching.md
           - MCP in Responses API: getting-started/mcp.md
           - External Providers: getting-started/external-providers.md
