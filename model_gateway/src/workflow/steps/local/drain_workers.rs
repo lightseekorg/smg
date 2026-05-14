@@ -64,11 +64,8 @@ impl StepExecutor<WorkerRemovalWorkflowData> for DrainWorkersStep {
             }
         }
 
-        if transitioned == 0 || max_drain_secs == 0 {
-            debug!(
-                "Drain step: nothing to drain (transitioned={}, max_drain_secs={})",
-                transitioned, max_drain_secs
-            );
+        if transitioned == 0 {
+            debug!("Drain step: no Ready workers in batch, skipping drain");
             return Ok(StepResult::Success);
         }
 

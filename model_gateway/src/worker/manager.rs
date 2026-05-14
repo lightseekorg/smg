@@ -407,6 +407,14 @@ fn queue_due_probes(
             }
             continue;
         }
+        if launched_status == WorkerStatus::Draining {
+            // Drain is owned by the worker_removal workflow's
+            // DrainWorkersStep — probing here would only churn metrics
+            // and `compute_next_status` is a no-op for Draining anyway.
+            // Don't push a removal: the workflow already has one in flight.
+            next_check.remove(&worker_id);
+            continue;
+        }
 
         let next_deadline = now
             + Duration::from_secs(resolved_interval_secs(

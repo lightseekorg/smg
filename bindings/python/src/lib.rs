@@ -394,7 +394,6 @@ struct Router {
     router_selector: HashMap<String, String>,
     bootstrap_port_annotation: String,
     model_id_from: Option<String>,
-    drain_settle_secs: u64,
     prometheus_port: Option<u16>,
     prometheus_host: Option<String>,
     prometheus_duration_buckets: Option<Vec<f64>>,
@@ -468,6 +467,9 @@ struct Router {
     mesh_advertise_host: Option<String>,
     mesh_port: u16,
     mesh_peer_urls: Vec<String>,
+    /// New parameters MUST be appended here (not inserted mid-list) to avoid
+    /// breaking external Python callers that pass `_Router(...)` positionally.
+    drain_settle_secs: u64,
 }
 
 impl Router {
@@ -786,7 +788,6 @@ impl Router {
         router_selector = HashMap::new(),
         bootstrap_port_annotation = String::from("sglang.ai/bootstrap-port"),
         model_id_from = None,
-        drain_settle_secs = 5,
         prometheus_port = None,
         prometheus_host = None,
         prometheus_duration_buckets = None,
@@ -858,6 +859,7 @@ impl Router {
         mesh_port = 39527u16,
         mesh_peer_urls = vec![],
         mesh_advertise_host = None,
+        drain_settle_secs = 5,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -896,7 +898,6 @@ impl Router {
         router_selector: HashMap<String, String>,
         bootstrap_port_annotation: String,
         model_id_from: Option<String>,
-        drain_settle_secs: u64,
         prometheus_port: Option<u16>,
         prometheus_host: Option<String>,
         prometheus_duration_buckets: Option<Vec<f64>>,
@@ -968,6 +969,7 @@ impl Router {
         mesh_port: u16,
         mesh_peer_urls: Vec<String>,
         mesh_advertise_host: Option<String>,
+        drain_settle_secs: u64,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1015,7 +1017,6 @@ impl Router {
             router_selector,
             bootstrap_port_annotation,
             model_id_from,
-            drain_settle_secs,
             prometheus_port,
             prometheus_host,
             prometheus_duration_buckets,
@@ -1088,6 +1089,7 @@ impl Router {
             mesh_advertise_host,
             mesh_port,
             mesh_peer_urls,
+            drain_settle_secs,
         })
     }
 
