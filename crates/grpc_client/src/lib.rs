@@ -7,6 +7,7 @@ pub mod common_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
     tonic::include_proto!("smg.grpc.common");
 }
+pub mod abort_on_drop;
 pub mod channel;
 pub mod mlx_engine;
 pub mod sglang_scheduler;
@@ -17,6 +18,7 @@ pub mod vllm_engine;
 // Re-export clients
 use std::sync::Arc;
 
+pub use abort_on_drop::{AbortOnDropClient, AbortOnDropStream};
 pub use channel::{connect_channel, normalize_grpc_endpoint};
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
@@ -105,3 +107,85 @@ impl TraceInjector for NoopTraceInjector {
 
 /// Type alias for a boxed trace injector.
 pub type BoxedTraceInjector = Arc<dyn TraceInjector>;
+
+/// Generates the boilerplate that every engine client shares: the two
+/// `connect` constructors, `with_trace_injector`, and the three "standard"
+/// RPCs (`health_check`, `get_model_info`, `get_server_info`) whose
+/// request/response types are uniform across the generated proto crates.
+///
+/// `$proto_client` is the fully-qualified path of the generated tonic
+/// client type (which `Self` wraps). `$display_name` is the human-readable
+/// name used in the connect log line.
+///
+/// Each engine's `impl` block invokes this once and then adds engine-
+/// specific RPCs (`generate`, `embed`, etc.) below.
+macro_rules! impl_engine_client_basics {
+    ($proto_client:path, $display_name:literal) => {
+        /// Create a new client and connect to the backend.
+        pub async fn connect(
+            endpoint: &str,
+        ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+            Self::connect_with_trace_injector(
+                endpoint,
+                std::sync::Arc::new($crate::NoopTraceInjector),
+            )
+            .await
+        }
+
+        /// Create a new client with a custom trace injector.
+        pub async fn connect_with_trace_injector(
+            endpoint: &str,
+            trace_injector: $crate::BoxedTraceInjector,
+        ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+            tracing::debug!(
+                "Connecting to {} gRPC server at {}",
+                $display_name,
+                endpoint
+            );
+            let channel = $crate::channel::connect_channel(endpoint).await?;
+            let client = <$proto_client>::new(channel);
+            Ok(Self {
+                client,
+                trace_injector,
+            })
+        }
+
+        /// Set or replace the trace injector.
+        #[must_use]
+        pub fn with_trace_injector(mut self, trace_injector: $crate::BoxedTraceInjector) -> Self {
+            self.trace_injector = trace_injector;
+            self
+        }
+
+        /// Perform a health check.
+        pub async fn health_check(&self) -> Result<proto::HealthCheckResponse, tonic::Status> {
+            tracing::debug!("Sending health check request");
+            let request = tonic::Request::new(proto::HealthCheckRequest {});
+            let mut client = self.client.clone();
+            let response = client.health_check(request).await?;
+            tracing::debug!("Health check response received");
+            Ok(response.into_inner())
+        }
+
+        /// Get model information.
+        pub async fn get_model_info(&self) -> Result<proto::GetModelInfoResponse, tonic::Status> {
+            tracing::debug!("Requesting model info");
+            let request = tonic::Request::new(proto::GetModelInfoRequest {});
+            let mut client = self.client.clone();
+            let response = client.get_model_info(request).await?;
+            tracing::debug!("Model info response received");
+            Ok(response.into_inner())
+        }
+
+        /// Get server information.
+        pub async fn get_server_info(&self) -> Result<proto::GetServerInfoResponse, tonic::Status> {
+            tracing::debug!("Requesting server info");
+            let request = tonic::Request::new(proto::GetServerInfoRequest {});
+            let mut client = self.client.clone();
+            let response = client.get_server_info(request).await?;
+            tracing::debug!("Server info response received");
+            Ok(response.into_inner())
+        }
+    };
+}
+pub(crate) use impl_engine_client_basics;
