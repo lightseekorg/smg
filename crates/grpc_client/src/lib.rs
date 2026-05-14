@@ -7,6 +7,7 @@ pub mod common_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
     tonic::include_proto!("smg.grpc.common");
 }
+pub mod channel;
 pub mod mlx_engine;
 pub mod sglang_scheduler;
 pub mod tokenizer_bundle;
@@ -16,6 +17,7 @@ pub mod vllm_engine;
 // Re-export clients
 use std::sync::Arc;
 
+pub use channel::{connect_channel, normalize_grpc_endpoint};
 pub use mlx_engine::{proto as mlx_proto, MlxEngineClient};
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
 use tonic::metadata::MetadataMap;

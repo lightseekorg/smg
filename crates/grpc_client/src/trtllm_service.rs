@@ -5,7 +5,6 @@ use std::{
         Arc,
     },
     task::{Context, Poll},
-    time::Duration,
 };
 
 use openai_protocol::{
@@ -141,26 +140,7 @@ impl TrtllmServiceClient {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         debug!("Connecting to TensorRT-LLM gRPC server at {}", endpoint);
 
-        // Convert gRPC schemes to tonic-compatible HTTP(S) endpoints.
-        let http_endpoint = if let Some(addr) = endpoint.strip_prefix("grpc://") {
-            format!("http://{addr}")
-        } else if let Some(addr) = endpoint.strip_prefix("grpcs://") {
-            format!("https://{addr}")
-        } else {
-            endpoint.to_string()
-        };
-
-        let channel = Channel::from_shared(http_endpoint)?
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .keep_alive_timeout(Duration::from_secs(10))
-            .keep_alive_while_idle(true)
-            .tcp_keepalive(Some(Duration::from_secs(60)))
-            .tcp_nodelay(true)
-            .http2_adaptive_window(true)
-            .initial_stream_window_size(Some(16 * 1024 * 1024)) // 16MB
-            .initial_connection_window_size(Some(32 * 1024 * 1024)) // 32MB
-            .connect()
-            .await?;
+        let channel = crate::channel::connect_channel(endpoint).await?;
 
         let client = proto::trtllm_service_client::TrtllmServiceClient::new(channel);
 

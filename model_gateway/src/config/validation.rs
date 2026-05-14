@@ -835,12 +835,13 @@ impl ConfigValidator {
                 });
             }
 
-            // Perform case-insensitive scheme check
-            let url_lower = url.to_ascii_lowercase();
-            if !url_lower.starts_with("http://")
-                && !url_lower.starts_with("https://")
-                && !url_lower.starts_with("grpc://")
-                && !url_lower.starts_with("grpcs://")
+            // Case-insensitive scheme allow-list. Compare just the scheme
+            // segment so we don't allocate a lowercased copy of the full URL.
+            const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs"];
+            let scheme = url.split_once("://").map_or("", |(s, _)| s);
+            if !ALLOWED_SCHEMES
+                .iter()
+                .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
             {
                 return Err(ConfigError::InvalidValue {
                     field: "worker_url".to_string(),
