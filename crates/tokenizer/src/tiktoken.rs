@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Error, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tiktoken_rs::{cl100k_base, p50k_base, p50k_edit, r50k_base, CoreBPE};
 
 use crate::{
@@ -128,6 +128,18 @@ pub struct TiktokenTokenizer {
     special_tokens: SpecialTokens,
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
+    /// Token IDs that tiktoken-rs can decode without panicking — the union of
+    /// the BPE encoder's ranks and `special_tokens_encoder`'s IDs. `None` for
+    /// the built-in encodings created via `new()` (whose internal vocab we
+    /// don't have direct access to); in that case the dense `[0, vocab_size)`
+    /// range is used for sanitation instead.
+    ///
+    /// Hub-loaded models (e.g. Kimi K2.5) may declare a vocab_size that is
+    /// strictly larger than the union of mapped IDs — see issue #1475. The
+    /// `Decoder::decode` impl uses this set to drop reserved/unmapped IDs
+    /// before calling tiktoken-rs, avoiding an unconditional `[&token]` panic
+    /// in `tiktoken_rs::patched_tiktoken::_decode_native_and_split`.
+    known_token_ids: Option<FxHashSet<TokenIdType>>,
     vocab_size: usize,
     chat_template: ChatTemplateState,
     eos_token_ids: Vec<TokenIdType>,
@@ -177,6 +189,12 @@ impl TiktokenTokenizer {
             special_tokens,
             vocab: HashMap::new(),
             reverse_vocab: HashMap::new(),
+            // Built-in OpenAI encodings have dense, contiguous IDs in
+            // `[0, vocab_size)`. We don't materialize the explicit set here
+            // because the encoder lives inside `CoreBPE` and is not exposed;
+            // `Decoder::decode` falls back to the dense range check via
+            // `is_known_token_id` when this is `None`.
+            known_token_ids: None,
             vocab_size,
             chat_template: ChatTemplateState::empty(),
             eos_token_ids: Vec::new(), // No directory path in from_model
@@ -239,7 +257,9 @@ impl TiktokenTokenizer {
             .collect();
 
         // 4. Calculate true vocab size from max token ID (handles sparse/reserved IDs),
-        //    build string-based vocab maps (borrows encoder), then pass encoder by value to CoreBPE
+        //    build string-based vocab maps (borrows encoder), capture the set of
+        //    mapped IDs that tiktoken-rs can safely decode, then pass encoder by
+        //    value to CoreBPE.
         let vocab_size = encoder
             .values()
             .copied()
@@ -248,6 +268,11 @@ impl TiktokenTokenizer {
             .map(|id| id as usize + 1)
             .unwrap_or(0);
         let (vocab, reverse_vocab) = build_vocab_maps(&encoder, &config.added_tokens);
+        let known_token_ids: FxHashSet<TokenIdType> = encoder
+            .values()
+            .copied()
+            .chain(special_tokens_encoder.values().copied())
+            .collect();
         let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN)?;
 
         // 5. Load chat template — propagate errors for explicit paths,
@@ -269,6 +294,7 @@ impl TiktokenTokenizer {
             special_tokens: config.special_tokens,
             vocab,
             reverse_vocab,
+            known_token_ids: Some(known_token_ids),
             vocab_size,
             chat_template: ChatTemplateState::new(chat_template)?,
             eos_token_ids,
@@ -469,15 +495,69 @@ impl Encoder for TiktokenTokenizer {
     }
 }
 
+impl TiktokenTokenizer {
+    /// Whether tiktoken-rs has a byte mapping for `id`.
+    ///
+    /// For hub-loaded models this is an explicit set built at load time from
+    /// the BPE encoder + `added_tokens_decoder`; for built-in encodings (where
+    /// the explicit set isn't materialized) it falls back to the dense range
+    /// check `id < vocab_size`. See issue #1475: Kimi K2.5 declares 163840
+    /// tokens but only ~163607 IDs are mapped — the rest are reserved slots
+    /// that would trigger an unconditional `[&token]` panic inside
+    /// `tiktoken_rs::patched_tiktoken::_decode_native_and_split` if passed in.
+    fn is_known_token_id(&self, id: TokenIdType) -> bool {
+        match &self.known_token_ids {
+            Some(set) => set.contains(&id),
+            None => (id as usize) < self.vocab_size,
+        }
+    }
+
+    /// Drop any token IDs that tiktoken-rs cannot decode. Returns the
+    /// sanitized vector and the count of dropped IDs.
+    fn sanitize_token_ids(&self, token_ids: &[TokenIdType]) -> (Vec<TokenIdType>, usize) {
+        let mut sanitized = Vec::with_capacity(token_ids.len());
+        let mut dropped = 0usize;
+        for &id in token_ids {
+            if self.is_known_token_id(id) {
+                sanitized.push(id);
+            } else {
+                dropped += 1;
+            }
+        }
+        (sanitized, dropped)
+    }
+}
+
 impl Decoder for TiktokenTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
-        match self.tokenizer.decode(token_ids.to_vec()) {
+        // Pre-filter unmapped IDs. tiktoken-rs's `_decode_native_and_split`
+        // performs an unconditional `[&token]` index that panics on IDs absent
+        // from both `decoder` and `special_tokens_decoder` — see issue #1475.
+        // Some model vocabs (notably Kimi K2.5) declare reserved/extra-id
+        // slots in their declared `vocab_size` that have no byte mapping, and
+        // those IDs occasionally show up in long sweeps. Dropping them here
+        // matches HuggingFace tokenizers' default behavior for unknown IDs
+        // (silent skip) and keeps the worker thread alive.
+        let (sanitized, dropped) = self.sanitize_token_ids(token_ids);
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                kept = sanitized.len(),
+                total = token_ids.len(),
+                "tiktoken decode skipped token IDs that are not present in the encoder; \
+                 these are usually reserved/extra slots in the model vocab"
+            );
+        }
+
+        match self.tokenizer.decode(sanitized.clone()) {
             Ok(text) => Ok(text),
             Err(err) => {
-                // Fallback to lossy decoding for incomplete UTF-8 sequences
+                // Fallback to lossy decoding for incomplete UTF-8 sequences.
+                // `sanitized` was already filtered, so this call is safe from
+                // the panic in `_decode_native_and_split`.
                 let bytes: Vec<u8> = self
                     .tokenizer
-                    ._decode_native_and_split(token_ids.to_vec())
+                    ._decode_native_and_split(sanitized)
                     .flatten()
                     .collect();
                 tracing::warn!(
@@ -849,6 +929,297 @@ mod tests {
         assert!(
             ids.contains(&100257),
             "Special token <|endoftext|> should be recognized as single token, got: {ids:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Unmapped-token-ID regression tests (issue #1475)
+    //
+    // Build a synthetic tiktoken model with sparse vocab — BPE IDs 0..3 and a
+    // few added tokens at 100..103, leaving a large gap full of reserved
+    // slots. This mirrors Kimi K2.5's vocab structure where ~233 IDs in
+    // {163589, 163592, 163600, 163608..163837} are declared but unmapped.
+    // ------------------------------------------------------------------------
+
+    /// Build a minimal tiktoken model directory on disk with a sparse vocab:
+    /// BPE ranks 0..=3 mapping single ASCII bytes (h, i, !, space), plus
+    /// added tokens `[BOS]=100`, `[EOS]=101`, `<|im_end|>=102`, `<|extra|>=200`.
+    /// IDs 4..=99 and 103..=199 (except 200) are *declared* via vocab_size but
+    /// unmapped — they should be safely skipped on decode.
+    fn build_sparse_tiktoken_dir() -> tempfile::TempDir {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+
+        // tiktoken.model — 4 BPE entries
+        let model_path = dir.path().join("tiktoken.model");
+        let mut f = std::fs::File::create(&model_path).unwrap();
+        // 'h' = 0x68, 'i' = 0x69, '!' = 0x21, ' ' = 0x20
+        writeln!(f, "{} 0", STANDARD.encode([0x68u8])).unwrap();
+        writeln!(f, "{} 1", STANDARD.encode([0x69u8])).unwrap();
+        writeln!(f, "{} 2", STANDARD.encode([0x21u8])).unwrap();
+        writeln!(f, "{} 3", STANDARD.encode([0x20u8])).unwrap();
+
+        // tokenizer_config.json — added tokens at sparse, non-contiguous IDs
+        let config = serde_json::json!({
+            "added_tokens_decoder": {
+                "100": { "content": "[BOS]", "special": true },
+                "101": { "content": "[EOS]", "special": true },
+                "102": { "content": "<|im_end|>", "special": true },
+                "200": { "content": "<|extra|>", "special": true },
+            },
+            "bos_token": "[BOS]",
+            "eos_token": "[EOS]",
+        });
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        dir
+    }
+
+    #[test]
+    fn test_known_token_ids_populated_from_load() {
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        // vocab_size derived from max id: max(3, 200) + 1 = 201
+        assert_eq!(tokenizer.vocab_size(), 201);
+
+        // BPE ranks 0..=3 are known
+        for id in 0u32..=3 {
+            assert!(
+                tokenizer.is_known_token_id(id),
+                "BPE rank {id} should be known"
+            );
+        }
+        // Added tokens are known
+        for id in [100u32, 101, 102, 200] {
+            assert!(
+                tokenizer.is_known_token_id(id),
+                "added token {id} should be known"
+            );
+        }
+        // Reserved/gap IDs are NOT known (this is the bug surface)
+        for id in [4u32, 50, 99, 103, 150, 199] {
+            assert!(
+                !tokenizer.is_known_token_id(id),
+                "gap ID {id} must be flagged as unknown"
+            );
+        }
+        // IDs beyond declared vocab are also not known
+        assert!(!tokenizer.is_known_token_id(201));
+        assert!(!tokenizer.is_known_token_id(u32::MAX));
+    }
+
+    #[test]
+    fn test_decode_drops_single_unmapped_id() {
+        // The pre-fix bug: decoding a vector containing one unmapped reserved
+        // ID would panic in `_decode_native_and_split` (the fallback path).
+        // Post-fix: it returns Ok with the unmapped ID silently dropped.
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        // ID 150 is in the gap — not in the BPE encoder and not an added
+        // token, but < vocab_size, so the model can validly emit it.
+        let result = tokenizer.decode(&[150], false);
+        assert!(
+            result.is_ok(),
+            "decode of unmapped ID must not panic or error: {result:?}"
+        );
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_drops_interleaved_unmapped_ids() {
+        // Mixed valid + unmapped + valid: 'h' (0), 'i' (1), gap (50), '!' (2)
+        // Expected: "hi!" with the gap silently skipped.
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        let result = tokenizer.decode(&[0, 1, 50, 2], false);
+        assert!(
+            result.is_ok(),
+            "decode of mixed valid+unmapped IDs must not panic: {result:?}"
+        );
+        assert_eq!(result.unwrap(), "hi!");
+    }
+
+    #[test]
+    fn test_decode_drops_many_unmapped_ids_in_sequence() {
+        // Long run mimicking Kimi K2.5's 233-reserved-IDs scenario:
+        // alternate valid BPE ranks with gap IDs and verify only the valid
+        // bytes survive.
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        let mut input: Vec<TokenIdType> = Vec::new();
+        for _ in 0..16 {
+            input.push(0); // 'h'
+            input.push(1); // 'i'
+            input.push(60); // gap
+            input.push(70); // gap
+        }
+        let decoded = tokenizer.decode(&input, false).unwrap();
+        // Each of the 16 cycles contributes "hi"; gaps are dropped.
+        assert_eq!(decoded, "hi".repeat(16));
+    }
+
+    #[test]
+    fn test_decode_unmapped_around_added_tokens() {
+        // Unmapped IDs adjacent to special/added tokens must still be skipped
+        // cleanly. tiktoken-rs's `special_tokens_decoder` is the one the
+        // unconditional `[&token]` index on line 82 of patched_tiktoken.rs
+        // targets, so this exercises exactly the panicking code path.
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        // [BOS] (100), gap (150), 'h' (0), 'i' (1), gap (199), [EOS] (101)
+        let decoded = tokenizer
+            .decode(&[100, 150, 0, 1, 199, 101], false)
+            .unwrap();
+        assert_eq!(decoded, "[BOS]hi[EOS]");
+    }
+
+    #[test]
+    fn test_decode_all_unmapped_returns_empty() {
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+        let decoded = tokenizer.decode(&[50, 99, 150, 199], false).unwrap();
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_decode_empty_input() {
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+        let decoded = tokenizer.decode(&[], false).unwrap();
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_decode_only_added_tokens() {
+        // All added/special tokens: confirms the special_tokens_decoder
+        // lookup branch works after sanitation (no unmapped IDs to drop).
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+        let decoded = tokenizer.decode(&[100, 102, 101], false).unwrap();
+        assert_eq!(decoded, "[BOS]<|im_end|>[EOS]");
+    }
+
+    #[test]
+    fn test_sanitize_token_ids_counts_drops() {
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        let (kept, dropped) = tokenizer.sanitize_token_ids(&[0, 50, 1, 99, 2, 199, 3]);
+        assert_eq!(kept, vec![0, 1, 2, 3]);
+        assert_eq!(dropped, 3);
+
+        let (kept, dropped) = tokenizer.sanitize_token_ids(&[]);
+        assert!(kept.is_empty());
+        assert_eq!(dropped, 0);
+
+        let (kept, dropped) = tokenizer.sanitize_token_ids(&[0, 1, 2, 3]);
+        assert_eq!(kept, vec![0, 1, 2, 3]);
+        assert_eq!(dropped, 0);
+
+        let (kept, dropped) = tokenizer.sanitize_token_ids(&[50, 99, 199]);
+        assert!(kept.is_empty());
+        assert_eq!(dropped, 3);
+    }
+
+    #[test]
+    fn test_builtin_encoding_uses_range_check_for_known_ids() {
+        // Built-in encodings populate `known_token_ids: None` and rely on the
+        // dense `id < vocab_size` range check. Confirm the range check
+        // matches what tiktoken-rs can actually decode (no panics) and that
+        // out-of-range IDs are flagged as unknown.
+        let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+
+        // 0 is the first BPE rank.
+        assert!(tokenizer.is_known_token_id(0));
+        // 100256 is the cl100k_base vocab size; ids up to 100255 must be
+        // considered known. (Special tokens like 100257 live ABOVE this; the
+        // range-check based path is intentionally conservative — see comment
+        // on `known_token_ids`. Decoding a special-token id still routes
+        // through `tokenizer.decode` which itself handles them, and would
+        // hit the lossy fallback if filtered out. The built-in path is not
+        // exposed to sparse vocabs.)
+        assert!(tokenizer.is_known_token_id(100_000));
+        assert!(tokenizer.is_known_token_id(100_255));
+        assert!(!tokenizer.is_known_token_id(100_256));
+        assert!(!tokenizer.is_known_token_id(u32::MAX));
+    }
+
+    #[test]
+    fn test_decode_with_unmapped_does_not_panic_under_stress() {
+        // Long sweep mimicking the BFCL scenario in the bug report: 1390
+        // sequences containing occasional reserved IDs. Pre-fix this would
+        // panic many times; post-fix every call must return Ok.
+        let dir = build_sparse_tiktoken_dir();
+        let tokenizer = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+
+        let gap_ids: [TokenIdType; 6] = [4, 50, 99, 103, 150, 199];
+        for i in 0..1390 {
+            let gap = gap_ids[i % gap_ids.len()];
+            // Realistic-ish mix: a few BPE tokens, an injected reserved ID,
+            // more BPE tokens, maybe an added token.
+            let mut ids = vec![0, 1, 3, gap, 2, 0];
+            if i % 7 == 0 {
+                ids.push(100);
+            }
+            if i % 11 == 0 {
+                ids.push(102);
+            }
+            let result = tokenizer.decode(&ids, false);
+            assert!(
+                result.is_ok(),
+                "iteration {i}: decode panicked or errored for ids={ids:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_invalid_utf8_with_unmapped_id_does_not_panic() {
+        // The fallback path (`_decode_native_and_split`) is the actual
+        // panicking call. Construct an input that *also* contains an unmapped
+        // ID to make sure sanitation runs before the fallback, not just
+        // before the happy path. We can't easily force invalid UTF-8 from
+        // single-byte ASCII fixtures, so use cl100k_base for the UTF-8
+        // invalidity. With a built-in encoder, the dense-range check still
+        // catches obviously-out-of-range IDs; combined with `u32::MAX` we
+        // exercise both behaviors at once.
+        let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+        let full = tokenizer.encode("😀", false).unwrap();
+        let mut ids = full.token_ids()[..1].to_vec();
+        ids.push(u32::MAX); // unmapped, must be dropped
+        let result = tokenizer.decode(&ids, false);
+        assert!(
+            result.is_ok(),
+            "decode with invalid-UTF-8 prefix + unmapped id must not panic: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_path_populates_known_set_only_for_hub_models() {
+        // Hub-loaded tokenizer: known_token_ids is Some(...)
+        let dir = build_sparse_tiktoken_dir();
+        let hub = TiktokenTokenizer::from_dir(dir.path()).unwrap();
+        assert!(
+            hub.known_token_ids.is_some(),
+            "hub-loaded tokenizers must materialize known_token_ids"
+        );
+        let set = hub.known_token_ids.as_ref().unwrap();
+        // 4 BPE + 4 added = 8 known IDs
+        assert_eq!(set.len(), 8);
+
+        // Built-in tokenizer: known_token_ids is None
+        let builtin = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
+        assert!(
+            builtin.known_token_ids.is_none(),
+            "built-in tokenizers leave known_token_ids as None (range-check path)"
         );
     }
 }

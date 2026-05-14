@@ -404,3 +404,83 @@ fn test_tiktoken_kimi_k2_encoding_stability() {
         "Same text produced different token IDs"
     );
 }
+
+/// Regression test for issue #1475 — decoding reserved/unmapped token IDs
+/// against the real Kimi K2 vocab must not panic.
+///
+/// Kimi K2 declares `vocab_size = 163840` but only ~163607 IDs (163,584 BPE
+/// ranks + 23 added tokens) are mapped. The remaining ~233 IDs are reserved
+/// extra-id slots that engines can validly emit. Pre-fix, decoding any one of
+/// them tripped an unconditional `[&token]` index in
+/// `tiktoken_rs::patched_tiktoken::_decode_native_and_split` and crashed the
+/// tokio worker. Post-fix, those IDs are silently dropped on the decode path.
+///
+/// IDs 163_600 and 163_700 are taken straight from the reproducer in the bug
+/// report. They live in the gap between the last mapped added token and the
+/// declared `vocab_size = 163_840`. We additionally pad with normal text-bearing
+/// tokens to confirm the surrounding output decodes intact.
+#[test]
+#[ignore]
+fn test_tiktoken_kimi_k2_decode_reserved_ids_does_not_panic() {
+    let dir = ensure_kimi_k2_cached();
+    let tokenizer = TiktokenTokenizer::from_dir(&dir).expect("Failed to load Kimi K2 tokenizer");
+
+    // Encode a normal prompt to get a handful of mapped IDs to surround the
+    // unmapped ones with.
+    let normal_ids = tokenizer
+        .encode("hello world", false)
+        .expect("encode 'hello world' failed")
+        .token_ids()
+        .to_vec();
+    assert!(!normal_ids.is_empty());
+
+    // The four reserved ids from the bug report. All within `vocab_size`
+    // (163840) but unmapped in both `decoder` and `special_tokens_decoder`.
+    let reserved_ids: [u32; 4] = [163_589, 163_600, 163_700, 163_837];
+
+    // 1) Single reserved id alone — pre-fix this is the minimal repro.
+    for &rid in &reserved_ids {
+        let result = tokenizer.decode(&[rid], false);
+        assert!(
+            result.is_ok(),
+            "decode([{rid}]) must not panic on Kimi K2 reserved id: {result:?}"
+        );
+        // Reserved id has no byte mapping, so output is empty.
+        assert_eq!(
+            result.unwrap(),
+            "",
+            "decode of lone reserved id {rid} should yield empty string"
+        );
+    }
+
+    // 2) Reserved id interleaved with a real prompt.
+    for &rid in &reserved_ids {
+        let mut ids = normal_ids.clone();
+        ids.insert(ids.len() / 2, rid);
+        let result = tokenizer.decode(&ids, false);
+        assert!(
+            result.is_ok(),
+            "decode of normal+reserved sequence with rid={rid} must not panic: {result:?}"
+        );
+        let normal_decoded = tokenizer.decode(&normal_ids, false).unwrap();
+        assert_eq!(
+            result.unwrap(),
+            normal_decoded,
+            "reserved id {rid} should be dropped, leaving the original decoded text"
+        );
+    }
+
+    // 3) Long run of mixed reserved + normal IDs (BFCL-style sweep). 1390
+    // iterations matches the load in the bug report. Pre-fix this would
+    // panic many times; post-fix every call must return Ok.
+    for i in 0..1390 {
+        let rid = reserved_ids[i % reserved_ids.len()];
+        let mut ids = normal_ids.clone();
+        ids.push(rid);
+        let result = tokenizer.decode(&ids, false);
+        assert!(
+            result.is_ok(),
+            "iteration {i}: decode panicked on K2 sequence with rid={rid}: {result:?}"
+        );
+    }
+}
