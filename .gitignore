@@ -160,3 +160,11 @@ clients/java/target/
 clients/java/build.sbt
 clients/java/gradle.properties
 openapitools.json
+
+# BFCL test data (downloaded from HuggingFace at runtime)
+e2e_test/bfcl/data/*.json
+!e2e_test/bfcl/data/.gitkeep
+
+# BFCL test logs (generated per run)
+e2e_test/bfcl_logs/*
+!e2e_test/bfcl_logs/.gitkeep
