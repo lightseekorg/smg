@@ -63,7 +63,7 @@ def _eval_all_module_arrays(module: nn.Module) -> None:
         elif isinstance(v, dict):
             for child in v.values():
                 _collect_value(child)
-        elif isinstance(v, list):
+        elif isinstance(v, (list, tuple)):
             for child in v:
                 _collect_value(child)
 
