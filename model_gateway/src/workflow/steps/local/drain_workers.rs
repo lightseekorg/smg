@@ -43,24 +43,36 @@ impl StepExecutor<WorkerRemovalWorkflowData> for DrainWorkersStep {
         let mut max_drain_secs: u64 = 0;
         let mut transitioned = 0usize;
 
-        for worker in workers_to_remove {
-            if worker.status() != WorkerStatus::Ready {
-                continue;
-            }
-            let url = worker.url();
+        for snapshot in workers_to_remove {
+            // Resolve the worker against the live registry: a worker that
+            // became `Ready` (or had its revision bumped via a same-URL
+            // replace) after `find_workers_to_remove` ran would otherwise
+            // bypass the drain and start serving traffic up until the
+            // remove step runs.
+            let url = snapshot.url();
             let Some(worker_id) = app_context.worker_registry.get_id_by_url(url) else {
                 debug!("Worker {} not in registry, skipping drain transition", url);
                 continue;
             };
-            let revision = worker.revision();
+            let Some(current) = app_context.worker_registry.get(&worker_id) else {
+                debug!(
+                    "Worker {} disappeared from registry, skipping drain transition",
+                    url
+                );
+                continue;
+            };
+            if current.status() != WorkerStatus::Ready {
+                continue;
+            }
+            let revision = current.revision();
+            let drain_secs = current.metadata().health_config.drain_settle_secs;
             if app_context
                 .worker_registry
                 .transition_status_if_revision(&worker_id, revision, WorkerStatus::Draining)
                 .is_some()
             {
                 transitioned += 1;
-                max_drain_secs =
-                    max_drain_secs.max(worker.metadata().health_config.drain_settle_secs);
+                max_drain_secs = max_drain_secs.max(drain_secs);
             }
         }
 
@@ -271,6 +283,38 @@ mod tests {
 
         // After total 7s: done.
         tokio::time::advance(Duration::from_secs(4)).await;
+        let result = step_handle.await.unwrap().unwrap();
+        assert_eq!(result, StepResult::Success);
+    }
+
+    /// Regression: status/revision must come from the live registry, not
+    /// the snapshot taken in `find_workers_to_remove`. A worker that was
+    /// non-Ready at snapshot time but became Ready before this step runs
+    /// would otherwise bypass the drain and start serving traffic right
+    /// up until removal.
+    #[tokio::test(start_paused = true)]
+    async fn test_drain_workers_step_uses_live_registry_status_not_snapshot() {
+        let worker = build_worker("http://w-live:8080", 5, WorkerStatus::Pending);
+        let app_ctx = make_app_context(&[Arc::clone(&worker)]);
+        // Snapshot was taken while Pending — the step must NOT trust this.
+        let snapshot = vec![Arc::clone(&worker)];
+        // Live state flips to Ready before the step runs (e.g. a probe
+        // succeeded between find_workers_to_remove and drain_workers).
+        worker.set_status(WorkerStatus::Ready);
+
+        let mut ctx = make_context(Arc::clone(&app_ctx), snapshot);
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only spawn awaited via the JoinHandle below"
+        )]
+        let step_handle = tokio::spawn(async move { DrainWorkersStep.execute(&mut ctx).await });
+
+        tokio::task::yield_now().await;
+        // Live status Ready → step did transition us to Draining.
+        assert_eq!(worker.status(), WorkerStatus::Draining);
+
+        tokio::time::advance(Duration::from_secs(5)).await;
         let result = step_handle.await.unwrap().unwrap();
         assert_eq!(result, StepResult::Success);
     }

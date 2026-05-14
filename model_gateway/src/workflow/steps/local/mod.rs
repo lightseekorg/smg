@@ -97,10 +97,13 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
                 "Drain Ready workers before removal",
                 Arc::new(DrainWorkersStep),
             )
-            // Timeout is generous so the per-worker drain_settle_secs sleep
-            // can complete even when several workers stack their settle
-            // windows. The step itself caps by taking max() across them.
-            .with_timeout(Duration::from_secs(600))
+            // No `with_timeout`: the step's purpose is to sleep for the
+            // resolved `drain_settle_secs` (which can be set per-worker
+            // via `WorkerSpec::health.drain_settle_secs`). A static
+            // workflow-level timeout would be set at definition time
+            // without visibility into runtime config and would
+            // preemptively fail the workflow for legitimately long
+            // drain windows, leaving workers stuck in `Draining`.
             .with_retry(RetryPolicy {
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
