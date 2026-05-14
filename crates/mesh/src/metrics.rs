@@ -8,39 +8,12 @@
 //! - State integrity metrics
 //! - Rate-limit/LB drift metrics
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 
 /// Initialize mesh metrics descriptions
 pub fn init_mesh_metrics() {
-    // Convergence latency
-    describe_histogram!(
-        "router_mesh_convergence_ms",
-        "Time for state to converge across mesh in milliseconds"
-    );
-
-    // Traffic metrics
-    describe_counter!(
-        "router_mesh_batches_total",
-        "Total number of state update batches sent/received"
-    );
-    describe_counter!("router_mesh_bytes_total", "Total bytes transmitted in mesh");
-
-    // Snapshot metrics
-    describe_counter!(
-        "router_mesh_snapshot_trigger_total",
-        "Total number of snapshot triggers"
-    );
-    describe_histogram!(
-        "router_mesh_snapshot_duration_seconds",
-        "Time to generate and send snapshot"
-    );
-    describe_counter!(
-        "router_mesh_snapshot_bytes_total",
-        "Total bytes in snapshots"
-    );
-
     // Peer health metrics
     describe_gauge!(
         "router_mesh_peer_connections",
@@ -56,7 +29,8 @@ pub fn init_mesh_metrics() {
         "Total number of NACK messages"
     );
 
-    // State integrity metrics
+    // State integrity metrics (drift gauges currently retained as scaffolding;
+    // recorder helpers below are `#[expect(dead_code)]`).
     describe_gauge!(
         "router_mesh_store_cardinality",
         "Number of entries in each store"
@@ -66,27 +40,13 @@ pub fn init_mesh_metrics() {
         "Hash of store state for integrity checking"
     );
 
-    // Sync round profiling metrics
+    // Sync round profiling
     describe_histogram!(
         "router_mesh_sync_round_duration_seconds",
         "Duration of a mesh sync round"
     );
-    describe_histogram!("router_mesh_sync_batch_bytes", "Size of mesh sync batch");
-    describe_gauge!(
-        "router_mesh_store_workers",
-        "Number of entries in worker store"
-    );
-    describe_gauge!(
-        "router_mesh_store_policies",
-        "Number of entries in policy store"
-    );
-    describe_gauge!(
-        "router_mesh_store_memberships",
-        "Number of entries in membership store"
-    );
-    describe_gauge!("router_mesh_store_apps", "Number of entries in app store");
 
-    // Rate-limit and LB drift metrics
+    // Rate-limit and LB drift gauges
     describe_gauge!(
         "router_rl_drift_ratio",
         "Rate-limit drift ratio (actual vs expected)"
@@ -95,14 +55,6 @@ pub fn init_mesh_metrics() {
         "router_lb_drift_ratio",
         "Load balance drift ratio (actual vs expected)"
     );
-}
-
-/// Record convergence latency
-pub fn record_convergence_latency(duration: Duration) {
-    histogram!("router_mesh_convergence_ms",
-        "quantile" => "p50"
-    )
-    .record(duration.as_millis() as f64);
 }
 
 /// Update peer connection status
@@ -181,29 +133,4 @@ pub fn record_sync_round_duration(peer: &str, duration: Duration) {
         "peer" => peer.to_string()
     )
     .record(duration.as_secs_f64());
-}
-
-/// Helper struct for tracking convergence time
-pub struct ConvergenceTracker {
-    start_time: Instant,
-}
-
-impl ConvergenceTracker {
-    pub fn new() -> Self {
-        Self {
-            start_time: Instant::now(),
-        }
-    }
-
-    #[expect(dead_code)]
-    pub fn record_convergence(&self) {
-        let duration = self.start_time.elapsed();
-        record_convergence_latency(duration);
-    }
-}
-
-impl Default for ConvergenceTracker {
-    fn default() -> Self {
-        Self::new()
-    }
 }
