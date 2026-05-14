@@ -1,9 +1,8 @@
 //! Flow control for mesh cluster communication
 //!
 //! Provides:
-//! - Backpressure control (channel capacity monitoring)
-//! - Message size limits and validation
-//! - Exponential backoff for reconnection
+//! - Message size limit constant for gRPC encode/decode caps
+//! - Exponential backoff for peer reconnection
 
 use std::{
     sync::Arc,
@@ -14,44 +13,6 @@ use parking_lot::RwLock;
 
 /// Maximum message size in bytes (default: 10MB)
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
-
-/// Channel capacity threshold for backpressure (default: 20% remaining)
-pub const BACKPRESSURE_THRESHOLD: usize = 25; // 25 out of 128 = ~20%
-
-/// Backpressure controller for managing channel capacity
-#[derive(Debug, Clone)]
-pub struct BackpressureController {
-    channel_capacity: usize,
-    threshold: usize,
-}
-
-impl BackpressureController {
-    pub fn new(channel_capacity: usize, threshold: usize) -> Self {
-        Self {
-            channel_capacity,
-            threshold,
-        }
-    }
-
-    #[expect(dead_code)]
-    /// Check if channel has capacity for sending
-    pub fn can_send(&self, current_len: usize) -> bool {
-        let remaining = self.channel_capacity.saturating_sub(current_len);
-        remaining > self.threshold
-    }
-
-    #[expect(dead_code)]
-    /// Get remaining capacity
-    pub fn remaining_capacity(&self, current_len: usize) -> usize {
-        self.channel_capacity.saturating_sub(current_len)
-    }
-}
-
-impl Default for BackpressureController {
-    fn default() -> Self {
-        Self::new(128, BACKPRESSURE_THRESHOLD)
-    }
-}
 
 /// Exponential backoff calculator for reconnection
 #[derive(Debug, Clone)]
