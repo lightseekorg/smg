@@ -1,0 +1,449 @@
+name: Release SMG dev wheels (whl index)
+
+# Builds dev wheels for smg, smg-grpc-proto, and smg-grpc-servicer and
+# publishes them to lightseekorg/whl releases + simple package indexes.
+# Requires a TOKENSPEED_GITHUB_TOKEN secret with write access to lightseekorg/whl.
+# Avoids the 10 GB PyPI project quota and lets us delete old dev releases freely.
+# Prod releases continue to go to PyPI via release-pypi.yml / release-grpc.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_smg:
+        description: "Build & release smg (Rust wheel)"
+        type: boolean
+        default: true
+      release_servicer:
+        description: "Build & release smg-grpc-servicer"
+        type: boolean
+        default: true
+      release_proto:
+        description: "Build & release smg-grpc-proto"
+        type: boolean
+        default: true
+  # Self-validating: PRs that touch this workflow file auto-build (no release
+  # is created on pull_request runs; they are pure dry-runs for CI).
+  pull_request:
+    paths:
+      - .github/workflows/release-pypi-dev.yml
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Compute dev versions
+    runs-on: ubuntu-latest
+    outputs:
+      smg_version: ${{ steps.compute.outputs.smg_version }}
+      proto_version: ${{ steps.compute.outputs.proto_version }}
+      servicer_version: ${{ steps.compute.outputs.servicer_version }}
+      release_tag: ${{ steps.compute.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: compute
+        run: |
+          set -euo pipefail
+          SUFFIX="dev${{ github.run_number }}"
+          RELEASE_TAG="smg-dev-${{ github.run_number }}"
+
+          read_version() {
+            grep -m1 '^version = ' "$1" | sed 's/version = "\(.*\)"/\1/'
+          }
+
+          # Bump patch so dev sorts AFTER current stable in PEP 440 ordering.
+          bump_patch() {
+            local IFS=.
+            # shellcheck disable=SC2206
+            local parts=($1)
+            parts[2]=$(( ${parts[2]} + 1 ))
+            echo "${parts[0]}.${parts[1]}.${parts[2]}"
+          }
+
+          SMG_VERSION="$(bump_patch "$(read_version bindings/python/pyproject.toml)").${SUFFIX}"
+          PROTO_VERSION="$(bump_patch "$(read_version crates/grpc_client/python/pyproject.toml)").${SUFFIX}"
+          SERVICER_VERSION="$(bump_patch "$(read_version grpc_servicer/pyproject.toml)").${SUFFIX}"
+
+          echo "smg_version=${SMG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "proto_version=${PROTO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "servicer_version=${SERVICER_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Planned dev versions"
+            echo "| Package | Version | Will build? |"
+            echo "|---|---|---|"
+            echo "| smg | ${SMG_VERSION} | ${{ github.event_name == 'pull_request' || inputs.release_smg }} |"
+            echo "| smg-grpc-proto | ${PROTO_VERSION} | ${{ github.event_name == 'pull_request' || inputs.release_proto }} |"
+            echo "| smg-grpc-servicer | ${SERVICER_VERSION} | ${{ github.event_name == 'pull_request' || inputs.release_servicer }} |"
+            echo ""
+            echo "Release tag (workflow_dispatch only): \`${RELEASE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── smg (Rust wheel via maturin) — slim matrix: manylinux x86_64 + sdist ──
+  build-smg:
+    name: Build smg dev wheel
+    needs: prepare
+    if: ${{ github.event_name == 'pull_request' || inputs.release_smg }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: smg-repo
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # Patches Python metadata + Rust runtime version so the wheel reports a
+      # consistent dev version everywhere — smg.__version__, the smg.smg_rs
+      # banner from model_gateway::build.rs, and pyproject.toml. PEP 440
+      # (1.4.2.dev42) for Python, semver (1.4.2-dev42) for Cargo. Other
+      # workspace crates reference model_gateway via path with no version pin.
+      - name: Patch dev version (Python + model_gateway Cargo)
+        working-directory: smg-repo
+        env:
+          SMG_VERSION: ${{ needs.prepare.outputs.smg_version }}
+        run: |
+          set -euo pipefail
+          SMG_CARGO_VERSION="${SMG_VERSION/.dev/-dev}"
+
+          sed -i.bak "s/^version = \".*\"/version = \"${SMG_VERSION}\"/" bindings/python/pyproject.toml
+          sed -i.bak "s/__version__ = \".*\"/__version__ = \"${SMG_VERSION}\"/" bindings/python/src/smg/version.py
+          sed -i.bak "s/^version = \".*\"/version = \"${SMG_CARGO_VERSION}\"/" model_gateway/Cargo.toml
+          rm -f bindings/python/pyproject.toml.bak bindings/python/src/smg/version.py.bak model_gateway/Cargo.toml.bak
+
+          echo "Patched smg version:"
+          echo "  pyproject.toml + __version__: ${SMG_VERSION}"
+          echo "  model_gateway/Cargo.toml:     ${SMG_CARGO_VERSION}"
+
+      - name: Build manylinux x86_64 wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: smg-repo/bindings/python
+          target: x86_64
+          manylinux: auto
+          # PR runs build a single interpreter (3.12) to keep dry-run fast
+          # (~6 min vs ~25 min); workflow_dispatch builds the full matrix.
+          args: --release --out dist --features vendored-openssl --interpreter ${{ github.event_name == 'pull_request' && '3.12' || '3.10 3.11 3.12 3.13' }}
+          rust-toolchain: stable
+          before-script-linux: |
+            if command -v yum &> /dev/null; then
+              yum update -y && yum install -y wget unzip gcc gcc-c++ perl-core make
+            elif command -v apt-get &> /dev/null; then
+              apt-get update && apt-get install -y wget unzip gcc g++ perl make
+            fi
+            (cd /tmp && \
+             wget https://github.com/protocolbuffers/protobuf/releases/download/v32.0/protoc-32.0-linux-x86_64.zip && \
+             unzip protoc-32.0-linux-x86_64.zip -d /usr/local && \
+             rm protoc-32.0-linux-x86_64.zip)
+            protoc --version
+
+      # The manylinux wheel build above runs inside Docker as root; dist/ ends
+      # up root-owned. Reclaim ownership so the host-side sdist step can write.
+      - name: Reclaim dist ownership from manylinux container
+        run: |
+          sudo chown -R "$(whoami):$(whoami)" smg-repo/bindings/python/dist
+          ls -la smg-repo/bindings/python/dist
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: smg-repo/bindings/python
+          command: sdist
+          args: --out dist
+          rust-toolchain: stable
+
+      - name: Check packages
+        run: |
+          pip install -U twine
+          twine check --strict smg-repo/bindings/python/dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smg-dev-dist
+          path: smg-repo/bindings/python/dist/
+
+  # ── smg-grpc-proto (pure Python) ──
+  build-proto:
+    name: Build smg-grpc-proto dev
+    needs: prepare
+    if: ${{ github.event_name == 'pull_request' || inputs.release_proto }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: pip install build twine grpcio-tools
+      - name: Patch dev version
+        env:
+          PROTO_VERSION: ${{ needs.prepare.outputs.proto_version }}
+        run: |
+          set -euo pipefail
+          sed -i.bak "s/^version = \".*\"/version = \"${PROTO_VERSION}\"/" \
+            crates/grpc_client/python/pyproject.toml
+          rm -f crates/grpc_client/python/pyproject.toml.bak
+      - name: Copy proto files (replace symlink with real files)
+        run: |
+          rm -f crates/grpc_client/python/smg_grpc_proto/proto
+          mkdir -p crates/grpc_client/python/smg_grpc_proto/proto
+          cp crates/grpc_client/proto/*.proto crates/grpc_client/python/smg_grpc_proto/proto/
+      - name: Build package
+        run: cd crates/grpc_client/python && python -m build
+      - name: Check package
+        run: twine check --strict crates/grpc_client/python/dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: proto-dev-dist
+          path: crates/grpc_client/python/dist/
+
+  # ── smg-grpc-servicer (pure Python) ──
+  build-servicer:
+    name: Build smg-grpc-servicer dev
+    needs: prepare
+    if: ${{ github.event_name == 'pull_request' || inputs.release_servicer }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: pip install build twine
+      # When proto is also being built in this run, pin the servicer's proto
+      # dep to the exact dev version so consumers get a coherent dev set.
+      - name: Patch dev version (+ pin proto dep if releasing proto together)
+        env:
+          SERVICER_VERSION: ${{ needs.prepare.outputs.servicer_version }}
+          PROTO_VERSION: ${{ needs.prepare.outputs.proto_version }}
+          RELEASE_PROTO: ${{ github.event_name == 'pull_request' || inputs.release_proto }}
+        run: |
+          set -euo pipefail
+          sed -i.bak "s/^version = \".*\"/version = \"${SERVICER_VERSION}\"/" \
+            grpc_servicer/pyproject.toml
+          if [ "${RELEASE_PROTO}" = "true" ]; then
+            # Matches both the core dep ("smg-grpc-proto>=0.4.6") and the
+            # mlx extra ("smg-grpc-proto>=0.4.7").
+            sed -i.bak -E "s|smg-grpc-proto>=[0-9.]+|smg-grpc-proto==${PROTO_VERSION}|g" \
+              grpc_servicer/pyproject.toml
+            echo "Pinned smg-grpc-proto==${PROTO_VERSION} for dev coherence"
+          fi
+          rm -f grpc_servicer/pyproject.toml.bak
+      - name: Build package
+        run: cd grpc_servicer && python -m build
+      - name: Check package
+        run: twine check --strict grpc_servicer/dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: servicer-dev-dist
+          path: grpc_servicer/dist/
+
+  # ── Publish dev wheels to lightseekorg/whl and update simple indexes ──
+  # Only fires for workflow_dispatch — pull_request runs validate the build
+  # but never publish artifacts or update indexes.
+  release:
+    name: Publish to whl index
+    needs: [prepare, build-smg, build-proto, build-servicer]
+    # Conditions:
+    #   - Only on workflow_dispatch (no releases on pull_request runs).
+    #   - prepare must have succeeded so we have a tag/versions.
+    #   - No requested build may have failed.
+    #   - At least one build must have produced artifacts.
+    if: >-
+      always()
+      && github.event_name == 'workflow_dispatch'
+      && github.repository == 'lightseekorg/smg'
+      && needs.prepare.result == 'success'
+      && needs.build-smg.result != 'failure'
+      && needs.build-proto.result != 'failure'
+      && needs.build-servicer.result != 'failure'
+      && (
+        needs.build-smg.result == 'success'
+        || needs.build-proto.result == 'success'
+        || needs.build-servicer.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all dev artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: "*-dev-dist"
+          merge-multiple: true
+
+      - name: List collected assets
+        run: ls -lh dist/
+
+      - name: Check out smg repo
+        uses: actions/checkout@v6
+        with:
+          path: smg-repo
+
+      - name: Check out whl index repo
+        uses: actions/checkout@v6
+        with:
+          repository: lightseekorg/whl
+          ref: gh-pages
+          path: whl-repo
+          token: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
+
+      - name: Create whl release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.TOKENSPEED_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          WHL_REPO: lightseekorg/whl
+          SMG_VERSION: ${{ needs.prepare.outputs.smg_version }}
+          PROTO_VERSION: ${{ needs.prepare.outputs.proto_version }}
+          SERVICER_VERSION: ${{ needs.prepare.outputs.servicer_version }}
+        run: |
+          set -euo pipefail
+
+          notes_file="$(mktemp)"
+          cat > "${notes_file}" <<EOF
+          Auto-generated dev release from lightseekorg/smg workflow run ${{ github.run_number }}.
+
+          **Versions**
+          - \`smg==${SMG_VERSION}\` — build: \`${{ needs.build-smg.result }}\`
+          - \`smg-grpc-proto==${PROTO_VERSION}\` — build: \`${{ needs.build-proto.result }}\`
+          - \`smg-grpc-servicer==${SERVICER_VERSION}\` — build: \`${{ needs.build-servicer.result }}\`
+
+          **Install**
+
+          \`\`\`bash
+          pip install smg smg-grpc-servicer smg-grpc-proto \\
+            --extra-index-url https://lightseek.org/whl/cu129/
+          \`\`\`
+
+          Source commit: \`${{ github.sha }}\`
+          EOF
+
+          if gh release view "${RELEASE_TAG}" --repo "${WHL_REPO}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${WHL_REPO}" \
+              --title "smg dev ${{ github.run_number }}" \
+              --prerelease \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${RELEASE_TAG}" \
+              --repo "${WHL_REPO}" \
+              --title "smg dev ${{ github.run_number }}" \
+              --prerelease \
+              --notes-file "${notes_file}"
+          fi
+
+          gh release upload "${RELEASE_TAG}" dist/* --repo "${WHL_REPO}" --clobber
+
+      - name: Update whl package indexes
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          cd whl-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          rm -rf wheelhouse
+          mkdir -p wheelhouse/smg wheelhouse/smg-grpc-proto wheelhouse/smg-grpc-servicer
+          cp ../dist/smg-*.whl wheelhouse/smg/ 2>/dev/null || true
+          cp ../dist/smg_grpc_proto-*.whl wheelhouse/smg-grpc-proto/ 2>/dev/null || true
+          cp ../dist/smg_grpc_servicer-*.whl wheelhouse/smg-grpc-servicer/ 2>/dev/null || true
+
+          # Make workflow re-runs idempotent for the same release tag. The
+          # shared update_whl_index.py script appends wheel links by design.
+          for index_file in \
+            cu129/smg/index.html \
+            cu129/smg-grpc-proto/index.html \
+            cu129/smg-grpc-servicer/index.html \
+            cu130/smg/index.html \
+            cu130/smg-grpc-proto/index.html \
+            cu130/smg-grpc-servicer/index.html \
+            rocm7.2/smg/index.html \
+            rocm7.2/smg-grpc-proto/index.html \
+            rocm7.2/smg-grpc-servicer/index.html; do
+            [ -f "${index_file}" ] && sed -i "\#/${RELEASE_TAG}/#d" "${index_file}"
+          done
+
+          for cuda in 129 130; do
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package smg \
+              --cuda "${cuda}" \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir wheelhouse/smg \
+              --whl-repo-dir .
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package smg-grpc-proto \
+              --cuda "${cuda}" \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir wheelhouse/smg-grpc-proto \
+              --whl-repo-dir .
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package smg-grpc-servicer \
+              --cuda "${cuda}" \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir wheelhouse/smg-grpc-servicer \
+              --whl-repo-dir .
+          done
+
+          for package in smg smg-grpc-proto smg-grpc-servicer; do
+            python3 ../smg-repo/scripts/update_whl_index.py \
+              --package "${package}" \
+              --rocm 7.2 \
+              --release-tag "${RELEASE_TAG}" \
+              --wheel-dir "wheelhouse/${package}" \
+              --whl-repo-dir .
+          done
+
+          rm -rf wheelhouse
+          git add cu129 cu130 rocm7.2
+          if git diff --cached --quiet; then
+            echo "No whl index changes to commit."
+          else
+            git commit -s -m "Add smg dev ${{ github.run_number }} wheels"
+            git push origin gh-pages
+          fi
+
+  # ── Final summary in the run UI ──
+  summary:
+    name: Summary
+    needs:
+      - prepare
+      - build-smg
+      - build-proto
+      - build-servicer
+      - release
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          {
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "## Dev build summary (pull_request — no GitHub Release created)"
+            else
+              echo "## Dev release summary"
+            fi
+            echo ""
+            echo "| Package | Version | Build |"
+            echo "|---|---|---|"
+            echo "| smg | ${{ needs.prepare.outputs.smg_version }} | ${{ needs.build-smg.result }} |"
+            echo "| smg-grpc-proto | ${{ needs.prepare.outputs.proto_version }} | ${{ needs.build-proto.result }} |"
+            echo "| smg-grpc-servicer | ${{ needs.prepare.outputs.servicer_version }} | ${{ needs.build-servicer.result }} |"
+            echo ""
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ needs.release.result }}" = "success" ]; then
+              TAG="${{ needs.prepare.outputs.release_tag }}"
+              REPO="${{ github.repository }}"
+              echo "### Release"
+              echo ""
+              echo "https://github.com/lightseekorg/whl/releases/tag/${TAG}"
+              echo ""
+              echo "### Install"
+              echo '```bash'
+              echo "pip install smg smg-grpc-servicer smg-grpc-proto \\"
+              echo "  --extra-index-url https://lightseek.org/whl/cu129/"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

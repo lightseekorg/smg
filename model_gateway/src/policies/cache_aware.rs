@@ -48,7 +48,6 @@ use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tre
 use parking_lot::RwLock;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeKey, TreeOperation};
 use tracing::{debug, warn};
 
 use super::{
@@ -78,7 +77,6 @@ pub struct CacheAwarePolicy {
     string_trees: Arc<DashMap<String, Arc<Tree>>>,
     /// Token-based trees for gRPC connections (pre-tokenized input)
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
-    mesh_sync: RwLock<OptionalMeshSyncManager>,
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
@@ -95,11 +93,10 @@ pub struct CacheAwarePolicy {
     ///   shared prefix from a pre-insert match. Bytes/entry is
     ///   bounded by tree depth, not input size — a 32K-token
     ///   request costs O(matched-prefix), not O(input).
-    /// - `apply_insert_to_trees` (snapshot/restore replay) stores
-    ///   the full inserted path because `apply_tenant_delta`
-    ///   re-inserts whatever value is stored, and the canonical
-    ///   path is required to attach tenants at the right node.
-    ///   This path runs at replay frequency, not request rate.
+    /// - `apply_repair_page` (cold-start replay) stores the full
+    ///   inserted path because the canonical path is required to
+    ///   attach remote tenants at the correct node. This path
+    ///   runs at replay frequency, not request rate.
     hash_index: Arc<DashMap<String, PerModelHashIndex>>,
 }
 
@@ -205,18 +202,9 @@ impl CacheAwarePolicy {
             config,
             string_trees,
             token_trees,
-            mesh_sync: RwLock::new(None),
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
             hash_index,
-        }
-    }
-
-    /// Set mesh sync manager (can be called after construction)
-    pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        self.mesh_sync.write().clone_from(&mesh_sync);
-        if mesh_sync.is_some() {
-            self.restore_tree_state_from_mesh();
         }
     }
 
@@ -319,252 +307,6 @@ impl CacheAwarePolicy {
         // No-op: rely on LRU eviction to clean up stale entries
     }
 
-    fn restore_tree_state_from_mesh(&self) {
-        let tree_states = {
-            let guard = self.mesh_sync.read();
-            guard
-                .as_ref()
-                .map(|mesh_sync| mesh_sync.get_all_tree_states())
-        };
-
-        if let Some(tree_states) = tree_states {
-            for tree_state in &tree_states {
-                // Use the merge path (not replace) so concurrent live updates
-                // arriving via subscriber callbacks are not overwritten.
-                self.apply_remote_tree_state(&tree_state.model_id, tree_state);
-            }
-        }
-    }
-
-    pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &TreeOperation) {
-        let tree_key = normalize_model_key(model_id);
-
-        match operation {
-            TreeOperation::Insert(insert_op) => {
-                self.apply_insert_operation(tree_key, insert_op);
-            }
-            TreeOperation::Remove(remove_op) => {
-                debug!(
-                    "Skipping remote tree remove (LRU will clean up): model={}, tenant={}",
-                    model_id, remove_op.tenant
-                );
-            }
-        }
-    }
-
-    fn apply_insert_operation(&self, model_id: &str, insert_op: &TreeInsertOp) {
-        let string_tree = self
-            .string_trees
-            .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(Tree::new()))
-            .clone();
-        let token_tree = self
-            .token_trees
-            .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(TokenTree::new()))
-            .clone();
-
-        self.apply_insert_to_trees(model_id, &string_tree, &token_tree, insert_op);
-    }
-
-    /// Apply a tree insert and populate the model-scoped hash
-    /// index alongside it. Remote-replay paths
-    /// (`apply_remote_tree_operation`, `restore_tree_state_from_mesh`)
-    /// funnel here, so `TreeHandle::apply_known_remote_insert`
-    /// can find these nodes when a peer broadcasts a delta that
-    /// references them. Without this, replayed prefixes would be
-    /// misclassified as unknown and trigger unnecessary repair.
-    /// The string-side value is the full `text` (not a matched
-    /// prefix) because remote apply doesn't compute a match;
-    /// `apply_known_remote_insert` re-inserts whatever string is
-    /// stored.
-    fn apply_insert_to_trees(
-        &self,
-        model_id: &str,
-        string_tree: &Arc<Tree>,
-        token_tree: &Arc<TokenTree>,
-        insert_op: &TreeInsertOp,
-    ) {
-        // Replay/restore path: store the FULL inserted path, not a
-        // matched prefix. `apply_tenant_delta` re-inserts whatever
-        // value is stored, so the canonical path is required to
-        // attach remote tenants at the correct node.
-        // On cold start the local tree is empty → a pre-insert
-        // `match_prefix_with_counts` would return 0 → storing ""
-        // would later cause `insert_text("", remote_worker)`,
-        // attaching the worker at root and tainting routing for
-        // every request to this model. This path runs at replay
-        // frequency (cold start, snapshot reconciliation), not per
-        // request, so the unbounded value cost is acceptable.
-        match &insert_op.key {
-            TreeKey::Text(text) => {
-                string_tree.insert_text(text, &insert_op.tenant);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .string_tree
-                    .insert(smg_mesh::hash_node_path(text), text.clone());
-            }
-            TreeKey::Tokens(tokens) => {
-                token_tree.insert_tokens(tokens, &insert_op.tenant);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
-            }
-        }
-    }
-
-    /// Notify mesh that a tree insert happened. Only the pre-computed hash
-    /// is passed — NOT the full prompt text — to avoid 80k+ String clones
-    /// on every request (16 MB/s of allocator churn at 200 rps).
-    fn sync_insert_hash(&self, model_id: &str, path_hash: u64, tenant: &str) {
-        let mesh_sync = self.mesh_sync.read().clone();
-        if let Some(mesh_sync) = mesh_sync {
-            let mesh_model_id = normalize_model_key(model_id);
-            mesh_sync.sync_tree_insert_hash(mesh_model_id, path_hash, tenant);
-        }
-    }
-
-    /// Deferred token allocation: only allocate `Vec` for TreeKey if mesh sync is active.
-    fn sync_insert_tokens(&self, model_id: &str, tokens: &[u32], tenant: &str) {
-        let mesh_sync = self.mesh_sync.read().clone();
-        if let Some(mesh_sync) = mesh_sync {
-            let op = TreeOperation::Insert(TreeInsertOp {
-                key: TreeKey::Tokens(tokens.to_vec()),
-                tenant: tenant.to_string(),
-            });
-            let mesh_model_id = normalize_model_key(model_id);
-            if let Err(error) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                warn!("Failed to sync tree insert operation to mesh: {}", error);
-            }
-        }
-    }
-
-    /// Merge remote tree state into local trees incrementally.
-    /// Uses entry-based insertion to preserve existing local routing state.
-    pub fn apply_remote_tree_state(&self, model_id: &str, tree_state: &smg_mesh::TreeState) {
-        let model_id = normalize_model_key(model_id);
-        for operation in &tree_state.operations {
-            if let TreeOperation::Insert(insert_op) = operation {
-                self.apply_insert_operation(model_id, insert_op);
-            }
-        }
-    }
-
-    /// Apply lightweight tenant delta directly to local radix trees.
-    /// No TreeState deserialization — each insert/eviction is applied
-    /// individually to the string tree via the node_path.
-    pub fn apply_tenant_delta(
-        &self,
-        model_id: &str,
-        inserts: &[smg_mesh::TenantInsert],
-        evictions: &[smg_mesh::TenantEvict],
-    ) {
-        let model_id = normalize_model_key(model_id);
-
-        let string_tree = self
-            .string_trees
-            .entry(model_id.to_string())
-            .or_insert_with(|| Arc::new(Tree::new()))
-            .clone();
-
-        // Apply inserts — look up the prefix path by hash in this
-        // model's index. Unknown hashes are silently dropped; the
-        // next structure snapshot (every ~30s) delivers the full
-        // tree including this prefix + its tenants.
-        for insert in inserts {
-            if let Some(model_entry) = self.hash_index.get(model_id) {
-                if let Some(path) = model_entry.string_tree.get(&insert.node_path_hash) {
-                    string_tree.insert_text(path.value(), &insert.worker_url);
-                }
-            }
-            // Unknown hash — dropped, next snapshot corrects
-        }
-
-        // Apply evictions
-        for evict in evictions {
-            let tenant_id: Arc<str> = Arc::from(evict.worker_url.as_str());
-            if evict.node_path_hash == smg_mesh::GLOBAL_EVICTION_HASH {
-                // Global eviction: remove from all nodes
-                string_tree.remove_tenant_all(&tenant_id);
-            }
-            // TODO: targeted eviction by hash requires a hash→node index on the tree.
-            // tracks eviction paths too
-        }
-    }
-
-    /// Export the current tree state for a model by walking the live radix tree.
-    /// Builds a `TreeState` from `Tree::snapshot()` — each (prefix, tenant) pair
-    /// becomes a `TreeOperation::Insert`. This avoids storing full prompt text
-    /// per request; the snapshot is built on-demand during periodic checkpoints.
-    #[expect(
-        clippy::unwrap_used,
-        reason = "pop() after last_mut().is_some() is infallible"
-    )]
-    pub fn export_tree_state(&self, model_id: &str) -> Option<smg_mesh::TreeState> {
-        let model_id = normalize_model_key(model_id);
-        let tree = self.string_trees.get(model_id)?;
-        let snapshot = tree.snapshot();
-        if snapshot.nodes.is_empty() {
-            return None;
-        }
-
-        // Walk snapshot nodes in pre-order, reconstructing full prefix paths
-        let mut tree_state = smg_mesh::TreeState::new(model_id.to_string());
-        let mut path_stack: Vec<(String, u32)> = Vec::new(); // (prefix_so_far, remaining_children)
-        let mut current_prefix = String::new();
-
-        for node in &snapshot.nodes {
-            // Pop completed parents from the stack
-            while let Some((_, remaining)) = path_stack.last_mut() {
-                if *remaining == 0 {
-                    let (parent_prefix, _) = path_stack.pop().unwrap();
-                    current_prefix = parent_prefix;
-                } else {
-                    *remaining -= 1;
-                    break;
-                }
-            }
-
-            // Build this node's full prefix
-            let node_prefix = format!("{}{}", current_prefix, node.edge);
-
-            // Emit an Insert operation for each tenant at this node
-            for (tenant_url, _epoch) in &node.tenants {
-                if !node_prefix.is_empty() {
-                    tree_state.add_operation(TreeOperation::Insert(TreeInsertOp {
-                        key: TreeKey::Text(node_prefix.clone()),
-                        tenant: tenant_url.clone(),
-                    }));
-                }
-            }
-
-            // Push this node onto the stack for its children
-            if node.child_count > 0 {
-                path_stack.push((current_prefix.clone(), node.child_count));
-                current_prefix = node_prefix;
-            }
-        }
-
-        Some(tree_state)
-    }
-
-    /// Export a compact tree snapshot for a model from the live radix tree.
-    /// Returns the compact [`kv_index::snapshot::TreeSnapshot`] directly,
-    /// which preserves shared prefixes and is much smaller than the flat
-    /// `TreeState` returned by [`export_tree_state`].
-    pub fn export_tree_snapshot(&self, model_id: &str) -> Option<kv_index::snapshot::TreeSnapshot> {
-        let model_id = normalize_model_key(model_id);
-        let tree = self.string_trees.get(model_id)?;
-        let snapshot = tree.snapshot();
-        if snapshot.nodes.is_empty() {
-            return None;
-        }
-        Some(snapshot)
-    }
-
     /// Run cache eviction to prevent unbounded growth
     pub fn evict_cache(&self, max_size: usize) {
         // Evict string trees (HTTP)
@@ -657,7 +399,6 @@ impl CacheAwarePolicy {
                     .or_default()
                     .token_tree
                     .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
-                self.sync_insert_tokens(model_id, tokens, worker_url);
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -684,7 +425,6 @@ impl CacheAwarePolicy {
                     .or_default()
                     .string_tree
                     .insert(path_hash, matched_prefix);
-                self.sync_insert_hash(model_id, path_hash, worker_url);
             } else {
                 debug!(
                     "Warning: No string tree found for model '{}', skipping cache update",
@@ -1145,7 +885,6 @@ impl CacheAwarePolicy {
                     .token_tree
                     .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
 
-                self.sync_insert_tokens(model_id, tokens, workers[idx].url());
                 workers[idx].increment_processed();
                 return Some(idx);
             }
@@ -1216,9 +955,6 @@ impl CacheAwarePolicy {
                     .string_tree
                     .insert(path_hash, matched_prefix);
 
-                // Use hash-based sync to avoid cloning 80k+ prompt text.
-                self.sync_insert_hash(model_id, path_hash, workers[idx].url());
-
                 workers[idx].increment_processed();
                 return Some(idx);
             }
@@ -1250,7 +986,7 @@ mod tests {
     use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
 
     use super::*;
-    use crate::worker::{BasicWorkerBuilder, WorkerType, UNKNOWN_MODEL_ID};
+    use crate::worker::{BasicWorkerBuilder, WorkerType};
 
     fn no_health_check() -> HealthCheckConfig {
         HealthCheckConfig {
@@ -1421,155 +1157,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_aware_sync_tree_operation_to_mesh() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync.clone()));
-
-        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
-            BasicWorkerBuilder::new("http://w1:8000")
-                .worker_type(WorkerType::Regular)
-                .api_key("test_api_key")
-                .health_config(no_health_check())
-                .build(),
-        )];
-
-        policy.init_workers(&workers);
-
-        // Select worker with a request - should sync to mesh
-        let _idx = policy
-            .select_worker(
-                &workers,
-                &SelectWorkerInfo {
-                    request_text: Some("test request"),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        // Verify the tree version was bumped (sync_tree_operation buffers
-        // tenant deltas and bumps version, but does not store full prompt text).
-        // get_tree_state returns None without a checkpoint, but the version
-        // counter proves the operation was processed.
-        assert!(
-            mesh_sync.get_tree_state(UNKNOWN_MODEL_ID).is_none(),
-            "get_tree_state should be None until checkpoint runs"
-        );
-    }
-
-    #[test]
-    fn test_cache_aware_restore_tree_state_from_mesh() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        // Pre-populate mesh with tree state via apply_remote_tree_operation
-        // (simulates receiving a full tree state from another node)
-        let mut ts = smg_mesh::TreeState::new("model1".to_string());
-        ts.add_operation(TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text_1".to_string()),
-            tenant: "http://w1:8000".to_string(),
-        }));
-        ts.add_operation(TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("test_text_2".to_string()),
-            tenant: "http://w2:8000".to_string(),
-        }));
-        mesh_sync.apply_remote_tree_operation("model1".to_string(), ts, None);
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync.clone()));
-
-        // Verify local tree was populated from mesh state
-        let tree = policy.string_trees.get("model1");
-        assert!(tree.is_some());
-
-        let tree_state = mesh_sync.get_tree_state("model1").unwrap();
-        assert_eq!(tree_state.operations.len(), 2);
-    }
-
-    #[test]
-    fn test_cache_aware_apply_remote_tree_operation() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync.clone()));
-
-        // Apply remote tree operation
-        let remote_op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("remote_text".to_string()),
-            tenant: "http://remote:8000".to_string(),
-        });
-
-        policy.apply_remote_tree_operation("model1", &remote_op);
-
-        // Verify the string tree was updated.
-        let tree = policy.string_trees.get("model1");
-        assert!(tree.is_some());
-    }
-
-    #[test]
-    fn test_cache_aware_apply_remote_token_tree_operation() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-        let policy = CacheAwarePolicy::with_config(config);
-        policy.set_mesh_sync(Some(mesh_sync));
-
-        let remote_op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Tokens(vec![1; 16]),
-            tenant: "http://remote:8000".to_string(),
-        });
-
-        policy.apply_remote_tree_operation("model1", &remote_op);
-
-        let tree = policy.token_trees.get("model1");
-        assert!(tree.is_some());
-    }
-
-    #[test]
     fn test_apply_known_remote_insert_round_trip() {
-        // Populate via apply_remote_tree_operation (which goes
-        // through apply_insert_to_trees and seeds hash_index for
-        // both kinds), then verify apply_known_remote_insert
-        // resolves the hash and returns true. Unknown hashes
-        // return false. Wrong-kind lookups against the same
-        // hash return false (model + kind scope the index).
-        use smg_mesh::{TreeInsertOp, TreeKey, TreeOperation};
-
+        // Seed both kinds via `apply_repair_page` (the v2 cold-start
+        // path that populates hash_index), then verify
+        // `apply_known_remote_insert` resolves the hash and returns
+        // true. Unknown hashes return false. Wrong-kind lookups
+        // against the same hash return false (model + kind scope
+        // the index).
         let config = CacheAwareConfig {
             eviction_interval_secs: 0,
             ..Default::default()
@@ -1578,20 +1172,33 @@ mod tests {
 
         let text = "remote_text";
         let tokens = vec![1u32, 2, 3, 4];
-        policy.apply_remote_tree_operation(
-            "model1",
-            &TreeOperation::Insert(TreeInsertOp {
-                key: TreeKey::Text(text.to_string()),
-                tenant: "http://w1".to_string(),
-            }),
-        );
-        policy.apply_remote_tree_operation(
-            "model1",
-            &TreeOperation::Insert(TreeInsertOp {
-                key: TreeKey::Tokens(tokens.clone()),
-                tenant: "http://w1".to_string(),
-            }),
-        );
+        let string_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::String,
+            page_index: 0,
+            entries: vec![RepairEntry::String {
+                path: text.to_string(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&string_page), 1);
+
+        let token_page = TreeRepairPage {
+            session_id: uuid::Uuid::now_v7(),
+            model_id: "model1".to_string(),
+            tree_kind: TreeKind::Token,
+            page_index: 0,
+            entries: vec![RepairEntry::Token {
+                tokens: tokens.clone(),
+                tenants: vec![(Arc::from("http://w1"), 1)],
+            }],
+            next_cursor: None,
+            is_last: true,
+        };
+        assert_eq!(policy.apply_repair_page(&token_page), 1);
 
         let text_hash = smg_mesh::hash_node_path(text);
         let token_hash = smg_mesh::hash_token_path(&tokens);
@@ -1687,8 +1294,8 @@ mod tests {
     #[test]
     fn test_apply_known_remote_insert_from_request_hot_path() {
         // Companion to `test_apply_known_remote_insert_round_trip`.
-        // That test seeds via `apply_remote_tree_operation`, which
-        // stores full text/tokens. The local request hot path
+        // That test seeds via `apply_repair_page`, which stores
+        // full text/tokens. The local request hot path
         // (`select_worker_with_text` / `_with_tokens` plus the
         // imbalanced fallback) stores the *matched prefix* shape
         // instead. A regression on the matched-prefix apply path
@@ -1751,46 +1358,6 @@ mod tests {
         // sites wrote.
         assert!(policy.apply_known_remote_insert("", TreeKind::String, text_hash, "http://remote",));
         assert!(policy.apply_known_remote_insert("", TreeKind::Token, token_hash, "http://remote",));
-    }
-
-    #[test]
-    fn test_cache_aware_multi_node_consistency() {
-        use std::sync::Arc;
-
-        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeKey, TreeOperation};
-
-        // Simulate two nodes
-        let stores1 = Arc::new(StateStores::with_self_name("node1".to_string()));
-        let mesh_sync1 = Arc::new(MeshSyncManager::new(stores1.clone(), "node1".to_string()));
-
-        let stores2 = Arc::new(StateStores::with_self_name("node2".to_string()));
-        let mesh_sync2 = Arc::new(MeshSyncManager::new(stores2.clone(), "node2".to_string()));
-
-        let config = CacheAwareConfig {
-            eviction_interval_secs: 0,
-            ..Default::default()
-        };
-
-        let _policy1 = CacheAwarePolicy::with_config(config.clone());
-        _policy1.set_mesh_sync(Some(mesh_sync1.clone()));
-        let _policy2 = CacheAwarePolicy::with_config(config);
-        _policy2.set_mesh_sync(Some(mesh_sync2.clone()));
-
-        // Node1 syncs a tree operation
-        let op = TreeOperation::Insert(TreeInsertOp {
-            key: TreeKey::Text("shared_text".to_string()),
-            tenant: "http://shared:8000".to_string(),
-        });
-        mesh_sync1
-            .sync_tree_operation("model1".to_string(), op.clone())
-            .unwrap();
-
-        // Node2 should be able to get the tree state
-        let tree_state = mesh_sync2.get_tree_state("model1");
-        // Note: In a real scenario, this would be synced via gossip protocol
-        // For unit test, we verify the sync mechanism works
-        // Tree state may or may not exist depending on sync timing
-        let _ = tree_state;
     }
 
     #[test]

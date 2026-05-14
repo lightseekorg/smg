@@ -41,7 +41,7 @@ use openai_protocol::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -58,16 +58,9 @@ use crate::{
         otel_trace,
     },
     routers::{
-        conversations,
-        mesh::{
-            get_app_config, get_cluster_status, get_global_rate_limit, get_global_rate_limit_stats,
-            get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
-            get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
-        },
-        openai::realtime::ws::RealtimeQueryParams,
-        parse, responses as response_handlers,
-        router_manager::RouterManager,
-        skills, tokenize, RouterTrait,
+        conversations, openai::realtime::ws::RealtimeQueryParams, parse,
+        responses as response_handlers, router_manager::RouterManager, skills, tokenize,
+        RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -996,24 +989,11 @@ pub fn build_app(
     let admin_routes = apply_control_plane_auth(admin_routes);
     let worker_routes = apply_control_plane_auth(worker_routes);
 
-    // HA management routes
-    let mesh_routes = Router::new()
-        .route("/ha/status", get(get_cluster_status))
-        .route("/ha/health", get(get_mesh_health))
-        .route("/ha/workers", get(get_worker_states))
-        .route("/ha/workers/{worker_id}", get(get_worker_state))
-        .route("/ha/policies", get(get_policy_states))
-        .route("/ha/policies/{model_id}", get(get_policy_state))
-        .route("/ha/config/{key}", get(get_app_config))
-        .route("/ha/config", post(update_app_config))
-        .route("/ha/rate-limit", post(set_global_rate_limit))
-        .route("/ha/rate-limit", get(get_global_rate_limit))
-        .route("/ha/rate-limit/stats", get(get_global_rate_limit_stats))
-        .route("/ha/shutdown", post(trigger_graceful_shutdown))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_config.clone(),
-            middleware::auth_middleware,
-        ));
+    // `/ha/*` management routes (routers/mesh handlers) are removed
+    // in this PR — they all read/write through the v1
+    // `MeshSyncManager` and don't map cleanly onto the v2 adapters.
+    // A v2-aware admin surface will return in a follow-up PR once
+    // adapters are production-wired.
 
     Ok(Router::new()
         .merge(protected_routes)
@@ -1022,7 +1002,6 @@ pub fn build_app(
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
-        .merge(mesh_routes)
         .layer(axum::extract::DefaultBodyLimit::max(max_payload_size))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             max_payload_size,
@@ -1096,9 +1075,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
         // Create mesh server builder and build with stores
         let (mesh_server, handler) = MeshServerBuilder::from(mesh_server_config).build();
-
-        // Start rate limit window reset task (managed by handler)
-        handler.start_rate_limit_task(1); // Reset every 1 second
 
         #[expect(
             clippy::disallowed_methods,
@@ -1332,32 +1308,11 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // Set mesh sync manager to worker registry and policy registry if mesh is enabled
-    // This allows these components to sync state across mesh nodes when mesh is enabled,
-    // but they work independently without mesh when mesh is disabled.
-    // Using thread-safe set_mesh_sync method that works with Arc-wrapped registries
-    if let Some(ref handle) = mesh_handler {
-        app_context
-            .worker_registry
-            .set_mesh_sync(Some(handle.sync_manager.clone()));
-        handle
-            .sync_manager
-            .register_worker_state_subscriber(app_context.worker_registry.clone());
-        // Replay workers already in the CRDT store — they arrived between
-        // mesh server start and subscriber registration above.
-        for state in handle.sync_manager.get_all_worker_states() {
-            app_context.worker_registry.on_remote_worker_state(&state);
-        }
-        info!("Mesh sync manager set on worker registry");
-
-        handle
-            .sync_manager
-            .register_tree_state_subscriber(app_context.policy_registry.clone());
-        app_context
-            .policy_registry
-            .set_mesh_sync(Some(handle.sync_manager.clone()));
-        info!("Mesh sync manager set on policy registry");
-    }
+    // v1 mesh sync (set_mesh_sync, WorkerStateSubscriber, TreeStateSubscriber)
+    // is removed in this PR. State sync across mesh peers is not wired in this
+    // branch — v2 adapters in `model_gateway/src/mesh/adapters/` are built and
+    // tested but not yet started from `server.rs`. That wiring lands in a
+    // follow-up PR.
 
     // Get mesh cluster state and port before moving mesh_handler into app_state
     let mesh_cluster_state = mesh_handler.as_ref().map(|h| h.state.clone());

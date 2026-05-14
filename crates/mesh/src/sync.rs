@@ -871,9 +871,6 @@ impl MeshSyncManager {
     }
 }
 
-/// Optional mesh sync manager (can be None if mesh is not enabled)
-pub type OptionalMeshSyncManager = Option<Arc<MeshSyncManager>>;
-
 #[cfg(test)]
 mod tests {
     use std::{

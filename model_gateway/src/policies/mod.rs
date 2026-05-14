@@ -6,7 +6,6 @@
 use std::{fmt::Debug, sync::Arc};
 
 use openai_protocol::worker::WorkerLoadResponse;
-use smg_mesh::OptionalMeshSyncManager;
 
 use crate::worker::{HashRing, Worker};
 
@@ -73,11 +72,6 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
     /// This is called periodically with current load information for load-aware policies.
     fn update_loads(&self, _loads: &std::collections::HashMap<String, WorkerLoadResponse>) {
         // Default: no-op for policies that don't use load information
-    }
-
-    /// Set mesh sync manager
-    fn set_mesh_sync(&mut self, _mesh_sync: OptionalMeshSyncManager) {
-        // Default: no-op for policies that don't use mesh sync
     }
 
     /// Reset any internal state

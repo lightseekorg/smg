@@ -20,11 +20,9 @@ use axum::{
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use bytes::Bytes;
 use http_body::Frame;
-use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
 
@@ -204,27 +202,11 @@ pub async fn concurrency_limit_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Check mesh global rate limit first if mesh is enabled
-    // If mesh is not enabled, this check is skipped and local rate limiting is used
-    if let Some(mesh_handler) = &app_state.mesh_handler {
-        let (is_exceeded, current_count, limit) =
-            mesh_handler.sync_manager.check_global_rate_limit();
-        if is_exceeded {
-            debug!(
-                "Global rate limit exceeded: {}/{} req/s",
-                current_count, limit
-            );
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": "Rate limit exceeded",
-                    "current_count": current_count,
-                    "limit": limit
-                })),
-            )
-                .into_response();
-        }
-    }
+    // Cluster-wide rate limiting was previously enforced via the
+    // v1 `MeshSyncManager::check_global_rate_limit` path. That hook
+    // is removed in this PR. Local per-node token-bucket rate
+    // limiting below still applies; cluster aggregation will return
+    // through the v2 `RateLimitSyncAdapter` in a follow-up PR.
 
     let token_bucket = match &app_state.context.rate_limiter {
         Some(bucket) => bucket.clone(),

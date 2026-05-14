@@ -128,6 +128,34 @@ impl ServiceDiscoveryConfig {
                 .join(",")
         }
     }
+
+    /// Build a label selector string for router pod K8s list/watch calls.
+    /// Returns an empty string when the router selector is unset, in which
+    /// case the watcher should fall back to listing without server-side
+    /// label filtering.
+    fn router_label_selector(&self) -> String {
+        self.router_selector
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// Build a kube watcher Config that pushes the given label selector down to
+/// the API server, logging the start of a new watcher iteration at INFO.
+/// An empty selector falls back to `Config::default()` (no server-side
+/// label filtering) so the watcher still functions when no selector is set.
+fn build_watcher_config(watcher_kind: &str, label_selector: &str) -> Config {
+    info!(
+        "Starting K8s {} watcher | selector: '{}'",
+        watcher_kind, label_selector
+    );
+    if label_selector.is_empty() {
+        Config::default()
+    } else {
+        Config::default().labels(label_selector)
+    }
 }
 
 impl Default for ServiceDiscoveryConfig {
@@ -505,7 +533,7 @@ pub async fn start_service_discovery(
         const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
 
         loop {
-            let watcher_config = Config::default();
+            let watcher_config = build_watcher_config("worker", &config_arc.list_label_selector());
             let watcher_stream = watcher(pods.clone(), watcher_config).applied_objects();
 
             let config_clone = Arc::clone(&config_arc);
@@ -1027,7 +1055,7 @@ async fn start_router_discovery(
     const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
 
     loop {
-        let watcher_config = Config::default();
+        let watcher_config = build_watcher_config("router", &config.router_label_selector());
         let watcher_stream = watcher(pods.clone(), watcher_config).applied_objects();
 
         let config_clone = Arc::clone(&config);
@@ -1153,6 +1181,7 @@ mod tests {
         api::core::v1::{Pod, PodCondition, PodSpec, PodStatus},
         apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time},
     };
+    use tracing_test::traced_test;
 
     use super::*;
     use crate::routers::{common::openai_bridge, grpc::multimodal::MultimodalConfigRegistry};
@@ -2516,5 +2545,109 @@ mod tests {
     fn test_deregistration_reconciled_metric_label() {
         // Verify the metric label constant exists and has expected value
         assert_eq!(metrics_labels::DEREGISTRATION_RECONCILED, "reconciled");
+    }
+
+    #[test]
+    fn test_build_watcher_config_with_selector_pushes_label_selector() {
+        let cfg = build_watcher_config("worker", "app=sglang");
+        assert_eq!(cfg.label_selector.as_deref(), Some("app=sglang"));
+    }
+
+    #[test]
+    fn test_build_watcher_config_empty_selector_falls_back_to_default() {
+        let cfg = build_watcher_config("worker", "");
+        assert!(cfg.label_selector.is_none());
+    }
+
+    #[test]
+    fn test_build_watcher_config_for_regular_mode_pushes_worker_selector() {
+        let mut selector = HashMap::new();
+        selector.insert("app".to_string(), "sglang".to_string());
+        let config = ServiceDiscoveryConfig {
+            selector,
+            pd_mode: false,
+            ..Default::default()
+        };
+        let watcher_config = build_watcher_config("worker", &config.list_label_selector());
+        assert_eq!(watcher_config.label_selector.as_deref(), Some("app=sglang"));
+    }
+
+    #[test]
+    fn test_build_watcher_config_for_pd_mode_pushes_intersection() {
+        let mut prefill = HashMap::new();
+        prefill.insert("app".to_string(), "sglang".to_string());
+        prefill.insert("component".to_string(), "prefill".to_string());
+        let mut decode = HashMap::new();
+        decode.insert("app".to_string(), "sglang".to_string());
+        decode.insert("component".to_string(), "decode".to_string());
+        let config = ServiceDiscoveryConfig {
+            pd_mode: true,
+            prefill_selector: prefill,
+            decode_selector: decode,
+            ..Default::default()
+        };
+        let watcher_config = build_watcher_config("worker", &config.list_label_selector());
+        assert_eq!(watcher_config.label_selector.as_deref(), Some("app=sglang"));
+    }
+
+    #[test]
+    fn test_build_watcher_config_for_pd_mode_no_common_labels_omits_filter() {
+        let mut prefill = HashMap::new();
+        prefill.insert("role".to_string(), "prefill".to_string());
+        let mut decode = HashMap::new();
+        decode.insert("role".to_string(), "decode".to_string());
+        let config = ServiceDiscoveryConfig {
+            pd_mode: true,
+            prefill_selector: prefill,
+            decode_selector: decode,
+            ..Default::default()
+        };
+        let watcher_config = build_watcher_config("worker", &config.list_label_selector());
+        assert!(watcher_config.label_selector.is_none());
+    }
+
+    #[test]
+    fn test_router_label_selector_serializes_router_selector() {
+        let mut router = HashMap::new();
+        router.insert("app".to_string(), "smg".to_string());
+        let config = ServiceDiscoveryConfig {
+            router_selector: router,
+            ..Default::default()
+        };
+        assert_eq!(config.router_label_selector(), "app=smg");
+    }
+
+    #[test]
+    fn test_router_label_selector_empty_when_unset() {
+        let config = ServiceDiscoveryConfig::default();
+        assert!(config.router_label_selector().is_empty());
+    }
+
+    #[test]
+    fn test_build_watcher_config_for_router_pushes_router_selector() {
+        let mut router = HashMap::new();
+        router.insert("app".to_string(), "smg".to_string());
+        let config = ServiceDiscoveryConfig {
+            router_selector: router,
+            ..Default::default()
+        };
+        let watcher_config = build_watcher_config("router", &config.router_label_selector());
+        assert_eq!(watcher_config.label_selector.as_deref(), Some("app=smg"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_build_watcher_config_logs_selector_at_info_level() {
+        let _ = build_watcher_config("worker", "app=sglang");
+        assert!(logs_contain("Starting K8s worker watcher"));
+        assert!(logs_contain("app=sglang"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_build_watcher_config_logs_router_kind_with_empty_selector() {
+        let _ = build_watcher_config("router", "");
+        assert!(logs_contain("Starting K8s router watcher"));
+        assert!(logs_contain("selector: ''"));
     }
 }
