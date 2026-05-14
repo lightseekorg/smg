@@ -19,30 +19,14 @@ use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::{chunk_assembler::ChunkAssembler, crdt_kv::CrdtOrMap};
+use crate::{
+    chunk_assembler::ChunkAssembler,
+    crdt_kv::{CrdtOrMap, MergeStrategy},
+};
 
 // ============================================================================
 // Type Definitions
 // ============================================================================
-
-/// Merge strategy for CRDT namespaces. Determines how conflicts are resolved
-/// when two nodes write the same key concurrently.
-#[derive(Debug, Clone)]
-#[expect(clippy::enum_variant_names)]
-pub enum MergeStrategy {
-    /// Higher (version, replica_id) wins. Used for worker:*, policy:*, config:*.
-    LastWriterWins,
-    /// Higher numeric value wins (simple max). Reserved for future use.
-    MaxValueWins,
-    /// Compare epochs first, then max within same epoch.
-    /// The mesh crate implements this internally — no application callback needed.
-    /// Values MUST be exactly 16 bytes: epoch (u64 big-endian) + count (i64 big-endian).
-    /// The adapter is responsible for serializing RateLimitValue to this fixed format.
-    ///
-    /// If either local or remote value is not exactly 16 bytes (corrupt/truncated message),
-    /// the merge keeps the well-formed value. If both are malformed, keeps local.
-    EpochMaxWins,
-}
 
 /// Routing mode for stream namespaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,6 +479,7 @@ impl MeshKV {
     pub fn new(server_name: String) -> Self {
         let replica_id = Self::derive_replica_id(&server_name);
         let store = Arc::new(CrdtOrMap::new());
+        store.register_merge_strategy("config:".to_string(), MergeStrategy::LastWriterWins);
         let subscriber_registry = Arc::new(SubscriberRegistry::new());
         let mut configured_prefixes = HashMap::new();
         configured_prefixes.insert(
@@ -577,6 +562,8 @@ impl MeshKV {
                 },
             );
         }
+        self.store
+            .register_merge_strategy(prefix.to_string(), merge_strategy.clone());
 
         Arc::new(CrdtNamespace {
             prefix: prefix.to_string(),

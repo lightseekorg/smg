@@ -7,7 +7,10 @@ use tracing_subscriber::{
 
 use super::{
     crdt::CrdtOrMap,
+    epoch_max_wins::{decode, encode, EpochCount},
+    merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
+    replica::ReplicaId,
 };
 static INIT: Once = Once::new();
 
@@ -219,6 +222,182 @@ fn test_older_insert_applied_later_does_not_overwrite_winner() {
     assert_eq!(replica.get("key1"), Some(b"newer_value".to_vec()));
 }
 
+#[test]
+fn test_epoch_max_wins_compaction_uses_value_epoch() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    let older_reset =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 1, ReplicaId::new());
+    let newer_stale_count = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        2,
+        ReplicaId::new(),
+    );
+
+    let mut log = OperationLog::new();
+    log.append(newer_stale_count);
+    log.append(older_reset);
+
+    replica.merge(&log);
+
+    let value = replica.get(key).expect("rate-limit shard should exist");
+    assert_eq!(decode(&value), Some(EpochCount { epoch: 6, count: 0 }));
+}
+
+#[test]
+fn test_epoch_max_wins_preserves_newer_tombstone() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:dead-node";
+    let stale_insert =
+        Operation::insert(key.to_string(), encode(6, 50).to_vec(), 1, ReplicaId::new());
+    let tombstone = Operation::remove(key.to_string(), 2, ReplicaId::new());
+
+    let mut log = OperationLog::new();
+    log.append(stale_insert);
+    log.append(tombstone);
+
+    replica.merge(&log);
+
+    assert_eq!(replica.get(key), None);
+}
+
+#[test]
+fn test_epoch_max_wins_local_write_cannot_rewind_epoch() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    replica.insert(key.to_string(), encode(6, 0).to_vec());
+    replica.insert(key.to_string(), encode(5, 100).to_vec());
+
+    let value = replica.get(key).expect("rate-limit shard should exist");
+    assert_eq!(decode(&value), Some(EpochCount { epoch: 6, count: 0 }));
+}
+
+#[test]
+fn test_epoch_max_wins_tombstone_compares_against_newest_live_version() {
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    let stale_newer_timestamp = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let epoch_winner_older_timestamp =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 90, ReplicaId::new());
+    let tombstone_after_epoch_winner = Operation::remove(key.to_string(), 95, ReplicaId::new());
+
+    let mut stale_log = OperationLog::new();
+    stale_log.append(stale_newer_timestamp);
+    replica.merge(&stale_log);
+
+    let mut reset_log = OperationLog::new();
+    reset_log.append(epoch_winner_older_timestamp);
+    replica.merge(&reset_log);
+    assert_eq!(
+        decode(&replica.get(key).expect("reset should win stale count")),
+        Some(EpochCount { epoch: 6, count: 0 }),
+    );
+
+    let mut tombstone_log = OperationLog::new();
+    tombstone_log.append(tombstone_after_epoch_winner);
+    replica.merge(&tombstone_log);
+
+    assert_eq!(
+        decode(
+            &replica
+                .get(key)
+                .expect("newer live version suppresses tombstone")
+        ),
+        Some(EpochCount { epoch: 6, count: 0 }),
+    );
+}
+
+#[test]
+fn test_epoch_max_wins_snapshot_only_propagation_preserves_tombstone_boundary() {
+    // Snapshot-only path: the source replica compacts its log so a
+    // peer receives just one Insert per key (with the shard's
+    // `tombstone_version` embedded), never the original Remove op.
+    // A late peer that still holds the pre-tombstone high-epoch
+    // insert must not be able to resurrect it.
+    init_test_logging();
+    let key = "rl:global:node-a";
+
+    // Source: pre-tombstone high-epoch insert, then tombstone, then
+    // post-tombstone lower-epoch insert. After merge+compact, the
+    // log holds a single shard insert with tombstone_version=65.
+    let source = CrdtOrMap::new();
+    source.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    let mut source_log = OperationLog::new();
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    source_log.append(Operation::remove(key.to_string(), 65, ReplicaId::new()));
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(6, 1).to_vec(),
+        70,
+        ReplicaId::new(),
+    ));
+    source.merge(&source_log);
+
+    let snapshot_log = source.get_operation_log();
+    assert_eq!(
+        snapshot_log.operations().len(),
+        1,
+        "compaction must reduce to a single shard insert",
+    );
+
+    // Receiver applies the snapshot — gets the shard with
+    // tombstone_version embedded but no Remove op in its log.
+    let receiver = CrdtOrMap::new();
+    receiver.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    receiver.merge(&snapshot_log);
+    assert_eq!(
+        decode(&receiver.get(key).expect("post-tombstone insert applied")),
+        Some(EpochCount { epoch: 6, count: 1 }),
+    );
+
+    // Late peer that never saw the Remove gossips the original
+    // pre-tombstone high-epoch insert. The receiver must reject it
+    // — the shard's embedded tombstone_version (65) > the late
+    // insert's version (60), so it gets filtered.
+    let mut late_log = OperationLog::new();
+    late_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    receiver.merge(&late_log);
+
+    assert_eq!(
+        decode(
+            &receiver
+                .get(key)
+                .expect("post-tombstone state must survive late pre-tombstone insert")
+        ),
+        Some(EpochCount { epoch: 6, count: 1 }),
+        "pre-tombstone insert must not resurrect when only the snapshot \
+         (no Remove op) has reached the receiver",
+    );
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================
@@ -280,6 +459,210 @@ fn test_operation_log_merge_deduplicates() {
     // Re-merging the same log should be a no-op for log length.
     merged_log.merge(&log);
     assert_eq!(merged_log.len(), merged_once_len);
+}
+
+#[test]
+fn test_operation_log_snapshot_uses_merge_strategy() {
+    let key = "rl:global:node-a";
+    let stale_newer_timestamp = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        2,
+        ReplicaId::new(),
+    );
+    let epoch_winner_older_timestamp =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 1, ReplicaId::new());
+
+    let mut log = OperationLog::new();
+    log.append(stale_newer_timestamp);
+    log.append(epoch_winner_older_timestamp);
+
+    let snapshot = log.snapshot_and_truncate(|key| {
+        if key.starts_with("rl:") {
+            MergeStrategy::EpochMaxWins
+        } else {
+            MergeStrategy::LastWriterWins
+        }
+    });
+
+    let Operation::Insert { value, .. } = snapshot.get(key).expect("snapshot keeps rl shard")
+    else {
+        panic!("snapshot should keep an insert");
+    };
+    assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
+    assert!(log.is_empty(), "snapshot truncates the source log");
+}
+
+#[test]
+fn test_operation_log_epoch_max_wins_tombstone_selection_is_order_independent() {
+    let key = "rl:global:node-a";
+    let stale_lower_epoch = Operation::insert(
+        key.to_string(),
+        encode(5, 100).to_vec(),
+        80,
+        ReplicaId::new(),
+    );
+    let epoch_winner_older_timestamp =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 90, ReplicaId::new());
+    let tombstone_after_epoch_winner = Operation::remove(key.to_string(), 95, ReplicaId::new());
+    let orders = [
+        [
+            stale_lower_epoch.clone(),
+            epoch_winner_older_timestamp.clone(),
+            tombstone_after_epoch_winner.clone(),
+        ],
+        [
+            stale_lower_epoch.clone(),
+            tombstone_after_epoch_winner.clone(),
+            epoch_winner_older_timestamp.clone(),
+        ],
+        [
+            epoch_winner_older_timestamp.clone(),
+            stale_lower_epoch.clone(),
+            tombstone_after_epoch_winner.clone(),
+        ],
+        [
+            epoch_winner_older_timestamp.clone(),
+            tombstone_after_epoch_winner.clone(),
+            stale_lower_epoch.clone(),
+        ],
+        [
+            tombstone_after_epoch_winner.clone(),
+            stale_lower_epoch.clone(),
+            epoch_winner_older_timestamp.clone(),
+        ],
+        [
+            tombstone_after_epoch_winner.clone(),
+            epoch_winner_older_timestamp.clone(),
+            stale_lower_epoch.clone(),
+        ],
+    ];
+
+    for order in orders {
+        let mut log = OperationLog::new();
+        for operation in order {
+            log.append(operation);
+        }
+
+        let snapshot = log.snapshot_and_truncate(|key| {
+            if key.starts_with("rl:") {
+                MergeStrategy::EpochMaxWins
+            } else {
+                MergeStrategy::LastWriterWins
+            }
+        });
+
+        let Some(Operation::Remove { timestamp, .. }) = snapshot.get(key) else {
+            panic!("tombstone should win consistently for order {snapshot:?}");
+        };
+        assert_eq!(*timestamp, 95);
+    }
+}
+
+#[test]
+fn test_operation_log_epoch_max_wins_post_tombstone_insert_revives_key() {
+    let key = "rl:global:node-a";
+    let pre_tombstone_higher_epoch =
+        Operation::insert(key.to_string(), encode(7, 0).to_vec(), 90, ReplicaId::new());
+    let tombstone = Operation::remove(key.to_string(), 95, ReplicaId::new());
+    let post_tombstone_lower_epoch = Operation::insert(
+        key.to_string(),
+        encode(6, 0).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let orders = [
+        [
+            pre_tombstone_higher_epoch.clone(),
+            tombstone.clone(),
+            post_tombstone_lower_epoch.clone(),
+        ],
+        [
+            pre_tombstone_higher_epoch.clone(),
+            post_tombstone_lower_epoch.clone(),
+            tombstone.clone(),
+        ],
+        [
+            tombstone.clone(),
+            pre_tombstone_higher_epoch.clone(),
+            post_tombstone_lower_epoch.clone(),
+        ],
+        [
+            tombstone.clone(),
+            post_tombstone_lower_epoch.clone(),
+            pre_tombstone_higher_epoch.clone(),
+        ],
+        [
+            post_tombstone_lower_epoch.clone(),
+            pre_tombstone_higher_epoch.clone(),
+            tombstone.clone(),
+        ],
+        [
+            post_tombstone_lower_epoch.clone(),
+            tombstone.clone(),
+            pre_tombstone_higher_epoch.clone(),
+        ],
+    ];
+
+    for order in orders {
+        let mut log = OperationLog::new();
+        for operation in order {
+            log.append(operation);
+        }
+
+        let snapshot = log.snapshot_and_truncate(|key| {
+            if key.starts_with("rl:") {
+                MergeStrategy::EpochMaxWins
+            } else {
+                MergeStrategy::LastWriterWins
+            }
+        });
+
+        let Some(Operation::Insert {
+            value, timestamp, ..
+        }) = snapshot.get(key)
+        else {
+            panic!("post-tombstone insert should revive key for order {snapshot:?}");
+        };
+        assert_eq!(*timestamp, 100);
+        assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
+    }
+}
+
+#[test]
+fn test_operation_log_epoch_max_wins_post_tombstone_insert_wins_over_pre_tombstone_equal_epoch() {
+    let key = "rl:global:node-a";
+    let newer_insert = Operation::insert(
+        key.to_string(),
+        encode(6, 0).to_vec(),
+        100,
+        ReplicaId::new(),
+    );
+    let older_equal_insert =
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 10, ReplicaId::new());
+    let tombstone_between = Operation::remove(key.to_string(), 50, ReplicaId::new());
+
+    let mut log = OperationLog::new();
+    log.append(older_equal_insert);
+    log.append(tombstone_between);
+    log.append(newer_insert);
+
+    let snapshot = log.snapshot_and_truncate(|key| {
+        if key.starts_with("rl:") {
+            MergeStrategy::EpochMaxWins
+        } else {
+            MergeStrategy::LastWriterWins
+        }
+    });
+
+    let Some(Operation::Insert {
+        value, timestamp, ..
+    }) = snapshot.get(key)
+    else {
+        panic!("newer equal-value insert should win over intermediate tombstone");
+    };
+    assert_eq!(*timestamp, 100);
+    assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
 }
 
 #[test]
