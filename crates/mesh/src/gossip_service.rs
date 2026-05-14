@@ -12,11 +12,7 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
-        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
-    },
-    flow_control::MAX_MESSAGE_SIZE,
+    chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
     metrics::{record_ack, record_nack, record_peer_reconnect, update_peer_connections},
     mtls::MTLSManager,
     partition::PartitionDetector,
@@ -29,6 +25,9 @@ use super::{
         },
         try_ping, ClusterState,
     },
+    transport::limits::{
+        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT,
+    },
 };
 
 #[derive(Debug)]
@@ -40,7 +39,7 @@ pub struct GossipService {
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
     /// Shared reference to the current stream RoundBatch, drained once
-    /// per round by the MeshController. Server-side handlers read
+    /// per round by the GossipController. Server-side handlers read
     /// broadcast drain_entries and also emit targeted_entries addressed
     /// to the remote peer learned from the first inbound message, so
     /// publish_to(peer) works in both directions of a peer pair.
@@ -315,10 +314,8 @@ impl Gossip for GossipService {
         )]
         tokio::spawn(async move {
             // Close the stream if no inbound message arrives within
-            // this window — protects against idle clients pinning the
-            // server-side task and mpsc channel indefinitely.
-            const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
+            // STREAM_IDLE_TIMEOUT — protects against idle clients
+            // pinning the server-side task and mpsc channel indefinitely.
             let mut peer_id = String::new();
             update_peer_connections(&peer_id, true);
             let mut sequence: u64 = 0;

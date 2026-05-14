@@ -5,10 +5,11 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
+use parking_lot::RwLock;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::{mpsc, watch, Mutex};
 use tonic::transport::{ClientTlsConfig, Endpoint};
@@ -16,7 +17,6 @@ use tracing as log;
 use tracing::{instrument, Instrument};
 
 use super::{
-    flow_control::RetryManager,
     mtls::MTLSManager,
     service::{
         broadcast_node_states,
@@ -28,15 +28,14 @@ use super::{
     },
 };
 use crate::{
-    chunking::{
-        build_stream_batches, chunk_value, dispatch_stream_batch, next_generation,
-        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_STREAM_CHUNK_BYTES,
-    },
-    flow_control::MAX_MESSAGE_SIZE,
+    chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
     metrics,
+    transport::limits::{
+        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT,
+    },
 };
 
-pub struct MeshController {
+pub struct GossipController {
     state: ClusterState,
     self_name: String,
     self_addr: SocketAddr,
@@ -47,14 +46,14 @@ pub struct MeshController {
     /// Current stream round batch, drained once per round from MeshKV.
     /// Per-peer senders read this and filter targeted entries to their
     /// own peer; drain_entries are broadcast to every peer.
-    current_stream_batch: Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>>,
+    current_stream_batch: Arc<RwLock<Arc<crate::kv::RoundBatch>>>,
     /// Node-wide MeshKV handle. Owns the stream buffers, subscriber
     /// registry, and chunk assembler shared with the server-side
     /// SyncStream handlers.
     mesh_kv: Option<Arc<crate::kv::MeshKV>>,
 }
 
-impl MeshController {
+impl GossipController {
     pub fn new(
         state: ClusterState,
         self_addr: SocketAddr,
@@ -69,9 +68,7 @@ impl MeshController {
             init_peer,
             mtls_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
-            current_stream_batch: Arc::new(parking_lot::RwLock::new(Arc::new(
-                crate::kv::RoundBatch::default(),
-            ))),
+            current_stream_batch: Arc::new(RwLock::new(Arc::new(crate::kv::RoundBatch::default()))),
             mesh_kv: None,
         }
     }
@@ -88,7 +85,7 @@ impl MeshController {
     /// Get a handle to the shared stream RoundBatch. Used by GossipService
     /// so server-side sync_stream handlers see the same drained stream
     /// entries as client-side handlers.
-    pub fn current_stream_batch(&self) -> Arc<parking_lot::RwLock<Arc<crate::kv::RoundBatch>>> {
+    pub fn current_stream_batch(&self) -> Arc<RwLock<Arc<crate::kv::RoundBatch>>> {
         self.current_stream_batch.clone()
     }
 
@@ -446,7 +443,7 @@ impl MeshController {
                         loop {
                             interval.tick().await;
 
-                            let round_start = std::time::Instant::now();
+                            let round_start = Instant::now();
 
                             // Stream batches: drain-portion (broadcast) +
                             // targeted entries addressed to this peer. Each
@@ -536,7 +533,6 @@ impl MeshController {
                 };
 
                 // Handle incoming messages
-                const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
                 loop {
                     match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming_stream.next()).await {
                         Ok(Some(Ok(msg))) => {
@@ -737,4 +733,86 @@ fn get_random_values_refs<K, V>(map: &BTreeMap<K, V>, k: usize) -> Vec<&V> {
     let mut rng = rand::rng();
 
     values.choose_multiple(&mut rng, k).copied().collect()
+}
+
+/// Exponential backoff calculator used by the per-peer reconnect loop.
+#[derive(Debug, Clone)]
+struct ExponentialBackoff {
+    initial_delay: Duration,
+    max_delay: Duration,
+    multiplier: f64,
+}
+
+impl ExponentialBackoff {
+    fn new(initial_delay: Duration, max_delay: Duration, multiplier: f64) -> Self {
+        Self {
+            initial_delay,
+            max_delay,
+            multiplier,
+        }
+    }
+
+    /// Delay for attempt number (0-indexed).
+    fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        let max_delay_secs = self.max_delay.as_secs_f64();
+        let delay_secs = self.initial_delay.as_secs_f64()
+            * self.multiplier.powi(attempt.min(i32::MAX as u32) as i32);
+        // Guard against f64 overflow to infinity which would panic in
+        // Duration::from_secs_f64.
+        let capped = if delay_secs.is_finite() && delay_secs >= 0.0 {
+            delay_secs.min(max_delay_secs)
+        } else {
+            max_delay_secs
+        };
+        Duration::from_secs_f64(capped)
+    }
+}
+
+impl Default for ExponentialBackoff {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(1), Duration::from_secs(60), 2.0)
+    }
+}
+
+/// Per-peer reconnect state tracker with exponential backoff.
+#[derive(Debug, Default)]
+struct RetryManager {
+    backoff: ExponentialBackoff,
+    last_attempt: RwLock<Option<Instant>>,
+    attempt_count: RwLock<u32>,
+}
+
+impl RetryManager {
+    /// Whether enough time has elapsed since the last attempt to retry.
+    fn should_retry(&self) -> bool {
+        let last = self.last_attempt.read();
+        if let Some(last_attempt) = *last {
+            let attempt = *self.attempt_count.read();
+            let delay = self.backoff.delay_for_attempt(attempt);
+            last_attempt.elapsed() >= delay
+        } else {
+            true
+        }
+    }
+
+    fn record_attempt(&self) {
+        *self.last_attempt.write() = Some(Instant::now());
+        let mut count = self.attempt_count.write();
+        *count = count.saturating_add(1);
+    }
+
+    /// Reset on successful connection.
+    fn reset(&self) {
+        *self.last_attempt.write() = None;
+        *self.attempt_count.write() = 0;
+    }
+
+    fn attempt_count(&self) -> u32 {
+        *self.attempt_count.read()
+    }
+
+    fn next_delay(&self) -> Duration {
+        let attempt = *self.attempt_count.read();
+        self.backoff.delay_for_attempt(attempt)
+    }
 }
