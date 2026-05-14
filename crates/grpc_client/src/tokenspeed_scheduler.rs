@@ -245,17 +245,25 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
-        let sglang_sampling = crate::sampling_params::build_grpc_sampling_params_from_chat(
+        let tokenspeed_sampling = crate::sampling_params::build_grpc_sampling_params_from_chat(
             body,
             tool_call_constraint,
         )?;
+        let mut sampling = translate::sampling_params(tokenspeed_sampling);
+        sampling.temperature = body.temperature;
+        sampling.top_p = body.top_p;
+        sampling.top_k = body.top_k;
+        sampling.min_p = body.min_p;
+        sampling.frequency_penalty = body.frequency_penalty;
+        sampling.presence_penalty = body.presence_penalty;
+        sampling.repetition_penalty = body.repetition_penalty;
         Ok(tokenspeed_proto::GenerateRequest {
             request_id,
             tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: processed_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(translate::sampling_params(sglang_sampling)),
+            sampling_params: Some(sampling),
             return_logprob: body.logprobs,
             logprob_start_len: Some(-1),
             top_logprobs_num: body.top_logprobs.unwrap_or(0) as i32,
@@ -275,16 +283,25 @@ impl TokenSpeedSchedulerClient {
         original_text: Option<String>,
         token_ids: Vec<u32>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
-        let sglang_sampling = crate::sampling_params::build_sampling_params_from_plain(
+        let tokenspeed_sampling = crate::sampling_params::build_sampling_params_from_plain(
             body.sampling_params.as_ref(),
         )?;
+        let mut sampling = translate::sampling_params(tokenspeed_sampling);
+        let plain = body.sampling_params.as_ref();
+        sampling.temperature = plain.and_then(|p| p.temperature);
+        sampling.top_p = plain.and_then(|p| p.top_p);
+        sampling.top_k = plain.and_then(|p| p.top_k);
+        sampling.min_p = plain.and_then(|p| p.min_p);
+        sampling.frequency_penalty = plain.and_then(|p| p.frequency_penalty);
+        sampling.presence_penalty = plain.and_then(|p| p.presence_penalty);
+        sampling.repetition_penalty = plain.and_then(|p| p.repetition_penalty);
         Ok(tokenspeed_proto::GenerateRequest {
             request_id,
             tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: original_text.unwrap_or_default(),
                 input_ids: token_ids,
             }),
-            sampling_params: Some(translate::sampling_params(sglang_sampling)),
+            sampling_params: Some(sampling),
             return_logprob: body.return_logprob.unwrap_or(false),
             logprob_start_len: Some(body.logprob_start_len.unwrap_or(-1)),
             top_logprobs_num: body.top_logprobs_num.unwrap_or(0),
@@ -305,15 +322,20 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
         constraint: Option<(String, String)>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
-        let sglang_sampling =
+        let tokenspeed_sampling =
             crate::sampling_params::build_grpc_sampling_params_from_responses(body, constraint)?;
+        let mut sampling = translate::sampling_params(tokenspeed_sampling);
+        sampling.temperature = body.temperature;
+        sampling.top_p = body.top_p;
+        sampling.frequency_penalty = body.frequency_penalty;
+        sampling.presence_penalty = body.presence_penalty;
         Ok(tokenspeed_proto::GenerateRequest {
             request_id,
             tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: processed_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(translate::sampling_params(sglang_sampling)),
+            sampling_params: Some(sampling),
             stream: body.stream.unwrap_or(false),
             ..Default::default()
         })
@@ -331,17 +353,25 @@ impl TokenSpeedSchedulerClient {
         token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
-        let sglang_sampling = crate::sampling_params::build_grpc_sampling_params_from_messages(
+        let tokenspeed_sampling = crate::sampling_params::build_grpc_sampling_params_from_messages(
             body,
             tool_call_constraint,
         )?;
+        let mut sampling = translate::sampling_params(tokenspeed_sampling);
+        sampling.temperature = body.temperature.map(|v| v as f32);
+        sampling.top_p = body.top_p.map(|v| v as f32);
+        sampling.top_k = body.top_k.map(|v| v as i32);
+        sampling.min_p = None;
+        sampling.frequency_penalty = None;
+        sampling.presence_penalty = None;
+        sampling.repetition_penalty = None;
         Ok(tokenspeed_proto::GenerateRequest {
             request_id,
             tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text: processed_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(translate::sampling_params(sglang_sampling)),
+            sampling_params: Some(sampling),
             stream: body.stream.unwrap_or(false),
             ..Default::default()
         })
@@ -358,15 +388,23 @@ impl TokenSpeedSchedulerClient {
         original_text: String,
         token_ids: Vec<u32>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
-        let sglang_sampling =
+        let tokenspeed_sampling =
             crate::sampling_params::build_grpc_sampling_params_from_completion(body)?;
+        let mut sampling = translate::sampling_params(tokenspeed_sampling);
+        sampling.temperature = body.temperature;
+        sampling.top_p = body.top_p;
+        sampling.top_k = body.top_k;
+        sampling.min_p = body.min_p;
+        sampling.frequency_penalty = body.frequency_penalty;
+        sampling.presence_penalty = body.presence_penalty;
+        sampling.repetition_penalty = body.repetition_penalty;
         Ok(tokenspeed_proto::GenerateRequest {
             request_id,
             tokenized: Some(tokenspeed_proto::TokenizedInput {
                 original_text,
                 input_ids: token_ids,
             }),
-            sampling_params: Some(translate::sampling_params(sglang_sampling)),
+            sampling_params: Some(sampling),
             return_logprob: body.logprobs.is_some(),
             logprob_start_len: Some(-1),
             top_logprobs_num: body.logprobs.unwrap_or(0) as i32,
