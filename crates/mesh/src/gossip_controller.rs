@@ -774,45 +774,44 @@ impl Default for ExponentialBackoff {
     }
 }
 
-/// Per-peer reconnect state tracker with exponential backoff.
+/// Per-peer reconnect state tracker with exponential backoff. Owned
+/// by the controller's `HashMap<peer_name, RetryManager>` and only
+/// touched on the controller's task, so plain `&mut self` mutation
+/// is sufficient — no interior mutability needed.
 #[derive(Debug, Default)]
 struct RetryManager {
     backoff: ExponentialBackoff,
-    last_attempt: RwLock<Option<Instant>>,
-    attempt_count: RwLock<u32>,
+    last_attempt: Option<Instant>,
+    attempt_count: u32,
 }
 
 impl RetryManager {
     /// Whether enough time has elapsed since the last attempt to retry.
     fn should_retry(&self) -> bool {
-        let last = self.last_attempt.read();
-        if let Some(last_attempt) = *last {
-            let attempt = *self.attempt_count.read();
-            let delay = self.backoff.delay_for_attempt(attempt);
-            last_attempt.elapsed() >= delay
-        } else {
-            true
+        match self.last_attempt {
+            Some(last_attempt) => {
+                last_attempt.elapsed() >= self.backoff.delay_for_attempt(self.attempt_count)
+            }
+            None => true,
         }
     }
 
-    fn record_attempt(&self) {
-        *self.last_attempt.write() = Some(Instant::now());
-        let mut count = self.attempt_count.write();
-        *count = count.saturating_add(1);
+    fn record_attempt(&mut self) {
+        self.last_attempt = Some(Instant::now());
+        self.attempt_count = self.attempt_count.saturating_add(1);
     }
 
     /// Reset on successful connection.
-    fn reset(&self) {
-        *self.last_attempt.write() = None;
-        *self.attempt_count.write() = 0;
+    fn reset(&mut self) {
+        self.last_attempt = None;
+        self.attempt_count = 0;
     }
 
     fn attempt_count(&self) -> u32 {
-        *self.attempt_count.read()
+        self.attempt_count
     }
 
     fn next_delay(&self) -> Duration {
-        let attempt = *self.attempt_count.read();
-        self.backoff.delay_for_attempt(attempt)
+        self.backoff.delay_for_attempt(self.attempt_count)
     }
 }

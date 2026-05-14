@@ -251,12 +251,12 @@ pub struct MeshServer {
     signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
-    /// Node-wide MeshKV handle shared by controller + ping_server.
+    /// Node-wide MeshKV handle shared by the gossip controller and service.
     mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServer {
-    fn build_ping_server(&self) -> GossipService {
+    fn build_gossip_service(&self) -> GossipService {
         GossipService::new(
             self.state.clone(),
             self.bind_addr,
@@ -317,7 +317,7 @@ impl MeshServer {
         // with server-side sync_stream handlers.
         let controller = self.build_controller();
 
-        let mut service = self.build_ping_server();
+        let mut service = self.build_gossip_service();
 
         service = service.with_partition_detector(partition_detector);
 
