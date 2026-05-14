@@ -373,7 +373,11 @@ impl Gossip for GossipService {
                             break;
                         }
                     }
-                    StreamMessageType::Ack => record_ack(&peer_id, true),
+                    StreamMessageType::Ack => {
+                        if let Some(gossip::stream_message::Payload::Ack(ack)) = &msg.payload {
+                            record_ack(&peer_id, ack.success);
+                        }
+                    }
                     StreamMessageType::Nack => record_nack(&peer_id),
                     StreamMessageType::StreamBatch => {
                         if let (
