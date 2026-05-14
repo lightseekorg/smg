@@ -1225,6 +1225,7 @@ mod tests {
             failure_threshold: 5,
             success_threshold: 3,
             disable_health_check: true,
+            drain_settle_secs: 5,
         };
         assert_eq!(config.timeout_secs, 10);
         assert_eq!(config.check_interval_secs, 60);
@@ -1270,6 +1271,7 @@ mod tests {
             failure_threshold: 4,
             success_threshold: 2,
             disable_health_check: false,
+            drain_settle_secs: 5,
         };
 
         use crate::worker::BasicWorkerBuilder;

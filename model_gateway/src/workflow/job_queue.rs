@@ -394,7 +394,12 @@ impl JobQueue {
                     url, instance_id
                 );
 
-                let timeout_duration = Duration::from_secs(30);
+                // 30s baseline for the removal steps + drain_settle_secs for
+                // the drain step. Per-worker overrides could push this higher
+                // (max is taken inside the step), but the global default is
+                // the right baseline for the caller's wait.
+                let timeout_duration =
+                    Duration::from_secs(30 + context.router_config.health_check.drain_settle_secs);
 
                 let result = engines
                     .worker_removal

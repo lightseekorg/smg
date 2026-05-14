@@ -635,8 +635,10 @@ fn compute_next_status(
                     return Some(WorkerStatus::Failed);
                 }
             }
-            WorkerStatus::Failed => {
-                // Terminal — handled outside.
+            WorkerStatus::Failed | WorkerStatus::Draining => {
+                // Terminal for the health-state machine. Failed is removed
+                // by `--remove-unhealthy-workers`; Draining is removed by
+                // the discovery drain timer once in-flight requests settle.
             }
         }
 
@@ -854,6 +856,7 @@ mod tests {
                     timeout_secs: 1,
                     check_interval_secs: 1,
                     disable_health_check: false,
+                    drain_settle_secs: 0,
                 })
                 .build(),
         )
@@ -866,6 +869,7 @@ mod tests {
             timeout_secs: 1,
             check_interval_secs: 1,
             disable_health_check: false,
+            drain_settle_secs: 0,
         }
     }
 

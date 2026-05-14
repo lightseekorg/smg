@@ -166,6 +166,16 @@ impl WorkerRegistry {
         self.url_to_id.get(url).and_then(|id| self.get(&id))
     }
 
+    /// Look up a worker's ID by its URL.
+    ///
+    /// Returns `Some(id)` when a worker with this URL is registered,
+    /// `None` otherwise. Read-only, lock-free. Emits no events. Useful for
+    /// callers that need to invoke `transition_status_if_revision` with
+    /// the current worker revision.
+    pub fn get_id_by_url(&self, url: &str) -> Option<WorkerId> {
+        self.url_to_id.get(url).map(|id| id.clone())
+    }
+
     /// Reverse-lookup the URL for a given worker ID.
     ///
     /// Prefers the URL stored on the live worker object; falls back to
@@ -1525,6 +1535,71 @@ mod tests {
             registry.transition_status(&missing, WorkerStatus::Ready),
             None
         );
+    }
+
+    #[test]
+    fn test_get_id_by_url_returns_id_for_registered_worker() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w-by-url:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(openai_protocol::worker::HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        let worker_id = registry.register(worker).unwrap();
+        assert_eq!(
+            registry.get_id_by_url("http://w-by-url:8080"),
+            Some(worker_id)
+        );
+    }
+
+    #[test]
+    fn test_get_id_by_url_returns_none_for_unknown_url() {
+        let registry = WorkerRegistry::new();
+        assert!(registry.get_id_by_url("http://missing:8080").is_none());
+    }
+
+    /// `transition_status_inner` (the shared backend used by both
+    /// `transition_status` and `transition_status_if_revision`) emits a
+    /// single `WorkerEvent::StatusChanged` event for every status mutation,
+    /// regardless of which target status is being installed. The mesh
+    /// adapter subscribes to that event stream, so this proves Draining
+    /// transitions propagate through the same path as Ready/NotReady.
+    #[test]
+    fn test_transition_to_draining_emits_status_changed_event() {
+        let registry = WorkerRegistry::new();
+        let mut rx = registry.subscribe_events();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w-drain:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(openai_protocol::worker::HealthCheckConfig {
+                    disable_health_check: true,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        let worker_id = registry.register(worker.clone()).unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        let result = registry.transition_status(&worker_id, WorkerStatus::Draining);
+        assert_eq!(result, Some((WorkerStatus::Ready, WorkerStatus::Draining)));
+        assert_eq!(worker.status(), WorkerStatus::Draining);
+
+        match rx.try_recv().unwrap() {
+            WorkerEvent::StatusChanged {
+                old_status,
+                new_status,
+                ..
+            } => {
+                assert_eq!(old_status, WorkerStatus::Ready);
+                assert_eq!(new_status, WorkerStatus::Draining);
+            }
+            other => panic!("expected StatusChanged, got {other:?}"),
+        }
     }
 
     #[test]

@@ -223,4 +223,41 @@ mod tests {
         let indices = get_healthy_worker_indices(&workers);
         assert_eq!(indices, vec![0, 2]);
     }
+
+    /// Only `Ready` workers may be selected. Pending, NotReady, Failed, and
+    /// Draining are all excluded. Draining specifically guards against
+    /// routing new traffic to a worker that is being torn down.
+    #[test]
+    fn test_get_healthy_worker_indices_excludes_each_non_ready_status() {
+        let cases = [
+            (WorkerStatus::Pending, false),
+            (WorkerStatus::Ready, true),
+            (WorkerStatus::NotReady, false),
+            (WorkerStatus::Failed, false),
+            (WorkerStatus::Draining, false),
+        ];
+
+        for (status, expected_included) in cases {
+            let worker: Arc<dyn Worker> = Arc::new(
+                BasicWorkerBuilder::new("http://w:8000")
+                    .worker_type(WorkerType::Regular)
+                    .api_key("k")
+                    .health_config(no_health_check())
+                    .build(),
+            );
+            worker.set_status(status);
+            let workers = vec![worker];
+            let indices = get_healthy_worker_indices(&workers);
+            assert_eq!(
+                indices == vec![0],
+                expected_included,
+                "status {status:?} should be {}",
+                if expected_included {
+                    "included"
+                } else {
+                    "excluded"
+                }
+            );
+        }
+    }
 }

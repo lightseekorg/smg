@@ -144,6 +144,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
 tracing-test = "0.2"
+tokio = { workspace = true, features = ["test-util"] }
 kv-index.workspace = true
 wasmtime-wasi = { workspace = true }
 lru = { workspace = true }

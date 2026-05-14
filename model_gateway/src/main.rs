@@ -430,6 +430,14 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     remove_unhealthy_workers: bool,
 
+    /// Seconds to keep a Ready worker in `Draining` before removing it from
+    /// the registry. Applies to all RemoveWorker submissions (K8s deletion,
+    /// `--remove-unhealthy-workers`, manual API). Per-worker overrides are
+    /// supported via `WorkerSpec::health.drain_settle_secs`. Set to `0` to
+    /// remove immediately without draining.
+    #[arg(long, default_value_t = 5, help_heading = "Health Checks")]
+    drain_settle_secs: u64,
+
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
     #[arg(long, alias = "model", help_heading = "Tokenizer")]
@@ -1224,6 +1232,7 @@ impl CliArgs {
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
                 remove_unhealthy_workers: self.remove_unhealthy_workers,
+                drain_settle_secs: self.drain_settle_secs,
             })
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
