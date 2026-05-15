@@ -6,7 +6,6 @@
 use std::{fmt::Debug, sync::Arc};
 
 use openai_protocol::worker::WorkerLoadResponse;
-use smg_mesh::OptionalMeshSyncManager;
 
 use crate::worker::{HashRing, Worker};
 
@@ -24,7 +23,7 @@ mod round_robin;
 pub(crate) mod utils;
 
 pub use bucket::BucketPolicy;
-pub use cache_aware::CacheAwarePolicy;
+pub use cache_aware::{CacheAwarePolicy, TreeHandle, TreeKind};
 pub use consistent_hashing::ConsistentHashingPolicy;
 pub use dp_min_token::MinimumTokensPolicy;
 pub use factory::PolicyFactory;
@@ -73,11 +72,6 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
     /// This is called periodically with current load information for load-aware policies.
     fn update_loads(&self, _loads: &std::collections::HashMap<String, WorkerLoadResponse>) {
         // Default: no-op for policies that don't use load information
-    }
-
-    /// Set mesh sync manager
-    fn set_mesh_sync(&mut self, _mesh_sync: OptionalMeshSyncManager) {
-        // Default: no-op for policies that don't use mesh sync
     }
 
     /// Reset any internal state
@@ -228,5 +222,42 @@ mod tests {
         workers[1].set_status(WorkerStatus::NotReady);
         let indices = get_healthy_worker_indices(&workers);
         assert_eq!(indices, vec![0, 2]);
+    }
+
+    /// Only `Ready` workers may be selected. Pending, NotReady, Failed, and
+    /// Draining are all excluded. Draining specifically guards against
+    /// routing new traffic to a worker that is being torn down.
+    #[test]
+    fn test_get_healthy_worker_indices_excludes_each_non_ready_status() {
+        let cases = [
+            (WorkerStatus::Pending, false),
+            (WorkerStatus::Ready, true),
+            (WorkerStatus::NotReady, false),
+            (WorkerStatus::Failed, false),
+            (WorkerStatus::Draining, false),
+        ];
+
+        for (status, expected_included) in cases {
+            let worker: Arc<dyn Worker> = Arc::new(
+                BasicWorkerBuilder::new("http://w:8000")
+                    .worker_type(WorkerType::Regular)
+                    .api_key("k")
+                    .health_config(no_health_check())
+                    .build(),
+            );
+            worker.set_status(status);
+            let workers = vec![worker];
+            let indices = get_healthy_worker_indices(&workers);
+            assert_eq!(
+                indices == vec![0],
+                expected_included,
+                "status {status:?} should be {}",
+                if expected_included {
+                    "included"
+                } else {
+                    "excluded"
+                }
+            );
+        }
     }
 }

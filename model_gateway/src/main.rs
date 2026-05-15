@@ -430,6 +430,14 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Health Checks")]
     remove_unhealthy_workers: bool,
 
+    /// Seconds to keep a Ready worker in `Draining` before removing it from
+    /// the registry. Applies to all RemoveWorker submissions (K8s deletion,
+    /// `--remove-unhealthy-workers`, manual API). Per-worker overrides are
+    /// supported via `WorkerSpec::health.drain_settle_secs`. Set to `0` to
+    /// remove immediately without draining.
+    #[arg(long, default_value_t = 5, help_heading = "Health Checks")]
+    drain_settle_secs: u64,
+
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
     #[arg(long, alias = "model", help_heading = "Tokenizer")]
@@ -687,7 +695,7 @@ struct CliArgs {
     /// STUN server for ICE candidate gathering (host:port).
     /// Set to your own STUN server for enterprise deployments that
     /// restrict outbound traffic to external STUN servers.
-    /// Defaults to `stun.l.google.com:19302` at runtime when omitted.
+    /// Defaults to `stun.l.google.com:19302`. Set to "none" to disable.
     #[arg(long, help_heading = "WebRTC")]
     webrtc_stun_server: Option<String>,
 }
@@ -1224,6 +1232,7 @@ impl CliArgs {
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
                 remove_unhealthy_workers: self.remove_unhealthy_workers,
+                drain_settle_secs: self.drain_settle_secs,
             })
             .tokenizer_cache(TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,

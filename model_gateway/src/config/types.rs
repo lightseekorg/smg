@@ -539,6 +539,16 @@ pub struct HealthCheckConfig {
     pub disable_health_check: bool,
     #[serde(default)]
     pub remove_unhealthy_workers: bool,
+    /// Seconds to keep a Ready worker in `Draining` after `RemoveWorker`
+    /// is submitted before the registry entry is removed. Lets in-flight
+    /// requests complete naturally. Set to `0` to skip draining and
+    /// remove immediately. Default: 5.
+    #[serde(default = "default_drain_settle_secs")]
+    pub drain_settle_secs: u64,
+}
+
+fn default_drain_settle_secs() -> u64 {
+    5
 }
 
 impl Default for HealthCheckConfig {
@@ -551,6 +561,7 @@ impl Default for HealthCheckConfig {
             endpoint: "/health".to_string(),
             disable_health_check: false,
             remove_unhealthy_workers: false,
+            drain_settle_secs: default_drain_settle_secs(),
         }
     }
 }
@@ -564,6 +575,7 @@ impl HealthCheckConfig {
             success_threshold: self.success_threshold,
             failure_threshold: self.failure_threshold,
             disable_health_check: self.disable_health_check,
+            drain_settle_secs: self.drain_settle_secs,
         }
     }
 }

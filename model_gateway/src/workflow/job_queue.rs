@@ -394,7 +394,20 @@ impl JobQueue {
                     url, instance_id
                 );
 
-                let timeout_duration = Duration::from_secs(30);
+                // Caller wait must cover the worst-case `DrainWorkersStep`
+                // sleep, which is `max(per-worker drain_settle_secs)`. We
+                // can't see per-worker overrides from here without scanning
+                // the registry, so use a generous floor: at least
+                // `MAX_DRAIN_WAIT_SECS` (large enough for realistic
+                // overrides), and at least the global default if it's
+                // higher. 30s on top covers the other removal steps.
+                const MAX_DRAIN_WAIT_SECS: u64 = 600;
+                let drain_wait_secs = context
+                    .router_config
+                    .health_check
+                    .drain_settle_secs
+                    .max(MAX_DRAIN_WAIT_SECS);
+                let timeout_duration = Duration::from_secs(30 + drain_wait_secs);
 
                 let result = engines
                     .worker_removal

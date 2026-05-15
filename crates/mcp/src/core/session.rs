@@ -9,9 +9,6 @@
 use std::collections::{HashMap, HashSet};
 
 use futures::stream::{self, StreamExt};
-use openai_protocol::responses::{
-    McpAllowedTools, RequireApproval, RequireApprovalMode, ResponseTool,
-};
 
 use super::{
     config::BuiltinToolType,
@@ -24,12 +21,7 @@ use super::{
 use crate::{
     approval::ApprovalMode,
     inventory::{QualifiedToolName, ToolCategory, ToolEntry},
-    responses_bridge::{
-        build_chat_function_tools_with_names, build_function_tools_json_with_names,
-        build_mcp_list_tools_item, build_mcp_list_tools_json, build_response_tools_with_names,
-    },
     tenant::TenantContext,
-    transform::ResponseFormat,
 };
 
 /// Default user-facing label for MCP servers when no explicit label is provided.
@@ -64,7 +56,6 @@ struct ExposedToolBinding {
     server_label: String,
     resolved_tool_name: String,
     is_builtin_routed: bool,
-    response_format: ResponseFormat,
     approval_mode: ApprovalMode,
 }
 
@@ -314,7 +305,6 @@ impl<'a> McpToolSession<'a> {
                 output: serde_json::json!({ "error": &err }),
                 is_error: true,
                 error_message: Some(err),
-                response_format: ResponseFormat::Passthrough,
                 duration: std::time::Duration::default(),
             })
         }
@@ -338,62 +328,24 @@ impl<'a> McpToolSession<'a> {
             .unwrap_or_else(|| fallback_label.to_string())
     }
 
-    /// Apply request-time approval configuration to exposed tools in this session.
-    pub fn configure_response_tools_approval(&mut self, tools: &[ResponseTool]) {
-        for tool in tools {
-            let ResponseTool::Mcp(mcp_tool) = tool else {
-                continue;
-            };
-
-            let approval_mode = match mcp_tool.require_approval.as_ref() {
-                Some(RequireApproval::Mode(RequireApprovalMode::Always)) => {
-                    ApprovalMode::Interactive
-                }
-                _ => ApprovalMode::PolicyOnly,
-            };
-
-            if approval_mode == ApprovalMode::PolicyOnly {
+    /// Set the approval mode for every binding matching `server_label`,
+    /// optionally narrowed to a subset of resolved tool names.
+    pub fn set_approval_mode(
+        &mut self,
+        server_label: &str,
+        allowed_tool_names: Option<&[String]>,
+        mode: ApprovalMode,
+    ) {
+        for binding in self.exposed_name_map.values_mut() {
+            if binding.server_label != server_label {
                 continue;
             }
-
-            // T11: the legacy `allowed_tools: Vec<String>` wire shape is now
-            // `McpAllowedTools` (untagged union of `List(Vec<String>)` or
-            // `Filter(McpToolFilter { read_only?, tool_names? })`). Project
-            // union variants back into the flat name-list scoping used here:
-            //   * `None`, or `Filter { None, None }` → no name constraint
-            //     (all bindings for this server inherit the explicit approval
-            //     mode).
-            //   * `List(names)` / `Filter { tool_names: Some(v), .. }` →
-            //     constrain by explicit names.
-            //   * `Filter { tool_names: None, read_only: Some(_) }` → `None`.
-            //     `readOnlyHint`-based filtering is unimplemented, but the
-            //     safe-default direction for *approval scoping* is the
-            //     opposite of exposure: narrowing to an empty name list here
-            //     would drop the caller's explicit approval mode for all
-            //     bindings (they'd fall back to `PolicyOnly`, which is
-            //     auto-approve-by-policy — LESS restrictive). Returning
-            //     `None` applies the requested approval mode to every
-            //     binding on the server, matching the "over-gate is safer
-            //     than under-gate" contract for approval prompts.
-            let allowed_tool_names: Option<&[String]> =
-                mcp_tool.allowed_tools.as_ref().and_then(|at| match at {
-                    McpAllowedTools::List(names) => Some(names.as_slice()),
-                    McpAllowedTools::Filter(filter) => filter.tool_names.as_deref(),
-                });
-            for binding in self.exposed_name_map.values_mut() {
-                if binding.server_label != mcp_tool.server_label {
+            if let Some(allowed) = allowed_tool_names {
+                if !allowed.iter().any(|n| n == &binding.resolved_tool_name) {
                     continue;
                 }
-                if let Some(allowed_tool_names) = allowed_tool_names {
-                    if !allowed_tool_names
-                        .iter()
-                        .any(|allowed_tool_name| allowed_tool_name == &binding.resolved_tool_name)
-                    {
-                        continue;
-                    }
-                }
-                binding.approval_mode = approval_mode;
             }
+            binding.approval_mode = mode;
         }
     }
 
@@ -455,235 +407,41 @@ impl<'a> McpToolSession<'a> {
             .collect()
     }
 
-    /// Look up the response format for a tool.
-    ///
-    /// Convenience method that returns `Passthrough` if the tool is not found.
-    pub fn tool_response_format(&self, tool_name: &str) -> ResponseFormat {
-        self.exposed_name_map
-            .get(tool_name)
-            .map(|binding| binding.response_format.clone())
-            .unwrap_or(ResponseFormat::Passthrough)
+    /// Resolve an exposed tool name (post-alias) to its `QualifiedToolName`.
+    pub fn qualified_name_for_exposed(&self, tool_name: &str) -> Option<QualifiedToolName> {
+        let binding = self.exposed_name_map.get(tool_name)?;
+        Some(QualifiedToolName::new(
+            &binding.server_key,
+            &binding.resolved_tool_name,
+        ))
     }
 
-    /// Build function-tool JSON payloads for upstream model calls.
-    pub fn build_function_tools_json(&self) -> Vec<serde_json::Value> {
-        build_function_tools_json_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
-    }
-
-    /// Build Chat API `Tool` structs for chat completions.
-    pub fn build_chat_function_tools(&self) -> Vec<openai_protocol::common::Tool> {
-        build_chat_function_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
-    }
-
-    /// Build Responses API `ResponseTool` structs.
-    pub fn build_response_tools(&self) -> Vec<ResponseTool> {
-        build_response_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
-    }
-
-    /// Build `mcp_list_tools` JSON for a specific server.
-    pub fn build_mcp_list_tools_json(
+    /// True when a tool name should be hidden because the underlying server
+    /// is internal-non-builtin and the user didn't explicitly declare it as a
+    /// function tool.
+    pub fn should_hide_function_call_like(
         &self,
-        server_label: &str,
-        server_key: &str,
-    ) -> serde_json::Value {
-        let tools = self.list_tools_for_server(server_key);
-        build_mcp_list_tools_json(server_label, &tools)
-    }
-
-    /// Build typed `mcp_list_tools` output item for a specific server.
-    pub fn build_mcp_list_tools_item(
-        &self,
-        server_label: &str,
-        server_key: &str,
-    ) -> openai_protocol::responses::ResponseOutputItem {
-        let tools = self.list_tools_for_server(server_key);
-        build_mcp_list_tools_item(server_label, &tools)
-    }
-
-    /// Inject MCP metadata into a response output array.
-    ///
-    /// Standardized ordering:
-    /// 1. `mcp_list_tools` items (one per server) — prepended
-    /// 2. `tool_call_items` (mcp_call / web_search_call / etc.) — after list_tools
-    /// 3. Existing items (messages, etc.) — remain at end
-    ///
-    /// Test-only helper for legacy ordering assertions.
-    /// Production code should use `inject_client_visible_mcp_output_items`.
-    #[cfg(test)]
-    fn inject_mcp_output_items(
-        &self,
-        output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
-        tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
-    ) {
-        // Modify the vector in-place: take existing items, then rebuild
-        // with the correct ordering without allocating a temporary Vec.
-        let existing = std::mem::take(output);
-        output.reserve(self.mcp_servers.len() + tool_call_items.len() + existing.len());
-
-        // 1. mcp_list_tools items (one per server)
-        for binding in &self.mcp_servers {
-            output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
-        }
-
-        // 2. Tool call items (mcp_call / web_search_call / etc.)
-        output.extend(tool_call_items);
-
-        // 3. Existing items (messages, etc.)
-        output.extend(existing);
-    }
-
-    /// Inject only client-visible MCP metadata and call items into response output.
-    ///
-    /// Visibility policy:
-    /// - Hide builtin `mcp_list_tools` (builtin tools surface under their own type)
-    /// - Hide internal non-builtin `mcp_list_tools`
-    /// - Hide internal non-builtin passthrough `mcp_call`/`mcp_approval_request`
-    /// - Keep builtin-routed call items visible
-    /// - Keep user-defined function calls visible even on name collisions
-    pub fn inject_client_visible_mcp_output_items(
-        &self,
-        output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
-        tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
-        user_function_names: &HashSet<String>,
-    ) {
-        let existing = std::mem::take(output);
-        output.reserve(self.mcp_servers.len() + tool_call_items.len() + existing.len());
-
-        // Use mcp_servers (excludes builtin) to match streaming path behavior.
-        for binding in &self.mcp_servers {
-            if !self.is_internal_non_builtin_server_label(&binding.label) {
-                output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
-            }
-        }
-
-        for item in tool_call_items {
-            if self.is_client_visible_output_item(&item, user_function_names) {
-                output.push(item);
-            }
-        }
-
-        // Apply the same visibility policy to existing items (e.g. FunctionToolCall
-        // for executed MCP tools emitted by build_tool_response in the mixed
-        // function+MCP early-exit path).
-        for item in existing {
-            if self.is_client_visible_output_item(&item, user_function_names) {
-                output.push(item);
-            }
-        }
-    }
-
-    fn is_client_visible_output_item(
-        &self,
-        item: &openai_protocol::responses::ResponseOutputItem,
+        name: &str,
         user_function_names: &HashSet<String>,
     ) -> bool {
-        use openai_protocol::responses::ResponseOutputItem;
+        self.is_internal_tool(name) && !user_function_names.contains(name)
+    }
 
-        match item {
-            ResponseOutputItem::McpListTools { server_label, .. } => {
-                !self.is_builtin_server_label(server_label)
-                    && !self.is_internal_non_builtin_server_label(server_label)
-            }
-            ResponseOutputItem::McpCall {
-                server_label, name, ..
-            }
-            | ResponseOutputItem::McpApprovalRequest {
-                server_label, name, ..
-            } => !self.should_hide_mcp_call_like_by_label(name, server_label),
-            ResponseOutputItem::FunctionToolCall { name, .. } => {
-                !self.should_hide_function_call_like(name, user_function_names)
-            }
-            ResponseOutputItem::WebSearchCall { .. }
-            | ResponseOutputItem::CodeInterpreterCall { .. }
-            | ResponseOutputItem::FileSearchCall { .. }
-            | ResponseOutputItem::ImageGenerationCall { .. }
-            | ResponseOutputItem::ComputerCall { .. }
-            | ResponseOutputItem::ComputerCallOutput { .. }
-            | ResponseOutputItem::ShellCall { .. }
-            | ResponseOutputItem::ShellCallOutput { .. }
-            | ResponseOutputItem::ApplyPatchCall { .. }
-            | ResponseOutputItem::ApplyPatchCallOutput { .. }
-            | ResponseOutputItem::Message { .. }
-            | ResponseOutputItem::Reasoning { .. }
-            | ResponseOutputItem::Compaction { .. }
-            | ResponseOutputItem::LocalShellCall { .. }
-            | ResponseOutputItem::LocalShellCallOutput { .. } => true,
+    /// True when an `mcp_call`/`mcp_approval_request` item should be hidden.
+    /// `name` is the tool name; `server_label` is the user-facing label.
+    pub fn should_hide_mcp_call_like_by_label(&self, name: &str, server_label: &str) -> bool {
+        let matches_internal_server = self.is_internal_non_builtin_server_label(server_label);
+        if self.has_exposed_tool(name) {
+            self.is_internal_non_builtin_tool(name)
+        } else {
+            matches_internal_server
         }
     }
 
-    /// Returns true when a JSON tool entry should be hidden from client-facing responses.
-    ///
-    /// This is used by OpenAI non-streaming response normalization, where tools are handled
-    /// as `serde_json::Value` payloads instead of typed `ResponseOutputItem`s.
-    pub fn should_hide_tool_json(
-        &self,
-        tool: &serde_json::Value,
-        user_function_names: &HashSet<String>,
-    ) -> bool {
-        match tool.get("type").and_then(|value| value.as_str()) {
-            Some("function") => Self::function_tool_name_json(tool)
-                .is_some_and(|name| self.should_hide_function_call_like(name, user_function_names)),
-            // MCP tool entries are keyed by server metadata, so function-name collision
-            // handling does not apply to this arm.
-            Some("mcp") => tool
-                .get("server_label")
-                .and_then(|value| value.as_str())
-                .is_some_and(|server_label| {
-                    self.is_internal_non_builtin_server_label(server_label)
-                }),
-            _ => false,
-        }
-    }
-
-    /// Returns true when a JSON output item should be hidden from client-facing responses.
-    ///
-    /// This keeps OpenAI non-streaming redaction aligned with session-level policy.
-    pub fn should_hide_output_item_json(
-        &self,
-        item: &serde_json::Value,
-        user_function_names: &HashSet<String>,
-    ) -> bool {
-        match item.get("type").and_then(|value| value.as_str()) {
-            // mcp_list_tools is gateway-synthesized metadata. Hide for builtin servers
-            // (implementation detail) and internal non-builtin servers (privacy).
-            Some("mcp_list_tools") => item
-                .get("server_label")
-                .and_then(|value| value.as_str())
-                .is_some_and(|server_label| {
-                    self.is_builtin_server_label(server_label)
-                        || self.is_internal_non_builtin_server_label(server_label)
-                }),
-            Some("mcp_call") | Some("mcp_approval_request") => {
-                let matches_internal_server = item
-                    .get("server_label")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|server_label| {
-                        self.is_internal_non_builtin_server_label(server_label)
-                    });
-
-                match item.get("name").and_then(|value| value.as_str()) {
-                    Some(name) => {
-                        self.should_hide_mcp_call_like_by_server_flag(name, matches_internal_server)
-                    }
-                    _ => matches_internal_server,
-                }
-            }
-            Some("function_call") | Some("function_tool_call") => item
-                .get("name")
-                .and_then(|value| value.as_str())
-                .is_some_and(|name| self.should_hide_function_call_like(name, user_function_names)),
-            _ => false,
-        }
-    }
-
-    fn should_hide_mcp_call_like_by_label(&self, name: &str, server_label: &str) -> bool {
-        self.should_hide_mcp_call_like_by_server_flag(
-            name,
-            self.is_internal_non_builtin_server_label(server_label),
-        )
-    }
-
-    fn should_hide_mcp_call_like_by_server_flag(
+    /// Variant of `should_hide_mcp_call_like_by_label` that takes the
+    /// pre-resolved internal-server flag, used by JSON-shape filters that
+    /// already inspected the `server_label` field.
+    pub fn should_hide_mcp_call_like_by_server_flag(
         &self,
         name: &str,
         matches_internal_server: bool,
@@ -693,28 +451,6 @@ impl<'a> McpToolSession<'a> {
         } else {
             matches_internal_server
         }
-    }
-
-    fn should_hide_function_call_like(
-        &self,
-        name: &str,
-        user_function_names: &HashSet<String>,
-    ) -> bool {
-        self.is_internal_tool(name) && !user_function_names.contains(name)
-    }
-
-    fn function_tool_name_json(tool: &serde_json::Value) -> Option<&str> {
-        let tool_type = tool.get("type").and_then(|value| value.as_str());
-        if tool_type != Some("function") {
-            return None;
-        }
-        tool.get("name")
-            .and_then(|value| value.as_str())
-            .or_else(|| {
-                tool.get("function")
-                    .and_then(|function| function.get("name"))
-                    .and_then(|value| value.as_str())
-            })
     }
 
     fn build_exposed_function_tools(
@@ -786,7 +522,6 @@ impl<'a> McpToolSession<'a> {
                     server_label,
                     resolved_tool_name,
                     is_builtin_routed,
-                    response_format: entry.response_format.clone(),
                     approval_mode: ApprovalMode::PolicyOnly,
                 },
             );
@@ -867,7 +602,7 @@ impl<'a> McpToolSession<'a> {
         ]
         .into_iter()
         .filter_map(|builtin_type| orchestrator.find_builtin_server(builtin_type))
-        .map(|(server_key, tool_name, _)| QualifiedToolName::new(server_key, tool_name))
+        .map(|(server_key, tool_name)| QualifiedToolName::new(server_key, tool_name))
         .collect()
     }
 
@@ -984,15 +719,6 @@ mod tests {
         assert_eq!(label, DEFAULT_SERVER_LABEL);
     }
 
-    #[test]
-    fn test_tool_response_format_default() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
-
-        let format = session.tool_response_format("nonexistent");
-        assert!(matches!(format, ResponseFormat::Passthrough));
-    }
-
     fn create_test_tool(name: &str) -> McpTool {
         use std::{borrow::Cow, sync::Arc};
 
@@ -1044,19 +770,7 @@ mod tests {
             }],
             "test-request",
         );
-        session.configure_response_tools_approval(&[ResponseTool::Mcp(
-            openai_protocol::responses::McpTool {
-                server_url: Some("http://example.com/mcp".to_string()),
-                authorization: None,
-                headers: None,
-                server_label: "label1".to_string(),
-                server_description: None,
-                require_approval: Some(RequireApproval::Mode(RequireApprovalMode::Always)),
-                allowed_tools: None,
-                connector_id: None,
-                defer_loading: None,
-            },
-        )]);
+        session.set_approval_mode("label1", None, ApprovalMode::Interactive);
 
         let result = session
             .execute_tool_result(ToolExecutionInput {
@@ -1372,7 +1086,6 @@ mod tests {
                     crate::inventory::ArgMapping::new()
                         .with_override("enable_brave", serde_json::json!(false)),
                 ),
-                ResponseFormat::WebSearchCall,
             )
             .expect("alias registration should succeed");
 
@@ -1391,10 +1104,6 @@ mod tests {
         assert_eq!(session.mcp_tools().len(), 1);
         assert_eq!(session.mcp_tools()[0].tool_name(), "web_search");
         assert_eq!(session.resolve_tool_server_label("web_search"), "brave");
-        assert_eq!(
-            session.tool_response_format("web_search"),
-            ResponseFormat::WebSearchCall
-        );
 
         let listed = session.list_tools_for_server("server1");
         assert_eq!(listed.len(), 1);
@@ -1413,13 +1122,7 @@ mod tests {
             ));
 
         orchestrator
-            .register_alias(
-                "web_search",
-                "server1",
-                "brave_web_search",
-                None,
-                ResponseFormat::WebSearchCall,
-            )
+            .register_alias("web_search", "server1", "brave_web_search", None)
             .expect("alias registration should succeed");
 
         let session = McpToolSession::new(
@@ -1513,13 +1216,7 @@ mod tests {
             ));
 
         orchestrator
-            .register_alias(
-                "alias_search",
-                "internal-server",
-                "internal_search",
-                None,
-                ResponseFormat::Passthrough,
-            )
+            .register_alias("alias_search", "internal-server", "internal_search", None)
             .expect("alias registration should succeed");
 
         let session = McpToolSession::new(
@@ -1596,122 +1293,6 @@ mod tests {
             session.is_internal_server_label("shared-label"),
             "shared labels should be internal when any matching binding is internal"
         );
-    }
-
-    /// Verify that `inject_mcp_output_items` produces the exact ordering:
-    ///   1. mcp_list_tools items (one per server, in server order)
-    ///   2. tool_call_items (in their original order)
-    ///   3. existing output items (in their original order)
-    ///
-    /// This is a regression test so future perf refactors cannot
-    /// accidentally change the output ordering contract.
-    #[test]
-    fn test_inject_mcp_output_items_ordering() {
-        use openai_protocol::responses::ResponseOutputItem;
-
-        let orchestrator = McpOrchestrator::new_test();
-
-        // Register one tool per server so build_mcp_list_tools_item has
-        // something to return.
-        orchestrator
-            .tool_inventory()
-            .insert_entry(ToolEntry::from_server_tool(
-                "srv_a",
-                create_test_tool("tool_a"),
-            ));
-        orchestrator
-            .tool_inventory()
-            .insert_entry(ToolEntry::from_server_tool(
-                "srv_b",
-                create_test_tool("tool_b"),
-            ));
-
-        let session = McpToolSession::new(
-            &orchestrator,
-            vec![
-                McpServerBinding {
-                    label: "Server A".to_string(),
-                    server_key: "srv_a".to_string(),
-                    allowed_tools: None,
-                },
-                McpServerBinding {
-                    label: "Server B".to_string(),
-                    server_key: "srv_b".to_string(),
-                    allowed_tools: None,
-                },
-            ],
-            "test-ordering",
-        );
-
-        // Pre-existing output items (e.g. assistant message).
-        let existing_1 = ResponseOutputItem::Message {
-            id: "msg_existing_1".to_string(),
-            role: "assistant".to_string(),
-            content: vec![],
-            status: "completed".to_string(),
-            phase: None,
-        };
-        let existing_2 = ResponseOutputItem::Message {
-            id: "msg_existing_2".to_string(),
-            role: "assistant".to_string(),
-            content: vec![],
-            status: "completed".to_string(),
-            phase: None,
-        };
-
-        // Tool call items injected by the router.
-        let call_1 = ResponseOutputItem::McpCall {
-            id: "call_1".to_string(),
-            status: "completed".to_string(),
-            approval_request_id: None,
-            arguments: "{}".to_string(),
-            error: None,
-            name: "tool_a".to_string(),
-            output: "result_a".to_string(),
-            server_label: "Server A".to_string(),
-        };
-        let call_2 = ResponseOutputItem::McpCall {
-            id: "call_2".to_string(),
-            status: "completed".to_string(),
-            approval_request_id: None,
-            arguments: "{}".to_string(),
-            error: None,
-            name: "tool_b".to_string(),
-            output: "result_b".to_string(),
-            server_label: "Server B".to_string(),
-        };
-
-        let mut output = vec![existing_1, existing_2];
-        let tool_call_items = vec![call_1, call_2];
-
-        session.inject_mcp_output_items(&mut output, tool_call_items);
-
-        // Expected ordering: 2 mcp_list_tools + 2 mcp_call + 2 messages = 6
-        assert_eq!(output.len(), 6, "expected 6 items in output");
-
-        // Serialize to JSON values for easier field-level assertions.
-        let items: Vec<serde_json::Value> = output
-            .iter()
-            .map(|item| serde_json::to_value(item).expect("serialization failed"))
-            .collect();
-
-        // [0..2] mcp_list_tools — one per server, in server order
-        assert_eq!(items[0]["type"], "mcp_list_tools");
-        assert_eq!(items[0]["server_label"], "Server A");
-        assert_eq!(items[1]["type"], "mcp_list_tools");
-        assert_eq!(items[1]["server_label"], "Server B");
-
-        // [2..4] tool call items in original order
-        assert_eq!(items[2]["type"], "mcp_call");
-        assert_eq!(items[2]["id"], "call_1");
-        assert_eq!(items[3]["type"], "mcp_call");
-        assert_eq!(items[3]["id"], "call_2");
-
-        // [4..6] existing items in original order
-        assert_eq!(items[4]["type"], "message");
-        assert_eq!(items[4]["id"], "msg_existing_1");
-        assert_eq!(items[5]["type"], "message");
-        assert_eq!(items[5]["id"], "msg_existing_2");
     }
 
     #[test]

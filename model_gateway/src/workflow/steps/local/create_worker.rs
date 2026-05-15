@@ -298,12 +298,53 @@ fn infer_non_generation_type(labels: &HashMap<String, String>) -> ModelType {
 }
 
 fn normalize_url(url: &str, connection_mode: ConnectionMode) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("grpc://") {
+    if url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("grpc://")
+        || url.starts_with("grpcs://")
+    {
         url.to_string()
     } else {
         match connection_mode {
             ConnectionMode::Http => format!("http://{url}"),
             ConnectionMode::Grpc => format!("grpc://{url}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_url_preserves_existing_schemes() {
+        assert_eq!(
+            normalize_url("http://localhost:30000", ConnectionMode::Http),
+            "http://localhost:30000"
+        );
+        assert_eq!(
+            normalize_url("https://localhost:30000", ConnectionMode::Http),
+            "https://localhost:30000"
+        );
+        assert_eq!(
+            normalize_url("grpc://localhost:30001", ConnectionMode::Grpc),
+            "grpc://localhost:30001"
+        );
+        assert_eq!(
+            normalize_url("grpcs://localhost:30001", ConnectionMode::Grpc),
+            "grpcs://localhost:30001"
+        );
+    }
+
+    #[test]
+    fn normalize_url_adds_scheme_for_bare_urls() {
+        assert_eq!(
+            normalize_url("localhost:30000", ConnectionMode::Http),
+            "http://localhost:30000"
+        );
+        assert_eq!(
+            normalize_url("localhost:30001", ConnectionMode::Grpc),
+            "grpc://localhost:30001"
+        );
     }
 }

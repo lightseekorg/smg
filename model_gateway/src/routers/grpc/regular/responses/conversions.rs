@@ -499,6 +499,7 @@ mod tests {
             stream_options: Some(StreamOptions {
                 include_usage: None,
                 include_obfuscation: Some(false),
+                ..StreamOptions::default()
             }),
             ..Default::default()
         };
@@ -524,6 +525,7 @@ mod tests {
             stream_options: Some(StreamOptions {
                 include_usage: Some(false),
                 include_obfuscation: Some(true),
+                ..StreamOptions::default()
             }),
             ..Default::default()
         };
@@ -542,6 +544,7 @@ mod tests {
             stream_options: Some(StreamOptions {
                 include_usage: Some(true),
                 include_obfuscation: Some(false),
+                ..StreamOptions::default()
             }),
             ..Default::default()
         };

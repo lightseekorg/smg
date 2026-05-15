@@ -13,12 +13,16 @@ use openai_protocol::{
 };
 use serde_json::{from_value, to_string, Value};
 use smg_data_connector::{ResponseId, ResponseStorageError};
-use smg_mcp::{McpToolSession, ResponseFormat};
+use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::routers::{error, grpc::common::responses::ResponsesContext};
+use crate::routers::{
+    common::openai_bridge::{self, FormatRegistry, ResponseFormat},
+    error,
+    grpc::common::responses::ResponsesContext,
+};
 
 /// Record of a single MCP tool call execution
 ///
@@ -177,7 +181,8 @@ pub(super) fn inject_mcp_metadata(
         .map(|record| record.output_item.clone())
         .collect();
 
-    session.inject_client_visible_mcp_output_items(
+    openai_bridge::inject_client_visible_mcp_output_items(
+        session,
         &mut response.output,
         tool_output_items,
         user_function_names,
@@ -325,15 +330,22 @@ pub(super) async fn load_previous_messages(
 pub(super) fn strip_image_generation_from_request_tools(
     request: &mut ResponsesRequest,
     session: &McpToolSession<'_>,
+    format_registry: &FormatRegistry,
 ) {
-    // Check whether any MCP tool in the session carries the
-    // `ImageGenerationCall` response format — this is the authoritative
-    // signal that an MCP server is routed for the hosted
-    // `image_generation` tool in this request.
+    // Strip only when the session exposes the literal `image_generation`
+    // name routed to an `ImageGenerationCall` format. Checking every MCP
+    // tool's format would also fire for unrelated custom tools that happen
+    // to share the image-generation output shape (e.g. a `thumbnailer`),
+    // and would then drop the real hosted `image_generation` tag even
+    // though the session has no dispatcher for it.
     let mcp_has_image_generation = session
-        .mcp_tools()
-        .iter()
-        .any(|entry| matches!(entry.response_format, ResponseFormat::ImageGenerationCall));
+        .qualified_name_for_exposed("image_generation")
+        .is_some_and(|qn| {
+            matches!(
+                format_registry.lookup(&qn),
+                ResponseFormat::ImageGenerationCall
+            )
+        });
 
     if !mcp_has_image_generation {
         return;

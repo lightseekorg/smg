@@ -17,7 +17,6 @@ categories = ["api-bindings"]
 name = "smg_mcp"
 
 [dependencies]
-openai-protocol.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 backoff = { version = "0.4", features = ["tokio", "futures"] }

@@ -63,8 +63,12 @@ pub(crate) async fn serve_harmony_responses(
     let current_request = load_previous_messages(ctx, request).await?;
 
     // Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, mcp_servers) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
+    let (has_mcp_tools, mcp_servers) = ensure_mcp_connection(
+        &ctx.mcp_orchestrator,
+        &ctx.mcp_format_registry,
+        current_request.tools.as_deref(),
+    )
+    .await?;
 
     let response = if has_mcp_tools {
         execute_with_mcp_loop(
@@ -140,7 +144,11 @@ async fn execute_with_mcp_loop(
     // advertises only the MCP-exposed function-tool name (which
     // `has_exposed_tool` actually recognizes for dispatch). See the
     // helper doc comment in `common.rs` for the full rationale.
-    strip_image_generation_from_request_tools(&mut current_request, &session);
+    strip_image_generation_from_request_tools(
+        &mut current_request,
+        &session,
+        &ctx.mcp_format_registry,
+    );
 
     loop {
         iteration_count += 1;
@@ -267,6 +275,7 @@ async fn execute_with_mcp_loop(
                 } else {
                     execute_mcp_tools(
                         &session,
+                        &ctx.mcp_format_registry,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
