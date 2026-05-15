@@ -1,19 +1,22 @@
-//! End-to-end test for the four cross-region local-signal producers.
-//!
-//! Drives a `CrossRegionProducers` orchestrator end-to-end with a real
-//! `WorkerRegistry`: registers workers, exercises lifecycle events, records
-//! latency observations, and asserts the resulting envelopes show up in the
-//! sync service's producer log with the right shape, version ordering, and
-//! tombstone semantics. The HTTP pull endpoint that serves the log to peers
-//! is out of scope here (Phase 4 wire-side).
+//! End-to-end test for the four cross-region local-signal producers, now
+//! backed by an in-process mesh `CrdtNamespace`. Drives a
+//! `CrossRegionProducers` orchestrator end-to-end with a real
+//! `WorkerRegistry`, exercises lifecycle events, records latency
+//! observations, and asserts the resulting envelopes show up in the mesh
+//! namespace with the right shape, version monotonicity, and tombstone
+//! semantics.
 
 use std::{sync::Arc, time::Duration};
 
 use openai_protocol::{model_card::ModelCard, worker::WorkerStatus};
 use smg::{
-    cross_region::{CrossRegionProducers, ProducerCadences, SignalKey, SignalKind},
+    cross_region::{
+        CrossRegionProducers, ProducerCadences, SignalEnvelope, SignalKey, SignalKind,
+        CROSS_REGION_NAMESPACE_PREFIX,
+    },
     worker::{event::WorkerEvent, BasicWorkerBuilder, Worker, WorkerRegistry},
 };
+use smg_mesh::{CrdtNamespace, MergeStrategy, MeshKV};
 
 const REGION: &str = "us-ashburn-1";
 const SERVER: &str = "smg-router-a";
@@ -35,14 +38,39 @@ fn build_worker(url: &str, model: &str, status: WorkerStatus, load: usize) -> Ar
     worker
 }
 
+#[expect(clippy::expect_used, reason = "test helper — fixture is known-valid")]
+fn make_producers() -> CrossRegionProducers {
+    let mesh_kv = Arc::new(MeshKV::new(SERVER.to_string()));
+    let namespace =
+        mesh_kv.configure_crdt_prefix(CROSS_REGION_NAMESPACE_PREFIX, MergeStrategy::LastWriterWins);
+    CrossRegionProducers::new(REGION.to_string(), SERVER.to_string(), namespace)
+        .expect("producers should construct")
+}
+
+/// Decode every live envelope currently published in the producer's mesh
+/// namespace. Tombstoned keys are absent (mesh `get` returns `None`).
+#[expect(
+    clippy::expect_used,
+    reason = "test helper — every byte we read was written by us via serde_json"
+)]
+fn live_envelopes(ns: &CrdtNamespace) -> Vec<SignalEnvelope<SignalKind>> {
+    let mut out = Vec::new();
+    for key in ns.keys("") {
+        if let Some(bytes) = ns.get(&key) {
+            let envelope: SignalEnvelope<SignalKind> = serde_json::from_slice(&bytes)
+                .expect("namespace value must round-trip through serde_json");
+            out.push(envelope);
+        }
+    }
+    out.sort_by_key(|env| env.key.as_path());
+    out
+}
+
 #[test]
 fn producers_publish_per_replica_keys_for_all_four_signals() {
-    let producers =
-        CrossRegionProducers::new(REGION.to_string(), SERVER.to_string()).expect("construct");
+    let producers = make_producers();
     let registry = make_registry();
 
-    // Local worker via the registry (drives worker-health Registered event
-    // if we use a subscriber — here we drive adapters directly).
     let worker = build_worker(
         "http://w1:8000",
         "cohere.command-r-plus",
@@ -73,8 +101,8 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
         .drain_and_publish()
         .expect("client-latency drain");
 
-    let (entries, cursor) = producers.sync.local_log_snapshot();
-    assert!(cursor > 0, "log cursor advanced");
+    let namespace = producers.sync.namespace();
+    let entries = live_envelopes(&namespace);
     assert_eq!(entries.len(), 4, "one envelope per signal kind");
 
     let mut kinds: Vec<&str> = entries
@@ -97,8 +125,6 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
         ]
     );
 
-    // Each envelope's actor is this replica's server_name; key segments
-    // match the local region + server_name + (worker_id where applicable).
     for env in &entries {
         assert_eq!(
             env.actor, SERVER,
@@ -118,7 +144,6 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
         );
     }
 
-    // Worker-load and worker-health both carry the same worker_id as the key.
     for env in &entries {
         match (&env.key, env.signal.as_ref()) {
             (
@@ -146,8 +171,7 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
 
 #[test]
 fn lifecycle_event_publishes_then_tombstones() {
-    let producers =
-        CrossRegionProducers::new(REGION.to_string(), SERVER.to_string()).expect("construct");
+    let producers = make_producers();
     let registry = make_registry();
 
     let worker = build_worker(
@@ -167,6 +191,11 @@ fn lifecycle_event_publishes_then_tombstones() {
             worker: worker.clone(),
         })
         .expect("registered");
+    let namespace = producers.sync.namespace();
+    let after_register = live_envelopes(&namespace);
+    assert_eq!(after_register.len(), 1);
+    let v_register = after_register[0].version;
+
     worker.set_status(WorkerStatus::Ready);
     producers
         .worker_health
@@ -177,6 +206,13 @@ fn lifecycle_event_publishes_then_tombstones() {
             new_status: WorkerStatus::Ready,
         })
         .expect("status changed");
+    let after_change = live_envelopes(&namespace);
+    assert_eq!(after_change.len(), 1, "same key collapses to one envelope");
+    assert!(
+        after_change[0].version > v_register,
+        "version monotonically increases on status change"
+    );
+
     producers
         .worker_health
         .handle_event(&WorkerEvent::Removed {
@@ -185,37 +221,21 @@ fn lifecycle_event_publishes_then_tombstones() {
         })
         .expect("removed");
 
-    let (entries, _) = producers.sync.local_log_snapshot();
-    assert_eq!(entries.len(), 3);
-
-    // Versions strictly increasing — every later envelope outranks every earlier.
-    for window in entries.windows(2) {
-        assert!(
-            window[1].version > window[0].version,
-            "envelope versions must be strictly increasing: {:?}",
-            entries.iter().map(|e| e.version).collect::<Vec<_>>(),
-        );
-    }
-
-    // Last envelope is a tombstone with no signal body and stale_after_ms = 0.
-    let tombstone = entries.last().expect("at least one entry");
-    assert!(tombstone.removed);
-    assert!(tombstone.signal.is_none());
-    assert_eq!(tombstone.stale_after_ms, 0);
-
-    // Tombstones remove the materialized worker immediately.
+    // Tombstones drop the key from the namespace and from materialized state.
+    assert!(
+        live_envelopes(&namespace).is_empty(),
+        "tombstone removes the key from the namespace"
+    );
     let state = producers.sync.state();
     let state = state.read();
-    let health = state.worker_health_replica(REGION, worker_id.as_str(), SERVER);
-    assert!(health.is_none());
+    assert!(state
+        .worker_health_replica(REGION, worker_id.as_str(), SERVER)
+        .is_none());
 }
 
 #[test]
-fn cursor_delta_streams_envelopes_in_order() {
-    let producers =
-        CrossRegionProducers::new(REGION.to_string(), SERVER.to_string()).expect("construct");
-
-    let (_initial, c0) = producers.sync.local_log_snapshot();
+fn version_strictly_increases_per_key_across_publishes() {
+    let producers = make_producers();
 
     producers.region_readiness.publish_ready(true).unwrap();
     producers
@@ -223,62 +243,62 @@ fn cursor_delta_streams_envelopes_in_order() {
         .publish_for("us-chicago-1", 30, 80)
         .unwrap();
 
-    let (delta, c1) = producers.sync.local_log_delta(c0).expect("cursor is fresh");
-    assert_eq!(delta.len(), 2);
-    assert!(c1 > c0);
+    let namespace = producers.sync.namespace();
+    let after_first = live_envelopes(&namespace);
+    assert_eq!(after_first.len(), 2);
 
-    // Subsequent publish — delta from c1 returns just the new one.
+    // Same key (us-chicago-1 latency), new sample → version must rise.
+    let latency_v1 = after_first
+        .iter()
+        .find(|e| matches!(e.signal, Some(SignalKind::ClientLatency(_))))
+        .expect("latency envelope present")
+        .version;
+
     producers
         .client_latency
-        .publish_for("us-phoenix-1", 5, 12)
+        .publish_for("us-chicago-1", 32, 84)
         .unwrap();
-    let (delta2, c2) = producers.sync.local_log_delta(c1).expect("cursor ok");
-    assert_eq!(delta2.len(), 1);
-    assert!(c2 > c1);
+    let after_second = live_envelopes(&namespace);
+    let latency_v2 = after_second
+        .iter()
+        .find(|e| matches!(e.signal, Some(SignalKind::ClientLatency(_))))
+        .expect("latency envelope present")
+        .version;
+    assert!(latency_v2 > latency_v1);
 
-    // Wrong region in the key should be rejected, so the log doesn't grow.
-    let len_before = producers.sync.local_log_snapshot().0.len();
-    let err = producers
-        .region_readiness
-        .publish_ready(true)
-        .and_then(|()| {
-            // Build a deliberately wrong-region client-latency key by going
-            // around the adapter, to confirm the sync service rejects.
-            producers.sync.publish_signal(
-                SignalKey::ClientLatency {
-                    client_region: "wrong-region".to_string(),
-                    target_region: "us-chicago-1".to_string(),
-                    server_name: SERVER.to_string(),
-                },
-                SignalKind::ClientLatency(smg::cross_region::ClientLatencySignal {
-                    client_region: "wrong-region".to_string(),
-                    target_region: "us-chicago-1".to_string(),
-                    server_name: SERVER.to_string(),
-                    p50_latency_ms: 30,
-                    p95_latency_ms: 80,
-                }),
-                30_000,
-            )
-        });
+    // Wrong region in the key should be rejected by the sync service and
+    // never reach the namespace.
+    let err = producers.sync.publish_signal(
+        SignalKey::ClientLatency {
+            client_region: "wrong-region".to_string(),
+            target_region: "us-chicago-1".to_string(),
+            server_name: SERVER.to_string(),
+        },
+        SignalKind::ClientLatency(smg::cross_region::ClientLatencySignal {
+            client_region: "wrong-region".to_string(),
+            target_region: "us-chicago-1".to_string(),
+            server_name: SERVER.to_string(),
+            p50_latency_ms: 30,
+            p95_latency_ms: 80,
+        }),
+        30_000,
+    );
     err.expect_err("wrong region must be rejected at the sync service");
-    // The legitimate readiness publish above did succeed, so log grew by 1.
-    assert_eq!(producers.sync.local_log_snapshot().0.len(), len_before + 1);
+    // Namespace footprint unchanged (still readiness + one latency key).
+    assert_eq!(live_envelopes(&namespace).len(), 2);
 }
 
 #[tokio::test]
 async fn orchestrator_start_publishes_via_periodic_tasks() {
-    // Use tight cadences so the test doesn't drag.
     let cadences = ProducerCadences {
         readiness_reconcile_interval: Duration::from_millis(50),
         worker_health_reconcile_interval: Duration::from_millis(50),
         worker_load_refresh_interval: Duration::from_millis(50),
         client_latency_publish_interval: Duration::from_millis(50),
     };
-    let producers =
-        CrossRegionProducers::new(REGION.to_string(), SERVER.to_string()).expect("construct");
+    let producers = make_producers();
     let registry = make_registry();
 
-    // Register one worker before starting the tasks so reconcile sees it.
     let worker = build_worker(
         "http://w1:8000",
         "cohere.command-r-plus",
@@ -287,21 +307,15 @@ async fn orchestrator_start_publishes_via_periodic_tasks() {
     );
     registry.register(worker).expect("register");
 
-    // Record some latency so the client-latency drain has data to publish.
     producers.client_latency.record_latency("us-chicago-1", 25);
 
     let _handles = producers.start(registry.clone(), cadences);
 
-    // Let the periodic loops tick at least twice each (cadence is 50ms; wait
-    // 250ms for safety against scheduling jitter).
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let (entries, _) = producers.sync.local_log_snapshot();
+    let namespace = producers.sync.namespace();
+    let entries = live_envelopes(&namespace);
 
-    // We should see at least one envelope per periodic-driven signal kind.
-    // (worker-health event loop also picks up the Registered broadcast that
-    // was emitted before the loop started, but BroadcastStream is lossy on
-    // missed events; the reconcile loop covers the gap.)
     let has_readiness = entries
         .iter()
         .any(|e| matches!(e.signal, Some(SignalKind::SmgReadiness(_))));
@@ -329,14 +343,9 @@ async fn orchestrator_start_publishes_via_periodic_tasks() {
 
 #[tokio::test]
 async fn orchestrator_publishes_worker_health_on_registry_event() {
-    // Drive the event-driven path explicitly: subscribe-event loop is started,
-    // then a worker registers, and we expect a worker-health envelope.
-    let producers =
-        CrossRegionProducers::new(REGION.to_string(), SERVER.to_string()).expect("construct");
+    let producers = make_producers();
     let registry = make_registry();
 
-    // Start with no workers so the reconcile loop on its own would publish
-    // nothing — only the event-driven path produces the envelope.
     let cadences = ProducerCadences {
         readiness_reconcile_interval: Duration::from_secs(3600),
         worker_health_reconcile_interval: Duration::from_secs(3600),
@@ -345,7 +354,6 @@ async fn orchestrator_publishes_worker_health_on_registry_event() {
     };
     let _handles = producers.start(registry.clone(), cadences);
 
-    // Let the event subscriber attach.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let worker = build_worker(
@@ -356,10 +364,10 @@ async fn orchestrator_publishes_worker_health_on_registry_event() {
     );
     registry.register(worker).expect("register");
 
-    // Let the event ride through the broadcast channel into the adapter.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (entries, _) = producers.sync.local_log_snapshot();
+    let namespace = producers.sync.namespace();
+    let entries = live_envelopes(&namespace);
     let worker_health_count = entries
         .iter()
         .filter(|e| matches!(e.signal, Some(SignalKind::WorkerHealth(_))))

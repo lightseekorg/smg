@@ -139,27 +139,25 @@ impl Default for CrossRegionRequestPlaneConfig {
     }
 }
 
-/// Cross-region signal sync listener and freshness tuning.
+/// Cross-region signal sync freshness tuning. The sync plane piggy-backs on
+/// the shared mesh gossip transport; tombstone retention and replay handling
+/// are owned by mesh, so there is no separate listener port or full-resync
+/// cadence to configure here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CrossRegionSyncPlaneConfig {
     pub enabled: bool,
-    pub listen_port: u16,
-    pub full_resync_interval_seconds: u64,
+    /// Consumer-side freshness window. Used by `/get_loads` projection to
+    /// drop replica signals older than this when computing remote-region
+    /// rankings; matches the `stale_after_ms` envelopes are stamped with.
     pub signal_stale_after_seconds: u64,
-    pub tombstone_retention_seconds: u64,
-    pub dead_replica_retention_seconds: u64,
 }
 
 impl Default for CrossRegionSyncPlaneConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            listen_port: 9443,
-            full_resync_interval_seconds: 300,
             signal_stale_after_seconds: 30,
-            tombstone_retention_seconds: 24 * 60 * 60,
-            dead_replica_retention_seconds: 6 * 60 * 60,
         }
     }
 }
@@ -1017,11 +1015,7 @@ mod tests {
         );
         assert!(config.request_plane.local_first_tie_break);
         assert!(config.sync_plane.enabled);
-        assert_eq!(config.sync_plane.listen_port, 9443);
-        assert_eq!(config.sync_plane.full_resync_interval_seconds, 300);
         assert_eq!(config.sync_plane.signal_stale_after_seconds, 30);
-        assert_eq!(config.sync_plane.tombstone_retention_seconds, 86_400);
-        assert_eq!(config.sync_plane.dead_replica_retention_seconds, 21_600);
         assert!(config.peers.is_empty());
     }
 

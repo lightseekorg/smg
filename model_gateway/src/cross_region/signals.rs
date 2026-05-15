@@ -89,6 +89,39 @@ impl SignalKey {
             | Self::ClientLatency { server_name, .. } => server_name,
         }
     }
+
+    /// Inverse of [`as_path`]. The mesh subscriber receives tombstone
+    /// notifications as `(key, None)` events from `CrdtNamespace`; this
+    /// parser maps those back to a typed key so the materialized state can
+    /// be updated. Returns `None` for paths that don't match any known
+    /// signal-kind prefix or that have the wrong number of segments.
+    pub fn from_path(path: &str) -> Option<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        match parts.as_slice() {
+            ["smg-readiness", region_id, server_name] => Some(Self::SmgReadiness {
+                region_id: (*region_id).to_string(),
+                server_name: (*server_name).to_string(),
+            }),
+            ["worker-health", region_id, worker_id, server_name] => Some(Self::WorkerHealth {
+                region_id: (*region_id).to_string(),
+                worker_id: (*worker_id).to_string(),
+                server_name: (*server_name).to_string(),
+            }),
+            ["worker-load", region_id, worker_id, server_name] => Some(Self::WorkerLoad {
+                region_id: (*region_id).to_string(),
+                worker_id: (*worker_id).to_string(),
+                server_name: (*server_name).to_string(),
+            }),
+            ["client-latency", client_region, target_region, server_name] => {
+                Some(Self::ClientLatency {
+                    client_region: (*client_region).to_string(),
+                    target_region: (*target_region).to_string(),
+                    server_name: (*server_name).to_string(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Generic signal wrapper that carries versioning, identity, and freshness

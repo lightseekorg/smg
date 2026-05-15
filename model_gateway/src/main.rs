@@ -733,25 +733,10 @@ struct CliArgs {
     )]
     cross_region_sync_plane_enabled: Option<bool>,
 
-    /// Private NLB signal-sync listener port.
-    #[arg(long, help_heading = "Cross-Region Smart Router")]
-    cross_region_sync_plane_listen_port: Option<u16>,
-
-    /// Full signal resync interval in seconds.
-    #[arg(long, help_heading = "Cross-Region Smart Router")]
-    cross_region_sync_plane_full_resync_interval_seconds: Option<u64>,
-
-    /// Remote signal stale-after interval in seconds.
+    /// Consumer-side signal freshness window in seconds. Replica signals
+    /// older than this are excluded from cross-region rankings.
     #[arg(long, help_heading = "Cross-Region Smart Router")]
     cross_region_sync_plane_signal_stale_after_seconds: Option<u64>,
-
-    /// Tombstone retention interval in seconds for removed cross-region signals.
-    #[arg(long, help_heading = "Cross-Region Smart Router")]
-    cross_region_sync_plane_tombstone_retention_seconds: Option<u64>,
-
-    /// Live dead-replica retention interval in seconds for unrefreshed signals.
-    #[arg(long, help_heading = "Cross-Region Smart Router")]
-    cross_region_sync_plane_dead_replica_retention_seconds: Option<u64>,
 
     /// This replica's identifier for cross-region signals (the `actor` stamped
     /// on every published envelope and the trailing segment of per-replica
@@ -1060,21 +1045,9 @@ impl CliArgs {
                 enabled: self
                     .cross_region_sync_plane_enabled
                     .unwrap_or(sync_plane_defaults.enabled),
-                listen_port: self
-                    .cross_region_sync_plane_listen_port
-                    .unwrap_or(sync_plane_defaults.listen_port),
-                full_resync_interval_seconds: self
-                    .cross_region_sync_plane_full_resync_interval_seconds
-                    .unwrap_or(sync_plane_defaults.full_resync_interval_seconds),
                 signal_stale_after_seconds: self
                     .cross_region_sync_plane_signal_stale_after_seconds
                     .unwrap_or(sync_plane_defaults.signal_stale_after_seconds),
-                tombstone_retention_seconds: self
-                    .cross_region_sync_plane_tombstone_retention_seconds
-                    .unwrap_or(sync_plane_defaults.tombstone_retention_seconds),
-                dead_replica_retention_seconds: self
-                    .cross_region_sync_plane_dead_replica_retention_seconds
-                    .unwrap_or(sync_plane_defaults.dead_replica_retention_seconds),
             },
             peers: self.cross_region_peers.clone(),
             mtls: CrossRegionMtlsConfig {
@@ -1976,16 +1949,8 @@ mod tests {
             "automatic",
             "--cross-region-request-plane-local-first-tie-break",
             "false",
-            "--cross-region-sync-plane-listen-port",
-            "19443",
-            "--cross-region-sync-plane-full-resync-interval-seconds",
-            "600",
             "--cross-region-sync-plane-signal-stale-after-seconds",
             "45",
-            "--cross-region-sync-plane-tombstone-retention-seconds",
-            "90000",
-            "--cross-region-sync-plane-dead-replica-retention-seconds",
-            "23000",
             "--cross-region-peer",
             "region_id=us-chicago-1,request_url=https://smg-region-agent.us-chicago-1.internal:8443,sync_url=https://smg-region-agent.us-chicago-1.internal:9443,realm=oc1,environment=prod",
             "--cross-region-mtls-ca-cert-path",
@@ -2025,34 +1990,12 @@ mod tests {
                 .request_plane
                 .local_first_tie_break
         );
-        assert_eq!(router_config.cross_region.sync_plane.listen_port, 19443);
-        assert_eq!(
-            router_config
-                .cross_region
-                .sync_plane
-                .full_resync_interval_seconds,
-            600
-        );
         assert_eq!(
             router_config
                 .cross_region
                 .sync_plane
                 .signal_stale_after_seconds,
             45
-        );
-        assert_eq!(
-            router_config
-                .cross_region
-                .sync_plane
-                .tombstone_retention_seconds,
-            90_000
-        );
-        assert_eq!(
-            router_config
-                .cross_region
-                .sync_plane
-                .dead_replica_retention_seconds,
-            23_000
         );
         assert_eq!(router_config.cross_region.peers.len(), 1);
 

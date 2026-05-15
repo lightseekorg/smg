@@ -2130,57 +2130,39 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .as_ref()
         .map(|c| c.advertise_addr.port());
 
-    // Start the cross-region signal sync producer orchestrator. Retention
-    // windows flow through `CrossRegionContext::config.sync_retention()` so
-    // operator-facing CLI knobs take effect end-to-end. The returned bundle
-    // owns the spawned producer tasks (drop = abort) and is held in AppState
-    // for the lifetime of the server. When `sync_plane.enabled`, the same
-    // boot path also spawns a per-peer pull client over mTLS so this region
-    // begins consuming peer signals into its materialized state.
+    // Start the cross-region signal sync runtime. Publishes producer signals
+    // through the shared mesh `CrdtNamespace` (`cross_region:` prefix) and
+    // spawns the subscriber that applies inbound envelopes into the
+    // materialized `CrossRegionState`. Requires an active mesh handler — when
+    // the gateway is started without mesh, cross-region sync is a no-op even
+    // if configured.
     let cross_region_sync =
         match CrossRegionContext::from_router_config(&config.router_config.cross_region) {
-            Ok(Some(context)) => {
-                let runtime =
-                    CrossRegionSyncRuntime::start(&context, app_context.worker_registry.clone())
-                        .map_err(|error| {
-                            format!("Failed to start cross-region sync runtime: {error}")
-                        })?;
-                info!(
-                    region = %context.config.region_id,
-                    server = %context.config.server_name,
-                    "Cross-region signal sync producer orchestrator started",
-                );
-                let runtime = if config.router_config.cross_region.sync_plane.enabled {
-                    let mtls_manager =
-                        cross_region_mtls_manager(&config.router_config).map_err(|error| {
-                            format!("Invalid cross-region mTLS config for pull client: {error}")
-                        })?;
-                    let client_tls_config =
-                        mtls_manager.load_client_config().await.map_err(|error| {
-                            format!("Failed to load cross-region mTLS client config: {error}")
-                        })?;
-                    let http_client = reqwest::Client::builder()
-                        .use_preconfigured_tls((*client_tls_config).clone())
-                        .build()
-                        .map_err(|error| {
-                            format!("Failed to build cross-region sync pull HTTP client: {error}")
-                        })?;
-                    let orchestrator = crate::cross_region::PullClientOrchestrator::start(
-                        runtime.sync(),
-                        runtime.peers(),
-                        http_client,
-                        crate::cross_region::PullClientConfig::default(),
+            Ok(Some(context)) => match mesh_handler.as_ref() {
+                Some(handler) => {
+                    let runtime = CrossRegionSyncRuntime::start_with_mesh_kv(
+                        &context,
+                        handler.mesh_kv(),
+                        app_context.worker_registry.clone(),
                     )
                     .map_err(|error| {
-                        format!("Failed to start cross-region sync pull client: {error}")
+                        format!("Failed to start cross-region sync runtime: {error}")
                     })?;
-                    info!("Cross-region signal sync pull client orchestrator started");
-                    runtime.with_pull_client(orchestrator)
-                } else {
-                    runtime
-                };
-                Some(Arc::new(runtime))
-            }
+                    info!(
+                        region = %context.config.region_id,
+                        server = %context.config.server_name,
+                        "Cross-region signal sync runtime started over mesh",
+                    );
+                    Some(Arc::new(runtime))
+                }
+                None => {
+                    warn!(
+                        region = %context.config.region_id,
+                        "Cross-region sync configured but mesh server is not running; skipping",
+                    );
+                    None
+                }
+            },
             Ok(None) => None,
             Err(error) => {
                 return Err(format!("Invalid cross-region runtime config: {error}").into());
@@ -2269,10 +2251,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         None
     };
 
-    // Clone the cross-region sync runtime Arc before app_state is moved into
-    // build_app — the sync-plane listener block below reads it.
-    let cross_region_sync_for_listener = app_state.cross_region_sync.clone();
-
     let app = build_app(
         app_state,
         auth_config,
@@ -2343,71 +2321,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         None
     };
 
-    // Cross-region signal sync pull-server listener. Mirrors the
-    // request-forwarding listener pattern: same mTLS manager (certs are
-    // shared across both planes), same SPIFFE-identity acceptor (the pull
-    // handler reads `AuthenticatedPeerIdentity` as an axum Extension), but
-    // mounted on `sync_plane.listen_port` with `pull_router(...)`.
-    let sync_pull_handle = if let Some(sync_runtime) = cross_region_sync_for_listener.as_ref() {
-        if config.router_config.cross_region.enabled
-            && config.router_config.cross_region.sync_plane.enabled
-        {
-            let sync_mtls_manager = cross_region_mtls_manager(&config.router_config)
-                .map_err(|error| format!("Invalid sync-plane mTLS config: {error}"))?;
-            let sync_bind_addr = format!(
-                "{}:{}",
-                config.host, config.router_config.cross_region.sync_plane.listen_port
-            );
-            let sync_addr: std::net::SocketAddr = sync_bind_addr
-                .parse()
-                .map_err(|e| format!("Invalid sync-plane address: {e}"))?;
-            let listener = std::net::TcpListener::bind(sync_addr)
-                .map_err(|e| format!("Failed to bind sync-plane listener: {e}"))?;
-            listener
-                .set_nonblocking(true)
-                .map_err(|e| format!("Failed to set sync-plane listener nonblocking: {e}"))?;
-            let sync_handle = axum_server::Handle::new();
-            let server_handle = sync_handle.clone();
-            let mtls_server_config =
-                sync_mtls_manager
-                    .load_server_config()
-                    .await
-                    .map_err(|error| {
-                        format!("Failed to load sync-plane mTLS server config: {error}")
-                    })?;
-            let sync_acceptor =
-                ForwardingPeerIdentityAcceptor::new(RustlsConfig::from_config(mtls_server_config));
-            let pull_state = crate::cross_region::PullServerState::new(
-                sync_runtime.sync(),
-                sync_runtime.peers().clone(),
-            );
-            let sync_app = crate::cross_region::pull_router(pull_state);
-            let sync_server = axum_server::from_tcp(listener)
-                .map_err(|e| format!("Failed to create sync-plane listener: {e}"))?
-                .acceptor(sync_acceptor)
-                .handle(server_handle)
-                .serve(sync_app.into_make_service_with_connect_info::<std::net::SocketAddr>());
-            info!(
-                "Starting cross-region signal sync pull listener on {}",
-                sync_bind_addr
-            );
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sync-plane listener runs for the lifetime of the server"
-            )]
-            spawn(async move {
-                if let Err(error) = sync_server.await {
-                    error!("Cross-region signal sync listener failed: {}", error);
-                }
-            });
-            Some(sync_handle)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     let inflight_tracker = app_context.inflight_tracker.clone();
     let drain_timeout = Duration::from_secs(config.shutdown_grace_period_secs);
     #[expect(
@@ -2425,9 +2338,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         inflight_tracker.begin_drain();
         handle_clone.graceful_shutdown(Some(drain_timeout));
         if let Some(handle) = forwarding_handle {
-            handle.graceful_shutdown(Some(drain_timeout));
-        }
-        if let Some(handle) = sync_pull_handle {
             handle.graceful_shutdown(Some(drain_timeout));
         }
 

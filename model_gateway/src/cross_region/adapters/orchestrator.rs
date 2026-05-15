@@ -9,12 +9,13 @@
 
 use std::{sync::Arc, time::Duration};
 
+use smg_mesh::CrdtNamespace;
 use tokio::task::JoinHandle;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use super::{ClientLatencyAdapter, RegionReadinessAdapter, WorkerHealthAdapter, WorkerLoadAdapter};
 use crate::{
-    cross_region::{CrossRegionResult, CrossRegionSyncService, SyncRetention},
+    cross_region::{CrossRegionResult, CrossRegionSyncService},
     worker::WorkerRegistry,
 };
 
@@ -51,31 +52,25 @@ pub struct CrossRegionProducers {
 }
 
 impl CrossRegionProducers {
-    /// Build adapters wrapping a fresh sync service. The sync service is
-    /// constructed inside this call so the gateway only ever passes
-    /// `region_id` / `server_name` in.
-    pub fn new(region_id: String, server_name: String) -> CrossRegionResult<Self> {
-        let sync = Arc::new(CrossRegionSyncService::new(region_id, server_name)?);
-        Ok(Self::from_sync(sync))
-    }
-
-    /// Build adapters wrapping a fresh sync service with explicit log
-    /// retention windows from runtime config.
-    pub fn new_with_retention(
+    /// Build adapters wrapping a fresh sync service that publishes through
+    /// the supplied mesh namespace. The boot path is responsible for
+    /// registering the namespace on the shared `MeshKV` and passing the
+    /// handle in.
+    pub fn new(
         region_id: String,
         server_name: String,
-        retention: SyncRetention,
+        namespace: Arc<CrdtNamespace>,
     ) -> CrossRegionResult<Self> {
-        let sync = Arc::new(CrossRegionSyncService::new_with_retention(
+        let sync = Arc::new(CrossRegionSyncService::new(
             region_id,
             server_name,
-            retention,
+            namespace,
         )?);
         Ok(Self::from_sync(sync))
     }
 
     /// Variant that takes a pre-built sync service. Useful for tests that
-    /// want custom retention windows.
+    /// share a sync service across multiple harness components.
     pub fn from_sync(sync: Arc<CrossRegionSyncService>) -> Self {
         Self {
             region_readiness: RegionReadinessAdapter::new(sync.clone()),

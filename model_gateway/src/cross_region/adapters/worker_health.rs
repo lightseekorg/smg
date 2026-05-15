@@ -116,14 +116,13 @@ mod tests {
     use openai_protocol::model_card::ModelCard;
 
     use super::*;
-    use crate::worker::{registry::WorkerId, BasicWorkerBuilder};
-
-    fn service() -> Arc<CrossRegionSyncService> {
-        Arc::new(
-            CrossRegionSyncService::new("us-ashburn-1".to_string(), "smg-router-a".to_string())
-                .expect("service constructs"),
-        )
-    }
+    use crate::{
+        cross_region::{
+            adapters::test_support::{live_envelopes, service, single_live},
+            sync::mesh_path,
+        },
+        worker::{registry::WorkerId, BasicWorkerBuilder},
+    };
 
     fn make_registry_with_worker(url: &str, status: WorkerStatus) -> (Arc<WorkerRegistry>, String) {
         let registry = Arc::new(WorkerRegistry::new());
@@ -150,9 +149,8 @@ mod tests {
             .publish_for("worker-uuid-1", WorkerStatus::Ready)
             .expect("publish ok");
 
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries.len(), 1);
-        match &entries[0].key {
+        let env = single_live(&svc);
+        match &env.key {
             SignalKey::WorkerHealth {
                 region_id,
                 worker_id,
@@ -162,13 +160,10 @@ mod tests {
                 assert_eq!(worker_id, "worker-uuid-1");
                 assert_eq!(server_name, "smg-router-a");
             }
-            _ => panic!("unexpected key shape: {:?}", entries[0].key),
+            _ => panic!("unexpected key shape: {:?}", env.key),
         }
-        assert_eq!(
-            entries[0].stale_after_ms,
-            DEFAULT_WORKER_HEALTH_STALE_AFTER_MS
-        );
-        assert!(!entries[0].removed);
+        assert_eq!(env.stale_after_ms, DEFAULT_WORKER_HEALTH_STALE_AFTER_MS);
+        assert!(!env.removed);
     }
 
     #[test]
@@ -187,9 +182,8 @@ mod tests {
         };
         adapter.handle_event(&event).expect("handle ok");
 
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries.len(), 1);
-        match &entries[0].signal {
+        let env = single_live(&svc);
+        match env.signal {
             Some(SignalKind::WorkerHealth(s)) => {
                 assert_eq!(s.status, WorkerStatus::Ready);
                 assert_eq!(s.worker_id, worker_id);
@@ -208,16 +202,27 @@ mod tests {
             .get(&WorkerId::from_string(worker_id.clone()))
             .expect("registered");
 
+        // Seed a live envelope so the tombstone has something to delete.
+        adapter
+            .publish_for(&worker_id, WorkerStatus::Ready)
+            .expect("publish ok");
+        assert_eq!(live_envelopes(&svc).len(), 1);
+
         let event = WorkerEvent::Removed {
             worker_id: WorkerId::from_string(worker_id.clone()),
             worker,
         };
         adapter.handle_event(&event).expect("handle ok");
 
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries.len(), 1);
-        assert!(entries[0].removed);
-        assert!(entries[0].signal.is_none());
+        // Tombstones drop the key from the mesh namespace; the materialized
+        // state no longer reports the replica.
+        assert!(live_envelopes(&svc).is_empty());
+        let key = SignalKey::WorkerHealth {
+            region_id: "us-ashburn-1".to_string(),
+            worker_id: worker_id.clone(),
+            server_name: "smg-router-a".to_string(),
+        };
+        assert!(svc.namespace().get(&mesh_path(&key)).is_none());
     }
 
     #[test]
@@ -240,8 +245,8 @@ mod tests {
         };
         adapter.handle_event(&event).unwrap();
 
-        let (entries, _) = svc.local_log_snapshot();
-        match &entries[0].signal {
+        let env = single_live(&svc);
+        match env.signal {
             Some(SignalKind::WorkerHealth(s)) => assert_eq!(s.status, WorkerStatus::Ready),
             other => panic!("unexpected signal: {other:?}"),
         }
@@ -264,8 +269,8 @@ mod tests {
 
         adapter.reconcile(&registry);
 
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries.len(), 3);
-        assert!(entries.iter().all(|e| !e.removed));
+        let envelopes = live_envelopes(&svc);
+        assert_eq!(envelopes.len(), 3);
+        assert!(envelopes.iter().all(|e| !e.removed));
     }
 }

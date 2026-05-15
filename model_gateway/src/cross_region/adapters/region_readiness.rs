@@ -67,13 +67,7 @@ impl RegionReadinessAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn service() -> Arc<CrossRegionSyncService> {
-        Arc::new(
-            CrossRegionSyncService::new("us-ashburn-1".to_string(), "smg-router-a".to_string())
-                .expect("service constructs"),
-        )
-    }
+    use crate::cross_region::adapters::test_support::{live_envelopes, service, single_live};
 
     #[test]
     fn publish_ready_emits_per_replica_envelope() {
@@ -81,9 +75,7 @@ mod tests {
         let adapter = RegionReadinessAdapter::new(svc.clone());
 
         adapter.publish_ready(true).expect("publish ok");
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries.len(), 1);
-        let env = &entries[0];
+        let env = single_live(&svc);
         assert!(matches!(env.signal, Some(SignalKind::SmgReadiness(_))));
         match &env.key {
             SignalKey::SmgReadiness {
@@ -105,18 +97,17 @@ mod tests {
         let adapter = RegionReadinessAdapter::new(svc.clone());
 
         adapter.publish_ready(true).unwrap();
+        let first_version = single_live(&svc).version;
         adapter.publish_ready(false).unwrap();
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries.len(), 2);
-        let ready_values: Vec<bool> = entries
-            .iter()
-            .filter_map(|e| match e.signal.as_ref()? {
-                SignalKind::SmgReadiness(s) => Some(s.ready),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ready_values, vec![true, false]);
-        assert!(entries[1].version > entries[0].version);
+        let env = single_live(&svc);
+        match env.signal {
+            Some(SignalKind::SmgReadiness(s)) => assert!(!s.ready),
+            other => panic!("unexpected signal: {other:?}"),
+        }
+        assert!(env.version > first_version);
+        // Mesh CRDTs collapse same-key writes, so the namespace only ever
+        // holds one envelope per `SignalKey`.
+        assert_eq!(live_envelopes(&svc).len(), 1);
     }
 
     #[test]
@@ -124,7 +115,6 @@ mod tests {
         let svc = service();
         let adapter = RegionReadinessAdapter::new(svc.clone()).with_stale_after_ms(5_000);
         adapter.publish_ready(true).unwrap();
-        let (entries, _) = svc.local_log_snapshot();
-        assert_eq!(entries[0].stale_after_ms, 5_000);
+        assert_eq!(single_live(&svc).stale_after_ms, 5_000);
     }
 }

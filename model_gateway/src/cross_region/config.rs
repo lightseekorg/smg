@@ -1,4 +1,4 @@
-use super::{CrossRegionError, CrossRegionResult, RegionPeer, RegionPeerRegistry, SyncRetention};
+use super::{CrossRegionError, CrossRegionResult, RegionPeer, RegionPeerRegistry};
 use crate::config::{CrossRegionConfig, CrossRegionFailoverMode};
 
 /// Runtime-friendly request-plane settings derived from RouterConfig.
@@ -15,11 +15,9 @@ pub struct RequestPlaneRuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncPlaneRuntimeConfig {
     pub enabled: bool,
-    pub listen_port: u16,
-    pub full_resync_interval_seconds: u64,
+    /// Consumer-side freshness window in seconds. The `/get_loads` cross-
+    /// region projection drops replica signals older than this.
     pub signal_stale_after_seconds: u64,
-    pub tombstone_retention_seconds: u64,
-    pub dead_replica_retention_seconds: u64,
 }
 
 /// Runtime mTLS file paths for cross-region request and sync planes.
@@ -70,11 +68,7 @@ impl CrossRegionRuntimeConfig {
             },
             sync_plane: SyncPlaneRuntimeConfig {
                 enabled: config.sync_plane.enabled,
-                listen_port: config.sync_plane.listen_port,
-                full_resync_interval_seconds: config.sync_plane.full_resync_interval_seconds,
                 signal_stale_after_seconds: config.sync_plane.signal_stale_after_seconds,
-                tombstone_retention_seconds: config.sync_plane.tombstone_retention_seconds,
-                dead_replica_retention_seconds: config.sync_plane.dead_replica_retention_seconds,
             },
             mtls: CrossRegionMtlsRuntimeConfig {
                 ca_cert_path: required("mtls.ca_cert_path", config.mtls.ca_cert_path.as_deref())?
@@ -102,25 +96,11 @@ impl CrossRegionRuntimeConfig {
             },
         }))
     }
-
-    /// Convert runtime sync-plane retention settings into the sync service's
-    /// millisecond retention windows.
-    pub fn sync_retention(&self) -> SyncRetention {
-        SyncRetention {
-            tombstone_retention_ms: seconds_to_millis_saturating(
-                self.sync_plane.tombstone_retention_seconds,
-            ),
-            dead_replica_retention_ms: seconds_to_millis_saturating(
-                self.sync_plane.dead_replica_retention_seconds,
-            ),
-        }
-    }
 }
 
 /// Convert a seconds value to milliseconds, saturating at `i64::MAX` instead
-/// of overflowing. Used by both retention plumbing (`sync_retention`) and the
-/// `/get_loads` cross-region projection (`signal_stale_after_seconds` →
-/// freshness window).
+/// of overflowing. Used by the `/get_loads` cross-region projection
+/// (`signal_stale_after_seconds` → freshness window).
 pub(crate) fn seconds_to_millis_saturating(seconds: u64) -> i64 {
     i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
 }
@@ -219,22 +199,7 @@ mod tests {
             .expect("context should be present");
 
         assert_eq!(context.config.region_id, "us-ashburn-1");
-        assert_eq!(
-            context.config.sync_plane.tombstone_retention_seconds,
-            86_400
-        );
-        assert_eq!(
-            context.config.sync_plane.dead_replica_retention_seconds,
-            21_600
-        );
-        assert_eq!(
-            context.config.sync_retention().tombstone_retention_ms,
-            86_400_000
-        );
-        assert_eq!(
-            context.config.sync_retention().dead_replica_retention_ms,
-            21_600_000
-        );
+        assert_eq!(context.config.sync_plane.signal_stale_after_seconds, 30);
         assert!(context.peers.contains_region("us-chicago-1"));
         assert!(context.peers.is_enabled("us-chicago-1"));
     }

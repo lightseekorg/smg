@@ -1,23 +1,26 @@
-//! Cross-region sync plane acceptance tests.
+//! Cross-region sync plane acceptance tests over the mesh-backed sync service.
 //!
-//! Each test wires two `CrossRegionSyncService` instances directly (no HTTP)
-//! and drives the producer-side log → consumer-side `apply_remote_envelopes`
-//! path that the production pull-server/pull-client pair exercises end-to-end.
-//! Skipping HTTP means we cover the *semantics* (apply ordering, tombstones,
-//! cursor-stale → snapshot, freshness windowing, view projection) without
-//! standing up mTLS certs or bound ports.
+//! Each test wires two `CrossRegionSyncService` instances (each with its own
+//! in-process `MeshKV`) and drives the publish → remote-apply path by reading
+//! A's namespace bytes and calling `apply_envelope_to_state` directly into
+//! B's materialized state. That short-circuits mesh gossip (which we don't
+//! exercise in-process) but covers everything the production subscriber task
+//! does once a peer's envelope arrives: decode, validate, run the
+//! `(version, actor)` apply check, and update `CrossRegionState`.
 //!
-//! Acceptance criteria from
-//! `2026-05-13-cross-region-sync-implementation-plan.md` §"Phase G":
+//! Acceptance criteria mapped from the original plan:
+//!   1. local publish on A round-trips to B's materialized state
+//!   2. idempotent apply (`(version, actor)` equality is a no-op)
+//!   3. older-version envelopes rejected after newer ones observed
+//!   4. multi-replica signals in one region survive materialization
+//!   5. per-replica tombstone removes only the addressed replica
+//!   6. `RemoteRegionView` freshness window filters stale entries
+//!   7. candidate ranking + `RemoteRegionView` project consistently
 //!
-//! 1. local publish on A round-trips to B's materialized state
-//! 2. idempotent apply (`(version, actor)` equality is a no-op)
-//! 3. older-version envelopes rejected after newer ones observed
-//! 4. multi-replica signals in one region survive materialization
-//! 5. per-replica tombstone removes only the addressed replica
-//! 6. stale cursor → full-snapshot resync via cursor-0 path
-//! 7. `RemoteRegionView` freshness window filters stale entries
-//! 8. candidate ranking + `RemoteRegionView` project consistently
+//! Cursor/retention/stale-cursor concerns are gone in the mesh design: mesh
+//! handles transport replay, deduplication, and tombstone grace internally.
+
+use std::sync::Arc;
 
 use openai_protocol::{
     model_type::Endpoint,
@@ -26,12 +29,14 @@ use openai_protocol::{
 use smg::{
     config::CrossRegionFailoverMode,
     cross_region::{
-        CandidateCalculationInput, CandidateCalculator, ClientLatencySignal, CrossRegionBreaker,
-        CrossRegionSyncService, CursorStale, FailoverPolicy, ModalityPolicy, RegionPeer,
-        RegionPeerRegistry, RemoteRegionView, RoutingProfileContext, SignalKey, SignalKind,
-        SmgReadinessSignal, SyncRetention, WorkerHealthSignal, WorkerLoadSignal,
+        apply_envelope_to_state, decode_envelope, CandidateCalculationInput, CandidateCalculator,
+        ClientLatencySignal, CrossRegionBreaker, CrossRegionSyncService, FailoverPolicy,
+        ModalityPolicy, RegionPeer, RegionPeerRegistry, RemoteRegionView, RoutingProfileContext,
+        SignalEnvelope, SignalKey, SignalKind, SmgReadinessSignal, WorkerHealthSignal,
+        WorkerLoadSignal, CROSS_REGION_NAMESPACE_PREFIX,
     },
 };
+use smg_mesh::{MergeStrategy, MeshKV};
 
 const REGION_A: &str = "us-ashburn-1";
 const REGION_B: &str = "us-chicago-1";
@@ -41,43 +46,48 @@ const SERVER_B: &str = "smg-router-b";
 
 #[expect(clippy::expect_used, reason = "test helper — fixture is known-valid")]
 fn service(region: &str, server: &str) -> CrossRegionSyncService {
-    CrossRegionSyncService::new(region.to_string(), server.to_string())
+    let mesh_kv = Arc::new(MeshKV::new(server.to_string()));
+    let namespace =
+        mesh_kv.configure_crdt_prefix(CROSS_REGION_NAMESPACE_PREFIX, MergeStrategy::LastWriterWins);
+    CrossRegionSyncService::new(region.to_string(), server.to_string(), namespace)
         .expect("service should construct")
 }
 
-#[expect(clippy::expect_used, reason = "test helper — fixture is known-valid")]
-fn service_with_retention(
-    region: &str,
-    server: &str,
-    retention: SyncRetention,
-) -> CrossRegionSyncService {
-    CrossRegionSyncService::new_with_retention(region.to_string(), server.to_string(), retention)
-        .expect("service should construct")
+/// Drain every live envelope currently published in `producer`'s namespace,
+/// in stable key order.
+fn live_envelopes(producer: &CrossRegionSyncService) -> Vec<SignalEnvelope<SignalKind>> {
+    let ns = producer.namespace();
+    let mut out: Vec<SignalEnvelope<SignalKind>> = ns
+        .keys("")
+        .into_iter()
+        .filter_map(|key| {
+            let bytes = ns.get(&key)?;
+            // Treat each value as a single-chunk decode (production decode
+            // path is the same one used by the mesh subscriber).
+            let chunks = [bytes::Bytes::from(bytes)];
+            decode_envelope(&chunks).ok()
+        })
+        .collect();
+    out.sort_by_key(|env| env.key.as_path());
+    out
 }
 
-/// Drive one pull cycle from A → B, returning B's new cursor. Mirrors the
-/// pull-client's loop: on `CursorStale`, fall through to a snapshot request.
-fn pull_and_apply(
-    a: &CrossRegionSyncService,
-    b: &CrossRegionSyncService,
-    cursor: u64,
-) -> (u64, bool) {
-    if cursor == 0 {
-        let (envs, next) = a.local_log_snapshot();
-        b.apply_remote_envelopes(a.region_id(), &envs);
-        return (next, false);
+/// Apply every live envelope from `producer`'s namespace into `consumer`'s
+/// materialized state, mirroring what the mesh subscriber task in
+/// `sync_runtime::spawn_subscriber` does on every received `(key, value)`
+/// event.
+fn ship(producer: &CrossRegionSyncService, consumer: &CrossRegionSyncService) {
+    let state = consumer.state();
+    let mut state = state.write();
+    for envelope in live_envelopes(producer) {
+        apply_envelope_to_state(&mut state, &envelope);
     }
-    match a.local_log_delta(cursor) {
-        Ok((envs, next)) => {
-            b.apply_remote_envelopes(a.region_id(), &envs);
-            (next, false)
-        }
-        Err(CursorStale) => {
-            let (envs, next) = a.local_log_snapshot();
-            b.apply_remote_envelopes(a.region_id(), &envs);
-            (next, true)
-        }
-    }
+}
+
+/// Apply a tombstone for `key` to `consumer` — mirrors the subscriber's
+/// behavior on a `(key, None)` event.
+fn ship_tombstone(consumer: &CrossRegionSyncService, key: &SignalKey) {
+    consumer.state().write().remove_key(key);
 }
 
 fn readiness_key(server: &str) -> SignalKey {
@@ -147,9 +157,6 @@ fn worker_load_body(
     }
 }
 
-/// Client-latency keys are owned by the *client* region (the observer).
-/// A is the observer here; B is the latency target. This matches the
-/// publisher-side ownership invariant the sync service enforces.
 fn client_latency_key(server: &str) -> SignalKey {
     SignalKey::ClientLatency {
         client_region: REGION_A.to_string(),
@@ -207,8 +214,7 @@ fn local_publish_then_remote_apply_round_trip() {
     )
     .unwrap();
 
-    let (cursor, _) = pull_and_apply(&a, &b, 0);
-    assert!(cursor > 0, "cursor must advance after initial snapshot");
+    ship(&a, &b);
 
     let state = b.state();
     let state = state.read();
@@ -257,22 +263,18 @@ fn idempotent_apply_same_envelope_no_op() {
         30_000,
     )
     .unwrap();
-    let (envs, _) = a.local_log_snapshot();
 
-    // Apply twice.
-    b.apply_remote_envelopes(a.region_id(), &envs);
-    b.apply_remote_envelopes(a.region_id(), &envs);
+    // Apply twice — mesh's CRDT collapses duplicate writes, but at the
+    // application layer the `(version, actor)` check must still no-op.
+    ship(&a, &b);
+    ship(&a, &b);
 
-    // The second apply must be a no-op: state remains the same.
     let state = b.state();
     let state = state.read();
     let (signal, version) = state
         .readiness_replica_with_version(REGION_A, SERVER_A1)
         .expect("readiness materialized");
     assert!(signal.ready);
-    // The version's actor field is the writing replica's server_name, set
-    // exactly once. A second apply with identical (version, actor) is a
-    // no-op so this value matches the publisher.
     assert_eq!(version.actor, SERVER_A1);
 }
 
@@ -285,14 +287,18 @@ fn older_version_rejected_after_newer_observed() {
     let a = service(REGION_A, SERVER_A1);
     let b = service(REGION_B, SERVER_B);
 
-    // Publish ready=true twice — versions are monotone, so the second is
-    // the "newer" one.
     a.publish_signal(
         readiness_key(SERVER_A1),
         SignalKind::SmgReadiness(readiness_body(SERVER_A1, true)),
         30_000,
     )
     .unwrap();
+    // Snapshot the first publish before it gets overwritten by the second.
+    let first_envelope = live_envelopes(&a)
+        .into_iter()
+        .find(|e| matches!(e.signal, Some(SignalKind::SmgReadiness(_))))
+        .expect("first readiness envelope present");
+
     a.publish_signal(
         readiness_key(SERVER_A1),
         SignalKind::SmgReadiness(readiness_body(SERVER_A1, false)),
@@ -300,19 +306,20 @@ fn older_version_rejected_after_newer_observed() {
     )
     .unwrap();
 
-    let (envs, _) = a.local_log_snapshot();
-    assert_eq!(envs.len(), 2, "two publish calls produce two envelopes");
-
-    // Apply the *newer* envelope first.
-    b.apply_remote_envelopes(a.region_id(), &envs[1..]);
+    // Ship the *newer* envelope first.
+    ship(&a, &b);
     {
         let state = b.state();
         let state = state.read();
         assert!(!state.readiness_replica(REGION_A, SERVER_A1).unwrap().ready);
     }
 
-    // Now apply the older envelope — must be rejected.
-    b.apply_remote_envelopes(a.region_id(), &envs[..1]);
+    // Replay the older envelope directly — must be rejected.
+    {
+        let state = b.state();
+        let mut state = state.write();
+        apply_envelope_to_state(&mut state, &first_envelope);
+    }
     let state = b.state();
     let state = state.read();
     assert!(
@@ -327,9 +334,6 @@ fn older_version_rejected_after_newer_observed() {
 
 #[test]
 fn same_region_multi_replica_signals_do_not_overwrite() {
-    // Two SMG replicas in REGION_A each publish their own readiness +
-    // worker-load. B pulls from both. The materialized state on B must
-    // keep both replica entries, and `RemoteRegionView` must aggregate them.
     let a1 = service(REGION_A, SERVER_A1);
     let a2 = service(REGION_A, SERVER_A2);
     let b = service(REGION_B, SERVER_B);
@@ -370,10 +374,8 @@ fn same_region_multi_replica_signals_do_not_overwrite() {
     )
     .unwrap();
 
-    let (envs1, _) = a1.local_log_snapshot();
-    let (envs2, _) = a2.local_log_snapshot();
-    b.apply_remote_envelopes(REGION_A, &envs1);
-    b.apply_remote_envelopes(REGION_A, &envs2);
+    ship(&a1, &b);
+    ship(&a2, &b);
 
     let state = b.state();
     let state = state.read();
@@ -419,16 +421,15 @@ fn single_replica_tombstone_does_not_remove_sibling_replica() {
     )
     .unwrap();
 
-    let (envs1, _) = a1.local_log_snapshot();
-    let (envs2, _) = a2.local_log_snapshot();
-    b.apply_remote_envelopes(REGION_A, &envs1);
-    b.apply_remote_envelopes(REGION_A, &envs2);
+    ship(&a1, &b);
+    ship(&a2, &b);
 
     // A1 tombstones its own entry; A2's must survive.
     a1.remove_signal(worker_health_key(SERVER_A1, "w1"))
         .unwrap();
-    let (tombstones, _) = a1.local_log_snapshot();
-    b.apply_remote_envelopes(REGION_A, &tombstones);
+    // Mesh delivers tombstones as `(key, None)` events — emulate that path
+    // directly against B's state.
+    ship_tombstone(&b, &worker_health_key(SERVER_A1, "w1"));
 
     let state = b.state();
     let state = state.read();
@@ -447,94 +448,7 @@ fn single_replica_tombstone_does_not_remove_sibling_replica() {
 }
 
 // -------------------------------------------------------------------------
-// 6. stale cursor → full-snapshot resync via cursor-0 path
-// -------------------------------------------------------------------------
-
-#[test]
-fn stale_cursor_triggers_full_resync() {
-    // CursorStale fires when an entry the consumer has not yet observed is
-    // GC'd before they pull it. Setup:
-    //   * Consumer's cursor = 1 (saw entry 1).
-    //   * Producer publishes entry 2 (which the consumer hasn't seen).
-    //   * Sleep so entry 2's retention window can close.
-    //   * Producer publishes entry 3 (fresh).
-    //   * GC drops entries 1 + 2, keeps entry 3.
-    //   * Consumer delta(since=1): oldest is 3, gap to 2 is lost → 409.
-    let a = service_with_retention(
-        REGION_A,
-        SERVER_A1,
-        SyncRetention {
-            tombstone_retention_ms: 10,
-            dead_replica_retention_ms: 10,
-        },
-    );
-    let b = service(REGION_B, SERVER_B);
-
-    a.publish_signal(
-        readiness_key(SERVER_A1),
-        SignalKind::SmgReadiness(readiness_body(SERVER_A1, true)),
-        30_000,
-    )
-    .unwrap();
-    let (cursor_after_first_pull, resync_first) = pull_and_apply(&a, &b, 0);
-    assert!(!resync_first, "initial pull is not a resync");
-
-    // Entry 2 — consumer never observes this one directly; GC will drop it.
-    a.publish_signal(
-        readiness_key(SERVER_A1),
-        SignalKind::SmgReadiness(readiness_body(SERVER_A1, false)),
-        30_000,
-    )
-    .unwrap();
-
-    // Sleep long enough for entries 1 + 2's retention windows to close,
-    // then publish entry 3 fresh.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    a.publish_signal(
-        readiness_key(SERVER_A1),
-        SignalKind::SmgReadiness(readiness_body(SERVER_A1, true)),
-        30_000,
-    )
-    .unwrap();
-
-    let (envs_before_gc, _) = a.local_log_snapshot();
-    assert_eq!(
-        envs_before_gc.len(),
-        3,
-        "three publishes produce three entries"
-    );
-    let first_ts = envs_before_gc[0].generated_at_ms;
-    // GC at t1 + 30ms: entries 1 + 2 are well past their 10ms window;
-    // entry 3 (published after a 50ms sleep) is still fresh.
-    a.gc_log(first_ts + 30);
-
-    let (envs_after_gc, _) = a.local_log_snapshot();
-    assert_eq!(
-        envs_after_gc.len(),
-        1,
-        "GC drops entries 1 + 2 (windows closed); entry 3 is still inside its window",
-    );
-
-    let (cursor_after_resync, resynced) = pull_and_apply(&a, &b, cursor_after_first_pull);
-    assert!(
-        resynced,
-        "stale cursor must trigger snapshot resync: a needed entry (entry 2) was GC'd"
-    );
-    assert!(
-        cursor_after_resync > cursor_after_first_pull,
-        "cursor advances past resync",
-    );
-
-    let state = b.state();
-    let state = state.read();
-    assert!(
-        state.readiness_replica(REGION_A, SERVER_A1).unwrap().ready,
-        "post-resync state must reflect the newest publish (entry 3, ready=true)",
-    );
-}
-
-// -------------------------------------------------------------------------
-// 7. RemoteRegionView freshness window filters stale entries
+// 6. RemoteRegionView freshness window filters stale entries
 // -------------------------------------------------------------------------
 
 #[test]
@@ -548,19 +462,17 @@ fn freshness_window_filters_stale_entries() {
         30_000,
     )
     .unwrap();
-    let (envs, _) = a.local_log_snapshot();
-    let publish_ts = envs[0].generated_at_ms;
-    b.apply_remote_envelopes(a.region_id(), &envs);
+    let envelopes = live_envelopes(&a);
+    let publish_ts = envelopes
+        .iter()
+        .find(|e| matches!(e.signal, Some(SignalKind::SmgReadiness(_))))
+        .expect("readiness envelope present")
+        .generated_at_ms;
+    ship(&a, &b);
 
-    // Use a "now" that's older than the freshness window relative to the
-    // publish timestamp.
     let state_handle = b.state();
     let state_guard = state_handle.read();
-    let view = RemoteRegionView::new(
-        &state_guard,
-        publish_ts + 60_000,
-        30_000, // 30s freshness window
-    );
+    let view = RemoteRegionView::new(&state_guard, publish_ts + 60_000, 30_000);
     assert!(
         view.readiness(REGION_A).is_none(),
         "stale entry (age > window) must not project",
@@ -570,7 +482,6 @@ fn freshness_window_filters_stale_entries() {
         "the entry is still materialized; only the projection filters it",
     );
 
-    // A "now" within the window does project.
     let fresh_view = RemoteRegionView::new(&state_guard, publish_ts + 5_000, 30_000);
     assert!(
         fresh_view.readiness(REGION_A).is_some(),
@@ -579,14 +490,11 @@ fn freshness_window_filters_stale_entries() {
 }
 
 // -------------------------------------------------------------------------
-// 8. candidate ranking + RemoteRegionView project consistently
+// 7. candidate ranking + RemoteRegionView project consistently
 // -------------------------------------------------------------------------
 
 #[test]
 fn remote_region_view_projects_consistently_with_candidate_ranking() {
-    // Same materialized state feeds both `RemoteRegionView` directly and
-    // `CandidateCalculator::build_candidates`. The view's projections must
-    // match the candidate's published readiness/load/freshness.
     let a = service(REGION_A, SERVER_A1);
     let b = service(REGION_B, SERVER_B);
 
@@ -614,20 +522,23 @@ fn remote_region_view_projects_consistently_with_candidate_ranking() {
     )
     .unwrap();
 
-    let (envs, _) = a.local_log_snapshot();
-    let now = envs[0].generated_at_ms + 1_000;
-    b.apply_remote_envelopes(a.region_id(), &envs);
+    let envelopes = live_envelopes(&a);
+    let now = envelopes
+        .iter()
+        .map(|e| e.generated_at_ms)
+        .min()
+        .expect("at least one envelope")
+        + 1_000;
+    ship(&a, &b);
 
     let state = b.state();
     let state = state.read();
 
-    // RemoteRegionView projection.
     let view = RemoteRegionView::new(&state, now, 30_000);
     let view_readiness = view.readiness(REGION_A).expect("readiness projected");
     let view_worker = view.worker(REGION_A, "w1").expect("worker projected");
     let view_load = view_worker.load_for_model("cohere.command-r-plus");
 
-    // Candidate ranking against the same state.
     let local_registry = smg::worker::WorkerRegistry::new();
     let peers = peer_registry(&[REGION_A]);
     let profile = profile_for(&[REGION_B, REGION_A], "cohere.command-r-plus");

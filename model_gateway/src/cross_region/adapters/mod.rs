@@ -4,17 +4,18 @@
 //! source (worker registry, latency observer, …). Adapters either subscribe
 //! to in-process events or run a periodic reconcile tick; in both cases the
 //! end action is `CrossRegionSyncService::publish_signal` /
-//! `CrossRegionSyncService::remove_signal`.
-//!
-//! The pull-protocol HTTP endpoint that serves the producer log is **not**
-//! built in this module; that's Phase 4 (the wire side of peer-to-peer).
-//! For now adapters just feed the in-memory log.
+//! `CrossRegionSyncService::remove_signal`. Publication flows through mesh's
+//! `CrdtNamespace`; peers observe the envelope via the subscriber wired in
+//! [`crate::cross_region::sync_runtime`].
 
 mod client_latency;
 mod orchestrator;
 mod region_readiness;
 mod worker_health;
 mod worker_load;
+
+#[cfg(test)]
+pub(super) mod test_support;
 
 pub use client_latency::ClientLatencyAdapter;
 pub use orchestrator::{CrossRegionProducers, ProducerCadences, ProducerHandles};

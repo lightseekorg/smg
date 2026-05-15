@@ -12,8 +12,6 @@ pub mod headers;
 pub mod metrics;
 pub mod peers;
 pub mod profile;
-pub mod pull_client;
-pub mod pull_server;
 pub mod settled;
 pub mod signals;
 pub mod state;
@@ -45,21 +43,16 @@ pub use metrics::{
 };
 pub use peers::{RegionPeer, RegionPeerRegistry};
 pub use profile::{FailoverPolicy, ModalityPolicy, RoutingProfileContext};
-pub use pull_client::{
-    HttpPullTransport, PeerPullTask, PullClientConfig, PullClientError, PullClientOrchestrator,
-    PullStepOutcome, PullTransport, PullTransportResponse,
-};
-pub use pull_server::{
-    handle_pull, pull_signals, router as pull_router, PullErrorResponse, PullRequest, PullResponse,
-    PullServerError, PullServerState,
-};
 pub use settled::{validate_settled_local_execution, AuthenticatedPeerIdentity};
 pub use signals::{
     ClientLatencySignal, SignalEnvelope, SignalKey, SmgReadinessSignal, WorkerHealthSignal,
     WorkerLoadSignal, SIGNAL_CONTRACT_VERSION,
 };
 pub use state::{CrossRegionState, SignalVersion};
-pub use sync::{CrossRegionSyncService, Cursor, CursorStale, SignalKind, SyncRetention};
+pub use sync::{
+    apply_envelope_to_state, decode_envelope, mesh_path, validate_remote_envelope,
+    CrossRegionSyncService, SignalKind, CROSS_REGION_NAMESPACE_PREFIX,
+};
 pub use sync_runtime::CrossRegionSyncRuntime;
 pub use view::{
     ClientLatencyProjection, RegionReadinessProjection, RemoteRegionView,

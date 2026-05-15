@@ -273,42 +273,12 @@ impl ConfigValidator {
             }
         }
 
-        if config.sync_plane.enabled {
-            if config.sync_plane.listen_port == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "cross_region.sync_plane.listen_port".to_string(),
-                    value: config.sync_plane.listen_port.to_string(),
-                    reason: "Port must be > 0".to_string(),
-                });
-            }
-            if config.sync_plane.full_resync_interval_seconds == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "cross_region.sync_plane.full_resync_interval_seconds".to_string(),
-                    value: config.sync_plane.full_resync_interval_seconds.to_string(),
-                    reason: "Must be > 0".to_string(),
-                });
-            }
-            if config.sync_plane.signal_stale_after_seconds == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "cross_region.sync_plane.signal_stale_after_seconds".to_string(),
-                    value: config.sync_plane.signal_stale_after_seconds.to_string(),
-                    reason: "Must be > 0".to_string(),
-                });
-            }
-            if config.sync_plane.tombstone_retention_seconds == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "cross_region.sync_plane.tombstone_retention_seconds".to_string(),
-                    value: config.sync_plane.tombstone_retention_seconds.to_string(),
-                    reason: "Must be > 0".to_string(),
-                });
-            }
-            if config.sync_plane.dead_replica_retention_seconds == 0 {
-                return Err(ConfigError::InvalidValue {
-                    field: "cross_region.sync_plane.dead_replica_retention_seconds".to_string(),
-                    value: config.sync_plane.dead_replica_retention_seconds.to_string(),
-                    reason: "Must be > 0".to_string(),
-                });
-            }
+        if config.sync_plane.enabled && config.sync_plane.signal_stale_after_seconds == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "cross_region.sync_plane.signal_stale_after_seconds".to_string(),
+                value: config.sync_plane.signal_stale_after_seconds.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
         }
 
         Self::validate_cross_region_mtls(&config.mtls)?;
@@ -1224,25 +1194,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cross_region_rejects_zero_sync_retention_fields() {
+    fn test_validate_cross_region_rejects_zero_signal_stale_after_seconds() {
         let mut config = router_config_with_cross_region();
-        config.cross_region.sync_plane.tombstone_retention_seconds = 0;
+        config.cross_region.sync_plane.signal_stale_after_seconds = 0;
 
         let error =
-            ConfigValidator::validate(&config).expect_err("zero tombstone retention should fail");
-        assert!(format!("{error}").contains("cross_region.sync_plane.tombstone_retention_seconds"));
-
-        let mut config = router_config_with_cross_region();
-        config
-            .cross_region
-            .sync_plane
-            .dead_replica_retention_seconds = 0;
-
-        let error = ConfigValidator::validate(&config)
-            .expect_err("zero dead replica retention should fail");
-        assert!(
-            format!("{error}").contains("cross_region.sync_plane.dead_replica_retention_seconds")
-        );
+            ConfigValidator::validate(&config).expect_err("zero signal stale after should fail");
+        assert!(format!("{error}").contains("cross_region.sync_plane.signal_stale_after_seconds"));
     }
 
     #[test]
