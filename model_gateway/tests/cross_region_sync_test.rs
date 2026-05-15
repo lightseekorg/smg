@@ -1,24 +1,26 @@
 //! Cross-region sync plane acceptance tests over the mesh-backed sync service.
 //!
 //! Each test wires two `CrossRegionSyncService` instances (each with its own
-//! in-process `MeshKV`) and drives the publish → remote-apply path by reading
-//! A's namespace bytes and calling `apply_envelope_to_state` directly into
-//! B's materialized state. That short-circuits mesh gossip (which we don't
-//! exercise in-process) but covers everything the production subscriber task
-//! does once a peer's envelope arrives: decode, validate, run the
-//! `(version, actor)` apply check, and update `CrossRegionState`.
+//! in-process `MeshKV`) and drives the publish → remote-apply path by
+//! snapshotting A's outbox (the entries mesh would ship next round) and
+//! calling `apply_envelope_to_state` directly into B's materialized state.
+//! That short-circuits mesh gossip (which we don't exercise in-process) but
+//! covers everything the production subscriber task does once a peer's
+//! envelope arrives: decode, validate, run the `(version, actor)` apply
+//! check, and update `CrossRegionState`.
 //!
 //! Acceptance criteria mapped from the original plan:
 //!   1. local publish on A round-trips to B's materialized state
 //!   2. idempotent apply (`(version, actor)` equality is a no-op)
 //!   3. older-version envelopes rejected after newer ones observed
 //!   4. multi-replica signals in one region survive materialization
-//!   5. per-replica tombstone removes only the addressed replica
+//!   5. removing a producer's outbox entry doesn't disturb sibling replicas
 //!   6. `RemoteRegionView` freshness window filters stale entries
 //!   7. candidate ranking + `RemoteRegionView` project consistently
 //!
-//! Cursor/retention/stale-cursor concerns are gone in the mesh design: mesh
-//! handles transport replay, deduplication, and tombstone grace internally.
+//! With broadcast streams there is no over-the-wire tombstone: peers learn
+//! that a worker is gone by the producer no longer re-emitting and the
+//! consumer's freshness window dropping the entry from projections.
 
 use std::sync::Arc;
 
@@ -29,14 +31,14 @@ use openai_protocol::{
 use smg::{
     config::CrossRegionFailoverMode,
     cross_region::{
-        apply_envelope_to_state, decode_envelope, CandidateCalculationInput, CandidateCalculator,
+        apply_envelope_to_state, CandidateCalculationInput, CandidateCalculator,
         ClientLatencySignal, CrossRegionBreaker, CrossRegionSyncService, FailoverPolicy,
         ModalityPolicy, RegionPeer, RegionPeerRegistry, RemoteRegionView, RoutingProfileContext,
         SignalEnvelope, SignalKey, SignalKind, SmgReadinessSignal, WorkerHealthSignal,
         WorkerLoadSignal, CROSS_REGION_NAMESPACE_PREFIX,
     },
 };
-use smg_mesh::{MergeStrategy, MeshKV};
+use smg_mesh::{MeshKV, StreamConfig, StreamRouting};
 
 const REGION_A: &str = "us-ashburn-1";
 const REGION_B: &str = "us-chicago-1";
@@ -47,35 +49,29 @@ const SERVER_B: &str = "smg-router-b";
 #[expect(clippy::expect_used, reason = "test helper — fixture is known-valid")]
 fn service(region: &str, server: &str) -> CrossRegionSyncService {
     let mesh_kv = Arc::new(MeshKV::new(server.to_string()));
-    let namespace =
-        mesh_kv.configure_crdt_prefix(CROSS_REGION_NAMESPACE_PREFIX, MergeStrategy::LastWriterWins);
+    let namespace = mesh_kv.configure_stream_prefix(
+        CROSS_REGION_NAMESPACE_PREFIX,
+        StreamConfig {
+            max_buffer_bytes: 16 * 1024 * 1024,
+            routing: StreamRouting::Broadcast,
+        },
+    );
     CrossRegionSyncService::new(region.to_string(), server.to_string(), namespace)
         .expect("service should construct")
 }
 
-/// Drain every live envelope currently published in `producer`'s namespace,
-/// in stable key order.
+/// Snapshot every envelope currently staged in `producer`'s outbox (the
+/// entries mesh would broadcast on its next gossip round), in stable key
+/// order.
 fn live_envelopes(producer: &CrossRegionSyncService) -> Vec<SignalEnvelope<SignalKind>> {
-    let ns = producer.namespace();
-    let mut out: Vec<SignalEnvelope<SignalKind>> = ns
-        .keys("")
-        .into_iter()
-        .filter_map(|key| {
-            let bytes = ns.get(&key)?;
-            // Treat each value as a single-chunk decode (production decode
-            // path is the same one used by the mesh subscriber).
-            let chunks = [bytes::Bytes::from(bytes)];
-            decode_envelope(&chunks).ok()
-        })
-        .collect();
+    let mut out = producer.outbox_snapshot();
     out.sort_by_key(|env| env.key.as_path());
     out
 }
 
-/// Apply every live envelope from `producer`'s namespace into `consumer`'s
-/// materialized state, mirroring what the mesh subscriber task in
-/// `sync_runtime::spawn_subscriber` does on every received `(key, value)`
-/// event.
+/// Apply every staged envelope from `producer`'s outbox into `consumer`'s
+/// materialized state, mirroring what the production subscriber task does
+/// once a peer's broadcast entry arrives.
 fn ship(producer: &CrossRegionSyncService, consumer: &CrossRegionSyncService) {
     let state = consumer.state();
     let mut state = state.write();

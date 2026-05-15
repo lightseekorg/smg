@@ -2,10 +2,11 @@
 //!
 //! Exercises the construction the gateway boot block in `server::startup`
 //! goes through: build a `CrossRegionContext` from a fully-populated
-//! `CrossRegionConfig`, register the `cross_region:` mesh namespace on a
-//! shared `MeshKV`, call `CrossRegionSyncRuntime::start_with_mesh_kv(...)`,
-//! and verify the resulting bundle exposes a live sync handle that writes
-//! envelopes through the mesh namespace.
+//! `CrossRegionConfig`, register the `cross_region:` broadcast stream
+//! namespace on a shared `MeshKV`, call
+//! `CrossRegionSyncRuntime::start_with_mesh_kv(...)`, and verify the
+//! resulting bundle exposes a live sync handle whose publishes stage
+//! envelopes in the outbox ready for the next gossip round.
 //!
 //! Real mesh transport / mTLS allowlist is out of scope — `MeshKV::new`
 //! gives us an in-process namespace that exercises the same publish path
@@ -19,8 +20,8 @@ use smg::{
         CrossRegionRequestPlaneConfig, CrossRegionSyncPlaneConfig,
     },
     cross_region::{
-        CrossRegionContext, CrossRegionSyncRuntime, SignalEnvelope, SignalKey, SignalKind,
-        SmgReadinessSignal, CROSS_REGION_NAMESPACE_PREFIX,
+        CrossRegionContext, CrossRegionSyncRuntime, CrossRegionSyncService, SignalEnvelope,
+        SignalKey, SignalKind, SmgReadinessSignal,
     },
     worker::WorkerRegistry,
 };
@@ -68,17 +69,13 @@ fn make_mesh_kv() -> Arc<MeshKV> {
     Arc::new(MeshKV::new("smg-router-a".to_string()))
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "test helper — bytes were produced by the sync service we control"
-)]
 fn fetch_envelope(
-    sync: &smg::cross_region::CrossRegionSyncService,
+    sync: &CrossRegionSyncService,
     key: &SignalKey,
 ) -> Option<SignalEnvelope<SignalKind>> {
-    let path = format!("{}{}", CROSS_REGION_NAMESPACE_PREFIX, key.as_path());
-    let bytes = sync.namespace().get(&path)?;
-    Some(serde_json::from_slice(&bytes).expect("envelope must decode"))
+    sync.outbox_snapshot()
+        .into_iter()
+        .find(|env| env.key == *key)
 }
 
 #[tokio::test]
@@ -118,7 +115,7 @@ async fn boot_starts_runtime_with_live_producers_and_publishable_sync_handle() {
         )
         .expect("manual readiness publish should succeed");
     let envelope = fetch_envelope(&runtime.sync(), &key)
-        .expect("manual readiness publish should reach the namespace");
+        .expect("manual readiness publish should stage in the outbox");
     assert!(matches!(
         envelope.signal,
         Some(SignalKind::SmgReadiness(s)) if s.ready
@@ -141,7 +138,7 @@ async fn boot_reconcile_loop_publishes_readiness_without_manual_intervention() {
     };
 
     // The periodic readiness reconcile loop publishes immediately on its
-    // first tick. Give the spawned task time to run and verify the namespace
+    // first tick. Give the spawned task time to run and verify the outbox
     // carries a readiness envelope without the test having published one.
     let mut readiness_envelope = None;
     for _ in 0..20 {

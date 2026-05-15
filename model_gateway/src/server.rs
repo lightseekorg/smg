@@ -2131,43 +2131,48 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         .map(|c| c.advertise_addr.port());
 
     // Start the cross-region signal sync runtime. Publishes producer signals
-    // through the shared mesh `CrdtNamespace` (`cross_region:` prefix) and
+    // through the shared mesh broadcast stream (`cross_region:` prefix) and
     // spawns the subscriber that applies inbound envelopes into the
-    // materialized `CrossRegionState`. Requires an active mesh handler — when
-    // the gateway is started without mesh, cross-region sync is a no-op even
-    // if configured.
-    let cross_region_sync =
-        match CrossRegionContext::from_router_config(&config.router_config.cross_region) {
-            Ok(Some(context)) => match mesh_handler.as_ref() {
-                Some(handler) => {
-                    let runtime = CrossRegionSyncRuntime::start_with_mesh_kv(
-                        &context,
-                        handler.mesh_kv(),
-                        app_context.worker_registry.clone(),
+    // materialized `CrossRegionState`. Requires both `sync_plane.enabled`
+    // and an active mesh handler — starting cross-region sync without mesh
+    // is a misconfiguration we fail boot for rather than silently no-op.
+    let cross_region_sync = match CrossRegionContext::from_router_config(
+        &config.router_config.cross_region,
+    ) {
+        Ok(Some(context)) => {
+            if context.config.sync_plane.enabled {
+                let handler = mesh_handler.as_ref().ok_or_else(|| {
+                    format!(
+                        "Cross-region sync plane is enabled for region {} but mesh server is not running; \
+                         cross-region signals require mesh transport",
+                        context.config.region_id,
                     )
-                    .map_err(|error| {
-                        format!("Failed to start cross-region sync runtime: {error}")
-                    })?;
-                    info!(
-                        region = %context.config.region_id,
-                        server = %context.config.server_name,
-                        "Cross-region signal sync runtime started over mesh",
-                    );
-                    Some(Arc::new(runtime))
-                }
-                None => {
-                    warn!(
-                        region = %context.config.region_id,
-                        "Cross-region sync configured but mesh server is not running; skipping",
-                    );
-                    None
-                }
-            },
-            Ok(None) => None,
-            Err(error) => {
-                return Err(format!("Invalid cross-region runtime config: {error}").into());
+                })?;
+                let runtime = CrossRegionSyncRuntime::start_with_mesh_kv(
+                    &context,
+                    handler.mesh_kv(),
+                    app_context.worker_registry.clone(),
+                )
+                .map_err(|error| format!("Failed to start cross-region sync runtime: {error}"))?;
+                info!(
+                    region = %context.config.region_id,
+                    server = %context.config.server_name,
+                    "Cross-region signal sync runtime started over mesh",
+                );
+                Some(Arc::new(runtime))
+            } else {
+                info!(
+                    region = %context.config.region_id,
+                    "Cross-region sync plane disabled; skipping runtime",
+                );
+                None
             }
-        };
+        }
+        Ok(None) => None,
+        Err(error) => {
+            return Err(format!("Invalid cross-region runtime config: {error}").into());
+        }
+    };
 
     let app_state = Arc::new(AppState {
         router,

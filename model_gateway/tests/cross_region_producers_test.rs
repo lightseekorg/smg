@@ -1,9 +1,10 @@
 //! End-to-end test for the four cross-region local-signal producers, now
-//! backed by an in-process mesh `CrdtNamespace`. Drives a
+//! backed by an in-process mesh broadcast stream namespace. Drives a
 //! `CrossRegionProducers` orchestrator end-to-end with a real
 //! `WorkerRegistry`, exercises lifecycle events, records latency
-//! observations, and asserts the resulting envelopes show up in the mesh
-//! namespace with the right shape, version monotonicity, and tombstone
+//! observations, and asserts the resulting envelopes show up in the
+//! producer's outbox (= the entries mesh would ship on the next gossip
+//! round) with the right shape, version monotonicity, and worker-lifecycle
 //! semantics.
 
 use std::{sync::Arc, time::Duration};
@@ -11,12 +12,12 @@ use std::{sync::Arc, time::Duration};
 use openai_protocol::{model_card::ModelCard, worker::WorkerStatus};
 use smg::{
     cross_region::{
-        CrossRegionProducers, ProducerCadences, SignalEnvelope, SignalKey, SignalKind,
-        CROSS_REGION_NAMESPACE_PREFIX,
+        CrossRegionProducers, CrossRegionSyncService, ProducerCadences, SignalEnvelope, SignalKey,
+        SignalKind, CROSS_REGION_NAMESPACE_PREFIX,
     },
     worker::{event::WorkerEvent, BasicWorkerBuilder, Worker, WorkerRegistry},
 };
-use smg_mesh::{CrdtNamespace, MergeStrategy, MeshKV};
+use smg_mesh::{MeshKV, StreamConfig, StreamRouting};
 
 const REGION: &str = "us-ashburn-1";
 const SERVER: &str = "smg-router-a";
@@ -41,27 +42,24 @@ fn build_worker(url: &str, model: &str, status: WorkerStatus, load: usize) -> Ar
 #[expect(clippy::expect_used, reason = "test helper — fixture is known-valid")]
 fn make_producers() -> CrossRegionProducers {
     let mesh_kv = Arc::new(MeshKV::new(SERVER.to_string()));
-    let namespace =
-        mesh_kv.configure_crdt_prefix(CROSS_REGION_NAMESPACE_PREFIX, MergeStrategy::LastWriterWins);
+    let namespace = mesh_kv.configure_stream_prefix(
+        CROSS_REGION_NAMESPACE_PREFIX,
+        StreamConfig {
+            max_buffer_bytes: 16 * 1024 * 1024,
+            routing: StreamRouting::Broadcast,
+        },
+    );
     CrossRegionProducers::new(REGION.to_string(), SERVER.to_string(), namespace)
         .expect("producers should construct")
 }
 
-/// Decode every live envelope currently published in the producer's mesh
-/// namespace. Tombstoned keys are absent (mesh `get` returns `None`).
-#[expect(
-    clippy::expect_used,
-    reason = "test helper — every byte we read was written by us via serde_json"
-)]
-fn live_envelopes(ns: &CrdtNamespace) -> Vec<SignalEnvelope<SignalKind>> {
-    let mut out = Vec::new();
-    for key in ns.keys("") {
-        if let Some(bytes) = ns.get(&key) {
-            let envelope: SignalEnvelope<SignalKind> = serde_json::from_slice(&bytes)
-                .expect("namespace value must round-trip through serde_json");
-            out.push(envelope);
-        }
-    }
+/// Snapshot every envelope currently staged in the producer's outbox (i.e.
+/// the entries mesh would ship on the next gossip round). Tombstones do not
+/// appear — `remove_signal` purges the outbox locally rather than emitting
+/// a wire entry; peers learn that the signal is gone via the freshness
+/// window after the producer stops re-emitting.
+fn live_envelopes(sync: &CrossRegionSyncService) -> Vec<SignalEnvelope<SignalKind>> {
+    let mut out = sync.outbox_snapshot();
     out.sort_by_key(|env| env.key.as_path());
     out
 }
@@ -101,8 +99,7 @@ fn producers_publish_per_replica_keys_for_all_four_signals() {
         .drain_and_publish()
         .expect("client-latency drain");
 
-    let namespace = producers.sync.namespace();
-    let entries = live_envelopes(&namespace);
+    let entries = live_envelopes(&producers.sync);
     assert_eq!(entries.len(), 4, "one envelope per signal kind");
 
     let mut kinds: Vec<&str> = entries
@@ -191,8 +188,7 @@ fn lifecycle_event_publishes_then_tombstones() {
             worker: worker.clone(),
         })
         .expect("registered");
-    let namespace = producers.sync.namespace();
-    let after_register = live_envelopes(&namespace);
+    let after_register = live_envelopes(&producers.sync);
     assert_eq!(after_register.len(), 1);
     let v_register = after_register[0].version;
 
@@ -206,7 +202,7 @@ fn lifecycle_event_publishes_then_tombstones() {
             new_status: WorkerStatus::Ready,
         })
         .expect("status changed");
-    let after_change = live_envelopes(&namespace);
+    let after_change = live_envelopes(&producers.sync);
     assert_eq!(after_change.len(), 1, "same key collapses to one envelope");
     assert!(
         after_change[0].version > v_register,
@@ -221,10 +217,12 @@ fn lifecycle_event_publishes_then_tombstones() {
         })
         .expect("removed");
 
-    // Tombstones drop the key from the namespace and from materialized state.
+    // Removal purges the outbox locally (peers age out via the freshness
+    // window once the producer stops re-emitting) and drops the entry from
+    // materialized state immediately.
     assert!(
-        live_envelopes(&namespace).is_empty(),
-        "tombstone removes the key from the namespace"
+        live_envelopes(&producers.sync).is_empty(),
+        "remove_signal clears the outbox locally"
     );
     let state = producers.sync.state();
     let state = state.read();
@@ -243,8 +241,7 @@ fn version_strictly_increases_per_key_across_publishes() {
         .publish_for("us-chicago-1", 30, 80)
         .unwrap();
 
-    let namespace = producers.sync.namespace();
-    let after_first = live_envelopes(&namespace);
+    let after_first = live_envelopes(&producers.sync);
     assert_eq!(after_first.len(), 2);
 
     // Same key (us-chicago-1 latency), new sample → version must rise.
@@ -258,7 +255,7 @@ fn version_strictly_increases_per_key_across_publishes() {
         .client_latency
         .publish_for("us-chicago-1", 32, 84)
         .unwrap();
-    let after_second = live_envelopes(&namespace);
+    let after_second = live_envelopes(&producers.sync);
     let latency_v2 = after_second
         .iter()
         .find(|e| matches!(e.signal, Some(SignalKind::ClientLatency(_))))
@@ -267,7 +264,7 @@ fn version_strictly_increases_per_key_across_publishes() {
     assert!(latency_v2 > latency_v1);
 
     // Wrong region in the key should be rejected by the sync service and
-    // never reach the namespace.
+    // never reach the outbox.
     let err = producers.sync.publish_signal(
         SignalKey::ClientLatency {
             client_region: "wrong-region".to_string(),
@@ -284,8 +281,8 @@ fn version_strictly_increases_per_key_across_publishes() {
         30_000,
     );
     err.expect_err("wrong region must be rejected at the sync service");
-    // Namespace footprint unchanged (still readiness + one latency key).
-    assert_eq!(live_envelopes(&namespace).len(), 2);
+    // Outbox footprint unchanged (still readiness + one latency key).
+    assert_eq!(live_envelopes(&producers.sync).len(), 2);
 }
 
 #[tokio::test]
@@ -313,8 +310,7 @@ async fn orchestrator_start_publishes_via_periodic_tasks() {
 
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let namespace = producers.sync.namespace();
-    let entries = live_envelopes(&namespace);
+    let entries = live_envelopes(&producers.sync);
 
     let has_readiness = entries
         .iter()
@@ -366,8 +362,7 @@ async fn orchestrator_publishes_worker_health_on_registry_event() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let namespace = producers.sync.namespace();
-    let entries = live_envelopes(&namespace);
+    let entries = live_envelopes(&producers.sync);
     let worker_health_count = entries
         .iter()
         .filter(|e| matches!(e.signal, Some(SignalKind::WorkerHealth(_))))

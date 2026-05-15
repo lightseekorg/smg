@@ -117,10 +117,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        cross_region::{
-            adapters::test_support::{live_envelopes, service, single_live},
-            sync::mesh_path,
-        },
+        cross_region::adapters::test_support::{live_envelopes, service, single_live},
         worker::{registry::WorkerId, BasicWorkerBuilder},
     };
 
@@ -214,15 +211,20 @@ mod tests {
         };
         adapter.handle_event(&event).expect("handle ok");
 
-        // Tombstones drop the key from the mesh namespace; the materialized
-        // state no longer reports the replica.
+        // Removal purges the outbox locally — peers age out via the freshness
+        // window once the producer stops re-emitting — and drops the entry
+        // from materialized state immediately.
         assert!(live_envelopes(&svc).is_empty());
         let key = SignalKey::WorkerHealth {
             region_id: "us-ashburn-1".to_string(),
             worker_id: worker_id.clone(),
             server_name: "smg-router-a".to_string(),
         };
-        assert!(svc.namespace().get(&mesh_path(&key)).is_none());
+        assert!(svc
+            .outbox_snapshot()
+            .iter()
+            .find(|env| env.key == key)
+            .is_none());
     }
 
     #[test]

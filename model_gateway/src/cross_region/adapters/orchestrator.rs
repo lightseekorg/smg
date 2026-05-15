@@ -9,7 +9,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use smg_mesh::CrdtNamespace;
+use smg_mesh::StreamNamespace;
 use tokio::task::JoinHandle;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
@@ -53,13 +53,13 @@ pub struct CrossRegionProducers {
 
 impl CrossRegionProducers {
     /// Build adapters wrapping a fresh sync service that publishes through
-    /// the supplied mesh namespace. The boot path is responsible for
-    /// registering the namespace on the shared `MeshKV` and passing the
-    /// handle in.
+    /// the supplied mesh broadcast stream namespace. The boot path is
+    /// responsible for registering the namespace on the shared `MeshKV`
+    /// and passing the handle in.
     pub fn new(
         region_id: String,
         server_name: String,
-        namespace: Arc<CrdtNamespace>,
+        namespace: Arc<StreamNamespace>,
     ) -> CrossRegionResult<Self> {
         let sync = Arc::new(CrossRegionSyncService::new(
             region_id,

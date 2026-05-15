@@ -140,9 +140,8 @@ impl ClientLatencyAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_region::{
-        adapters::test_support::{live_envelopes, service_with_identity, single_live},
-        sync::mesh_path,
+    use crate::cross_region::adapters::test_support::{
+        live_envelopes, service_with_identity, single_live,
     };
 
     fn service() -> Arc<CrossRegionSyncService> {
@@ -246,13 +245,14 @@ mod tests {
         adapter.publish_for("us-chicago-1", 30, 80).unwrap();
         adapter.remove_for("us-chicago-1").unwrap();
 
-        // Tombstones drop the key from the mesh namespace.
+        // remove_for purges the outbox locally; peers age out via the
+        // freshness window once the producer stops re-emitting.
         assert!(live_envelopes(&svc).is_empty());
         let key = SignalKey::ClientLatency {
             client_region: "us-phoenix-1".to_string(),
             target_region: "us-chicago-1".to_string(),
             server_name: "smg-router-a".to_string(),
         };
-        assert!(svc.namespace().get(&mesh_path(&key)).is_none());
+        assert!(svc.outbox_snapshot().iter().all(|env| env.key != key));
     }
 }
