@@ -27,8 +27,8 @@ async-trait = "0.1"
 futures = "0.3"
 prost = "0.14.1"
 prost-types = "0.14.1"
-tonic = { version = "0.14.2", features = ["gzip", "transport"] }
-tonic-prost = "0.14.2"
+tonic = { version = "0.14.6", features = ["gzip", "transport"] }
+tonic-prost = "0.14.6"
 axum = { version = "0.8.6" }
 blake3 = "1.5"
 lz4_flex = "0.13"

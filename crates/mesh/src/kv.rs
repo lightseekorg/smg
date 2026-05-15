@@ -242,9 +242,17 @@ impl DrainRegistry {
 // ============================================================================
 
 /// Per-prefix subscriber channel capacity.
+///
+/// Sized for a single gossip round's worst-case burst. Stream namespaces
+/// drop entries on backpressure (`try_send`), so prefixes whose producers
+/// can emit many entries in one drain pass need headroom above the
+/// 100-default. The `cross_region:` budget covers a 1k-worker cluster where
+/// readiness + per-worker health + per-worker load + per-target latency
+/// could all align on one round (~4 × 1000 entries).
 fn subscriber_capacity_for_prefix(prefix: &str) -> usize {
     match prefix {
         "worker:" => 1000,
+        "cross_region:" => 4096,
         "policy:" => 100,
         "rl:" => 100,
         "config:" => 100,

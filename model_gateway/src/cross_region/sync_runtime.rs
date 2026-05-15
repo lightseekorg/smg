@@ -5,7 +5,9 @@
 //!   broadcast [`StreamNamespace`]),
 //! - the producer task handles (readiness/health/load/latency periodic loops),
 //! - the subscriber task handle that decodes inbound `cross_region:` stream
-//!   entries and drives [`apply_envelope_to_state`].
+//!   entries and drives [`apply_envelope_to_state`],
+//! - a periodic GC task that evicts materialized entries older than the
+//!   consumer-side freshness window (no-tombstone sweep — see [`build_gc_loop`]).
 //!
 //! Constructed once in `server::startup` when `cross_region.enabled` and
 //! `cross_region.sync_plane.enabled` are both true and a mesh server is
@@ -13,15 +15,16 @@
 //! alive for the lifetime of the server. Dropping the bundle aborts every
 //! spawned task and unregisters the drain callback.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use parking_lot::RwLock;
 use smg_mesh::{MeshKV, StreamConfig, StreamNamespace, StreamRouting};
 use tokio::task::JoinHandle;
 
 use super::{
     adapters::{CrossRegionProducers, ProducerCadences, ProducerHandles},
-    decode_envelope, CrossRegionContext, CrossRegionResult, CrossRegionSyncService,
-    RegionPeerRegistry, CROSS_REGION_NAMESPACE_PREFIX,
+    decode_envelope, CrossRegionContext, CrossRegionResult, CrossRegionState,
+    CrossRegionSyncService, RegionPeerRegistry, CROSS_REGION_NAMESPACE_PREFIX,
 };
 use crate::worker::WorkerRegistry;
 
@@ -30,6 +33,19 @@ use crate::worker::WorkerRegistry;
 /// effectively unused, but the struct field is required by
 /// [`StreamConfig`]. Set high enough to be a non-concern.
 const CROSS_REGION_STREAM_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Multiplier applied to `signal_stale_after_seconds` to derive the GC
+/// eviction age. Entries older than `signal_stale_after_seconds × this` are
+/// considered abandoned (the producer has stopped re-emitting and the
+/// projection has already filtered them out of cross-region rankings) and
+/// dropped from materialized state to bound memory growth on worker churn.
+const GC_AGE_MULTIPLIER: u64 = 4;
+
+/// Cadence for the materialized-state GC sweep. Cheap operation (HashMap
+/// retain pass over a few-thousand-entry working set) so we run it
+/// frequently enough to keep stale entries from accumulating between
+/// long-lived reconcile cadences.
+const GC_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Cross-region sync plane handles owned by the gateway for its lifetime.
 ///
@@ -48,6 +64,10 @@ pub struct CrossRegionSyncRuntime {
     /// Subscriber task. Reads `cross_region:` stream entries from the mesh
     /// namespace and applies them to `CrossRegionState`. Drop aborts.
     _subscriber: SubscriberHandle,
+    /// Materialized-state GC task. Periodically evicts entries older than
+    /// the freshness window so abandoned signals don't leak memory or
+    /// clutter `worker_ids` / `regions` enumerations. Drop aborts.
+    _gc: GcHandle,
 }
 
 impl CrossRegionSyncRuntime {
@@ -71,12 +91,15 @@ impl CrossRegionSyncRuntime {
         )?;
         let handles = producers.start(worker_registry, ProducerCadences::default());
         let subscriber = spawn_subscriber(producers.sync.clone());
+        let gc_max_age_ms = gc_max_age_ms(context.config.sync_plane.signal_stale_after_seconds);
+        let gc = spawn_gc_loop(producers.sync.state(), GC_INTERVAL, gc_max_age_ms);
 
         Ok(Self {
             producers,
             peers: context.peers.clone(),
             _producer_handles: handles,
             _subscriber: subscriber,
+            _gc: gc,
         })
     }
 
@@ -127,6 +150,64 @@ impl Drop for SubscriberHandle {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Handle wrapping the GC sweep task. Drop aborts.
+#[derive(Debug)]
+struct GcHandle {
+    task: JoinHandle<()>,
+}
+
+impl Drop for GcHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Derive the GC eviction age (ms) from the consumer's freshness window in
+/// seconds. Uses [`GC_AGE_MULTIPLIER`] so we keep a margin past the
+/// projection-side filter, which avoids evicting entries that the producer
+/// is about to re-emit on its reconcile tick.
+fn gc_max_age_ms(signal_stale_after_seconds: u64) -> i64 {
+    let millis = signal_stale_after_seconds
+        .saturating_mul(GC_AGE_MULTIPLIER)
+        .saturating_mul(1_000);
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "GC task is bounded by CrossRegionSyncRuntime which aborts on drop"
+)]
+fn spawn_gc_loop(
+    state: Arc<RwLock<CrossRegionState>>,
+    interval: Duration,
+    max_age_ms: i64,
+) -> GcHandle {
+    let task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let dropped = state.write().gc_stale(now_ms(), max_age_ms);
+            if dropped > 0 {
+                tracing::debug!(
+                    dropped,
+                    max_age_ms,
+                    "cross-region GC swept stale materialized entries"
+                );
+            }
+        }
+    });
+    GcHandle { task }
 }
 
 #[expect(

@@ -335,6 +335,36 @@ impl CrossRegionState {
         }
     }
 
+    /// Drop every materialized entry whose `updated_at_ms` is older than
+    /// `now_ms - max_age_ms`. Returns the total number of entries evicted.
+    ///
+    /// Stream-based sync delivers no tombstones — when a producer stops
+    /// re-emitting (worker deregistered, latency target removed, etc.) the
+    /// entry would otherwise live forever in the materialized state, leak
+    /// memory, and clutter diagnostic enumerations like
+    /// [`Self::worker_ids`]. A periodic GC sweep against the consumer's
+    /// freshness window is the bound that compensates.
+    pub fn gc_stale(&mut self, now_ms: i64, max_age_ms: i64) -> usize {
+        let cutoff = now_ms.saturating_sub(max_age_ms);
+        let mut dropped = 0;
+        let before = self.readiness.len();
+        self.readiness.retain(|_, (_, v)| v.updated_at_ms >= cutoff);
+        dropped += before - self.readiness.len();
+        let before = self.worker_health.len();
+        self.worker_health
+            .retain(|_, (_, v)| v.updated_at_ms >= cutoff);
+        dropped += before - self.worker_health.len();
+        let before = self.worker_load.len();
+        self.worker_load
+            .retain(|_, (_, v)| v.updated_at_ms >= cutoff);
+        dropped += before - self.worker_load.len();
+        let before = self.client_latency.len();
+        self.client_latency
+            .retain(|_, (_, v)| v.updated_at_ms >= cutoff);
+        dropped += before - self.client_latency.len();
+        dropped
+    }
+
     /// Remove the materialized value addressed by a tombstone key.
     ///
     /// Removes **only** the exact per-replica entry — sibling replicas keep
@@ -753,6 +783,54 @@ mod tests {
 
         assert!(state.worker_health_replica("r1", "w1", "smg-a").is_none());
         assert!(state.worker_health_replica("r1", "w1", "smg-b").is_some());
+    }
+
+    #[test]
+    fn gc_stale_evicts_entries_older_than_cutoff() {
+        let mut state = CrossRegionState::new();
+        state.upsert_readiness(
+            readiness_signal("r1", "smg-a", true),
+            version(1, "smg-a", 100),
+        );
+        state.upsert_readiness(
+            readiness_signal("r1", "smg-b", true),
+            version(1, "smg-b", 1_000),
+        );
+        state.upsert_worker_health(
+            worker_health_signal("r1", "w1", "smg-a", WorkerStatus::Ready),
+            version(1, "smg-a", 200),
+        );
+        state.upsert_client_latency(
+            ClientLatencySignal {
+                client_region: "r2".to_string(),
+                target_region: "r1".to_string(),
+                server_name: "smg-c".to_string(),
+                p50_latency_ms: 10,
+                p95_latency_ms: 20,
+            },
+            version(1, "smg-c", 2_000),
+        );
+
+        // Cutoff at 1_500: keep updated_at_ms >= 1_500. Two entries are
+        // older (100, 200, 1_000); one newer (2_000).
+        let dropped = state.gc_stale(2_000, 500);
+        assert_eq!(dropped, 3);
+        assert!(state.readiness_replica("r1", "smg-a").is_none());
+        assert!(state.readiness_replica("r1", "smg-b").is_none());
+        assert!(state.worker_health_replica("r1", "w1", "smg-a").is_none());
+        assert!(state.client_latency_replica("r2", "r1", "smg-c").is_some());
+    }
+
+    #[test]
+    fn gc_stale_is_noop_when_nothing_expired() {
+        let mut state = CrossRegionState::new();
+        state.upsert_readiness(
+            readiness_signal("r1", "smg-a", true),
+            version(1, "smg-a", 1_000),
+        );
+        let dropped = state.gc_stale(1_010, 100);
+        assert_eq!(dropped, 0);
+        assert!(state.readiness_replica("r1", "smg-a").is_some());
     }
 
     #[test]
