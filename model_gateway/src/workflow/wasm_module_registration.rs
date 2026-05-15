@@ -569,7 +569,7 @@ pub fn create_wasm_module_registration_workflow() -> WorkflowDefinition<WasmRegi
             })
             .with_timeout(Duration::from_secs(60))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["validate_descriptor"]),
+            .depends_on(["validate_descriptor"]),
         )
         .add_step(
             StepDefinition::new(
@@ -579,7 +579,7 @@ pub fn create_wasm_module_registration_workflow() -> WorkflowDefinition<WasmRegi
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["calculate_hash"]),
+            .depends_on(["calculate_hash"]),
         )
         .add_step(
             StepDefinition::new(
@@ -593,7 +593,7 @@ pub fn create_wasm_module_registration_workflow() -> WorkflowDefinition<WasmRegi
             })
             .with_timeout(Duration::from_secs(60))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["check_duplicate"]),
+            .depends_on(["check_duplicate"]),
         )
         .add_step(
             StepDefinition::new(
@@ -603,7 +603,7 @@ pub fn create_wasm_module_registration_workflow() -> WorkflowDefinition<WasmRegi
             )
             .with_timeout(Duration::from_secs(30))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["load_wasm_bytes"]),
+            .depends_on(["load_wasm_bytes"]),
         )
         .add_step(
             StepDefinition::new(
@@ -613,7 +613,7 @@ pub fn create_wasm_module_registration_workflow() -> WorkflowDefinition<WasmRegi
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["validate_wasm_component"]),
+            .depends_on(["validate_wasm_component"]),
         )
 }
 

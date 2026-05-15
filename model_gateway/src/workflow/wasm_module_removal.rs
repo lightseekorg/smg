@@ -163,7 +163,7 @@ pub fn create_wasm_module_removal_workflow() -> WorkflowDefinition<WasmRemovalWo
             StepDefinition::new("remove_module", "Remove Module", Arc::new(RemoveModuleStep))
                 .with_timeout(Duration::from_secs(5))
                 .with_failure_action(FailureAction::FailWorkflow)
-                .depends_on(&["find_module_to_remove"]),
+                .depends_on(["find_module_to_remove"]),
         )
 }
 

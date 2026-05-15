@@ -108,7 +108,7 @@ pub fn create_worker_registration_workflow(
             })
             .with_timeout(detect_timeout)
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["classify_worker_type"]),
+            .depends_on(["classify_worker_type"]),
         )
         // Step 1.5: Detect backend runtime (sglang, vllm, trtllm)
         .add_step(
@@ -126,7 +126,7 @@ pub fn create_worker_registration_workflow(
             })
             .with_timeout(Duration::from_secs(10))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["detect_connection_mode"]),
+            .depends_on(["detect_connection_mode"]),
         )
         // Step 2a: Discover metadata
         .add_step(
@@ -141,7 +141,7 @@ pub fn create_worker_registration_workflow(
             })
             .with_timeout(Duration::from_secs(10))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["detect_backend"]),
+            .depends_on(["detect_backend"]),
         )
         // Step 2b: Discover DP info (after metadata)
         .add_step(
@@ -152,7 +152,7 @@ pub fn create_worker_registration_workflow(
                 })
                 .with_timeout(Duration::from_secs(10))
                 .with_failure_action(FailureAction::FailWorkflow)
-                .depends_on(&["discover_metadata"]),
+                .depends_on(["discover_metadata"]),
         )
         // Step 3 (local): Create local worker(s)
         .add_step(
@@ -163,7 +163,7 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["discover_dp_info"]),
+            .depends_on(["discover_dp_info"]),
         )
         // === EXTERNAL BRANCH ===
         // Step 1 (external): Discover models from /v1/models
@@ -182,7 +182,7 @@ pub fn create_worker_registration_workflow(
             })
             .with_timeout(Duration::from_secs(30))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["classify_worker_type"]),
+            .depends_on(["classify_worker_type"]),
         )
         // Step 2 (external): Create external workers
         .add_step(
@@ -193,7 +193,7 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["discover_models"]),
+            .depends_on(["discover_models"]),
         )
         // === SHARED (both branches converge) ===
         // Step 4: Register workers
@@ -205,7 +205,7 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["create_local_worker", "create_external_workers"]),
+            .depends_on(["create_local_worker", "create_external_workers"]),
         )
         // Step 5a: Submit tokenizer job (local only)
         .add_step(
@@ -216,7 +216,7 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["register_workers"]),
+            .depends_on(["register_workers"]),
         )
         // Step 5b: Update policies
         .add_step(
@@ -227,7 +227,7 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["register_workers"]),
+            .depends_on(["register_workers"]),
         )
         // Step 5c: Activate workers
         .add_step(
@@ -238,7 +238,7 @@ pub fn create_worker_registration_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["register_workers"]),
+            .depends_on(["register_workers"]),
         )
 }
 

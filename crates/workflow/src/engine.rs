@@ -18,7 +18,7 @@ use backoff::{backoff::Backoff, ExponentialBackoffBuilder};
 use chrono::Utc;
 use parking_lot::RwLock;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, Notify},
     time::timeout,
 };
 
@@ -28,6 +28,15 @@ use crate::{
     state::{InMemoryStore, StateStore},
     types::*,
 };
+
+/// Terminal outcome of a workflow run, used by [`WorkflowEngine::finalize`]
+/// to derive both the persisted [`WorkflowStatus`] and the matching
+/// [`WorkflowEvent`] in one step.
+enum WorkflowOutcome {
+    Completed { duration: Duration },
+    Failed { failed_step: StepId, error: String },
+    Cancelled,
+}
 
 #[derive(Default)]
 struct StepTracker {
@@ -187,6 +196,10 @@ pub struct WorkflowEngine<D: WorkflowData, S: StateStore<D> = InMemoryStore<D>> 
     shutdown_tx: Arc<watch::Sender<bool>>,
     /// Count of active workflow executions
     active_workflows: Arc<AtomicUsize>,
+    /// Per-instance completion notifiers. Inserted by `start_workflow`,
+    /// fired and removed by `finalize`. Lets `wait_for_completion`
+    /// block on a `Notify` instead of polling the state store.
+    completion_notifiers: Arc<RwLock<HashMap<WorkflowInstanceId, Arc<Notify>>>>,
     _phantom: PhantomData<D>,
 }
 
@@ -206,6 +219,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             event_bus: Arc::new(EventBus::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             active_workflows: Arc::new(AtomicUsize::new(0)),
+            completion_notifiers: Arc::new(RwLock::new(HashMap::new())),
             _phantom: PhantomData,
         }
     }
@@ -447,6 +461,13 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
         self.state_store.save(state).await?;
 
+        // Register the completion slot before publishing `WorkflowStarted`
+        // so a `wait_for_completion` call that races the spawned task
+        // always finds something to subscribe to. `finalize` removes it.
+        self.completion_notifiers
+            .write()
+            .insert(instance_id, Arc::new(Notify::new()));
+
         self.event_bus
             .publish(WorkflowEvent::WorkflowStarted {
                 instance_id,
@@ -498,6 +519,9 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
         loop {
             if self.state_store.is_cancelled(instance_id).await? {
+                // The status is already Cancelled (set by `cancel_workflow`);
+                // we just need to fan the event out and exit. Use the
+                // event-bus directly to avoid a redundant state write.
                 self.event_bus
                     .publish(WorkflowEvent::WorkflowCancelled { instance_id })
                     .await;
@@ -568,16 +592,13 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                     t.clear_waiting(idx);
                 }
 
-                // Collect steps ready to launch, deduplicating indices.
-                // A step with depends_on_any([A, B]) appears in pending_check once
-                // per completed dependency, but must only launch once.
-                let mut seen = HashSet::new();
-                let mut ready: Vec<usize> = Vec::new();
-                for idx in newly_ready_from_wait {
-                    if seen.insert(idx) {
-                        ready.push(idx);
-                    }
-                }
+                // Wait-ready indices come from the `waiting_until` HashMap
+                // and are unique by construction. Dedup is only needed for
+                // `deps_ready_indices`, where a step with
+                // `depends_on_any([A, B])` is pushed onto `pending_check`
+                // once per completed dependency.
+                let mut ready: Vec<usize> = newly_ready_from_wait;
+                let mut seen: HashSet<usize> = ready.iter().copied().collect();
 
                 for idx in deps_ready_indices {
                     let step = &definition.steps[idx];
@@ -585,7 +606,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
                     if let Some(duration) = wait_duration {
                         if duration > Duration::ZERO {
-                            // Step needs to wait - add to waiting_until
                             let ready_at = now + duration;
                             tracing::debug!(
                                 step_id = %step.id,
@@ -622,26 +642,20 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 && pending_check.is_empty()
             {
                 let failed_step = tracker.read().failed.iter().next().cloned();
-                // Use &'static str to avoid allocation in common error paths
-                let error_message: &'static str = if failed_step.is_some() {
+                let error = if failed_step.is_some() {
                     "Workflow failed due to step dependency failure"
                 } else {
                     "Workflow deadlocked: no steps ready and none running"
                 };
-
-                self.state_store
-                    .update(instance_id, |s| {
-                        s.status = WorkflowStatus::Failed;
-                    })
-                    .await?;
-                self.event_bus
-                    .publish(WorkflowEvent::WorkflowFailed {
-                        instance_id,
+                self.finalize(
+                    instance_id,
+                    WorkflowOutcome::Failed {
                         failed_step: failed_step
                             .unwrap_or_else(|| StepId::new("internal_scheduler")),
-                        error: error_message.to_string(),
-                    })
-                    .await;
+                        error: error.to_string(),
+                    },
+                )
+                .await?;
                 return Ok(());
             }
 
@@ -867,34 +881,16 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             t.failed.iter().next().cloned()
         };
 
-        if let Some(ref step) = failed_step {
-            self.state_store
-                .update(instance_id, |s| {
-                    s.status = WorkflowStatus::Failed;
-                })
-                .await?;
-            self.event_bus
-                .publish(WorkflowEvent::WorkflowFailed {
-                    instance_id,
-                    failed_step: step.clone(),
-                    error: "One or more steps failed".into(),
-                })
-                .await;
-        } else {
-            self.state_store
-                .update(instance_id, |s| {
-                    s.status = WorkflowStatus::Completed;
-                })
-                .await?;
-
-            let duration = start_time.elapsed();
-            self.event_bus
-                .publish(WorkflowEvent::WorkflowCompleted {
-                    instance_id,
-                    duration,
-                })
-                .await;
-        }
+        let outcome = match failed_step {
+            Some(failed_step) => WorkflowOutcome::Failed {
+                failed_step,
+                error: "One or more steps failed".into(),
+            },
+            None => WorkflowOutcome::Completed {
+                duration: start_time.elapsed(),
+            },
+        };
+        self.finalize(instance_id, outcome).await?;
 
         Ok(())
     }
@@ -1006,7 +1002,25 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                         _ => ("Step failed".to_string(), false),
                     };
 
-                    let will_retry = should_retry && attempt < max_attempts;
+                    // Resolve whether we'll retry AND the delay together.
+                    // `next_backoff()` returns `None` when the policy is
+                    // exhausted — honor that instead of silently swapping
+                    // in a 1s default, which would mask a misconfigured
+                    // policy and turn "stop" into "retry forever".
+                    let retry_delay = if should_retry && attempt < max_attempts {
+                        let next = backoff.next_backoff();
+                        if next.is_none() {
+                            tracing::warn!(
+                                step_id = %step.id,
+                                attempt,
+                                "Backoff exhausted; falling through to on_failure"
+                            );
+                        }
+                        next
+                    } else {
+                        None
+                    };
+                    let will_retry = retry_delay.is_some();
 
                     // Update step state
                     self.state_store
@@ -1035,12 +1049,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                         })
                         .await;
 
-                    if will_retry {
-                        // Calculate backoff delay
-                        let delay = backoff
-                            .next_backoff()
-                            .unwrap_or_else(|| Duration::from_secs(1));
-
+                    if let Some(delay) = retry_delay {
                         self.event_bus
                             .publish(WorkflowEvent::StepRetrying {
                                 instance_id,
@@ -1090,16 +1099,49 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
     /// Cancel a running workflow
     pub async fn cancel_workflow(&self, instance_id: WorkflowInstanceId) -> WorkflowResult<()> {
+        self.finalize(instance_id, WorkflowOutcome::Cancelled).await
+    }
+
+    /// Persist a terminal status, emit the matching workflow event, and
+    /// wake any `wait_for_completion` callers.
+    ///
+    /// Used by every termination path (deadlock, step failure, normal
+    /// completion, explicit cancel) so the "update state + publish event +
+    /// notify" trio stays in lockstep — historically these were open-coded
+    /// in three different sites and could drift.
+    async fn finalize(
+        &self,
+        instance_id: WorkflowInstanceId,
+        outcome: WorkflowOutcome,
+    ) -> WorkflowResult<()> {
+        let new_status = match outcome {
+            WorkflowOutcome::Completed { .. } => WorkflowStatus::Completed,
+            WorkflowOutcome::Failed { .. } => WorkflowStatus::Failed,
+            WorkflowOutcome::Cancelled => WorkflowStatus::Cancelled,
+        };
         self.state_store
             .update(instance_id, |s| {
-                s.status = WorkflowStatus::Cancelled;
+                s.status = new_status;
             })
             .await?;
-
-        self.event_bus
-            .publish(WorkflowEvent::WorkflowCancelled { instance_id })
-            .await;
-
+        let event = match outcome {
+            WorkflowOutcome::Completed { duration } => WorkflowEvent::WorkflowCompleted {
+                instance_id,
+                duration,
+            },
+            WorkflowOutcome::Failed { failed_step, error } => WorkflowEvent::WorkflowFailed {
+                instance_id,
+                failed_step,
+                error,
+            },
+            WorkflowOutcome::Cancelled => WorkflowEvent::WorkflowCancelled { instance_id },
+        };
+        self.event_bus.publish(event).await;
+        // Wake any waiters and drop the slot. Callers arriving after this
+        // point fall back to reading the state store directly.
+        if let Some(notify) = self.completion_notifiers.write().remove(&instance_id) {
+            notify.notify_waiters();
+        }
         Ok(())
     }
 
@@ -1111,60 +1153,96 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
         self.state_store.load(instance_id).await
     }
 
-    /// Wait for a workflow to complete with adaptive polling
+    /// Wait for a workflow to reach a terminal state.
     ///
-    /// Returns Ok with success message on completion, Err on failure/timeout/cancellation.
-    /// Automatically cleans up terminal workflow states.
+    /// Subscribes to the per-instance completion notifier registered by
+    /// `start_workflow`; the spawned execution task fires it via
+    /// [`finalize`](Self::finalize) when the workflow ends. If the slot
+    /// is already gone (workflow finished before this call), the current
+    /// state is read directly.
+    ///
+    /// Returns `Ok` with a success message on completion, `Err` on
+    /// failure/timeout/cancellation. Automatically cleans up terminal
+    /// workflow states.
     pub async fn wait_for_completion(
         &self,
         instance_id: WorkflowInstanceId,
         label: &str,
         timeout_duration: Duration,
     ) -> Result<String, String> {
-        let start = std::time::Instant::now();
-        let mut poll_interval = Duration::from_millis(100);
-        let max_poll_interval = Duration::from_millis(2000);
-        let poll_backoff = Duration::from_millis(200);
+        // Snapshot the notifier handle (if any) and prepare the wait
+        // future *before* checking the state, so we can't miss a
+        // `notify_waiters` that fires between the state read and the
+        // await.
+        let notifier = self.completion_notifiers.read().get(&instance_id).cloned();
+        let waiter = notifier.as_ref().map(|n| n.notified());
 
-        loop {
-            if start.elapsed() > timeout_duration {
-                return Err(format!(
-                    "Workflow timeout after {}s for {}",
-                    timeout_duration.as_secs(),
-                    label
-                ));
-            }
-
-            let state = self
-                .get_status(instance_id)
-                .await
-                .map_err(|e| format!("Failed to get workflow status: {e:?}"))?;
-
-            let result = match state.status {
-                WorkflowStatus::Completed => {
-                    Ok(format!("{label} completed successfully via workflow"))
-                }
-                WorkflowStatus::Failed => {
-                    let current_step = state.current_step.as_ref();
-                    let step_name = current_step
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let error_msg = current_step
-                        .and_then(|step_id| state.step_states.get(step_id))
-                        .and_then(|s| s.last_error.as_deref())
-                        .unwrap_or("Unknown error");
-                    Err(format!("Workflow failed at step {step_name}: {error_msg}"))
-                }
-                WorkflowStatus::Cancelled => Err(format!("Workflow cancelled for {label}")),
-                WorkflowStatus::Pending | WorkflowStatus::Paused | WorkflowStatus::Running => {
-                    tokio::time::sleep(poll_interval).await;
-                    poll_interval = (poll_interval + poll_backoff).min(max_poll_interval);
-                    continue;
-                }
-            };
-
+        // First state read: handles "already terminal" and "no notifier"
+        // (workflow finalised before we got here) without ever sleeping.
+        let state = self
+            .get_status(instance_id)
+            .await
+            .map_err(|e| format!("Failed to get workflow status: {e:?}"))?;
+        if let Some(result) = Self::result_from_state(&state, label) {
             self.state_store.cleanup_if_terminal(instance_id).await;
             return result;
+        }
+
+        let Some(waiter) = waiter else {
+            // Notifier slot is gone but state isn't terminal yet — this
+            // shouldn't happen because `finalize` updates state before
+            // removing the slot. Fall back to a single timed poll.
+            return Err(format!(
+                "Workflow {label} has no completion notifier and is still {:?}",
+                state.status
+            ));
+        };
+
+        match timeout(timeout_duration, waiter).await {
+            Ok(()) => {
+                let state = self
+                    .get_status(instance_id)
+                    .await
+                    .map_err(|e| format!("Failed to get workflow status: {e:?}"))?;
+                let result = Self::result_from_state(&state, label).unwrap_or_else(|| {
+                    Err(format!(
+                        "Workflow {label} was notified but state is still {:?}",
+                        state.status
+                    ))
+                });
+                self.state_store.cleanup_if_terminal(instance_id).await;
+                result
+            }
+            Err(_) => Err(format!(
+                "Workflow timeout after {}s for {}",
+                timeout_duration.as_secs(),
+                label
+            )),
+        }
+    }
+
+    /// Map a workflow state to a `wait_for_completion` result, or `None`
+    /// if the workflow is still in a non-terminal status.
+    fn result_from_state(state: &WorkflowState<D>, label: &str) -> Option<Result<String, String>> {
+        match state.status {
+            WorkflowStatus::Completed => {
+                Some(Ok(format!("{label} completed successfully via workflow")))
+            }
+            WorkflowStatus::Failed => {
+                let current_step = state.current_step.as_ref();
+                let step_name = current_step
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let error_msg = current_step
+                    .and_then(|step_id| state.step_states.get(step_id))
+                    .and_then(|s| s.last_error.as_deref())
+                    .unwrap_or("Unknown error");
+                Some(Err(format!(
+                    "Workflow failed at step {step_name}: {error_msg}"
+                )))
+            }
+            WorkflowStatus::Cancelled => Some(Err(format!("Workflow cancelled for {label}"))),
+            WorkflowStatus::Pending | WorkflowStatus::Paused | WorkflowStatus::Running => None,
         }
     }
 
@@ -1176,6 +1254,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             event_bus: Arc::clone(&self.event_bus),
             shutdown_tx: Arc::clone(&self.shutdown_tx),
             active_workflows: Arc::clone(&self.active_workflows),
+            completion_notifiers: Arc::clone(&self.completion_notifiers),
             _phantom: PhantomData,
         }
     }
