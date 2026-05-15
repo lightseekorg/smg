@@ -328,6 +328,13 @@ impl ToolInventory {
             .collect()
     }
 
+    /// Check if a server has any registered tools.
+    pub fn has_server_tools(&self, server_key: &str) -> bool {
+        self.tools_by_server
+            .get(server_key)
+            .is_some_and(|tools| !tools.is_empty())
+    }
+
     /// Clear all cached items for a server. Uses server index for O(tools_per_server) removal.
     pub fn clear_server_tools(&self, server_key: &str) {
         if let Some((_, tool_names)) = self.tools_by_server.remove(server_key) {

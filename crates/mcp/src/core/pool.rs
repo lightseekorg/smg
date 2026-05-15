@@ -227,6 +227,17 @@ impl McpConnectionPool {
         self.connections.lock().contains(key)
     }
 
+    /// Remove a connection from the pool by key. Returns true if it was present.
+    pub fn remove(&self, key: &PoolKey) -> bool {
+        let mut connections = self.connections.lock();
+        if connections.pop(key).is_some() {
+            self.connection_count.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Look up a connection by URL only (backward compatibility).
     ///
     /// **O(n)** — performs a linear scan of all pooled connections under the

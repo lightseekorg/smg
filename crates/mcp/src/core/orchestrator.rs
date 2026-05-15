@@ -1331,8 +1331,12 @@ impl McpOrchestrator {
 
         let pool_key = PoolKey::from_config(&config, tenant_id);
 
-        // Check if already connected with same auth/tenant
-        if self.connection_pool.contains(&pool_key) {
+        // Fast path: connection exists AND tools are already registered in the inventory.
+        // If the connection is pooled but tools are missing (e.g. prior list_all_tools failed),
+        // fall through to re-fetch tools using the cached client.
+        if self.connection_pool.contains(&pool_key)
+            && self.tool_inventory.has_server_tools(&pool_key.url)
+        {
             return Ok(pool_key.url.clone());
         }
 
@@ -1345,7 +1349,7 @@ impl McpOrchestrator {
 
         let client = self
             .connection_pool
-            .get_or_create(pool_key, config.clone(), |cfg, _proxy| async move {
+            .get_or_create(pool_key.clone(), config.clone(), |cfg, _proxy| async move {
                 match &cfg.transport {
                     McpTransport::Streamable {
                         url,
@@ -1398,9 +1402,15 @@ impl McpOrchestrator {
             })
             .await?;
 
-        // Load tools from the server
-        // Use server_key (URL) as the tool's server identifier so it matches
-        // what ensure_request_mcp_client adds to server_keys for filtering
+        // Skip tool listing if tools are already in the inventory (pool hit with existing tools)
+        if inventory_clone.has_server_tools(&server_key) {
+            self.metrics.record_connection_opened();
+            return Ok(server_key);
+        }
+
+        // Load tools from the server.
+        // If this fails, remove the connection from the pool so the next request
+        // retries from scratch instead of perpetually seeing zero tools.
         match client.peer().list_all_tools().await {
             Ok(tools) => {
                 info!(
@@ -1414,7 +1424,16 @@ impl McpOrchestrator {
                     inventory_clone.insert_entry(entry);
                 }
             }
-            Err(e) => warn!("Failed to list tools from '{}': {}", server_key, e),
+            Err(e) => {
+                warn!(
+                    "Failed to list tools from '{}': {}; removing pooled connection",
+                    server_key, e
+                );
+                self.connection_pool.remove(&pool_key);
+                return Err(McpError::ConnectionFailed(format!(
+                    "Tool discovery failed for '{server_key}': {e}"
+                )));
+            }
         }
 
         self.metrics.record_connection_opened();
