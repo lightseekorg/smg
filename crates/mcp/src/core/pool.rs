@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use rmcp::{service::RunningService, RoleClient};
 
 use super::config::{McpProxyConfig, McpServerConfig, McpTransport};
-use crate::error::McpResult;
+use crate::{error::McpResult, tenant::TenantId};
 
 type McpClient = RunningService<RoleClient, ()>;
 type EvictionCallback = Arc<dyn Fn(&PoolKey) + Send + Sync>;
@@ -26,11 +26,11 @@ type EvictionCallback = Arc<dyn Fn(&PoolKey) + Send + Sync>;
 pub struct PoolKey {
     pub url: String,
     pub auth_hash: u64,
-    pub tenant_id: Option<String>,
+    pub tenant_id: Option<TenantId>,
 }
 
 impl PoolKey {
-    pub fn new(url: impl Into<String>, auth_hash: u64, tenant_id: Option<String>) -> Self {
+    pub fn new(url: impl Into<String>, auth_hash: u64, tenant_id: Option<TenantId>) -> Self {
         Self {
             url: url.into(),
             auth_hash,
@@ -38,7 +38,7 @@ impl PoolKey {
         }
     }
 
-    pub fn from_config(config: &McpServerConfig, tenant_id: Option<String>) -> Self {
+    pub fn from_config(config: &McpServerConfig, tenant_id: Option<TenantId>) -> Self {
         let (url, auth_hash) = match &config.transport {
             McpTransport::Streamable {
                 url,
@@ -95,11 +95,16 @@ impl PoolKey {
 #[derive(Clone)]
 pub(crate) struct CachedConnection {
     pub client: Arc<McpClient>,
+    /// Set after a successful `list_all_tools` for this pool entry (including empty tool lists).
+    pub tools_discovered: bool,
 }
 
 impl CachedConnection {
     pub fn new(client: Arc<McpClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            tools_discovered: false,
+        }
     }
 }
 
@@ -227,11 +232,33 @@ impl McpConnectionPool {
         self.connections.lock().contains(key)
     }
 
+    /// True when the pool holds this key and tool discovery has completed successfully.
+    pub fn tool_discovery_completed(&self, key: &PoolKey) -> bool {
+        self.connections
+            .lock()
+            .get(key)
+            .is_some_and(|cached| cached.tools_discovered)
+    }
+
+    /// Mark tool discovery as done for a pooled connection (including zero-tool servers).
+    pub fn mark_tool_discovery_completed(&self, key: &PoolKey) -> bool {
+        let mut connections = self.connections.lock();
+        if let Some(cached) = connections.get_mut(key) {
+            cached.tools_discovered = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove a connection from the pool by key. Returns true if it was present.
     pub fn remove(&self, key: &PoolKey) -> bool {
         let mut connections = self.connections.lock();
         if connections.pop(key).is_some() {
             self.connection_count.fetch_sub(1, Ordering::Relaxed);
+            if let Some(callback) = &self.eviction_callback {
+                callback(key);
+            }
             true
         } else {
             false
@@ -356,8 +383,19 @@ mod tests {
         assert_ne!(key_with_token.auth_hash, 0); // Token hashed
 
         // With tenant
-        let key_with_tenant = PoolKey::from_config(&config, Some("tenant-123".to_string()));
-        assert_eq!(key_with_tenant.tenant_id, Some("tenant-123".to_string()));
+        let key_with_tenant = PoolKey::from_config(&config, Some(TenantId::from("tenant-123")));
+        assert_eq!(
+            key_with_tenant.tenant_id,
+            Some(TenantId::from("tenant-123"))
+        );
+    }
+
+    #[test]
+    fn test_tool_discovery_completed_absent_key() {
+        let pool = McpConnectionPool::new();
+        let key = PoolKey::from_config(&create_test_config("http://localhost:3000"), None);
+        assert!(!pool.tool_discovery_completed(&key));
+        assert!(!pool.mark_tool_discovery_completed(&key));
     }
 
     #[test]

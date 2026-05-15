@@ -1318,7 +1318,7 @@ impl McpOrchestrator {
     pub async fn connect_dynamic_server_with_tenant(
         &self,
         config: McpServerConfig,
-        tenant_id: Option<String>,
+        tenant_id: Option<crate::tenant::TenantId>,
     ) -> McpResult<String> {
         use rmcp::{
             transport::{
@@ -1331,10 +1331,14 @@ impl McpOrchestrator {
 
         let pool_key = PoolKey::from_config(&config, tenant_id);
 
-        // Fast path: connection exists AND tools are already registered in the inventory.
-        // If the connection is pooled but tools are missing (e.g. prior list_all_tools failed),
-        // fall through to re-fetch tools using the cached client.
-        if self.connection_pool.contains(&pool_key)
+        // Fast path: pool reports discovery completed AND the inventory still holds
+        // tools for this URL. The two invariants can desync because pool keys
+        // include (auth, tenant) but the inventory is keyed by URL only — a
+        // sibling pool entry's eviction can wipe the URL's inventory while this
+        // entry's `tools_discovered` flag remains true. Re-running discovery is
+        // the safe recovery; empty-tool servers fall through to the slower path
+        // and re-list, which is acceptable because that case is rare.
+        if self.connection_pool.tool_discovery_completed(&pool_key)
             && self.tool_inventory.has_server_tools(&pool_key.url)
         {
             return Ok(pool_key.url.clone());
@@ -1402,15 +1406,17 @@ impl McpOrchestrator {
             })
             .await?;
 
-        // Skip tool listing if tools are already in the inventory (pool hit with existing tools)
-        if inventory_clone.has_server_tools(&server_key) {
+        // Another caller may have completed discovery while we were connecting.
+        // Same defensive AND as the outer fast path — see note above.
+        if self.connection_pool.tool_discovery_completed(&pool_key)
+            && inventory_clone.has_server_tools(&server_key)
+        {
             self.metrics.record_connection_opened();
             return Ok(server_key);
         }
 
-        // Load tools from the server.
-        // If this fails, remove the connection from the pool so the next request
-        // retries from scratch instead of perpetually seeing zero tools.
+        // Load tools from the server. Dynamic servers are not built-in tool hosts.
+        // If discovery fails, remove the connection so the next request retries cleanly.
         match client.peer().list_all_tools().await {
             Ok(tools) => {
                 info!(
@@ -1418,11 +1424,16 @@ impl McpOrchestrator {
                     tools.len(),
                     server_key
                 );
+                // Drop any stale/partial entries from a prior failed discovery before
+                // re-populating, so the inventory reflects only the current tool set.
+                inventory_clone.clear_server_tools(&server_key);
                 for tool in tools {
                     let entry = ToolEntry::from_server_tool(&server_key, tool)
                         .with_category(ToolCategory::Dynamic);
                     inventory_clone.insert_entry(entry);
                 }
+                self.connection_pool
+                    .mark_tool_discovery_completed(&pool_key);
             }
             Err(e) => {
                 warn!(

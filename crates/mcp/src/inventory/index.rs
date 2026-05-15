@@ -31,7 +31,11 @@ pub(crate) struct CachedResource {
 
 pub struct ToolInventory {
     tools_by_qualified: DashMap<QualifiedToolName, ToolEntry>,
-    tools_by_simple_name: DashMap<String, Vec<QualifiedToolName>>,
+    /// Tools indexed by simple (unqualified) name. Multiple servers may register
+    /// the same simple name; the `HashSet` enforces structural deduplication so
+    /// repeated re-discovery cannot create duplicate entries even if a caller
+    /// bypasses the explicit dedup check in `insert_entry`.
+    tools_by_simple_name: DashMap<String, HashSet<QualifiedToolName>>,
     tools_by_server: DashMap<String, HashSet<String>>,
     tools_by_category: DashMap<ToolCategory, HashSet<QualifiedToolName>>,
     aliases: DashMap<String, QualifiedToolName>,
@@ -60,12 +64,13 @@ impl Default for ToolInventory {
 }
 
 impl ToolInventory {
-    /// Returns first registered tool on collision. Use `get_tool_qualified()` for specific server.
+    /// Returns an arbitrary registered tool on collision (HashSet iteration order).
+    /// Use `get_tool_qualified()` to target a specific server deterministically.
     pub fn get_tool(&self, tool_name: &str) -> Option<(String, Tool)> {
         let qualified_names = self.tools_by_simple_name.get(tool_name)?;
-        let qualified = qualified_names.first()?;
+        let qualified = qualified_names.iter().next()?.clone();
         self.tools_by_qualified
-            .get(qualified)
+            .get(&qualified)
             .map(|entry| (entry.server_key().to_string(), entry.tool.clone()))
     }
 
@@ -109,15 +114,11 @@ impl ToolInventory {
         // Insert into primary index
         self.tools_by_qualified.insert(qualified.clone(), entry);
 
-        // Update simple name index
+        // Update simple name index — HashSet guarantees deduplication.
         self.tools_by_simple_name
             .entry(tool_name.clone())
-            .and_modify(|v| {
-                if !v.contains(&qualified) {
-                    v.push(qualified.clone());
-                }
-            })
-            .or_insert_with(|| vec![qualified]);
+            .or_default()
+            .insert(qualified);
 
         // Update server index
         self.tools_by_server
@@ -328,7 +329,12 @@ impl ToolInventory {
             .collect()
     }
 
-    /// Check if a server has any registered tools.
+    /// True if at least one tool is currently registered under this server key.
+    ///
+    /// Used as a defensive invariant by the dynamic-connect fast path: the pool
+    /// is keyed by `(url, auth_hash, tenant_id)` while the inventory is keyed
+    /// by URL only, so the inventory for a URL can be wiped by a sibling pool
+    /// entry's eviction even when this entry still claims `tools_discovered`.
     pub fn has_server_tools(&self, server_key: &str) -> bool {
         self.tools_by_server
             .get(server_key)
@@ -351,7 +357,7 @@ impl ToolInventory {
 
                 // Remove from simple name index
                 if let Some(mut entry) = self.tools_by_simple_name.get_mut(&tool_name) {
-                    entry.retain(|q| q != &qualified);
+                    entry.remove(&qualified);
                 }
                 self.tools_by_simple_name
                     .remove_if(&tool_name, |_, v| v.is_empty());
@@ -694,9 +700,13 @@ mod tests {
         // Both stored (counts total tools including collisions)
         assert_eq!(inventory.counts().0, 2);
 
-        // Simple lookup returns first registered
+        // Simple lookup returns one of the registered servers (HashSet iteration
+        // order is unspecified; callers must use the qualified API for determinism).
         let (server, _) = inventory.get_tool("read_file").unwrap();
-        assert_eq!(server, "server-a");
+        assert!(
+            server == "server-a" || server == "server-b",
+            "unexpected server returned from simple lookup: {server}"
+        );
 
         // Qualified lookup can access both
         assert!(inventory
