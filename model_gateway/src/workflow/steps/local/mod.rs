@@ -108,7 +108,7 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["find_workers_to_remove"]),
+            .depends_on(["find_workers_to_remove"]),
         )
         .add_step(
             StepDefinition::new(
@@ -121,7 +121,7 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["drain_workers"]),
+            .depends_on(["drain_workers"]),
         )
         .add_step(
             StepDefinition::new(
@@ -134,7 +134,7 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["remove_from_policy_registry"]),
+            .depends_on(["remove_from_policy_registry"]),
         )
         .add_step(
             StepDefinition::new(
@@ -147,7 +147,7 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["remove_from_worker_registry"]),
+            .depends_on(["remove_from_worker_registry"]),
         )
 }
 
@@ -186,7 +186,7 @@ pub fn create_worker_update_workflow() -> WorkflowDefinition<WorkerUpdateWorkflo
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["find_worker_to_update"]),
+            .depends_on(["find_worker_to_update"]),
         )
         .add_step(
             StepDefinition::new(
@@ -199,7 +199,7 @@ pub fn create_worker_update_workflow() -> WorkflowDefinition<WorkerUpdateWorkflo
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["update_worker_properties"]),
+            .depends_on(["update_worker_properties"]),
         )
 }
 

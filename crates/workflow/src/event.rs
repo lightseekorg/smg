@@ -116,29 +116,8 @@ impl EventBus {
     /// Subscriber failures (timeout or panic) are logged but don't affect
     /// other subscribers or the caller.
     pub async fn publish(&self, event: WorkflowEvent) {
-        let subscribers: Vec<_> = self.subscribers.read().await.iter().cloned().collect();
-        let timeout = self.subscriber_timeout;
-
-        for (idx, subscriber) in subscribers.into_iter().enumerate() {
-            let event = event.clone();
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "fire-and-forget event notification; subscriber timeout and failure are logged internally"
-            )]
-            tokio::spawn(async move {
-                let result = tokio::time::timeout(timeout, subscriber.on_event(&event)).await;
-                match result {
-                    Ok(()) => {}
-                    Err(_) => {
-                        warn!(
-                            subscriber_index = idx,
-                            timeout_secs = timeout.as_secs(),
-                            "Event subscriber timed out"
-                        );
-                    }
-                }
-            });
-        }
+        // Drop the handles — caller doesn't wait for subscribers.
+        let _ = self.spawn_subscriber_tasks(event).await;
     }
 
     /// Publish an event and wait for all subscribers to complete
@@ -147,15 +126,30 @@ impl EventBus {
     /// (or timeout). Use this when you need to ensure all subscribers
     /// have processed the event before continuing.
     pub async fn publish_and_wait(&self, event: WorkflowEvent) {
+        let handles = self.spawn_subscriber_tasks(event).await;
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
+    /// Spawn one task per subscriber to deliver `event`. Returns join
+    /// handles so callers can choose to drop (fire-and-forget) or await.
+    async fn spawn_subscriber_tasks(
+        &self,
+        event: WorkflowEvent,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
         let subscribers: Vec<_> = self.subscribers.read().await.iter().cloned().collect();
         let timeout = self.subscriber_timeout;
 
-        let handles: Vec<_> = subscribers
+        subscribers
             .into_iter()
             .enumerate()
             .map(|(idx, subscriber)| {
                 let event = event.clone();
-                #[expect(clippy::disallowed_methods, reason = "parallel event fan-out; handles are collected and awaited by publish_and_wait")]
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "parallel event fan-out; caller decides whether to await the handles"
+                )]
                 tokio::spawn(async move {
                     let result = tokio::time::timeout(timeout, subscriber.on_event(&event)).await;
                     if result.is_err() {
@@ -167,12 +161,7 @@ impl EventBus {
                     }
                 })
             })
-            .collect();
-
-        // Wait for all spawned tasks, ignoring individual failures (panics)
-        for handle in handles {
-            let _ = handle.await;
-        }
+            .collect()
     }
 }
 

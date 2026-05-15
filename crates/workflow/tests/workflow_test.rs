@@ -528,7 +528,7 @@ async fn test_dag_with_dependencies() {
                     end_times: Arc::clone(&end_times),
                 }),
             )
-            .depends_on(&["step_a", "step_b"]),
+            .depends_on(["step_a", "step_b"]),
         );
 
     let workflow_id = workflow.id.clone();
@@ -617,7 +617,7 @@ async fn test_dag_dependency_failure_blocks_dependents() {
                     counter: Arc::clone(&b_executed),
                 }),
             )
-            .depends_on(&["step_a"]),
+            .depends_on(["step_a"]),
         );
 
     let workflow_id = workflow.id.clone();
@@ -650,15 +650,15 @@ fn test_dag_validation_cycle_detection() {
     let mut workflow = WorkflowDefinition::new("cyclic_workflow", "Cyclic Test")
         .add_step(
             StepDefinition::new("step_a", "Step A", Arc::new(AlwaysSucceedStep))
-                .depends_on(&["step_c"]),
+                .depends_on(["step_c"]),
         )
         .add_step(
             StepDefinition::new("step_b", "Step B", Arc::new(AlwaysSucceedStep))
-                .depends_on(&["step_a"]),
+                .depends_on(["step_a"]),
         )
         .add_step(
             StepDefinition::new("step_c", "Step C", Arc::new(AlwaysSucceedStep))
-                .depends_on(&["step_b"]),
+                .depends_on(["step_b"]),
         );
 
     let result = workflow.validate();
@@ -680,7 +680,7 @@ fn test_dag_validation_missing_dependency() {
         ))
         .add_step(
             StepDefinition::new("step_b", "Step B", Arc::new(AlwaysSucceedStep))
-                .depends_on(&["nonexistent_step"]),
+                .depends_on(["nonexistent_step"]),
         );
 
     let result = workflow.validate();
@@ -707,11 +707,11 @@ fn test_dag_validation_valid_workflow() {
         ))
         .add_step(
             StepDefinition::new("step_c", "Step C", Arc::new(AlwaysSucceedStep))
-                .depends_on(&["step_a", "step_b"]),
+                .depends_on(["step_a", "step_b"]),
         )
         .add_step(
             StepDefinition::new("step_d", "Step D", Arc::new(AlwaysSucceedStep))
-                .depends_on(&["step_c"]),
+                .depends_on(["step_c"]),
         );
 
     let result = workflow.validate();
@@ -968,7 +968,7 @@ async fn test_run_if_context_based() {
                 "Conditional Step",
                 Arc::new(TrackingStep { counter: executed }),
             )
-            .depends_on(&["set_key_step"])
+            .depends_on(["set_key_step"])
             .run_if(|ctx| ctx.data.test_key.as_deref() == Some("execute_next")),
         );
 
@@ -1037,7 +1037,7 @@ async fn test_depends_on_any() {
                     end_times: Arc::clone(&end_times),
                 }),
             )
-            .depends_on_any(&["step_a", "step_b"]),
+            .depends_on_any(["step_a", "step_b"]),
         );
 
     let workflow_id = workflow.id.clone();
@@ -1126,8 +1126,8 @@ async fn test_depends_on_any_combined_with_depends_on() {
                     end_times: Arc::clone(&end_times),
                 }),
             )
-            .depends_on(&["step_a"]) // Must wait for A
-            .depends_on_any(&["step_b", "step_d"]), // AND any of B or D
+            .depends_on(["step_a"]) // Must wait for A
+            .depends_on_any(["step_b", "step_d"]), // AND any of B or D
         );
 
     let workflow_id = workflow.id.clone();
@@ -1180,7 +1180,7 @@ fn test_dag_validation_depends_on_any_missing() {
         ))
         .add_step(
             StepDefinition::new("step_b", "Step B", Arc::new(AlwaysSucceedStep))
-                .depends_on_any(&["nonexistent_step"]),
+                .depends_on_any(["nonexistent_step"]),
         );
 
     let result = workflow.validate();
@@ -1237,7 +1237,7 @@ async fn test_depends_on_any_all_fail() {
                     counter: c_executed,
                 }),
             )
-            .depends_on_any(&["step_a", "step_b"]),
+            .depends_on_any(["step_a", "step_b"]),
         );
 
     let workflow_id = workflow.id.clone();
@@ -1314,7 +1314,7 @@ async fn test_depends_on_any_one_fails_one_succeeds() {
                     counter: c_executed,
                 }),
             )
-            .depends_on_any(&["step_a", "step_b"]),
+            .depends_on_any(["step_a", "step_b"]),
         );
 
     let workflow_id = workflow.id.clone();
