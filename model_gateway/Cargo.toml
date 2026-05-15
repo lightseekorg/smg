@@ -88,6 +88,7 @@ tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors",
 serde_json = { version = "1.0", default-features = false, features = ["std", "preserve_order"] }
 bytes = "1.8.0"
 http-body = "1.0"
+http-body-util = "0.1"
 futures-util = "0.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 tracing-log = "0.2"
@@ -135,13 +136,15 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 portpicker = "0.1"
 lazy_static = "1.4"
-wasm-encoder = "0.247"
+wasm-encoder = "0.248"
 npyz = { version = "0.9", features = ["npz"] }
 opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
 serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
+tracing-test = "0.2"
+tokio = { workspace = true, features = ["test-util"] }
 kv-index.workspace = true
 wasmtime-wasi = { workspace = true }
 lru = { workspace = true }

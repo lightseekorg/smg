@@ -7,6 +7,7 @@ Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 
 import hashlib
 import itertools
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
@@ -33,6 +34,24 @@ from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = init_logger(__name__)
+SAMPLING_DEFAULT_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+)
+
+
+def _filtered_sampling_defaults(params: dict | None) -> dict:
+    if not params:
+        return {}
+    return {
+        key: params[key]
+        for key in SAMPLING_DEFAULT_KEYS
+        if key in params and params[key] is not None
+    }
+
 
 # Proto dtype string → torch dtype
 _PROTO_DTYPE_MAP: dict[str, torch.dtype] = {
@@ -321,6 +340,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         else:
             eos_token_ids = []
 
+        sampling_defaults = _filtered_sampling_defaults(
+            model_config.get_diff_sampling_param() or {}
+        )
+
         return vllm_engine_pb2.GetModelInfoResponse(
             model_path=model_config.model,
             is_generation=model_config.runner_type == "generate",
@@ -335,6 +358,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             pad_token_id=getattr(hf_config, "pad_token_id", None) or 0,
             bos_token_id=getattr(hf_config, "bos_token_id", None) or 0,
             max_req_input_len=model_config.max_model_len,
+            default_sampling_params_json=(
+                json.dumps(sampling_defaults, separators=(",", ":")) if sampling_defaults else ""
+            ),
         )
 
     async def GetServerInfo(

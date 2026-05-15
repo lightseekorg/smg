@@ -584,6 +584,7 @@ impl App {
                             check_interval_secs: None,
                             success_threshold: None,
                             failure_threshold: None,
+                            drain_settle_secs: None,
                         }),
                         priority: None,
                         cost: None,
@@ -970,6 +971,7 @@ impl App {
                                             check_interval_secs: None,
                                             success_threshold: None,
                                             failure_threshold: None,
+                                            drain_settle_secs: None,
                                         }),
                                     },
                                 )

@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::{
-    extract::{multipart::MultipartError, Extension, Multipart, Path, Query, Request, State},
+    extract::{Extension, Multipart, Path, Query, Request, State},
     http::{header::InvalidHeaderName, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -22,6 +22,7 @@ use openai_protocol::{
     generate::GenerateRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    multipart::AudioTranscriptionMultipart,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
     realtime_session::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
@@ -34,14 +35,13 @@ use openai_protocol::{
         SkillsListQuery,
     },
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
-    transcription::TranscriptionRequest,
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
 };
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler, WorkerStateSubscriber};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
@@ -58,16 +58,9 @@ use crate::{
         otel_trace,
     },
     routers::{
-        conversations,
-        mesh::{
-            get_app_config, get_cluster_status, get_global_rate_limit, get_global_rate_limit_stats,
-            get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
-            get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
-        },
-        openai::realtime::ws::RealtimeQueryParams,
-        parse, responses as response_handlers,
-        router_manager::RouterManager,
-        skills, tokenize, AudioFile, RouterTrait,
+        conversations, openai::realtime::ws::RealtimeQueryParams, parse,
+        responses as response_handlers, router_manager::RouterManager, skills, tokenize,
+        RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -314,145 +307,18 @@ async fn v1_audio_transcriptions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
-    mut multipart: Multipart,
+    AudioTranscriptionMultipart { request, audio }: AudioTranscriptionMultipart,
 ) -> Response {
-    let mut file_bytes: Option<bytes::Bytes> = None;
-    let mut file_name: Option<String> = None;
-    let mut file_content_type: Option<String> = None;
-    let mut req = TranscriptionRequest::default();
-    let mut timestamp_granularities: Vec<String> = Vec::new();
-
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to read multipart field: {e}"),
-                )
-                    .into_response();
-            }
-        };
-
-        let name = field.name().unwrap_or("").to_string();
-        match name.as_str() {
-            "file" => {
-                file_name = field.file_name().map(str::to_string);
-                file_content_type = field.content_type().map(str::to_string);
-                match field.bytes().await {
-                    Ok(b) => file_bytes = Some(b),
-                    Err(e) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            format!("Failed to read audio file bytes: {e}"),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-            "model" => match field.text().await {
-                Ok(t) => req.model = t,
-                Err(e) => return bad_text_field("model", e),
-            },
-            "language" => match field.text().await {
-                Ok(t) => req.language = Some(t),
-                Err(e) => return bad_text_field("language", e),
-            },
-            "prompt" => match field.text().await {
-                Ok(t) => req.prompt = Some(t),
-                Err(e) => return bad_text_field("prompt", e),
-            },
-            "response_format" => match field.text().await {
-                Ok(t) => req.response_format = Some(t),
-                Err(e) => return bad_text_field("response_format", e),
-            },
-            "temperature" => match field.text().await {
-                Ok(t) => match t.trim().parse::<f32>() {
-                    Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {
-                        req.temperature = Some(v);
-                    }
-                    Ok(v) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "Invalid 'temperature' value: {v} (must be a finite number in [0.0, 1.0])"
-                            ),
-                        )
-                            .into_response();
-                    }
-                    Err(e) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            format!("Invalid 'temperature' value: {e}"),
-                        )
-                            .into_response();
-                    }
-                },
-                Err(e) => return bad_text_field("temperature", e),
-            },
-            "timestamp_granularities" | "timestamp_granularities[]" => match field.text().await {
-                Ok(t) => timestamp_granularities.push(t),
-                Err(e) => return bad_text_field("timestamp_granularities", e),
-            },
-            "stream" => match field.text().await {
-                Ok(t) => match t.as_str() {
-                    "true" | "True" | "TRUE" | "1" => req.stream = Some(true),
-                    "false" | "False" | "FALSE" | "0" => req.stream = Some(false),
-                    other => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            format!("Invalid 'stream' value: '{other}' (expected true/false/1/0)"),
-                        )
-                            .into_response();
-                    }
-                },
-                Err(e) => return bad_text_field("stream", e),
-            },
-            _ => {
-                // Unknown field; drain to free resources but otherwise ignore.
-                let _ = field.bytes().await;
-            }
-        }
-    }
-
-    // Reject blank/whitespace-only `model` before it reaches worker selection.
-    if req.model.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "Missing required 'model' field").into_response();
-    }
-    req.model = req.model.trim().to_string();
-    let bytes = match file_bytes {
-        Some(b) if !b.is_empty() => b,
-        Some(_) => {
-            return (StatusCode::BAD_REQUEST, "Uploaded 'file' part is empty").into_response();
-        }
-        None => {
-            return (StatusCode::BAD_REQUEST, "Missing required 'file' part").into_response();
-        }
-    };
-
-    if !timestamp_granularities.is_empty() {
-        req.timestamp_granularities = Some(timestamp_granularities);
-    }
-
-    let audio = AudioFile {
-        bytes,
-        file_name: file_name.unwrap_or_else(|| "audio".to_string()),
-        content_type: file_content_type,
-    };
-
     state
         .router
-        .route_audio_transcriptions(Some(&headers), &tenant_meta, &req, audio, &req.model)
+        .route_audio_transcriptions(
+            Some(&headers),
+            &tenant_meta,
+            &request,
+            audio,
+            &request.model,
+        )
         .await
-}
-
-fn bad_text_field(field: &str, e: MultipartError) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        format!("Failed to read '{field}' field: {e}"),
-    )
-        .into_response()
 }
 
 async fn v1_responses_get(
@@ -894,7 +760,7 @@ pub struct ServerConfig {
     /// `None` means use the default (0.0.0.0, auto-detect candidate IP).
     pub webrtc_bind_addr: Option<std::net::IpAddr>,
     /// STUN server for ICE candidate gathering (host:port).
-    /// `None` means use the default (stun.l.google.com:19302).
+    /// Defaults to `stun.l.google.com:19302`; `"none"` to disable.
     pub webrtc_stun_server: Option<String>,
 }
 
@@ -1123,24 +989,11 @@ pub fn build_app(
     let admin_routes = apply_control_plane_auth(admin_routes);
     let worker_routes = apply_control_plane_auth(worker_routes);
 
-    // HA management routes
-    let mesh_routes = Router::new()
-        .route("/ha/status", get(get_cluster_status))
-        .route("/ha/health", get(get_mesh_health))
-        .route("/ha/workers", get(get_worker_states))
-        .route("/ha/workers/{worker_id}", get(get_worker_state))
-        .route("/ha/policies", get(get_policy_states))
-        .route("/ha/policies/{model_id}", get(get_policy_state))
-        .route("/ha/config/{key}", get(get_app_config))
-        .route("/ha/config", post(update_app_config))
-        .route("/ha/rate-limit", post(set_global_rate_limit))
-        .route("/ha/rate-limit", get(get_global_rate_limit))
-        .route("/ha/rate-limit/stats", get(get_global_rate_limit_stats))
-        .route("/ha/shutdown", post(trigger_graceful_shutdown))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_config.clone(),
-            middleware::auth_middleware,
-        ));
+    // `/ha/*` management routes (routers/mesh handlers) are removed
+    // in this PR — they all read/write through the v1
+    // `MeshSyncManager` and don't map cleanly onto the v2 adapters.
+    // A v2-aware admin surface will return in a follow-up PR once
+    // adapters are production-wired.
 
     Ok(Router::new()
         .merge(protected_routes)
@@ -1149,7 +1002,6 @@ pub fn build_app(
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
-        .merge(mesh_routes)
         .layer(axum::extract::DefaultBodyLimit::max(max_payload_size))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             max_payload_size,
@@ -1223,9 +1075,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
         // Create mesh server builder and build with stores
         let (mesh_server, handler) = MeshServerBuilder::from(mesh_server_config).build();
-
-        // Start rate limit window reset task (managed by handler)
-        handler.start_rate_limit_task(1); // Reset every 1 second
 
         #[expect(
             clippy::disallowed_methods,
@@ -1459,32 +1308,11 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // Set mesh sync manager to worker registry and policy registry if mesh is enabled
-    // This allows these components to sync state across mesh nodes when mesh is enabled,
-    // but they work independently without mesh when mesh is disabled.
-    // Using thread-safe set_mesh_sync method that works with Arc-wrapped registries
-    if let Some(ref handle) = mesh_handler {
-        app_context
-            .worker_registry
-            .set_mesh_sync(Some(handle.sync_manager.clone()));
-        handle
-            .sync_manager
-            .register_worker_state_subscriber(app_context.worker_registry.clone());
-        // Replay workers already in the CRDT store — they arrived between
-        // mesh server start and subscriber registration above.
-        for state in handle.sync_manager.get_all_worker_states() {
-            app_context.worker_registry.on_remote_worker_state(&state);
-        }
-        info!("Mesh sync manager set on worker registry");
-
-        handle
-            .sync_manager
-            .register_tree_state_subscriber(app_context.policy_registry.clone());
-        app_context
-            .policy_registry
-            .set_mesh_sync(Some(handle.sync_manager.clone()));
-        info!("Mesh sync manager set on policy registry");
-    }
+    // v1 mesh sync (set_mesh_sync, WorkerStateSubscriber, TreeStateSubscriber)
+    // is removed in this PR. State sync across mesh peers is not wired in this
+    // branch — v2 adapters in `model_gateway/src/mesh/adapters/` are built and
+    // tested but not yet started from `server.rs`. That wiring lands in a
+    // follow-up PR.
 
     // Get mesh cluster state and port before moving mesh_handler into app_state
     let mesh_cluster_state = mesh_handler.as_ref().map(|h| h.state.clone());

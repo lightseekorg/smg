@@ -19,8 +19,10 @@ name = "smg_skills"
 [dependencies]
 async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
+openai-protocol.workspace = true
 parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 serde_yml = "0.0.12"
 smg-blob-storage.workspace = true
 thiserror.workspace = true
@@ -29,7 +31,6 @@ zip = "8.1"
 
 [dev-dependencies]
 anyhow.workspace = true
-serde_json.workspace = true
 tempfile = "3.15"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

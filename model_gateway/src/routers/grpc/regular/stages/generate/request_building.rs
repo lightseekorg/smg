@@ -76,6 +76,12 @@ impl PipelineStage for GenerateRequestBuildingStage {
                 error::bad_request("build_request_failed", e)
             })?;
 
+        helpers::apply_sampling_defaults_to_generate_request(
+            &mut proto_request,
+            &ctx.input.request_type,
+            ctx.state.workers.as_ref(),
+        );
+
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {
                 helpers::maybe_inject_pd_metadata(&mut proto_request, workers);

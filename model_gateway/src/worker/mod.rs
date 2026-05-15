@@ -12,6 +12,7 @@ pub mod metrics_aggregator;
 pub mod monitor;
 pub mod registry;
 pub mod resilience;
+pub mod sampling_defaults;
 pub mod service;
 // FIXME: worker.rs is a 1800-line monolith containing the Worker trait,
 // BasicWorker impl, HealthChecker, WorkerType, ConnectionMode, and more.
@@ -40,6 +41,7 @@ pub use openai_protocol::{
 };
 pub use registry::WorkerRegistry;
 pub use resilience::{resolve_resilience, ResolvedResilience, DEFAULT_RETRYABLE_STATUS_CODES};
+pub use sampling_defaults::DEFAULT_SAMPLING_PARAMS_LABEL;
 pub use service::WorkerService;
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, RuntimeType, Worker, WorkerLoadGuard, WorkerType,

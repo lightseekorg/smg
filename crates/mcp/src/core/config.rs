@@ -336,9 +336,16 @@ pub struct ToolConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
 
-    /// Response format for transformation (default: passthrough)
-    #[serde(default)]
-    pub response_format: ResponseFormatConfig,
+    /// Response format for transformation.
+    ///
+    /// `None` means "use whatever the surrounding context decides" — for a
+    /// builtin-routed tool that becomes the builtin's hosted format, otherwise
+    /// it falls through to `Passthrough`. `Some(Passthrough)` is an *explicit*
+    /// passthrough request and overrides the builtin default. This distinction
+    /// lets users add an `alias` or `arg_mapping` to a builtin tool without
+    /// silently disabling its hosted-format wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormatConfig>,
 
     /// Argument mapping configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,7 +353,7 @@ pub struct ToolConfig {
 }
 
 /// Response format configuration (mirrors ResponseFormat but for config).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseFormatConfig {
     #[default]
@@ -929,7 +936,7 @@ tools:
         assert_eq!(tool_config.alias, Some("web_search".to_string()));
         assert_eq!(
             tool_config.response_format,
-            ResponseFormatConfig::WebSearchCall
+            Some(ResponseFormatConfig::WebSearchCall)
         );
 
         let arg_mapping = tool_config.arg_mapping.as_ref().unwrap();
@@ -994,7 +1001,7 @@ tools:
         assert!(tool_config.alias.is_none());
         assert_eq!(
             tool_config.response_format,
-            ResponseFormatConfig::FileSearchCall
+            Some(ResponseFormatConfig::FileSearchCall)
         );
         assert!(tool_config.arg_mapping.is_none());
     }
@@ -1013,10 +1020,10 @@ tools:
         let tools = config.tools.as_ref().unwrap();
         let tool_config = tools.get("my_tool").unwrap();
         assert!(tool_config.alias.is_none());
-        assert_eq!(
-            tool_config.response_format,
-            ResponseFormatConfig::Passthrough
-        );
+        // `my_tool: {}` carries no `response_format` field, so the deserialized
+        // value is `None` (meaning "inherit context"), not an explicit
+        // `Passthrough`.
+        assert_eq!(tool_config.response_format, None);
         assert!(tool_config.arg_mapping.is_none());
     }
 
@@ -1067,15 +1074,23 @@ tools:
 
         let tool_a = tools.get("tool_a").unwrap();
         assert_eq!(tool_a.alias, Some("a".to_string()));
-        assert_eq!(tool_a.response_format, ResponseFormatConfig::WebSearchCall);
+        assert_eq!(
+            tool_a.response_format,
+            Some(ResponseFormatConfig::WebSearchCall)
+        );
 
         let tool_b = tools.get("tool_b").unwrap();
         assert!(tool_b.alias.is_none());
-        assert_eq!(tool_b.response_format, ResponseFormatConfig::FileSearchCall);
+        assert_eq!(
+            tool_b.response_format,
+            Some(ResponseFormatConfig::FileSearchCall)
+        );
 
         let tool_c = tools.get("tool_c").unwrap();
         assert_eq!(tool_c.alias, Some("c".to_string()));
-        assert_eq!(tool_c.response_format, ResponseFormatConfig::Passthrough);
+        // Alias-only stanza: no `response_format` field → `None` (meaning
+        // "inherit context"), not explicit Passthrough.
+        assert_eq!(tool_c.response_format, None);
     }
 
     #[test]

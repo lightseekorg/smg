@@ -3,6 +3,7 @@ mod detect_backend;
 mod detect_connection;
 mod discover_dp;
 mod discover_metadata;
+mod drain_workers;
 mod find_worker_to_update;
 mod find_workers_to_remove;
 mod remove_from_policy_registry;
@@ -19,6 +20,7 @@ pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
 pub use discover_dp::{get_dp_info, DiscoverDPInfoStep, DpInfo};
 pub use discover_metadata::DiscoverMetadataStep;
+pub use drain_workers::DrainWorkersStep;
 pub use find_worker_to_update::FindWorkerToUpdateStep;
 pub use find_workers_to_remove::{FindWorkersToRemoveStep, WorkerRemovalRequest};
 use openai_protocol::worker::WorkerUpdateRequest;
@@ -67,6 +69,8 @@ pub(crate) fn find_workers_by_url(
 /// ```text
 ///     find_workers_to_remove
 ///              │
+///         drain_workers
+///              │
 ///     remove_from_policy_registry
 ///              │
 ///     remove_from_worker_registry
@@ -89,6 +93,25 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
         )
         .add_step(
             StepDefinition::new(
+                "drain_workers",
+                "Drain Ready workers before removal",
+                Arc::new(DrainWorkersStep),
+            )
+            // No `with_timeout`: the step's purpose is to sleep for the
+            // resolved `drain_settle_secs` (which can be set per-worker
+            // via `WorkerSpec::health.drain_settle_secs`). A static
+            // workflow-level timeout would be set at definition time
+            // without visibility into runtime config and would
+            // preemptively fail the workflow for legitimately long
+            // drain windows, leaving workers stuck in `Draining`.
+            .with_retry(RetryPolicy {
+                max_attempts: 1,
+                backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
+            })
+            .depends_on(&["find_workers_to_remove"]),
+        )
+        .add_step(
+            StepDefinition::new(
                 "remove_from_policy_registry",
                 "Remove workers from policy registry",
                 Arc::new(RemoveFromPolicyRegistryStep),
@@ -98,7 +121,7 @@ pub fn create_worker_removal_workflow() -> WorkflowDefinition<WorkerRemovalWorkf
                 max_attempts: 1,
                 backoff: BackoffStrategy::Fixed(Duration::from_secs(0)),
             })
-            .depends_on(&["find_workers_to_remove"]),
+            .depends_on(&["drain_workers"]),
         )
         .add_step(
             StepDefinition::new(

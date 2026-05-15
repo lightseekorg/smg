@@ -15,6 +15,8 @@ use smg_data_connector::{
 };
 use tracing::{debug, info, warn};
 
+use super::openai_bridge;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -83,8 +85,23 @@ pub fn item_to_json(item: &ConversationItem) -> Value {
                 obj.insert("phase".to_string(), phase_value);
             }
         }
+    } else if let Some(content_obj) = item.content.as_object() {
+        // Whole-item store path (`store_whole_item` in
+        // `item_to_new_conversation_item`): `content` is the original item
+        // value with its fields at the top level. Hoist them back rather
+        // than wrapping them under `content`, otherwise replayed structural
+        // items come back as `{"type":"…","content":{"type":"…",…}}` and
+        // lose `revised_prompt`/`status`/etc. on the wire.
+        for (k, v) in content_obj {
+            if matches!(k.as_str(), "id" | "type" | "role" | "status") {
+                continue;
+            }
+            obj.insert(k.clone(), v.clone());
+        }
     } else {
-        // Default: include content as-is
+        // Pre-fix rows for non-listed types stored `[]` instead of the
+        // whole item; preserve the legacy `{"content": …}` wrapping so we
+        // don't drop data that came in under the old write path.
         obj.insert("content".to_string(), item.content.clone());
     }
 
@@ -171,9 +188,13 @@ fn get_string(json: &Value, key: &str) -> Option<String> {
     json.get(key).and_then(|v| v.as_str()).map(String::from)
 }
 
-/// Build a StoredResponse from response JSON and original request
+/// Build a StoredResponse from response JSON and original request.
+///
+/// Takes `response_json` by value so it can be moved into `raw_response`
+/// without an extra clone — the persistence path passes a freshly-compacted
+/// JSON object that has no other live references.
 pub fn build_stored_response(
-    response_json: &Value,
+    response_json: Value,
     original_body: &ResponsesRequest,
 ) -> StoredResponse {
     let mut stored = StoredResponse::new(None);
@@ -181,7 +202,8 @@ pub fn build_stored_response(
     // Initialize empty array - will be populated by persist_conversation_items
     stored.input = Value::Array(vec![]);
 
-    stored.model = get_string(response_json, "model").or_else(|| Some(original_body.model.clone()));
+    stored.model =
+        get_string(&response_json, "model").or_else(|| Some(original_body.model.clone()));
 
     stored.safety_identifier.clone_from(&original_body.user);
     // `StoredResponse.conversation_id` is `Option<String>`; flatten the
@@ -191,7 +213,7 @@ pub fn build_stored_response(
         .as_ref()
         .map(|c| c.as_id().to_string());
 
-    stored.previous_response_id = get_string(response_json, "previous_response_id")
+    stored.previous_response_id = get_string(&response_json, "previous_response_id")
         .map(|s| ResponseId::from(s.as_str()))
         .or_else(|| {
             original_body
@@ -200,11 +222,11 @@ pub fn build_stored_response(
                 .map(ResponseId::from)
         });
 
-    if let Some(id_str) = get_string(response_json, "id") {
+    if let Some(id_str) = get_string(&response_json, "id") {
         stored.id = ResponseId::from(id_str.as_str());
     }
 
-    stored.raw_response = response_json.clone();
+    stored.raw_response = response_json;
     stored
 }
 
@@ -288,6 +310,13 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                                 }
                             }
 
+                            // Strip image_generation_call.result base64 from
+                            // historical replayed items before persistence —
+                            // a no-op for non-image item types.
+                            openai_bridge::compact_image_generation_outputs_json(
+                                std::slice::from_mut(&mut value),
+                            );
+
                             Ok(value)
                         }
                     }
@@ -306,19 +335,18 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
 fn item_to_new_conversation_item(
     item_value: &Value,
     response_id: Option<String>,
-    is_input: bool,
+    _is_input: bool,
 ) -> NewConversationItem {
     let item_type = item_value
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
-    // Determine if we should store the whole item or just the content field
-    let store_whole_item = if is_input {
-        item_type == "function_call" || item_type == "function_call_output"
-    } else {
-        item_type != "message"
-    };
+    // Non-message items carry their fields at the top level (no `content`
+    // field on the wire), so reading `content` on the input side would
+    // collapse replayed structural items (`image_generation_call`,
+    // `web_search_call`, …) to `[]`.
+    let store_whole_item = item_type != "message";
 
     let content = if store_whole_item {
         item_value.clone()
@@ -415,24 +443,40 @@ async fn persist_conversation_items_inner(
         return Ok(());
     }
 
-    // Extract response ID
+    // Clone once, then strip multi-MB base64 from any `image_generation_call`
+    // items before they reach storage. Replay only references images by `id`,
+    // so storing the bytes per turn would balloon the response chain.
+    let mut response_json = response_json.clone();
+    if let Some(outputs) = response_json
+        .get_mut("output")
+        .and_then(|v| v.as_array_mut())
+    {
+        openai_bridge::compact_image_generation_outputs_json(outputs);
+    }
+
+    // Extract response ID and clone out the (already-compacted) output array
+    // before handing the rest of `response_json` to `build_stored_response`,
+    // which moves the value into `raw_response` without re-cloning the full
+    // response tree.
     let response_id_str = response_json
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Response missing id field".to_string())?;
-    let response_id = ResponseId::from(response_id_str);
+        .ok_or_else(|| "Response missing id field".to_string())?
+        .to_string();
+    let response_id = ResponseId::from(response_id_str.as_str());
 
     // Parse and normalize input items from request
     let input_items = extract_input_items(&original_body.input)?;
 
-    // Parse output items from response
+    // Cloning the array here is shallow against compacted items — base64
+    // image payloads have already been stripped above.
     let output_items = response_json
         .get("output")
         .and_then(|v| v.as_array())
         .cloned()
         .ok_or_else(|| "No output array in response".to_string())?;
 
-    // Build and store response
+    // Build and store response (consumes `response_json`).
     let mut stored_response = build_stored_response(response_json, original_body);
     stored_response.id = response_id.clone();
     stored_response.input = Value::Array(input_items.clone());
@@ -464,7 +508,7 @@ async fn persist_conversation_items_inner(
             &conv_id,
             &input_items,
             &output_items,
-            response_id_str,
+            &response_id_str,
         )
         .await?;
         info!(
@@ -484,4 +528,96 @@ async fn persist_conversation_items_inner(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn stored_item(item_type: &str, content: Value) -> ConversationItem {
+        ConversationItem {
+            id: ConversationItemId::from("ig_replay_1"),
+            response_id: None,
+            item_type: item_type.to_string(),
+            role: None,
+            content,
+            status: Some("completed".to_string()),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn item_to_json_restores_top_level_fields_for_whole_item_store() {
+        let stored = stored_item(
+            "image_generation_call",
+            json!({
+                "id": "ig_replay_1",
+                "type": "image_generation_call",
+                "status": "completed",
+                "revised_prompt": "cat",
+            }),
+        );
+
+        let serialized = item_to_json(&stored);
+        assert_eq!(serialized["type"], json!("image_generation_call"));
+        assert_eq!(serialized["revised_prompt"], json!("cat"));
+        assert!(
+            serialized.get("content").is_none(),
+            "non-message whole-item store must hoist top-level fields, not \
+             nest the original item under `content`: {serialized}"
+        );
+    }
+
+    #[test]
+    fn item_to_json_falls_back_to_legacy_content_wrap_for_array_content() {
+        // Pre-fix rows for non-listed types may have stored `[]`. Preserve
+        // the legacy wrapping so old data still round-trips.
+        let stored = stored_item("image_generation_call", json!([]));
+        let serialized = item_to_json(&stored);
+        assert_eq!(serialized["content"], json!([]));
+    }
+
+    #[test]
+    fn replayed_image_generation_input_item_is_stored_whole() {
+        let input_item = json!({
+            "id": "ig_replay_1",
+            "type": "image_generation_call",
+            "status": "completed",
+            "revised_prompt": "cat",
+        });
+
+        let new_item = item_to_new_conversation_item(&input_item, None, /* is_input */ true);
+        assert_eq!(new_item.item_type, "image_generation_call");
+        assert_eq!(
+            new_item
+                .content
+                .get("revised_prompt")
+                .and_then(|v| v.as_str()),
+            Some("cat"),
+        );
+        assert_eq!(
+            new_item.content.get("type").and_then(|v| v.as_str()),
+            Some("image_generation_call"),
+        );
+    }
+
+    #[test]
+    fn replayed_message_input_item_still_extracts_content() {
+        let input_item = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+            "status": "completed",
+        });
+
+        let new_item = item_to_new_conversation_item(&input_item, None, /* is_input */ true);
+        assert_eq!(new_item.item_type, "message");
+        assert_eq!(
+            new_item.content,
+            json!([{"type": "input_text", "text": "hi"}])
+        );
+    }
 }

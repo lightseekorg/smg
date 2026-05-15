@@ -69,7 +69,7 @@ With health checks:
 SMG sends periodic HTTP requests to each worker's health endpoint:
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/health-checks-flow.svg" alt="Health Check Sequence Diagram">
+  <img src="../../assets/images/health-checks-flow.svg" alt="Health Check Sequence Diagram">
 </div>
 
 ### Worker States

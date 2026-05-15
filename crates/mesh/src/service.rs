@@ -30,11 +30,8 @@ use gossip::{
 use crate::{
     controller::MeshController,
     mtls::{MTLSConfig, MTLSManager},
-    node_state_machine::{ConvergenceConfig, NodeStateMachine},
     partition::PartitionDetector,
     ping_server::GossipService,
-    stores::{AppState, StateStores},
-    sync::MeshSyncManager,
 };
 
 pub type ClusterState = Arc<RwLock<BTreeMap<String, NodeState>>>;
@@ -53,14 +50,10 @@ pub struct MeshServerConfig {
 /// node discovery(TODO), node status update(TODO), etc.
 pub struct MeshServerHandler {
     pub state: ClusterState,
-    pub stores: Arc<StateStores>,
-    pub sync_manager: Arc<MeshSyncManager>,
     pub self_name: String,
     _self_addr: SocketAddr,
     signal_tx: watch::Sender<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
-    state_machine: Option<Arc<NodeStateMachine>>,
-    rate_limit_task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Shared with the MeshServer so adapters can subscribe to stream
     /// namespaces (broadcast/targeted) and publish values that reach
     /// peers via the gossip loop.
@@ -73,19 +66,6 @@ impl MeshServerHandler {
         self.partition_detector.as_ref()
     }
 
-    /// Get state machine
-    pub fn state_machine(&self) -> Option<&Arc<NodeStateMachine>> {
-        self.state_machine.as_ref()
-    }
-
-    /// Check if node is ready
-    pub fn is_ready(&self) -> bool {
-        self.state_machine
-            .as_ref()
-            .map(|sm| sm.is_ready())
-            .unwrap_or(true) // If no state machine, consider ready
-    }
-
     /// Check if we should serve (have quorum)
     pub fn should_serve(&self) -> bool {
         self.partition_detector
@@ -94,48 +74,9 @@ impl MeshServerHandler {
             .unwrap_or(true) // If no partition detector, consider should serve
     }
 
-    /// Start rate limit window reset task
-    /// This task will periodically reset the global rate limit counter
-    pub fn start_rate_limit_task(&self, window_seconds: u64) {
-        use crate::rate_limit_window::RateLimitWindow;
-
-        let window_manager = RateLimitWindow::new(self.sync_manager.clone(), window_seconds);
-        let shutdown_rx = self.signal_tx.subscribe();
-
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "handle is stored in rate_limit_task_handle and awaited on shutdown via stop_rate_limit_task"
-        )]
-        let handle = tokio::spawn(async move {
-            window_manager.start_reset_task(shutdown_rx).await;
-        });
-
-        if let Ok(mut task_handle) = self.rate_limit_task_handle.lock() {
-            *task_handle = Some(handle);
-        }
-    }
-
-    /// Stop rate limit window reset task
-    pub fn stop_rate_limit_task(&self) {
-        self.signal_tx.send(true).ok();
-        if let Ok(mut task_handle) = self.rate_limit_task_handle.lock() {
-            if let Some(handle) = task_handle.take() {
-                #[expect(
-                    clippy::disallowed_methods,
-                    reason = "short-lived join task that awaits the rate_limit_task handle during shutdown; completes when the inner task finishes"
-                )]
-                tokio::spawn(async move {
-                    if let Err(err) = handle.await {
-                        log::warn!("Rate limit task shutdown failed: {}", err);
-                    }
-                });
-            }
-        }
-    }
-
     /// Shutdown immediately without graceful shutdown
     pub fn shutdown(&self) {
-        self.stop_rate_limit_task();
+        self.signal_tx.send(true).ok();
     }
 
     /// Graceful shutdown: broadcast LEAVING status to all alive nodes,
@@ -172,7 +113,7 @@ impl MeshServerHandler {
         let (leaving_node, alive_nodes) = match maybe_leaving {
             Some(values) => values,
             None => {
-                self.stop_rate_limit_task();
+                self.signal_tx.send(true).ok();
                 return Ok(());
             }
         };
@@ -204,67 +145,9 @@ impl MeshServerHandler {
         );
         tokio::time::sleep(propagation_delay).await;
 
-        log::info!("Stopping rate limit task and signaling shutdown");
-        self.stop_rate_limit_task();
+        log::info!("Signaling shutdown");
+        self.signal_tx.send(true).ok();
         Ok(())
-    }
-
-    /// Calculate the next version for a key
-    /// If the key exists, increment its version by 1
-    /// If the key doesn't exist, start with version 1
-    fn next_version(&self, key: &str) -> u64 {
-        self.stores
-            .app
-            .get(key)
-            .map(|app_state| app_state.version + 1)
-            .unwrap_or(1)
-    }
-
-    pub fn write_data(&self, key: String, value: Vec<u8>) -> Result<()> {
-        // Keep app store write and metadata/version update in one lock scope.
-        let mut state = self.state.write();
-        let node = state.get_mut(&self.self_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Node {} not found in cluster state during write_data",
-                self.self_name
-            )
-        })?;
-
-        let version = self.next_version(&key);
-        let app_state = AppState {
-            key: key.clone(),
-            value: value.clone(),
-            version,
-        };
-        self.stores
-            .app
-            .insert(key.clone(), app_state)
-            .map_err(|err| anyhow::anyhow!("Failed to persist app state for key {key}: {err}"))?;
-
-        node.metadata.insert(key, value);
-        node.version += 1;
-        Ok(())
-    }
-
-    pub fn read_data(&self, key: String) -> Option<Vec<u8>> {
-        // Read from the app store
-        self.stores
-            .app
-            .get(&key)
-            .map(|app_state| app_state.value.clone())
-    }
-
-    /// Get operation log of the app store for synchronization
-    /// Returns an operation log that can be merged into other nodes
-    pub fn get_operation_log(&self) -> crate::crdt_kv::OperationLog {
-        self.stores.app.get_operation_log()
-    }
-
-    /// Sync app store data from an operation log (for testing and manual sync)
-    /// This will be replaced by automatic sync stream in the future
-    pub fn sync_app_from_log(&self, log: &crate::crdt_kv::OperationLog) {
-        // Merge operation log into our app store using CRDT merge
-        self.stores.app.merge(log);
     }
 
     /// Shared MeshKV handle — adapters subscribe to stream namespaces
@@ -277,7 +160,6 @@ impl MeshServerHandler {
 
 pub struct MeshServerBuilder {
     state: ClusterState,
-    stores: Arc<StateStores>,
     self_name: String,
     bind_addr: SocketAddr,
     advertise_addr: SocketAddr,
@@ -302,10 +184,8 @@ impl MeshServerBuilder {
                 metadata: HashMap::new(),
             },
         )])));
-        let stores = Arc::new(StateStores::with_self_name(self_name.clone()));
         Self {
             state,
-            stores,
             self_name,
             bind_addr,
             advertise_addr,
@@ -322,22 +202,10 @@ impl MeshServerBuilder {
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
         let (signal_tx, signal_rx) = watch::channel(false);
         let partition_detector = Arc::new(PartitionDetector::default());
-        let sync_manager = Arc::new(MeshSyncManager::new(
-            self.stores.clone(),
-            self.self_name.clone(),
-        ));
-        let state_machine = Arc::new(NodeStateMachine::new(
-            self.stores.clone(),
-            ConvergenceConfig::default(),
-        ));
-        // Initialize rate-limit hash ring with current membership
-        sync_manager.update_rate_limit_membership();
         let mesh_kv = Arc::new(crate::kv::MeshKV::new(self.self_name.clone()));
         (
             MeshServer {
                 state: self.state.clone(),
-                stores: self.stores.clone(),
-                sync_manager: sync_manager.clone(),
                 self_name: self.self_name.clone(),
                 bind_addr: self.bind_addr,
                 advertise_addr: self.advertise_addr,
@@ -349,14 +217,10 @@ impl MeshServerBuilder {
             },
             MeshServerHandler {
                 state: self.state.clone(),
-                stores: self.stores.clone(),
-                sync_manager,
                 self_name: self.self_name.clone(),
                 _self_addr: self.advertise_addr,
                 signal_tx,
                 partition_detector: Some(partition_detector),
-                state_machine: Some(state_machine),
-                rate_limit_task_handle: std::sync::Mutex::new(None),
                 mesh_kv,
             },
         )
@@ -380,8 +244,6 @@ impl From<&MeshServerConfig> for MeshServerBuilder {
 
 pub struct MeshServer {
     state: ClusterState,
-    stores: Arc<StateStores>,
-    sync_manager: Arc<MeshSyncManager>,
     self_name: String,
     bind_addr: SocketAddr,
     advertise_addr: SocketAddr,
@@ -410,8 +272,6 @@ impl MeshServer {
             self.advertise_addr,
             &self.self_name,
             self.init_peer,
-            self.stores.clone(),
-            self.sync_manager.clone(),
             self.mtls_manager.clone(),
         )
         .with_mesh_kv(self.mesh_kv.clone())
@@ -453,22 +313,17 @@ impl MeshServer {
             .clone()
             .expect("partition detector missing");
 
-        // Build controller first so we can share its current_batch with the
-        // server-side sync_stream handlers. This ensures both client-side
-        // (outgoing connections) and server-side (incoming connections) use
-        // the same centrally collected RoundBatch.
+        // Build controller first so we can share its current_stream_batch
+        // with server-side sync_stream handlers.
         let controller = self.build_controller();
 
         let mut service = self.build_ping_server();
-        service = service.with_stores(self.stores.clone());
-
-        service = service.with_sync_manager(self.sync_manager.clone());
 
         service = service.with_partition_detector(partition_detector);
 
-        // Share the controller's current_batch so server-side sync_stream
-        // handlers use the same centrally collected data as client-side.
-        service = service.with_current_batch(controller.current_batch());
+        // Share the controller's current_stream_batch so server-side
+        // sync_stream handlers see the same drained stream entries as
+        // client-side.
         service = service.with_current_stream_batch(controller.current_stream_batch());
 
         // Add mTLS support if configured
@@ -790,10 +645,6 @@ mod tests {
             "A-B cluster formed",
         )
         .await;
-
-        handler_a
-            .write_data("hello".into(), "world".into())
-            .unwrap();
 
         // 2. Add C and D
         let (listener_c, addr_c) = bind_node().await;

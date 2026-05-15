@@ -467,6 +467,9 @@ struct Router {
     mesh_advertise_host: Option<String>,
     mesh_port: u16,
     mesh_peer_urls: Vec<String>,
+    /// New parameters MUST be appended here (not inserted mid-list) to avoid
+    /// breaking external Python callers that pass `_Router(...)` positionally.
+    drain_settle_secs: u64,
 }
 
 impl Router {
@@ -698,6 +701,7 @@ impl Router {
                 endpoint: self.health_check_endpoint.clone(),
                 disable_health_check: self.disable_health_check,
                 remove_unhealthy_workers: self.remove_unhealthy_workers,
+                drain_settle_secs: self.drain_settle_secs,
             })
             .tokenizer_cache(config::TokenizerCacheConfig {
                 enable_l0: self.tokenizer_cache_enable_l0,
@@ -855,6 +859,7 @@ impl Router {
         mesh_port = 39527u16,
         mesh_peer_urls = vec![],
         mesh_advertise_host = None,
+        drain_settle_secs = 5,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -964,6 +969,7 @@ impl Router {
         mesh_port: u16,
         mesh_peer_urls: Vec<String>,
         mesh_advertise_host: Option<String>,
+        drain_settle_secs: u64,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -1083,6 +1089,7 @@ impl Router {
             mesh_advertise_host,
             mesh_port,
             mesh_peer_urls,
+            drain_settle_secs,
         })
     }
 

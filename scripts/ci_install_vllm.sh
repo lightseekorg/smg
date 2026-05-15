@@ -35,9 +35,12 @@ echo "Using uv version: $(uv --version)"
 echo "Installing vLLM..."
 uv pip install "vllm<0.19.1"
 
-# Install nixl for vLLM PD disaggregation (NIXL KV transfer)
+# Install nixl for vLLM PD disaggregation (NIXL KV transfer).
+# Pin <1.1.0: 1.1.0 lands a cu13 nixl_ep_cpp.so that vLLM 0.19.0 imports
+# unconditionally, breaking CUDA-12 ARC pods. Drop once vLLM or the
+# runner pool catches up.
 echo "Installing nixl..."
-uv pip install nixl
+uv pip install "nixl<1.1.0"
 
 # Install gRPC packages from source (not PyPI) so PR changes are always tested
 echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."

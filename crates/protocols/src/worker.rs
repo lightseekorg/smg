@@ -116,6 +116,11 @@ pub enum WorkerStatus {
 
     /// Sustained liveness failure. Will be removed if `--remove-unhealthy-workers`.
     Failed = 3,
+
+    /// Marked for removal (e.g. K8s pod has `deletionTimestamp`). Excluded
+    /// from selection so no new traffic is routed, but kept in the registry
+    /// so in-flight requests can complete before the worker is removed.
+    Draining = 4,
 }
 
 impl WorkerStatus {
@@ -127,6 +132,7 @@ impl WorkerStatus {
             1 => Some(Self::Ready),
             2 => Some(Self::NotReady),
             3 => Some(Self::Failed),
+            4 => Some(Self::Draining),
             _ => None,
         }
     }
@@ -155,6 +161,7 @@ impl std::fmt::Display for WorkerStatus {
             WorkerStatus::Ready => write!(f, "ready"),
             WorkerStatus::NotReady => write!(f, "not_ready"),
             WorkerStatus::Failed => write!(f, "failed"),
+            WorkerStatus::Draining => write!(f, "draining"),
         }
     }
 }
@@ -376,6 +383,10 @@ fn default_max_connection_attempts() -> u32 {
     20
 }
 
+fn default_drain_settle_secs() -> u64 {
+    5
+}
+
 // ── Health check config ─────────────────────────────────────────────
 
 /// Health check configuration shared across protocol and runtime layers.
@@ -400,6 +411,13 @@ pub struct HealthCheckConfig {
     /// Disable periodic health checks for this worker (default: false).
     #[serde(default)]
     pub disable_health_check: bool,
+
+    /// Seconds to keep a worker in `Draining` after `RemoveWorker` is
+    /// submitted before the registry entry is actually removed. Lets
+    /// in-flight requests complete naturally (default: 5). Set to `0`
+    /// to skip draining and remove immediately.
+    #[serde(default = "default_drain_settle_secs")]
+    pub drain_settle_secs: u64,
 }
 
 impl Default for HealthCheckConfig {
@@ -410,6 +428,7 @@ impl Default for HealthCheckConfig {
             success_threshold: default_health_success_threshold(),
             failure_threshold: default_health_failure_threshold(),
             disable_health_check: false,
+            drain_settle_secs: default_drain_settle_secs(),
         }
     }
 }
@@ -806,6 +825,8 @@ pub struct HealthCheckUpdate {
     pub success_threshold: Option<u32>,
     pub failure_threshold: Option<u32>,
     pub disable_health_check: Option<bool>,
+    /// Per-worker override for `HealthCheckConfig::drain_settle_secs`.
+    pub drain_settle_secs: Option<u64>,
 }
 
 impl HealthCheckUpdate {
@@ -816,6 +837,7 @@ impl HealthCheckUpdate {
             && self.success_threshold.is_none()
             && self.failure_threshold.is_none()
             && self.disable_health_check.is_none()
+            && self.drain_settle_secs.is_none()
     }
 }
 
@@ -833,6 +855,7 @@ impl HealthCheckUpdate {
             disable_health_check: self
                 .disable_health_check
                 .unwrap_or(existing.disable_health_check),
+            drain_settle_secs: self.drain_settle_secs.unwrap_or(existing.drain_settle_secs),
         }
     }
 }
@@ -1085,5 +1108,110 @@ impl IntoResponse for WorkerLoadsResult {
             })
             .collect();
         Json(json!({"workers": loads})).into_response()
+    }
+}
+
+#[cfg(test)]
+mod worker_status_tests {
+    use super::WorkerStatus;
+
+    #[test]
+    fn test_try_from_u8_draining() {
+        assert_eq!(WorkerStatus::try_from_u8(4), Some(WorkerStatus::Draining));
+    }
+
+    #[test]
+    fn test_try_from_u8_unknown_returns_none() {
+        assert_eq!(WorkerStatus::try_from_u8(5), None);
+        assert_eq!(WorkerStatus::try_from_u8(255), None);
+    }
+
+    #[test]
+    fn test_from_u8_draining() {
+        assert_eq!(WorkerStatus::from_u8(4), WorkerStatus::Draining);
+    }
+
+    #[test]
+    fn test_display_draining_is_snake_case() {
+        assert_eq!(WorkerStatus::Draining.to_string(), "draining");
+    }
+
+    #[test]
+    fn test_serde_round_trip_draining() {
+        let s = serde_json::to_string(&WorkerStatus::Draining).unwrap();
+        assert_eq!(s, "\"draining\"");
+        let back: WorkerStatus = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, WorkerStatus::Draining);
+    }
+
+    #[test]
+    fn test_draining_is_not_routable() {
+        assert!(!WorkerStatus::Draining.is_routable());
+    }
+
+    #[test]
+    fn test_only_ready_is_routable() {
+        for s in [
+            WorkerStatus::Pending,
+            WorkerStatus::Ready,
+            WorkerStatus::NotReady,
+            WorkerStatus::Failed,
+            WorkerStatus::Draining,
+        ] {
+            assert_eq!(s.is_routable(), s == WorkerStatus::Ready, "{s:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod health_check_drain_settle_tests {
+    use super::{HealthCheckConfig, HealthCheckUpdate};
+
+    #[test]
+    fn test_default_drain_settle_secs_is_5() {
+        assert_eq!(HealthCheckConfig::default().drain_settle_secs, 5);
+    }
+
+    #[test]
+    fn test_health_check_update_overrides_drain_settle_secs() {
+        let base = HealthCheckConfig::default();
+        let update = HealthCheckUpdate {
+            drain_settle_secs: Some(30),
+            ..Default::default()
+        };
+        let merged = update.apply_to(&base);
+        assert_eq!(merged.drain_settle_secs, 30);
+    }
+
+    #[test]
+    fn test_health_check_update_keeps_default_when_unset() {
+        let base = HealthCheckConfig {
+            drain_settle_secs: 12,
+            ..Default::default()
+        };
+        let update = HealthCheckUpdate::default();
+        assert_eq!(update.apply_to(&base).drain_settle_secs, 12);
+    }
+
+    #[test]
+    fn test_health_check_update_is_empty_includes_drain_settle_secs() {
+        let mut update = HealthCheckUpdate::default();
+        assert!(update.is_empty());
+        update.drain_settle_secs = Some(3);
+        assert!(!update.is_empty());
+    }
+
+    #[test]
+    fn test_health_check_config_deserialize_omitted_uses_default() {
+        // Existing serialized configs without drain_settle_secs must
+        // still deserialize with the default value, not fail.
+        let json = r#"{
+            "timeout_secs": 30,
+            "check_interval_secs": 60,
+            "success_threshold": 2,
+            "failure_threshold": 3
+        }"#;
+        let cfg: HealthCheckConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.drain_settle_secs, 5);
     }
 }
