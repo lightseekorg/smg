@@ -22,6 +22,79 @@ from smg.launch_router import launch_router
 from smg.router_args import RouterArgs
 
 logger = logging.getLogger("smg.serve")
+_SMG_TP_SIZE_ATTR = "_smg_worker_tp_size"
+
+
+def _get_arg_tp_size(args: argparse.Namespace, *names: str) -> int | None:
+    """Return the first non-null TP size from the given arg names."""
+    for name in names:
+        tp_size = getattr(args, name, None)
+        if tp_size is not None:
+            return tp_size
+    return None
+
+
+def _resolve_args_tp_size(args: argparse.Namespace) -> int | None:
+    """Resolve TP size from parsed args.
+
+    Prefer ``tensor_parallel_size`` because both SGLang and vLLM expose that
+    argparse dest during CLI parsing. Fall back to ``tp_size`` for compatibility
+    with other shared parser paths or already-normalized namespaces.
+    """
+    return _get_arg_tp_size(args, "tensor_parallel_size", "tp_size")
+
+
+def _resolve_sglang_tp_size(args: argparse.Namespace) -> int:
+    """Resolve SGLang TP size from parsed args."""
+    tp_size = _resolve_args_tp_size(args)
+    if tp_size is not None:
+        return tp_size
+    return 1
+
+
+def _resolve_vllm_tp_size(args: argparse.Namespace) -> int:
+    """Resolve vLLM TP size from parsed args."""
+    tp_size = _resolve_args_tp_size(args)
+    if tp_size is not None:
+        return tp_size
+    return 1
+
+
+def _resolve_trtllm_tp_size(args: argparse.Namespace) -> int:
+    """Resolve TRT-LLM TP size from CLI args or config file."""
+    tp_size = _resolve_args_tp_size(args)
+    if tp_size is not None:
+        return tp_size
+
+    config_path = getattr(args, "config", None)
+    if config_path:
+        import yaml
+
+        with open(config_path, encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        if config is None or not isinstance(config, dict):
+            raise ValueError(f"Config {config_path} is empty or malformed; expected a YAML mapping")
+        if "tensor_parallel_size" in config:
+            return int(config["tensor_parallel_size"])
+        if "tp_size" in config:
+            return int(config["tp_size"])
+        logger.warning(
+            "Config %s does not contain tensor_parallel_size or tp_size, defaulting to 1",
+            config_path,
+        )
+
+    return 1
+
+
+def _resolve_worker_tp_size(backend: str, args: argparse.Namespace) -> int:
+    """Resolve the canonical TP size used by SMG worker GPU assignment."""
+    if backend == "sglang":
+        return _resolve_sglang_tp_size(args)
+    if backend == "vllm":
+        return _resolve_vllm_tp_size(args)
+    if backend == "trtllm":
+        return _resolve_trtllm_tp_size(args)
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +137,9 @@ class WorkerLauncher(ABC):
         multi-worker partitioning.
         """
         env = dict(env) if env is not None else os.environ.copy()
-        tp_size = self._get_tp_size(args)
+        tp_size = getattr(args, _SMG_TP_SIZE_ATTR, None)
+        if tp_size is None:
+            tp_size = self._get_tp_size(args)
         if tp_size <= 0:
             raise ValueError(f"tp_size must be positive, got {tp_size}")
         base_idx = dp_rank * tp_size
@@ -126,7 +201,7 @@ class SglangWorkerLauncher(WorkerLauncher):
     """Launcher for sglang inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tensor_parallel_size", 1)
+        return _resolve_sglang_tp_size(args)
 
     def build_command(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
@@ -158,7 +233,7 @@ class VllmWorkerLauncher(WorkerLauncher):
     """Launcher for vLLM inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tensor_parallel_size", 1)
+        return _resolve_vllm_tp_size(args)
 
     def build_command(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
@@ -202,40 +277,13 @@ class TrtllmWorkerLauncher(WorkerLauncher):
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         """Get tensor parallel size from args or config file.
 
-        Priority: args.tp_size > args.tensor_parallel_size > config file > default(1)
+        Priority: args.tensor_parallel_size > args.tp_size > config file > default(1)
 
         Raises:
             FileNotFoundError: If --config path does not exist.
             yaml.YAMLError: If --config file contains invalid YAML.
         """
-        # Try --tp-size argument first
-        tp_size = getattr(args, "tp_size", None)
-        if tp_size is not None:
-            return tp_size
-
-        # Try --tensor-parallel-size (vLLM-style naming)
-        tp_size = getattr(args, "tensor_parallel_size", None)
-        if tp_size is not None:
-            return tp_size
-
-        # Try reading from config YAML file — let I/O and parse errors propagate
-        # so misconfigurations are caught early instead of silently using tp=1.
-        config_path = getattr(args, "config", None)
-        if config_path:
-            import yaml
-
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-            if config and "tensor_parallel_size" in config:
-                return int(config["tensor_parallel_size"])
-            if config and "tp_size" in config:
-                return int(config["tp_size"])
-            logger.warning(
-                "Config %s does not contain tensor_parallel_size or tp_size, defaulting to 1",
-                config_path,
-            )
-
-        return 1
+        return _resolve_trtllm_tp_size(args)
 
     def build_command(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
@@ -432,7 +480,14 @@ def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         help="Model path (HuggingFace ID or local path)",
     )
-    group.add_argument("--tp_size", type=int, help="Tensor parallel size (overrides config file)")
+    group.add_argument(
+        "--tp_size",
+        "--tp-size",
+        "--tensor-parallel-size",
+        dest="tensor_parallel_size",
+        type=int,
+        help="Tensor parallel size (overrides config file)",
+    )
 
 
 BACKEND_ARG_ADDERS = {
@@ -557,6 +612,8 @@ def parse_serve_args(
         args, _ = parser.parse_known_args(argv)
     else:
         args = parser.parse_args(argv)
+
+    setattr(args, _SMG_TP_SIZE_ATTR, _resolve_worker_tp_size(backend, args))
 
     return backend, args, backend_args
 
