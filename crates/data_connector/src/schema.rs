@@ -353,8 +353,9 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "content",
             "status",
             "created_at",
+            "item_json",
         ],
-        "conversation_item_links" => &["conversation_id", "item_id", "added_at"],
+        "conversation_item_links" => &["conversation_id", "item_id", "added_at", "link_id"],
         "conversation_memories" => &[
             "memory_id",
             "conversation_id",
@@ -1028,5 +1029,11 @@ mod tests {
         let err = cfg.validate().expect_err("shadowing should fail");
         assert!(err.contains("conversation_memories.extra_columns"));
         assert!(err.contains("shadows a core column name"));
+    }
+
+    #[test]
+    fn core_columns_registers_item_json_and_link_id() {
+        assert!(core_columns_for("conversation_items").contains(&"item_json"));
+        assert!(core_columns_for("conversation_item_links").contains(&"link_id"));
     }
 }

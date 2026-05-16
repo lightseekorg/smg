@@ -299,6 +299,7 @@ mod tests {
                 role: Some("user".to_string()),
                 content: json!([]),
                 status: Some("completed".to_string()),
+                item_json: None,
             })
             .await
             .unwrap();
@@ -451,6 +452,7 @@ mod tests {
                 role: Some("user".to_string()),
                 content: json!([]),
                 status: Some("completed".to_string()),
+                item_json: None,
             })
             .await
             .unwrap();
