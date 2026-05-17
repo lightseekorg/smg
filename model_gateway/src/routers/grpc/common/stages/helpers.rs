@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use axum::response::Response;
+use llm_tokenizer::traits::Tokenizer;
+use openai_protocol::common::StringOrArray;
 use rand::Rng;
 use smg_grpc_client::{
     mlx_proto,
@@ -11,9 +14,13 @@ use smg_grpc_client::{
 use tracing::{debug, warn};
 
 use crate::{
-    routers::grpc::{
-        context::{RequestType, WorkerSelection},
-        proto_wrapper::ProtoGenerateRequest,
+    routers::{
+        error,
+        grpc::{
+            context::{RequestType, WorkerSelection},
+            proto_wrapper::ProtoGenerateRequest,
+            utils::resolve_mlx_stop_ids,
+        },
     },
     worker::{
         sampling_defaults::SamplingDefaults, RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT,
@@ -262,4 +269,37 @@ fn inject_sglang_bootstrap_metadata(
         "Injected bootstrap metadata: host={}, port={}, room={}",
         hostname, bootstrap_port, room_id
     );
+}
+
+/// Convert string stop sequences to token IDs and append them to the MLX proto request.
+///
+/// The MLX proto only supports stop_token_ids; string stop sequences from the
+/// CompletionRequest must be tokenized here before the request is dispatched.
+/// No-op if the request has no string stop sequences.
+#[expect(
+    clippy::result_large_err,
+    reason = "Response is the standard error type in the pipeline stage pattern"
+)]
+pub(crate) fn apply_mlx_stop_sequences(
+    proto_request: &mut ProtoGenerateRequest,
+    stop: Option<&StringOrArray>,
+    tokenizer: Option<&dyn Tokenizer>,
+) -> Result<(), Response> {
+    let Some(stop) = stop else {
+        return Ok(());
+    };
+
+    if let ProtoGenerateRequest::Mlx(req) = proto_request {
+        let token_ids = resolve_mlx_stop_ids(stop, tokenizer)?;
+        let sampling = req.sampling_params.as_mut().ok_or_else(|| {
+            error::internal_error(
+                "mlx_sampling_params_missing",
+                "MLX GenerateRequest has no sampling_params; cannot inject stop IDs",
+            )
+        })?;
+        sampling.stop_token_ids.extend(token_ids);
+    }
+
+    // Non-MLX backends handle string stop sequences natively; no-op for them.
+    Ok(())
 }

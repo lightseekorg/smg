@@ -492,7 +492,14 @@ impl StreamingProcessor {
                     cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
-                    matched_stops.insert(index, complete.matched_stop_json());
+                    matched_stops.insert(
+                        index,
+                        complete.matched_stop_json_with_context(
+                            original_request.stop.as_ref(),
+                            original_request.stop_token_ids.as_ref(),
+                            tokenizer.as_ref(),
+                        ),
+                    );
 
                     // Don't break - continue reading all Complete messages for n>1
                 }
@@ -2405,8 +2412,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: std::mem::take(&mut chunk_text),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2432,8 +2438,7 @@ impl StreamingProcessor {
                                 choices: vec![CompletionStreamChoice {
                                     text: sfx.to_string(),
                                     index,
-                                    logprobs: None,
-                                    finish_reason: None,
+                                    ..Default::default()
                                 }],
                                 model: model.clone(),
                                 system_fingerprint: system_fingerprint.map(String::from),
@@ -2449,10 +2454,9 @@ impl StreamingProcessor {
                             object: "text_completion".to_string(),
                             created,
                             choices: vec![CompletionStreamChoice {
-                                text: String::new(),
                                 index,
-                                logprobs: None,
                                 finish_reason: Some("stop".to_string()),
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2485,8 +2489,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: prompt_text.to_string(),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2508,8 +2511,7 @@ impl StreamingProcessor {
                                     choices: vec![CompletionStreamChoice {
                                         text,
                                         index,
-                                        logprobs: None,
-                                        finish_reason: None,
+                                        ..Default::default()
                                     }],
                                     model: model.clone(),
                                     system_fingerprint: system_fingerprint.map(String::from),
@@ -2530,8 +2532,7 @@ impl StreamingProcessor {
                             choices: vec![CompletionStreamChoice {
                                 text: sfx.to_string(),
                                 index,
-                                logprobs: None,
-                                finish_reason: None,
+                                ..Default::default()
                             }],
                             model: model.clone(),
                             system_fingerprint: system_fingerprint.map(String::from),
@@ -2568,6 +2569,12 @@ impl StreamingProcessor {
                         }
                     };
 
+                    let matched_stop = complete.matched_stop_json_with_context(
+                        completion_request.stop.as_ref(),
+                        completion_request.stop_token_ids.as_ref(),
+                        tokenizer.as_ref(),
+                    );
+
                     let final_chunk = CompletionStreamResponse {
                         id: request_id.clone(),
                         object: "text_completion".to_string(),
@@ -2577,6 +2584,7 @@ impl StreamingProcessor {
                             index,
                             logprobs: None,
                             finish_reason,
+                            matched_stop,
                         }],
                         model: model.clone(),
                         system_fingerprint: system_fingerprint.map(String::from),

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 
 use futures_util::StreamExt;
+use llm_tokenizer::traits::Tokenizer;
+use openai_protocol::common::StringOrArray;
 use smg_grpc_client::{
     mlx_engine::AbortOnDropStream as MlxStream,
     mlx_proto::{self as mlx},
@@ -16,6 +18,8 @@ use smg_grpc_client::{
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
+
+use crate::routers::grpc::utils::resolve_mlx_matched_stop_json;
 
 // =====================
 // Multimodal Data
@@ -738,6 +742,14 @@ impl ProtoGenerateComplete {
         matches!(self, Self::Mlx(_))
     }
 
+    /// Return the raw matched stop token ID for MLX responses; None for all other backends.
+    fn mlx_matched_stop_token_id(&self) -> Option<u32> {
+        match self {
+            Self::Mlx(c) => c.matched_stop_token_id,
+            _ => None,
+        }
+    }
+
     /// Get token IDs from either backend (output_ids in proto)
     pub fn token_ids(&self) -> &[u32] {
         match self {
@@ -795,6 +807,10 @@ impl ProtoGenerateComplete {
     /// - MatchedTokenId → Number
     /// - MatchedStopStr → String
     /// - None → None
+    #[expect(
+        clippy::unreachable,
+        reason = "MLX must use matched_stop_json_with_context"
+    )]
     pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
         macro_rules! convert {
             ($oneof:expr, $token_id:path, $stop_str:path) => {
@@ -820,9 +836,31 @@ impl ProtoGenerateComplete {
                 TrtllmMatchedStop::MatchedTokenId,
                 TrtllmMatchedStop::MatchedStopStr
             ),
-            Self::Mlx(c) => c
-                .matched_stop_token_id
-                .map(|id| serde_json::Value::Number(id.into())),
+            // MLX requires request context to resolve the token ID; use matched_stop_json_with_context.
+            Self::Mlx(_) => unreachable!("matched_stop_json called for MLX backend"),
+        }
+    }
+
+    /// Resolve the matched stop for any backend, using request context for MLX.
+    ///
+    /// MLX only stores a token ID; this maps it back to the user-facing string or integer
+    /// (see `chat_utils::resolve_mlx_matched_stop_json`). All other backends return
+    /// `matched_stop_json()` directly.
+    pub fn matched_stop_json_with_context(
+        &self,
+        stop: Option<&StringOrArray>,
+        stop_token_ids: Option<&Vec<u32>>,
+        tokenizer: &dyn Tokenizer,
+    ) -> Option<serde_json::Value> {
+        if self.is_mlx() {
+            resolve_mlx_matched_stop_json(
+                self.mlx_matched_stop_token_id(),
+                stop,
+                stop_token_ids,
+                tokenizer,
+            )
+        } else {
+            self.matched_stop_json()
         }
     }
 
