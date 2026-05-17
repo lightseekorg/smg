@@ -6,7 +6,7 @@ use rand::Rng;
 use smg_grpc_client::{
     mlx_proto,
     sglang_proto::{self, DisaggregatedParams},
-    vllm_proto,
+    tokenspeed_proto, vllm_proto,
 };
 use tracing::{debug, warn};
 
@@ -156,6 +156,15 @@ pub(crate) fn apply_sampling_defaults_to_generate_request(
             };
             apply_mlx_sampling_defaults(params, defaults, mask);
         }
+        ProtoGenerateRequest::TokenSpeed(req) => {
+            let Some(params) = req.sampling_params.as_mut() else {
+                warn!(
+                    "Cannot apply sampling defaults to TokenSpeed request without sampling_params"
+                );
+                return;
+            };
+            apply_tokenspeed_sampling_defaults(params, defaults, mask);
+        }
         ProtoGenerateRequest::Trtllm(_) => {}
     }
 }
@@ -217,6 +226,30 @@ optional_temperature_sampling_defaults_fn!(
     vllm_proto::SamplingParams
 );
 optional_temperature_sampling_defaults_fn!(apply_mlx_sampling_defaults, mlx_proto::SamplingParams);
+
+/// TokenSpeed declares every sampling scalar as `optional` so the servicer
+/// can distinguish "client set 0" from "client unset". Apply defaults by
+/// writing `Some(value)` rather than the bare value.
+fn apply_tokenspeed_sampling_defaults(
+    params: &mut tokenspeed_proto::SamplingParams,
+    defaults: SamplingDefaults,
+    mask: SamplingDefaultsMask,
+) {
+    macro_rules! apply_opt {
+        ($field:ident) => {
+            if mask.$field {
+                if let Some(value) = defaults.$field {
+                    params.$field = Some(value);
+                }
+            }
+        };
+    }
+    apply_opt!(temperature);
+    apply_opt!(top_p);
+    apply_opt!(top_k);
+    apply_opt!(min_p);
+    apply_opt!(repetition_penalty);
+}
 
 /// Inject PD bootstrap metadata for SGLang if needed.
 ///

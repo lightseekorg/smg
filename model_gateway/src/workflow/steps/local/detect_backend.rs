@@ -1,8 +1,8 @@
 //! Backend runtime detection step.
 //!
-//! Detects the runtime type (sglang, vllm, trtllm, mlx) for both HTTP and gRPC workers.
+//! Detects the runtime type (sglang, vllm, trtllm, tokenspeed, mlx) for both HTTP and gRPC workers.
 //! - HTTP: probes `/v1/models` (owned_by field), falls back to unique endpoints.
-//! - gRPC: tries sglang → vllm → trtllm → mlx health checks sequentially.
+//! - gRPC: tries sglang → vllm → trtllm → tokenspeed → mlx health checks sequentially.
 
 use std::time::Duration;
 
@@ -44,7 +44,7 @@ async fn detect_grpc_backend(
     }
 
     // Try each runtime sequentially (most common first), skipping the hint we already tried
-    for runtime in &["sglang", "vllm", "trtllm", "mlx"] {
+    for runtime in &["sglang", "vllm", "trtllm", "tokenspeed", "mlx"] {
         if Some(*runtime) == runtime_hint {
             continue;
         }
@@ -57,7 +57,7 @@ async fn detect_grpc_backend(
     }
 
     Err(format!(
-        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, mlx)"
+        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm, tokenspeed, mlx)"
     ))
 }
 

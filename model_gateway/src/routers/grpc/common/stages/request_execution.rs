@@ -114,6 +114,7 @@ impl PipelineStage for RequestExecutionStage {
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::Mlx)
+                            | Some(RuntimeType::TokenSpeed)
                             | Some(RuntimeType::External)
                             | Some(RuntimeType::Unspecified) => {
                                 error!(
