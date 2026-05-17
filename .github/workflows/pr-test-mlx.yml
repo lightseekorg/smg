@@ -43,10 +43,7 @@ jobs:
   e2e-mlx:
     name: E2E (MLX on Apple Silicon)
     runs-on: macos-latest
-    # Cold rust-cache builds the SMG workspace from scratch in ~28 min;
-    # warm cache trims that to ~9 min. Cap at 60 so a cold-cache run
-    # (eviction after 7 days idle, or a Cargo.lock change) completes
-    # instead of getting cancelled mid-build.
+    # Cold rust-cache builds take ~28 min on macos-latest; warm ~9 min.
     timeout-minutes: 60
     permissions:
       contents: read
@@ -89,14 +86,9 @@ jobs:
         working-directory: bindings/python
         run: |
           pip install maturin
-          # `dev` profile (opt-level=0 for workspace, no LTO, codegen-units=256,
-          # incremental) — fastest possible compile. Router runtime perf is
-          # irrelevant for a correctness E2E test, so trading runtime for
-          # compile time is a pure win. The `ci` profile (opt-level=2 + thin
-          # LTO) was costing ~28 min cold-cache and ~9 min warm; dev cuts
-          # both by 3–5x.
-          # Use `maturin build` + `pip install` (not `maturin develop`)
-          # because the GitHub-hosted runner's Python is not in a virtualenv.
+          # dev profile — router runtime perf doesn't matter for a correctness test.
+          # `maturin build` + `pip install` (not `maturin develop`) since the
+          # runner's Python isn't in a virtualenv.
           maturin build --profile dev --out dist
           pip install dist/*.whl
 

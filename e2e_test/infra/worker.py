@@ -264,11 +264,7 @@ class Worker:
         return cmd
 
     def _build_mlx_cmd(self, model_path: str, spec: dict) -> list[str]:
-        """Build MLX gRPC server command (Apple Silicon only).
-
-        MLX backend only supports gRPC mode (no HTTP variant) since the
-        servicer wraps mlx-lm's BatchGenerator behind the MlxEngine proto.
-        """
+        """Build MLX gRPC server command (Apple Silicon, gRPC-only)."""
         if self.mode != ConnectionMode.GRPC:
             raise ValueError("MLX backend only supports gRPC mode")
         cmd = [

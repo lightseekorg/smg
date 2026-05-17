@@ -1,15 +1,10 @@
 """MLX backend E2E tests (Apple Silicon only).
 
-Tests the SMG router → gRPC → MLX worker pipeline using mlx-lm's
-BatchGenerator. MLX only supports gRPC. Backend-scoped here (sibling
-to `e2e_test/router/`, `e2e_test/bindings_go/`) since the fixtures
-need a macOS runner and a different model than the sglang/vllm/trtllm
-parameterization in `chat_completions/`.
+Exercises router → gRPC → MLX worker. Backend-scoped (separate from
+`chat_completions/`) because the fixtures need a macOS runner and a
+different model than the sglang/vllm/trtllm parameterization.
 
-Run locally:
-    E2E_RUNTIME=mlx pytest e2e_test/mlx/test_mlx_backend.py -v
-
-CI: `.github/workflows/pr-test-mlx.yml` (macos-latest, Qwen3-0.6B-4bit).
+Run: `E2E_RUNTIME=mlx pytest e2e_test/mlx/test_mlx_backend.py -v`
 """
 
 from __future__ import annotations
@@ -20,14 +15,11 @@ import sys
 
 import pytest
 
-# MLX is Apple Silicon only — skip the entire module elsewhere.
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin" or platform.machine() != "arm64",
     reason="MLX backend requires Apple Silicon (macOS arm64)",
 )
 
-
-# ── Tools used for function calling tests ────────────────────────────────────
 
 WEATHER_TOOL = {
     "type": "function",
@@ -58,19 +50,17 @@ WEATHER_TOOL = {
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--reasoning-parser", "qwen3"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestMlxBackend:
-    """End-to-end tests for the MLX gRPC backend.
+    """E2E tests for the MLX gRPC backend.
 
-    Uses mlx-community/Qwen3-0.6B-4bit (~400 MB) — small enough to download
-    and run on a macos-latest GitHub Actions runner. Qwen3 supports both
-    native tool calling and thinking mode in a single model.
+    Qwen3-0.6B-4bit (~400 MB) is small enough for macos-latest and covers
+    both tool calling and thinking mode.
     """
 
-    # Qwen3 enters thinking mode by default; disable for the basic chat tests
-    # so the small 0.6B model produces actual content within max_tokens budget.
+    # Disable thinking on basic chat tests so the 0.6B model has budget for
+    # actual content within max_tokens.
     NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
 
     def test_basic_chat(self, model, api_client):
-        """Non-streaming chat completion goes through the full pipeline."""
         response = api_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "Reply with the single word 'OK'."}],
@@ -86,7 +76,6 @@ class TestMlxBackend:
         assert response.usage.completion_tokens > 0
 
     def test_streaming_chat(self, model, api_client):
-        """Streaming chat yields incremental delta chunks."""
         stream = api_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "Count: 1, 2, 3."}],
@@ -96,7 +85,6 @@ class TestMlxBackend:
             extra_body=self.NO_THINKING,
         )
         chunks = list(stream)
-        # First chunk has the role, subsequent chunks carry content deltas.
         assert len(chunks) >= 2
         text_pieces = [
             c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content
@@ -105,7 +93,6 @@ class TestMlxBackend:
         assert "".join(text_pieces).strip()
 
     def test_tool_calling(self, model, api_client):
-        """Qwen3 emits <tool_call> tags; SMG's qwen ToolParser extracts them."""
         response = api_client.chat.completions.create(
             model=model,
             messages=[
@@ -124,12 +111,10 @@ class TestMlxBackend:
         assert msg.tool_calls, "Expected tool_calls to be populated"
         call = msg.tool_calls[0]
         assert call.function.name == "get_weather"
-        # arguments is a JSON string per OpenAI spec
         args = json.loads(call.function.arguments)
         assert "tokyo" in args.get("location", "").lower()
 
     def test_reasoning_thinking_mode(self, model, api_client):
-        """Qwen3 thinking mode populates reasoning_content separately from content."""
         response = api_client.chat.completions.create(
             model=model,
             messages=[
@@ -148,9 +133,8 @@ class TestMlxBackend:
         msg = response.choices[0].message
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", None) or ""
-        # Assert reasoning_content separately from the answer-correctness
-        # check: a regression that dumps the whole <think>...</think> span
-        # into content would otherwise pass silently.
+        # Asserting reasoning separately catches a regression that dumps the
+        # whole <think>...</think> span into content.
         assert reasoning.strip(), (
             f"Expected non-empty reasoning_content with enable_thinking=True, "
             f"got content={content!r} reasoning={reasoning!r}"
@@ -160,7 +144,6 @@ class TestMlxBackend:
         )
 
     def test_max_tokens_finish_reason(self, model, api_client):
-        """When max_tokens is reached, finish_reason is 'length'."""
         response = api_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "Tell me a story."}],
