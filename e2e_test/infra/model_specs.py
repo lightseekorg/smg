@@ -184,6 +184,12 @@ MODEL_SPECS: dict[str, dict] = {
             "--enable-chunked-prefill",
         ],
     },
+    # MLX (Apple Silicon). Smallest Qwen3 with tool calling + thinking (~400 MB).
+    "mlx-community/Qwen3-0.6B-4bit": {
+        "model": _resolve_model_path("mlx-community/Qwen3-0.6B-4bit"),
+        "tp": 1,
+        "features": ["chat", "streaming", "function_calling", "reasoning", "thinking"],
+    },
 }
 
 
