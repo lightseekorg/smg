@@ -53,13 +53,17 @@ export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_
 pip install --upgrade pip
 pip install --no-cache-dir "$NCCL_VERSION_CONSTRAINT"
 
-# ── Install TensorRT-LLM pre-release wheel from PyPI ─────────────────────────
-# --pre allows pre-release versions; --extra-index-url for cu130 torch so pip
-# resolves torch 2.10+cu130 (cuda-bindings==13.x) instead of the default PyPI
-# torch (cuda-bindings==12.9.4), which conflicts with tensorrt-llm's
-# cuda-python>=13 requirement.
-echo "Installing tensorrt-llm==${TRTLLM_VERSION} from PyPI..."
+# ── Install TensorRT-LLM pre-release wheel from NVIDIA's index ───────────────
+# PyPI only hosts the source tarball for tensorrt-llm — installing from there
+# would trigger a full source build. The pre-built linux_x86_64 wheels live on
+# https://pypi.nvidia.com, which we add as an extra index.
+#
+# The cu130 torch index is also needed so pip resolves torch 2.10+cu130
+# (cuda-bindings==13.x) instead of the default PyPI torch (cuda-bindings==12.9.4),
+# which conflicts with tensorrt-llm's cuda-python>=13 requirement.
+echo "Installing tensorrt-llm==${TRTLLM_VERSION} from pypi.nvidia.com..."
 pip install --no-cache-dir --pre \
+    --extra-index-url https://pypi.nvidia.com \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     "tensorrt-llm==${TRTLLM_VERSION}"
 
