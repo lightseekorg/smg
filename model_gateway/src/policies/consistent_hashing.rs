@@ -74,7 +74,7 @@ impl ConsistentHashingPolicy {
         let healthy_url_to_idx: std::collections::HashMap<&str, usize> = workers
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.is_healthy())
+            .filter(|(_, w)| w.is_available())
             .map(|(i, w)| (w.url(), i))
             .collect();
 
@@ -129,7 +129,7 @@ impl ConsistentHashingPolicy {
         // O(1) parse + O(1) bounds check + O(1) health check
         if let Some(idx_str) = target_worker {
             if let Ok(idx) = idx_str.parse::<usize>() {
-                if idx < workers.len() && workers[idx].is_healthy() {
+                if idx < workers.len() && workers[idx].is_available() {
                     return (Some(idx), Branch::TargetWorkerHit);
                 }
             }
@@ -161,7 +161,7 @@ impl ConsistentHashingPolicy {
         }
 
         // Fallback: random selection (truly anonymous client)
-        let healthy_count = workers.iter().filter(|w| w.is_healthy()).count();
+        let healthy_count = workers.iter().filter(|w| w.is_available()).count();
         if healthy_count == 0 {
             return (None, Branch::NoHealthyWorkers);
         }
@@ -170,7 +170,7 @@ impl ConsistentHashingPolicy {
         let idx = workers
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.is_healthy())
+            .filter(|(_, w)| w.is_available())
             .nth(random_healthy_idx)
             .map(|(i, _)| i);
 
@@ -326,6 +326,23 @@ mod tests {
     }
 
     #[test]
+    fn test_target_worker_miss_open_circuit_breaker() {
+        let policy = ConsistentHashingPolicy::new();
+        let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
+        workers[1].circuit_breaker().force_open();
+
+        let headers = headers_with_target_worker(1);
+        let info = SelectWorkerInfo {
+            headers: Some(&headers),
+            ..Default::default()
+        };
+
+        let (result, branch) = policy.select_worker_impl(&workers, &info);
+        assert_eq!(result, None);
+        assert_eq!(branch, Branch::TargetWorkerMiss);
+    }
+
+    #[test]
     fn test_target_worker_priority_over_routing_key() {
         let policy = ConsistentHashingPolicy::new();
         let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
@@ -381,6 +398,41 @@ mod tests {
         let (result, branch) = policy.select_worker_impl(&workers, &info);
         assert_eq!(result, None);
         assert_eq!(branch, Branch::NoHealthyWorkers);
+    }
+
+    #[test]
+    fn test_routing_key_skips_open_circuit_breaker() {
+        let policy = ConsistentHashingPolicy::new();
+        let workers = create_workers(&["http://w0:8000", "http://w1:8000", "http://w2:8000"]);
+        let ring = Arc::new(HashRing::new(&workers));
+        workers[1].circuit_breaker().force_open();
+
+        for i in 0..50 {
+            let headers = headers_with_routing_key(&format!("user-{i}"));
+            let info = SelectWorkerInfo {
+                headers: Some(&headers),
+                hash_ring: Some(ring.clone()),
+                ..Default::default()
+            };
+            let (result, branch) = policy.select_worker_impl(&workers, &info);
+            let idx = result.expect("should route to an available worker");
+            assert_ne!(idx, 1);
+            assert_eq!(branch, Branch::RoutingKeyHit);
+        }
+    }
+
+    #[test]
+    fn test_random_fallback_skips_open_circuit_breaker() {
+        let policy = ConsistentHashingPolicy::new();
+        let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
+        workers[0].circuit_breaker().force_open();
+
+        for _ in 0..20 {
+            let (result, branch) =
+                policy.select_worker_impl(&workers, &SelectWorkerInfo::default());
+            assert_eq!(result, Some(1));
+            assert_eq!(branch, Branch::RandomFallback);
+        }
     }
 
     #[test]

@@ -137,7 +137,7 @@ impl PrefixHashPolicy {
         let healthy_workers: Vec<(usize, &Arc<dyn Worker>)> = workers
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.is_healthy())
+            .filter(|(_, w)| w.is_available())
             .collect();
 
         if healthy_workers.is_empty() {
@@ -388,6 +388,27 @@ mod tests {
         let (result, branch) = policy.select_worker_impl(&workers, &info);
         assert_eq!(result, None);
         assert_eq!(branch, Branch::NoHealthyWorkers);
+    }
+
+    #[test]
+    fn test_open_circuit_breaker_excluded() {
+        let policy = PrefixHashPolicy::with_defaults();
+        let workers = create_workers(&["http://w1:8000", "http://w2:8000"]);
+        workers[0].circuit_breaker().force_open();
+
+        let ring = Arc::new(HashRing::new(&workers));
+        let tokens: Vec<u32> = vec![1, 2, 3, 4];
+        let info = SelectWorkerInfo {
+            tokens: Some(&tokens),
+            hash_ring: Some(ring),
+            ..Default::default()
+        };
+
+        for _ in 0..10 {
+            let (result, branch) = policy.select_worker_impl(&workers, &info);
+            assert_eq!(result, Some(1));
+            assert!(matches!(branch, Branch::RingHit | Branch::LoadBalanceWalk));
+        }
     }
 
     #[test]
