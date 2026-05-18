@@ -67,6 +67,21 @@ use crate::{
     tenant::TenantContext,
 };
 
+/// How long a successful `list_all_tools` is trusted as the basis for the
+/// dynamic-connect fast path when the inventory is empty for that URL. This
+/// bounds two competing concerns:
+///
+/// * Genuinely zero-tool servers re-list at most once per TTL, not on every
+///   request — keeping bandwidth and the chance of a transient
+///   `list_all_tools` failure low.
+/// * Warm-up races where the server briefly returned no tools self-heal on
+///   the next request after the TTL expires, so the empty state is never
+///   terminal.
+///
+/// 60s is short enough that warm-up issues resolve quickly and long enough
+/// that legitimately-empty servers don't generate per-request traffic.
+const EMPTY_DISCOVERY_TTL: Duration = Duration::from_secs(60);
+
 /// Build request headers from token and custom headers.
 fn build_request_headers(
     token: Option<&str>,
@@ -317,7 +332,8 @@ impl McpOrchestrator {
                 "LRU evicted dynamic server '{}' (tenant: {:?}) - clearing tools from inventory",
                 key.url, key.tenant_id
             );
-            // Tools are registered by URL, so clear by URL
+            // Tool entries are registered by URL; pool-presence tracking is
+            // cleared for matching pool identities inside the inventory.
             inventory_clone.clear_server_tools(&key.url);
         });
 
@@ -354,6 +370,10 @@ impl McpOrchestrator {
 
         // Start background refresh task
         orchestrator.spawn_refresh_handler(refresh_rx);
+
+        // Start background reaper for idle pooled connections so the configured
+        // `pool.idle_timeout` actually has an effect.
+        orchestrator.spawn_idle_reaper();
 
         info!(
             "McpOrchestrator initialized with {} static servers",
@@ -637,6 +657,53 @@ impl McpOrchestrator {
             }
             Err(e) => debug!("No resources from '{}': {}", server_key, e),
         }
+    }
+
+    /// Spawn a background task that periodically reaps pooled connections idle for
+    /// longer than `config.pool.idle_timeout`. The reaper fires the pool's eviction
+    /// callback for every removed entry, which keeps the URL-scoped tool inventory
+    /// consistent. Disabled (no task spawned) when `idle_timeout == 0`.
+    fn spawn_idle_reaper(&self) {
+        let idle_timeout_secs = self.config.pool.idle_timeout;
+        if idle_timeout_secs == 0 {
+            debug!("Idle reaper disabled (pool.idle_timeout = 0)");
+            return;
+        }
+
+        let idle_for = Duration::from_secs(idle_timeout_secs);
+        // Sweep frequently enough that worst-case eviction lag stays bounded, but
+        // never below 30s to keep wake-ups cheap on quiet deployments.
+        let sweep_interval = std::cmp::max(idle_for / 4, Duration::from_secs(30));
+
+        let pool = Arc::clone(&self.connection_pool);
+        let token = self.shutdown_token.clone();
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "idle reaper runs for orchestrator lifetime; shutdown is coordinated via CancellationToken"
+        )]
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(sweep_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    () = token.cancelled() => {
+                        debug!("Idle reaper shutting down");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        let reaped = pool.evict_idle(idle_for);
+                        if reaped > 0 {
+                            debug!(
+                                "Idle reaper evicted {} pooled MCP connection(s) idle for >= {:?}",
+                                reaped, idle_for
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Spawn background handler for inventory refresh requests.
@@ -1331,15 +1398,22 @@ impl McpOrchestrator {
 
         let pool_key = PoolKey::from_config(&config, tenant_id);
 
-        // Fast path: pool reports discovery completed AND the inventory still holds
-        // tools for this URL. The two invariants can desync because pool keys
-        // include (auth, tenant) but the inventory is keyed by URL only — a
-        // sibling pool entry's eviction can wipe the URL's inventory while this
-        // entry's `tools_discovered` flag remains true. Re-running discovery is
-        // the safe recovery; empty-tool servers fall through to the slower path
-        // and re-list, which is acceptable because that case is rare.
+        // Fast path: pool reports discovery completed AND either
+        //   (a) the inventory still holds tools for this pool identity, OR
+        //   (b) the last successful discovery is fresh within
+        //       `EMPTY_DISCOVERY_TTL`.
+        //
+        // The inventory check guards against sibling-tenant state standing in
+        // for this pool entry after URL-scoped inventory changes. The TTL
+        // branch lets genuinely-empty servers short-circuit briefly without
+        // making the empty state terminal: a warm-up race that returned no
+        // tools naturally re-validates after the TTL expires and tools that
+        // have since been registered become visible.
         if self.connection_pool.tool_discovery_completed(&pool_key)
-            && self.tool_inventory.has_server_tools(&pool_key.url)
+            && (self.tool_inventory.has_server_tools(&pool_key)
+                || self
+                    .connection_pool
+                    .discovery_fresh_within(&pool_key, EMPTY_DISCOVERY_TTL))
         {
             return Ok(pool_key.url.clone());
         }
@@ -1407,9 +1481,12 @@ impl McpOrchestrator {
             .await?;
 
         // Another caller may have completed discovery while we were connecting.
-        // Same defensive AND as the outer fast path — see note above.
+        // Same combined check as the outer fast path — see note above.
         if self.connection_pool.tool_discovery_completed(&pool_key)
-            && inventory_clone.has_server_tools(&server_key)
+            && (inventory_clone.has_server_tools(&pool_key)
+                || self
+                    .connection_pool
+                    .discovery_fresh_within(&pool_key, EMPTY_DISCOVERY_TTL))
         {
             self.metrics.record_connection_opened();
             return Ok(server_key);
@@ -1430,12 +1507,27 @@ impl McpOrchestrator {
                 for tool in tools {
                     let entry = ToolEntry::from_server_tool(&server_key, tool)
                         .with_category(ToolCategory::Dynamic);
-                    inventory_clone.insert_entry(entry);
+                    inventory_clone.insert_pool_entry(&pool_key, entry);
                 }
                 self.connection_pool
                     .mark_tool_discovery_completed(&pool_key);
             }
             Err(e) => {
+                // If a prior discovery already succeeded for this pool entry,
+                // a transient `list_all_tools` failure should not tear the
+                // connection down or surface as `ConnectionFailed`: the cached
+                // client is still valid and the existing inventory state
+                // (possibly empty after a sibling-tenant wipe) is the best we
+                // have. We keep the entry so the next request can retry; the
+                // TTL'd fast-path check above provides bounded backoff.
+                if self.connection_pool.tool_discovery_completed(&pool_key) {
+                    warn!(
+                        "Re-list of tools failed for '{}': {}; keeping cached connection (prior discovery still recorded)",
+                        server_key, e
+                    );
+                    self.metrics.record_connection_opened();
+                    return Ok(server_key);
+                }
                 warn!(
                     "Failed to list tools from '{}': {}; removing pooled connection",
                     server_key, e

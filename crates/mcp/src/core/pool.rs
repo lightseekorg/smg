@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use lru::LruCache;
@@ -95,8 +96,23 @@ impl PoolKey {
 #[derive(Clone)]
 pub(crate) struct CachedConnection {
     pub client: Arc<McpClient>,
-    /// Set after a successful `list_all_tools` for this pool entry (including empty tool lists).
+    /// Set after a successful `list_all_tools` for this pool entry, regardless of how
+    /// many tools were returned. The orchestrator combines this with a non-empty
+    /// inventory check before short-circuiting — see the comment above the fast path
+    /// in `connect_dynamic_server_with_tenant`. We deliberately do NOT cache a
+    /// separate "discovered empty" terminal shortcut: a single empty response during
+    /// server warm-up would otherwise poison the fast path until LRU/idle eviction.
     pub tools_discovered: bool,
+    /// Timestamp of the most recent successful `list_all_tools` for this pool entry.
+    /// Combined with a TTL by `discovery_fresh_within`, this gives a bounded grace
+    /// window in which an empty discovery may be trusted (avoiding re-listing on
+    /// every request for genuinely zero-tool servers) without making the empty
+    /// state terminal (a warm-up race re-validates after the TTL expires).
+    pub last_discovery_at: Option<Instant>,
+    /// Wall-clock-ish timestamp of the last access through `get` / `get_or_create` /
+    /// the fast-path inspection methods. Used by `evict_idle` to reap connections
+    /// that have not been touched for longer than the configured idle timeout.
+    pub last_used: Instant,
 }
 
 impl CachedConnection {
@@ -104,6 +120,8 @@ impl CachedConnection {
         Self {
             client,
             tools_discovered: false,
+            last_discovery_at: None,
+            last_used: Instant::now(),
         }
     }
 }
@@ -163,7 +181,8 @@ impl McpConnectionPool {
     {
         {
             let mut connections = self.connections.lock();
-            if let Some(cached) = connections.get(&key) {
+            if let Some(cached) = connections.get_mut(&key) {
+                cached.last_used = Instant::now();
                 return Ok(Arc::clone(&cached.client));
             }
         }
@@ -220,12 +239,12 @@ impl McpConnectionPool {
             .collect()
     }
 
-    /// Get connection, promoting in LRU.
+    /// Get connection, promoting in LRU and refreshing the idle timestamp.
     pub fn get(&self, key: &PoolKey) -> Option<Arc<McpClient>> {
-        self.connections
-            .lock()
-            .get(key)
-            .map(|cached| Arc::clone(&cached.client))
+        self.connections.lock().get_mut(key).map(|cached| {
+            cached.last_used = Instant::now();
+            Arc::clone(&cached.client)
+        })
     }
 
     pub fn contains(&self, key: &PoolKey) -> bool {
@@ -233,36 +252,90 @@ impl McpConnectionPool {
     }
 
     /// True when the pool holds this key and tool discovery has completed successfully.
+    /// Touches `last_used` because callers gate live usage of the connection on this.
     pub fn tool_discovery_completed(&self, key: &PoolKey) -> bool {
-        self.connections
-            .lock()
-            .get(key)
-            .is_some_and(|cached| cached.tools_discovered)
+        self.connections.lock().get_mut(key).is_some_and(|cached| {
+            cached.last_used = Instant::now();
+            cached.tools_discovered
+        })
     }
 
-    /// Mark tool discovery as done for a pooled connection (including zero-tool servers).
+    /// Mark tool discovery as done for a pooled connection. Records "ran
+    /// successfully" without caching "discovered zero tools" as a terminal
+    /// state — see `CachedConnection::last_discovery_at` for the rationale.
     pub fn mark_tool_discovery_completed(&self, key: &PoolKey) -> bool {
         let mut connections = self.connections.lock();
         if let Some(cached) = connections.get_mut(key) {
+            let now = Instant::now();
             cached.tools_discovered = true;
+            cached.last_discovery_at = Some(now);
+            cached.last_used = now;
             true
         } else {
             false
         }
+    }
+
+    /// True when the most recent successful discovery for `key` happened within
+    /// `fresh_within`. Lets the orchestrator's fast path short-circuit briefly
+    /// for genuinely-empty servers without ever caching the empty state as
+    /// terminal — the cache lapses on TTL and the next request re-validates.
+    pub fn discovery_fresh_within(&self, key: &PoolKey, fresh_within: Duration) -> bool {
+        let now = Instant::now();
+        self.connections.lock().get_mut(key).is_some_and(|cached| {
+            cached.last_used = now;
+            cached
+                .last_discovery_at
+                .is_some_and(|at| now.saturating_duration_since(at) < fresh_within)
+        })
+    }
+
+    /// Evict every pooled entry that has been idle for at least `idle_for`. Fires the
+    /// eviction callback for each removed key so downstream state (tool inventory,
+    /// metrics) stays consistent. Returns the number of entries reaped.
+    pub fn evict_idle(&self, idle_for: Duration) -> usize {
+        let now = Instant::now();
+        let evicted: Vec<PoolKey> = {
+            let mut connections = self.connections.lock();
+            let stale: Vec<PoolKey> = connections
+                .iter()
+                .filter(|(_, cached)| now.saturating_duration_since(cached.last_used) >= idle_for)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in &stale {
+                connections.pop(key);
+            }
+            stale
+        };
+
+        let count = evicted.len();
+        if count > 0 {
+            self.connection_count.fetch_sub(count, Ordering::Relaxed);
+            if let Some(callback) = &self.eviction_callback {
+                for key in &evicted {
+                    callback(key);
+                }
+            }
+        }
+        count
     }
 
     /// Remove a connection from the pool by key. Returns true if it was present.
     pub fn remove(&self, key: &PoolKey) -> bool {
-        let mut connections = self.connections.lock();
-        if connections.pop(key).is_some() {
-            self.connection_count.fetch_sub(1, Ordering::Relaxed);
-            if let Some(callback) = &self.eviction_callback {
-                callback(key);
+        let (removed, callback) = {
+            let mut connections = self.connections.lock();
+            if connections.pop(key).is_some() {
+                self.connection_count.fetch_sub(1, Ordering::Relaxed);
+                (true, self.eviction_callback.clone())
+            } else {
+                (false, None)
             }
-            true
-        } else {
-            false
+        };
+
+        if let Some(callback) = callback {
+            callback(key);
         }
+        removed
     }
 
     /// Look up a connection by URL only (backward compatibility).
@@ -396,6 +469,18 @@ mod tests {
         let key = PoolKey::from_config(&create_test_config("http://localhost:3000"), None);
         assert!(!pool.tool_discovery_completed(&key));
         assert!(!pool.mark_tool_discovery_completed(&key));
+    }
+
+    #[test]
+    fn test_evict_idle_noop_on_empty_pool() {
+        // We cannot safely fabricate `RunningService<RoleClient, ()>` stubs in unit
+        // tests (see the absence of get/insert tests above), so behaviour under load
+        // is covered by the e2e suite. This guards the bookkeeping for empty pools
+        // and exercises the public surface.
+        let pool = McpConnectionPool::new();
+        assert_eq!(pool.evict_idle(Duration::from_secs(0)), 0);
+        assert_eq!(pool.evict_idle(Duration::from_secs(300)), 0);
+        assert_eq!(pool.len(), 0);
     }
 
     #[test]
