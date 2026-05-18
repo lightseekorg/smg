@@ -517,7 +517,7 @@ class TestImageGenerationCloud(_ImageGenerationAssertions):
 
 
 @pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 class TestImageGenerationGrpcSglang(_ImageGenerationAssertions):
@@ -531,7 +531,7 @@ class TestImageGenerationGrpcSglang(_ImageGenerationAssertions):
 
 
 @pytest.mark.engine("vllm")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 class TestImageGenerationGrpcVllm(_ImageGenerationAssertions):
