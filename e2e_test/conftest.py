@@ -19,8 +19,12 @@ Markers
 
 Fixtures
 --------
-setup_backend: Class-scoped fixture that launches workers + gateway per test class.
-    Returns (backend_name, model_path, client, gateway).
+setup_backend: Class-scoped fixture that launches (or reuses) workers and a
+    fresh gateway per test class. Workers for non-PD local backends are
+    pooled across classes that share ``(model_id, engine, mode, count)`` so
+    cold-start cost is paid once per distinct config per session. Set
+    ``E2E_DISABLE_WORKER_POOL=1`` to fall back to per-class worker
+    start/stop. Returns ``(backend_name, model_path, client, gateway)``.
 model: Convenience fixture that returns just the model_path from setup_backend.
 """
 
@@ -108,6 +112,7 @@ from fixtures import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
     setup_backend,
 )
 from smg_client import SmgClient
@@ -151,6 +156,7 @@ __all__ = [
     "pytest_runtest_setup",
     "pytest_collection_modifyitems",
     "pytest_configure",
+    "pytest_sessionfinish",
     # Fixtures
     "setup_backend",
     "backend_router",
