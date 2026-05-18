@@ -28,6 +28,7 @@ from infra import (
 )
 from infra.model_specs import get_model_spec
 from infra.worker import start_workers, stop_workers
+from infra.worker_pool import get_pool
 
 from .markers import get_marker_kwargs, get_marker_value
 
@@ -48,10 +49,17 @@ _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
 
 
-def _start_workers_tracked(**kwargs) -> list:
-    """Start workers and track failures by engine for fail-fast."""
+def _start_workers_tracked(*, use_pool: bool = False, **kwargs) -> list:
+    """Start workers and track failures by engine for fail-fast.
+
+    When ``use_pool`` is True, workers are acquired from the session-scoped
+    pool and live across pytest class boundaries (caller MUST NOT call
+    ``stop_workers`` on the result). PD workers always bypass the pool.
+    """
     engine = kwargs.get("engine") or get_runtime()
     try:
+        if use_pool:
+            return get_pool().acquire(**kwargs)
         return start_workers(**kwargs)
     except (TimeoutError, RuntimeError):
         _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
@@ -175,11 +183,17 @@ def _setup_local(
     backend_name,
     log_dir,
 ):
-    """Launch regular workers + gateway, yield result tuple, tear down."""
+    """Launch regular workers + gateway, yield result tuple, tear down.
+
+    Workers are acquired from the session-scoped pool so they survive class
+    teardown when the next class needs the same backend. The gateway is
+    per-class (its config can differ across classes) and is torn down here.
+    """
     num_workers = workers_config.get("count") or 1
     logger.info("Starting %s backend: model=%s, workers=%d", backend_name, model_id, num_workers)
 
     workers = _start_workers_tracked(
+        use_pool=True,
         model_id=model_id,
         engine=engine,
         mode=connection_mode,
@@ -196,9 +210,8 @@ def _setup_local(
         logger.info("%s backend ready at %s", backend_name, gateway.base_url)
         yield backend_name, model_path, _make_openai_client(gateway), gateway
     finally:
-        logger.info("Tearing down %s backend", backend_name)
+        logger.info("Tearing down %s backend (workers stay in pool)", backend_name)
         gateway.shutdown()
-        stop_workers(workers)
 
 
 # ---------------------------------------------------------------------------
