@@ -26,13 +26,6 @@ on:
         description: "Minutes per cell"
         required: false
         default: "5"
-  # TEMPORARY: PR trigger for harness smoke-testing. Remove before merge.
-  pull_request:
-    branches: [main]
-    paths:
-      - "scripts/mlx_bench.sh"
-      - "scripts/mlx_bench_aggregate.py"
-      - ".github/workflows/nightly-mlx-bench.yml"
 
 permissions:
   contents: read
