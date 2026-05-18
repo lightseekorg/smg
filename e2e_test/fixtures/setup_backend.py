@@ -1,8 +1,15 @@
 """Backend setup fixtures for E2E tests.
 
-Simplified backend lifecycle -- one set of workers and gateway per test class.
-No model pool, no thread-local caching. Direct worker management via
-start_workers/stop_workers.
+One gateway per test class; workers come from the session-scoped pool in
+``infra.worker_pool`` so they survive class teardown when the next class
+needs the same backend. The pool keys reuse on
+``(engine, model_id, mode, worker_type, count)`` and gates reuse on
+worker liveness.
+
+PD-disaggregation paths run through the pool too (so it can evict a
+stale cached worker holding their GPUs) but the caller owns teardown of
+the prefill/decode workers via ``stop_workers``. The function-scoped
+``backend_router`` fixture intentionally bypasses the pool entirely.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from infra import (
     launch_cloud_gateway,
 )
 from infra.model_specs import get_model_spec
-from infra.worker import start_workers, stop_workers
+from infra.worker import stop_workers
 from infra.worker_pool import get_pool
 
 from .markers import get_marker_kwargs, get_marker_value
@@ -49,18 +56,18 @@ _worker_start_failures: dict[str, int] = {}  # engine -> count
 _MAX_WORKER_START_FAILURES = 3  # fail fast after this many failures (matches --reruns 2)
 
 
-def _start_workers_tracked(*, use_pool: bool = False, **kwargs) -> list:
-    """Start workers and track failures by engine for fail-fast.
+def _start_workers_tracked(**kwargs) -> list:
+    """Start workers via the session pool and track failures for fail-fast.
 
-    When ``use_pool`` is True, workers are acquired from the session-scoped
-    pool and live across pytest class boundaries (caller MUST NOT call
-    ``stop_workers`` on the result). PD workers always bypass the pool.
+    The pool caches REGULAR workers across class boundaries — caller MUST
+    NOT call ``stop_workers`` on those. Non-REGULAR workers (PD
+    prefill/decode) skip the cache but still run through the pool so it
+    can evict any stale cached worker holding their GPUs; the caller still
+    owns teardown of those.
     """
     engine = kwargs.get("engine") or get_runtime()
     try:
-        if use_pool:
-            return get_pool().acquire(**kwargs)
-        return start_workers(**kwargs)
+        return get_pool().acquire(**kwargs)
     except (TimeoutError, RuntimeError):
         _worker_start_failures[engine] = _worker_start_failures.get(engine, 0) + 1
         raise
@@ -193,7 +200,6 @@ def _setup_local(
     logger.info("Starting %s backend: model=%s, workers=%d", backend_name, model_id, num_workers)
 
     workers = _start_workers_tracked(
-        use_pool=True,
         model_id=model_id,
         engine=engine,
         mode=connection_mode,
@@ -330,8 +336,9 @@ def _setup_cloud(backend_name, request, gateway_config):
 def backend_router(request: pytest.FixtureRequest):
     """Function-scoped fixture that launches a fresh gateway per test.
 
-    Starts a single worker and a new gateway for each test function.
-    Use when tests need isolated router state.
+    A new gateway is started for each test function; the worker comes
+    from the session-scoped pool (so the GPU isn't fought over with
+    class-scope tests). Use when tests need isolated router state.
 
     Usage::
 
@@ -344,11 +351,18 @@ def backend_router(request: pytest.FixtureRequest):
     connection_mode = ConnectionMode(backend_name)
     model_path = get_model_spec(model_id)["model"]
 
-    workers = start_workers(model_id, engine=get_runtime(), mode=connection_mode, count=1)
+    # Route through the pool so we evict any cached class-scope worker
+    # holding the GPUs we need. The pool retains ownership; we don't stop
+    # the workers ourselves.
+    workers = get_pool().acquire(
+        model_id=model_id,
+        engine=get_runtime(),
+        mode=connection_mode,
+        count=1,
+    )
     gateway = Gateway()
     try:
         gateway.start(worker_urls=[w.base_url for w in workers], model_path=model_path)
         yield gateway
     finally:
         gateway.shutdown()
-        stop_workers(workers)

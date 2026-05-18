@@ -1,8 +1,8 @@
 """Session-scoped worker pool for E2E tests.
 
-Caches workers by ``(engine, model_id, mode, worker_type)`` so consecutive
-test classes that need the same backend don't pay the multi-minute worker
-startup cost on every class boundary.
+Caches workers by ``(engine, model_id, mode, worker_type, count)`` so
+consecutive test classes that need the same backend don't pay the multi-
+minute worker startup cost on every class boundary.
 
 The pool holds at most one *active* key at a time. Switching keys evicts
 (stops) the cached workers before starting the new set — required because
@@ -10,14 +10,15 @@ GPU resources are exclusive. Combined with the collection-ordering hook in
 ``fixtures/hooks.py`` (which clusters items by backend/model), this keeps
 the worker alive across every test class that uses the same backend.
 
-PD-disaggregation paths (prefill+decode) bypass the cache: they're rare,
-they hold multiple workers concurrently, and they live in a separate CI
-matrix. ``setup_backend`` calls them through the unchanged ``start_workers``
-/``stop_workers`` helpers.
+PD-disaggregation paths (prefill+decode) don't cache: they hold multiple
+workers concurrently and the caller manages teardown. But they still go
+through ``acquire()`` so the pool can evict any cached regular worker
+first — otherwise the PD launch would race a still-running cached worker
+for the same GPUs.
 
-Lifecycle is managed via ``pytest_sessionfinish`` in
-``fixtures/hooks.py``; an ``atexit`` handler covers the case where pytest
-exits before the hook runs (e.g. SIGINT / ``pytest.exit``).
+Lifecycle is managed via ``pytest_sessionfinish`` in ``fixtures/hooks.py``;
+a module-level ``atexit`` handler covers the case where pytest exits
+before that hook runs (SIGINT / ``pytest.exit``).
 """
 
 from __future__ import annotations
@@ -32,7 +33,11 @@ from .worker import Worker, start_workers, stop_workers
 logger = logging.getLogger(__name__)
 
 
-_PoolKey = tuple[str, str, ConnectionMode, WorkerType]
+# Key is (engine, model_id, mode, worker_type, count). ``count`` is part of
+# the key because a class asking for count=2 after a count=1 class on the
+# same backend would otherwise reuse a 1-worker entry and run with the
+# wrong topology.
+_PoolKey = tuple[str, str, ConnectionMode, WorkerType, int]
 
 
 class WorkerPool:
@@ -60,47 +65,68 @@ class WorkerPool:
         worker_type: WorkerType = WorkerType.REGULAR,
         timeout: int = DEFAULT_STARTUP_TIMEOUT,
         log_dir: str | None = None,
+        gpu_offset: int = 0,
     ) -> list[Worker]:
         """Return ``count`` healthy workers for the given key.
 
-        Reuses the cached set when the key matches and the cache holds at
-        least ``count`` workers. Any other case evicts the current slot and
-        starts a fresh set.
+        Reuses the cached set when the key matches AND every cached worker
+        is still alive. Anything else (key mismatch, dead worker,
+        non-REGULAR worker_type) evicts and starts fresh.
 
         Raises whatever ``start_workers`` raises on launch failure; the
         cache is left empty in that case.
-        """
-        if worker_type != WorkerType.REGULAR:
-            # PD prefill/decode bypass the cache (see module docstring).
-            return start_workers(
-                model_id=model_id,
-                engine=engine,
-                mode=mode,
-                count=count,
-                worker_type=worker_type,
-                timeout=timeout,
-                log_dir=log_dir,
-            )
 
+        The lock is intentionally held across the blocking ``start_workers``
+        call. CI runs sequentially today, so contention is a non-issue; if
+        pytest-xdist is ever introduced each worker should get its own pool
+        rather than competing for this one.
+        """
         with self._lock:
             if self._closed:
                 raise RuntimeError("WorkerPool has been closed")
 
-            key: _PoolKey = (engine, model_id, mode, worker_type)
+            # Non-REGULAR workers (PD prefill/decode) aren't cached, but we
+            # still have to release any cached regular worker first — it
+            # holds the GPUs the caller is about to claim.
+            if worker_type != WorkerType.REGULAR:
+                if self._key is not None:
+                    logger.info(
+                        "WorkerPool: evicting %s to free GPUs for non-REGULAR %s/%s",
+                        self._key,
+                        worker_type,
+                        model_id,
+                    )
+                    self._evict_locked()
+                return start_workers(
+                    model_id=model_id,
+                    engine=engine,
+                    mode=mode,
+                    count=count,
+                    worker_type=worker_type,
+                    timeout=timeout,
+                    log_dir=log_dir,
+                    gpu_offset=gpu_offset,
+                )
 
-            if self._key == key and len(self._workers) >= count:
+            # REGULAR workers always start at gpu 0; ``gpu_offset`` is only
+            # meaningful for non-REGULAR (PD decode) callers.
+            key: _PoolKey = (engine, model_id, mode, worker_type, count)
+
+            if self._key == key and all(w.is_alive() for w in self._workers):
                 logger.info(
                     "WorkerPool: reusing %d cached worker(s) for %s",
                     count,
                     key,
                 )
-                return list(self._workers[:count])
+                return list(self._workers)
 
             if self._key is not None:
+                reason = "key mismatch" if self._key != key else "dead worker"
                 logger.info(
-                    "WorkerPool: evicting %s to start %s",
+                    "WorkerPool: evicting %s to start %s (%s)",
                     self._key,
                     key,
+                    reason,
                 )
                 self._evict_locked()
 
@@ -140,7 +166,6 @@ def get_pool() -> WorkerPool:
     with _POOL_LOCK:
         if _POOL is None or _POOL._closed:
             _POOL = WorkerPool()
-            atexit.register(_POOL.cleanup)
         return _POOL
 
 
@@ -149,3 +174,9 @@ def cleanup_pool() -> None:
     with _POOL_LOCK:
         if _POOL is not None:
             _POOL.cleanup()
+
+
+# Register the module-level cleanup once at import time. Calling it after
+# the pool has already been torn down (by ``pytest_sessionfinish``) is a
+# no-op — ``cleanup_pool`` short-circuits when the slot is empty.
+atexit.register(cleanup_pool)
