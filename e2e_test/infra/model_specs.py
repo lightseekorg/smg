@@ -51,7 +51,9 @@ MODEL_SPECS: dict[str, dict] = {
     # Function calling specialist (larger, for Response API tests)
     "Qwen/Qwen2.5-14B-Instruct": {
         "model": _resolve_model_path("Qwen/Qwen2.5-14B-Instruct"),
-        "tp": 2,
+        # 14B BF16 weights (~28GB) fit on one H100/80GB; tp=1 avoids paying
+        # NCCL setup on every restart. Override via E2E_MODEL_TP_OVERRIDES.
+        "tp": 1,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
         "sglang_args": ["--context-length=16384"],  # Faster startup, prevents memory issues
     },
@@ -89,7 +91,9 @@ MODEL_SPECS: dict[str, dict] = {
     # GPT-OSS models (Harmony)
     "openai/gpt-oss-20b": {
         "model": _resolve_model_path("openai/gpt-oss-20b"),
-        "tp": 2,
+        # MXFP4-quantized MoE (~13GB weights) fits easily on one H100; tp=1
+        # roughly halves worker startup vs tp=2. Override via E2E_MODEL_TP_OVERRIDES.
+        "tp": 1,
         "features": ["chat", "streaming", "reasoning", "harmony"],
         "vllm_args": [
             "--structured-outputs-config",
