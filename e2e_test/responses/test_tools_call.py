@@ -764,7 +764,7 @@ class TestToolCallingCloud:
 
 
 @pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
@@ -1129,7 +1129,7 @@ class TestToolChoiceGptOss:
 
 
 @pytest.mark.engine("sglang")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.e2e
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])

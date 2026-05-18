@@ -169,7 +169,7 @@ class TestLargeMaxNewTokens:
 
 
 @pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
