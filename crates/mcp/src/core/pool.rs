@@ -96,19 +96,10 @@ impl PoolKey {
 #[derive(Clone)]
 pub(crate) struct CachedConnection {
     pub client: Arc<McpClient>,
-    /// Set after a successful `list_all_tools` for this pool entry, regardless of how
-    /// many tools were returned. The orchestrator combines this with a non-empty
-    /// inventory check before short-circuiting — see the comment above the fast path
-    /// in `connect_dynamic_server_with_tenant`. We deliberately do NOT cache a
-    /// separate "discovered empty" terminal shortcut: a single empty response during
-    /// server warm-up would otherwise poison the fast path until LRU/idle eviction.
+    /// Set after a successful `list_all_tools` for this pool entry. The orchestrator
+    /// combines this with a non-empty pool-scoped inventory check before
+    /// short-circuiting.
     pub tools_discovered: bool,
-    /// Timestamp of the most recent successful `list_all_tools` for this pool entry.
-    /// Combined with a TTL by `discovery_fresh_within`, this gives a bounded grace
-    /// window in which an empty discovery may be trusted (avoiding re-listing on
-    /// every request for genuinely zero-tool servers) without making the empty
-    /// state terminal (a warm-up race re-validates after the TTL expires).
-    pub last_discovery_at: Option<Instant>,
     /// Wall-clock-ish timestamp of the last access through `get` / `get_or_create` /
     /// the fast-path inspection methods. Used by `evict_idle` to reap connections
     /// that have not been touched for longer than the configured idle timeout.
@@ -120,7 +111,6 @@ impl CachedConnection {
         Self {
             client,
             tools_discovered: false,
-            last_discovery_at: None,
             last_used: Instant::now(),
         }
     }
@@ -260,34 +250,17 @@ impl McpConnectionPool {
         })
     }
 
-    /// Mark tool discovery as done for a pooled connection. Records "ran
-    /// successfully" without caching "discovered zero tools" as a terminal
-    /// state — see `CachedConnection::last_discovery_at` for the rationale.
+    /// Mark tool discovery as done for a pooled connection.
     pub fn mark_tool_discovery_completed(&self, key: &PoolKey) -> bool {
         let mut connections = self.connections.lock();
         if let Some(cached) = connections.get_mut(key) {
             let now = Instant::now();
             cached.tools_discovered = true;
-            cached.last_discovery_at = Some(now);
             cached.last_used = now;
             true
         } else {
             false
         }
-    }
-
-    /// True when the most recent successful discovery for `key` happened within
-    /// `fresh_within`. Lets the orchestrator's fast path short-circuit briefly
-    /// for genuinely-empty servers without ever caching the empty state as
-    /// terminal — the cache lapses on TTL and the next request re-validates.
-    pub fn discovery_fresh_within(&self, key: &PoolKey, fresh_within: Duration) -> bool {
-        let now = Instant::now();
-        self.connections.lock().get_mut(key).is_some_and(|cached| {
-            cached.last_used = now;
-            cached
-                .last_discovery_at
-                .is_some_and(|at| now.saturating_duration_since(at) < fresh_within)
-        })
     }
 
     /// Evict every pooled entry that has been idle for at least `idle_for`. Fires the

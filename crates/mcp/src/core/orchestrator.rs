@@ -67,21 +67,6 @@ use crate::{
     tenant::TenantContext,
 };
 
-/// How long a successful `list_all_tools` is trusted as the basis for the
-/// dynamic-connect fast path when the inventory is empty for that URL. This
-/// bounds two competing concerns:
-///
-/// * Genuinely zero-tool servers re-list at most once per TTL, not on every
-///   request — keeping bandwidth and the chance of a transient
-///   `list_all_tools` failure low.
-/// * Warm-up races where the server briefly returned no tools self-heal on
-///   the next request after the TTL expires, so the empty state is never
-///   terminal.
-///
-/// 60s is short enough that warm-up issues resolve quickly and long enough
-/// that legitimately-empty servers don't generate per-request traffic.
-const EMPTY_DISCOVERY_TTL: Duration = Duration::from_secs(60);
-
 /// Build request headers from token and custom headers.
 fn build_request_headers(
     token: Option<&str>,
@@ -1398,22 +1383,11 @@ impl McpOrchestrator {
 
         let pool_key = PoolKey::from_config(&config, tenant_id);
 
-        // Fast path: pool reports discovery completed AND either
-        //   (a) the inventory still holds tools for this pool identity, OR
-        //   (b) the last successful discovery is fresh within
-        //       `EMPTY_DISCOVERY_TTL`.
-        //
-        // The inventory check guards against sibling-tenant state standing in
-        // for this pool entry after URL-scoped inventory changes. The TTL
-        // branch lets genuinely-empty servers short-circuit briefly without
-        // making the empty state terminal: a warm-up race that returned no
-        // tools naturally re-validates after the TTL expires and tools that
-        // have since been registered become visible.
+        // Fast path only when this exact pool identity still has inventory.
+        // Without that invariant, a sibling eviction can clear URL-scoped tools
+        // while this pool entry still claims discovery completed.
         if self.connection_pool.tool_discovery_completed(&pool_key)
-            && (self.tool_inventory.has_server_tools(&pool_key)
-                || self
-                    .connection_pool
-                    .discovery_fresh_within(&pool_key, EMPTY_DISCOVERY_TTL))
+            && self.tool_inventory.has_server_tools(&pool_key)
         {
             return Ok(pool_key.url.clone());
         }
@@ -1481,12 +1455,9 @@ impl McpOrchestrator {
             .await?;
 
         // Another caller may have completed discovery while we were connecting.
-        // Same combined check as the outer fast path — see note above.
+        // Same inventory invariant as the outer fast path.
         if self.connection_pool.tool_discovery_completed(&pool_key)
-            && (inventory_clone.has_server_tools(&pool_key)
-                || self
-                    .connection_pool
-                    .discovery_fresh_within(&pool_key, EMPTY_DISCOVERY_TTL))
+            && inventory_clone.has_server_tools(&pool_key)
         {
             self.metrics.record_connection_opened();
             return Ok(server_key);
@@ -1518,8 +1489,7 @@ impl McpOrchestrator {
                 // connection down or surface as `ConnectionFailed`: the cached
                 // client is still valid and the existing inventory state
                 // (possibly empty after a sibling-tenant wipe) is the best we
-                // have. We keep the entry so the next request can retry; the
-                // TTL'd fast-path check above provides bounded backoff.
+                // have. We keep the entry so the next request can retry.
                 if self.connection_pool.tool_discovery_completed(&pool_key) {
                     warn!(
                         "Re-list of tools failed for '{}': {}; keeping cached connection (prior discovery still recorded)",
