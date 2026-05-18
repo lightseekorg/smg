@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    AnthropicProvider, GeminiProvider, OpenAIProvider, Provider, SGLangProvider, XAIProvider,
+    AnthropicProvider, BedrockProvider, GeminiProvider, OpenAIProvider, Provider, SGLangProvider,
+    XAIProvider,
 };
 use crate::worker::ProviderType;
 
@@ -35,6 +36,10 @@ impl ProviderRegistry {
         providers.insert(
             ProviderType::Anthropic,
             Arc::new(AnthropicProvider) as Arc<dyn Provider>,
+        );
+        providers.insert(
+            ProviderType::Bedrock,
+            Arc::new(BedrockProvider) as Arc<dyn Provider>,
         );
 
         Self {

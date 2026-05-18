@@ -29,6 +29,7 @@ use openai_protocol::{
 use crate::middleware::TenantRequestMeta;
 
 pub mod anthropic;
+pub mod bedrock;
 pub mod common;
 pub mod conversations;
 pub mod error;

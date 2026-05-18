@@ -274,6 +274,9 @@ pub enum ProviderType {
     /// Google Gemini — special logprobs handling.
     #[serde(alias = "gemini", alias = "google")]
     Gemini,
+    /// Amazon Bedrock Runtime.
+    #[serde(alias = "bedrock", alias = "aws")]
+    Bedrock,
     /// Custom provider with string identifier.
     #[serde(untagged)]
     Custom(String),
@@ -287,6 +290,7 @@ impl ProviderType {
             Self::XAI => "xai",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
+            Self::Bedrock => "bedrock",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -304,6 +308,8 @@ impl ProviderType {
             Some(Self::Anthropic)
         } else if host.ends_with("googleapis.com") {
             Some(Self::Gemini)
+        } else if host.contains("bedrock-runtime.") && host.ends_with(".amazonaws.com") {
+            Some(Self::Bedrock)
         } else {
             None
         }
@@ -317,6 +323,7 @@ impl ProviderType {
             Self::XAI => Some("XAI_ADMIN_KEY"),
             Self::Anthropic => Some("ANTHROPIC_ADMIN_KEY"),
             Self::Gemini => Some("GEMINI_ADMIN_KEY"),
+            Self::Bedrock => Some("AWS_BEDROCK_API_KEY"),
             Self::Custom(_) => None,
         }
     }
@@ -336,6 +343,12 @@ impl ProviderType {
             Some(Self::Gemini)
         } else if model_lower.starts_with("claude") {
             Some(Self::Anthropic)
+        } else if model_lower.starts_with("anthropic.claude")
+            || model_lower.starts_with("amazon.")
+            || model_lower.starts_with("meta.")
+            || model_lower.starts_with("mistral.")
+        {
+            Some(Self::Bedrock)
         } else if model_lower.starts_with("gpt")
             || model_lower.starts_with("o1")
             || model_lower.starts_with("o3")

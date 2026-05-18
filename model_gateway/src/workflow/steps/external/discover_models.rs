@@ -177,6 +177,15 @@ fn infer_provider_from_id(id: &str) -> Option<ProviderType> {
         return Some(ProviderType::Gemini);
     }
 
+    // Bedrock-hosted model IDs (common prefixes)
+    if id_lower.starts_with("anthropic.claude")
+        || id_lower.starts_with("amazon.")
+        || id_lower.starts_with("meta.")
+        || id_lower.starts_with("mistral.")
+    {
+        return Some(ProviderType::Bedrock);
+    }
+
     None
 }
 
@@ -272,6 +281,15 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
 
         let config = &context.data.config;
         let provider = ProviderType::from_url(&config.url);
+
+        // Bedrock Runtime has no /v1/models endpoint and requires SigV4 auth — skip discovery.
+        if provider.as_ref() == Some(&ProviderType::Bedrock) {
+            info!(
+                "Skipping model discovery for Bedrock worker {} — Bedrock Runtime does not expose /v1/models",
+                config.url
+            );
+            return Ok(StepResult::Skip);
+        }
 
         // Resolve discovery API key: env var admin key > config.api_key > None (wildcard)
         let discovery_key =

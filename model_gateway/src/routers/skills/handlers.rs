@@ -805,7 +805,7 @@ where
         hasher.update(updated_at.as_bytes());
         hasher.update([0xff]);
     }
-    Ok(format!("W/\"{:x}\"", hasher.finalize()))
+    Ok(format!("W/\"{}\"", hex::encode(hasher.finalize())))
 }
 
 fn build_resource_etag<T: Serialize>(value: &T, weak: bool) -> Result<String, SkillsApiError> {
@@ -817,9 +817,9 @@ fn build_resource_etag<T: Serialize>(value: &T, weak: bool) -> Result<String, Sk
             })?,
         );
     Ok(if weak {
-        format!("W/\"{digest:x}\"")
+        format!("W/\"{}\"", hex::encode(digest))
     } else {
-        format!("\"{digest:x}\"")
+        format!("\"{}\"", hex::encode(digest))
     })
 }
 
