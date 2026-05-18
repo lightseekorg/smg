@@ -25,7 +25,7 @@ on:
       duration_min:
         description: "Minutes per cell"
         required: false
-        default: "5"
+        default: "10"
 
 permissions:
   contents: read
@@ -38,9 +38,9 @@ jobs:
   bench:
     name: MLX bench (mlx-lm vs SMG+gRPC)
     runs-on: macos-latest
-    # 4 concurrencies × 2 scenarios × 2 backends × 5 min ≈ 1.4 h, plus
-    # build + model download. Cap at 4 h for safety.
-    timeout-minutes: 240
+    # 4 concurrencies × 2 scenarios × 2 backends × 10 min ≈ 2.7 h, plus
+    # build + model download. Cap at 5 h for safety.
+    timeout-minutes: 300
     env:
       MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
       PHASES: >-
@@ -51,11 +51,8 @@ jobs:
         || '1 4 16 64') }}
       SCENARIOS: >-
         ${{ github.event.inputs.scenarios || 'chat agent' }}
-      # PR runs trim duration so the agent scenario (~2.5k token prefill)
-      # has time to complete at least one request and produce metrics.
       DURATION_MIN: >-
-        ${{ github.event.inputs.duration_min
-        || (github.event_name == 'pull_request' && '4' || '5') }}
+        ${{ github.event.inputs.duration_min || '10' }}
       RESULTS_DIR: bench-results
       PYTHONUNBUFFERED: "1"
     steps:
