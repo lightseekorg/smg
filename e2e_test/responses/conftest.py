@@ -302,24 +302,23 @@ def _start_local_grpc_gateway_with_mcp(
     except Exception as e:
         pytest.skip(f"gRPC {engine} worker for {model_id} not available: {e}")
 
-    # Worker stays in the pool on any downstream failure, so we only have
-    # to clean up the gateway if the client init explodes.
+    # Worker stays in the pool on any downstream failure; the gateway is
+    # ours so we shut it down on any error from ``start()`` or client init.
     worker = workers[0]
     model_path = get_model_spec(model_id)["model"]
 
     gateway = Gateway()
-    gateway.start(
-        worker_urls=[worker.base_url],
-        model_path=model_path,
-        extra_args=[
-            "--mcp-config-path",
-            mcp_config_file,
-            "--history-backend",
-            "memory",
-        ],
-    )
-
     try:
+        gateway.start(
+            worker_urls=[worker.base_url],
+            model_path=model_path,
+            extra_args=[
+                "--mcp-config-path",
+                mcp_config_file,
+                "--history-backend",
+                "memory",
+            ],
+        )
         client = openai.OpenAI(base_url=f"{gateway.base_url}/v1", api_key="not-used")
     except Exception:
         gateway.shutdown()

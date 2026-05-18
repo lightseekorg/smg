@@ -156,8 +156,9 @@ def pytest_collection_modifyitems(
 def _pool_sort_key(item: pytest.Item) -> tuple:
     """Sort key clustering items that would share a pool entry.
 
-    Primary: ``setup_backend`` parametrize value (e.g. ``"grpc"``,
-    ``"openai"``) — different backends mean different pool keys.
+    Primary: backend parametrize value — ``setup_backend`` for class-scope
+    fixtures, falling back to ``backend_router`` for function-scope ones.
+    Different backends mean different pool keys.
     Secondary: ``@pytest.mark.model`` value if set, else empty — same
     backend with the same model is the cache-hit case.
     Tertiary: ``item.nodeid`` for stability across collections.
@@ -166,7 +167,7 @@ def _pool_sort_key(item: pytest.Item) -> tuple:
     callspec = getattr(item, "callspec", None)
     if callspec is not None:
         params = getattr(callspec, "params", {}) or {}
-        backend = str(params.get("setup_backend", ""))
+        backend = str(params.get("setup_backend", params.get("backend_router", "")))
 
     model_marker = resolve_class_marker(item, "model")
     model = ""
