@@ -14,9 +14,12 @@ use super::{
     },
     peers::RegionPeerRequestTarget,
     CrossRegionError, CrossRegionMtlsRuntimeConfig, CrossRegionResult, ExecutionTarget,
-    RegionPeerRegistry, RegionRouteDecision, RouteCommit,
+    FailoverPolicy, RegionPeerRegistry, RegionRouteDecision, RouteCommit,
 };
-use crate::routers::common::header_utils;
+use crate::{
+    config::CrossRegionFailoverMode,
+    routers::common::{header_utils, retry::is_retryable_status},
+};
 
 const LOCAL_WORKER_SELECTION_HEADERS: &[&str] = &["x-smg-target-worker", "x-smg-routing-key"];
 
@@ -217,6 +220,49 @@ fn response_from_reqwest(response: reqwest::Response) -> Response {
     forwarded
 }
 
+/// Return true when a remote forwarding status can trigger bounded failover.
+pub(crate) fn is_retryable_remote_forward_status(status: StatusCode) -> bool {
+    is_retryable_status(status)
+}
+
+/// Return true when a remote response has begun a streaming body contract.
+pub(crate) fn is_streaming_remote_forward_response(response: &Response) -> bool {
+    response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("text/event-stream")
+            })
+        })
+}
+
+/// Decide whether entry-region failover may try another remote region.
+///
+/// Attempts are 1-based. `max_retry` is the number of additional retries after
+/// the initial committed forwarding attempt, so attempt 1 may fail over when
+/// `max_retry >= 1`.
+pub(crate) fn should_failover_remote_forward(
+    policy: &FailoverPolicy,
+    status: StatusCode,
+    streaming_response_started: bool,
+    attempt: u32,
+) -> bool {
+    policy.failover_mode == CrossRegionFailoverMode::Automatic
+        && !streaming_response_started
+        && is_retryable_remote_forward_status(status)
+        && attempt <= policy.max_retry
+}
+
+/// Return true when a remote response should count as a breaker failure.
+pub(crate) fn should_record_remote_forward_failure(
+    status: StatusCode,
+    streaming_response_started: bool,
+) -> bool {
+    !streaming_response_started && is_retryable_remote_forward_status(status)
+}
+
 /// Build a request-forwarding HTTP client with outbound mTLS identity enforcement.
 pub async fn build_request_forwarding_http_client(
     mtls: &CrossRegionMtlsRuntimeConfig,
@@ -392,7 +438,7 @@ mod tests {
             model_id: "cohere.command-r-plus".to_string(),
             request_mode: RequestMode::Settled,
             attempt: 1,
-            failover_mode: crate::config::CrossRegionFailoverMode::Automatic,
+            failover_mode: CrossRegionFailoverMode::Automatic,
         }
     }
 
@@ -759,6 +805,108 @@ mod tests {
         .expect_err("scheme-relative worker URL should be rejected");
 
         assert!(error.to_string().contains("not a URL"));
+    }
+
+    #[test]
+    fn remote_forward_retryable_statuses_match_cross_region_contract() {
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(is_retryable_remote_forward_status(status));
+        }
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            assert!(!is_retryable_remote_forward_status(status));
+        }
+    }
+
+    #[test]
+    fn manual_failover_mode_does_not_retry_remote_forwarding() {
+        let policy = FailoverPolicy::new(CrossRegionFailoverMode::Manual, 3);
+
+        assert!(!should_failover_remote_forward(
+            &policy,
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            1
+        ));
+        assert!(should_record_remote_forward_failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            false
+        ));
+    }
+
+    #[test]
+    fn auto_failover_retries_retryable_non_streaming_response_within_budget() {
+        let policy = FailoverPolicy::new(CrossRegionFailoverMode::Automatic, 1);
+
+        assert!(should_failover_remote_forward(
+            &policy,
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            1
+        ));
+        assert!(!should_failover_remote_forward(
+            &policy,
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            2
+        ));
+        assert!(should_record_remote_forward_failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            false
+        ));
+    }
+
+    #[test]
+    fn streaming_response_is_not_retried_after_start() {
+        let policy = FailoverPolicy::new(CrossRegionFailoverMode::Automatic, 3);
+
+        assert!(!should_failover_remote_forward(
+            &policy,
+            StatusCode::SERVICE_UNAVAILABLE,
+            true,
+            1
+        ));
+        assert!(!should_record_remote_forward_failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            true
+        ));
+    }
+
+    #[test]
+    fn retryable_status_opens_breaker_even_when_failover_is_suppressed() {
+        for policy in [
+            FailoverPolicy::new(CrossRegionFailoverMode::Manual, 3),
+            FailoverPolicy::new(CrossRegionFailoverMode::Automatic, 0),
+        ] {
+            let breaker = crate::cross_region::CrossRegionBreaker::with_failure_threshold(1);
+
+            assert!(!should_failover_remote_forward(
+                &policy,
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                1
+            ));
+            if should_record_remote_forward_failure(StatusCode::SERVICE_UNAVAILABLE, false) {
+                breaker.record_failure("us-chicago-1");
+            }
+
+            assert_eq!(
+                breaker.state_for("us-chicago-1"),
+                crate::cross_region::BreakerState::Open
+            );
+        }
     }
 
     #[test]

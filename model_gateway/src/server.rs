@@ -71,13 +71,20 @@ use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
     cross_region::{
-        build_request_forwarding_http_client, config::seconds_to_millis_saturating,
-        headers::REQUEST_MODE_HEADER, validate_settled_local_execution, AuthenticatedPeerIdentity,
-        CandidateCalculationInput, CandidateCalculator, CrossRegionBreaker, CrossRegionContext,
-        CrossRegionError, CrossRegionForwarder, CrossRegionHeaders, CrossRegionRuntimeConfig,
-        CrossRegionState, CrossRegionSyncRuntime, ExecutionTarget, ForwardingRequest,
+        build_request_forwarding_http_client,
+        config::seconds_to_millis_saturating,
+        forwarding::{
+            is_streaming_remote_forward_response, should_failover_remote_forward,
+            should_record_remote_forward_failure,
+        },
+        headers::REQUEST_MODE_HEADER,
+        validate_settled_local_execution, AuthenticatedPeerIdentity, CandidateCalculationInput,
+        CandidateCalculator, CrossRegionBreaker, CrossRegionContext, CrossRegionError,
+        CrossRegionForwarder, CrossRegionHeaders, CrossRegionRuntimeConfig, CrossRegionState,
+        CrossRegionSyncRuntime, ExecutionTarget, FailoverPolicy, ForwardingRequest,
         ForwardingTarget, RegionPeer, RegionPeerRegistry, RemoteRegionView, RouteCalculationInput,
-        RouteCalculationOutput, SettledRequestContext, UnresolvedRequestContext,
+        RouteCalculationOutput, RoutingProfileContext, SettledRequestContext,
+        UnresolvedRequestContext,
     },
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
@@ -121,6 +128,8 @@ pub struct AppState {
     /// `Arc<_>` so cloning `AppState` does not duplicate `Drop` semantics on
     /// the spawned producer tasks (drop only fires when the last Arc dies).
     pub cross_region_sync: Option<Arc<CrossRegionSyncRuntime>>,
+    /// Per-target-region request-forward breaker owned by the entry region.
+    pub cross_region_breaker: CrossRegionBreaker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,10 +378,20 @@ fn validate_settled_dispatch(
     Ok(())
 }
 
-/// Route calculation output plus the peer registry required by remote forwarding.
+/// Route calculation output plus request-plane state needed by failover.
+#[derive(Clone)]
 struct UnresolvedRoutePlan {
     output: RouteCalculationOutput,
     peer_registry: RegionPeerRegistry,
+    profile: RoutingProfileContext,
+    entry_region: String,
+    failover_policy: FailoverPolicy,
+}
+
+/// Result of one remote forwarding attempt and whether another route may be tried.
+struct RemoteForwardAttemptResult {
+    response: Response,
+    should_failover: bool,
 }
 
 /// Return the current wall-clock timestamp in milliseconds for signal freshness checks.
@@ -408,34 +427,52 @@ fn calculate_unresolved_route(
     context: UnresolvedRequestContext,
     endpoint_type: Endpoint,
 ) -> Result<UnresolvedRoutePlan, InferenceDispatchError> {
+    calculate_unresolved_route_for_profile(
+        state,
+        context.profile,
+        context.common.entry_region,
+        endpoint_type,
+        1,
+    )
+}
+
+/// Calculate a committed route for one bounded cross-region attempt.
+fn calculate_unresolved_route_for_profile(
+    state: &AppState,
+    profile: RoutingProfileContext,
+    entry_region: String,
+    endpoint_type: Endpoint,
+    attempt: u32,
+) -> Result<UnresolvedRoutePlan, InferenceDispatchError> {
     let router_config = &state.context.router_config;
     let local_region = local_cross_region_id(router_config)?.to_string();
     let peer_registry = request_plane_peer_registry(state)?;
     let remote_state = cross_region_state_snapshot(state);
-    let breaker = CrossRegionBreaker::new();
+    let breaker = state.cross_region_breaker.clone();
     let stale_after_ms = seconds_to_millis_saturating(
         router_config
             .cross_region
             .sync_plane
             .signal_stale_after_seconds,
     );
+    let failover_policy = profile.failover_policy;
 
     let output = CandidateCalculator::new()
         .with_remote_signal_max_age_ms(stale_after_ms)
         .calculate(RouteCalculationInput {
             route_id: format!("crr-{}", Uuid::now_v7()),
-            entry_region: context.common.entry_region.clone(),
+            entry_region: entry_region.clone(),
             request_mode: crate::cross_region::RequestMode::Settled,
-            attempt: 1,
+            attempt,
             candidate_input: CandidateCalculationInput {
-                profile: context.profile,
+                profile: profile.clone(),
                 local_region,
                 endpoint_type,
                 local_worker_registry: &state.context.worker_registry,
                 remote_state: &remote_state,
                 peer_registry: &peer_registry,
                 breaker: &breaker,
-                client_region: Some(context.common.entry_region),
+                client_region: Some(entry_region.clone()),
                 now_ms: unix_epoch_millis(),
             },
         })?
@@ -446,6 +483,9 @@ fn calculate_unresolved_route(
     Ok(UnresolvedRoutePlan {
         output,
         peer_registry,
+        profile,
+        entry_region,
+        failover_policy,
     })
 }
 
@@ -472,33 +512,85 @@ async fn request_forwarding_client(
     Ok(build_request_forwarding_http_client(&runtime_config.mtls, target, timeout).await?)
 }
 
-/// Forward a committed remote route to the selected peer Region Agent.
-async fn forward_unresolved_to_remote(
+/// Forward one committed remote route to the selected peer Region Agent.
+async fn forward_unresolved_to_remote_attempt(
     state: &AppState,
     headers: &HeaderMap,
     path: &'static str,
     body: Vec<u8>,
     plan: &UnresolvedRoutePlan,
-) -> Response {
+) -> RemoteForwardAttemptResult {
     let forwarder = CrossRegionForwarder::new(plan.peer_registry.clone());
     let request = match ForwardingRequest::from_unresolved(path, headers, body, &plan.output.commit)
     {
         Ok(request) => request,
-        Err(error) => return InferenceDispatchError::from(error).into_response(),
+        Err(error) => {
+            return RemoteForwardAttemptResult {
+                response: InferenceDispatchError::from(error).into_response(),
+                should_failover: false,
+            };
+        }
     };
     let target = match forwarder.forwarding_target_for_decision(&plan.output.decision, &request) {
         Ok(target) => target,
-        Err(error) => return InferenceDispatchError::from(error).into_response(),
+        Err(error) => {
+            return RemoteForwardAttemptResult {
+                response: InferenceDispatchError::from(error).into_response(),
+                should_failover: false,
+            };
+        }
     };
     let client = match request_forwarding_client(&state.context.router_config, &target).await {
         Ok(client) => client,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            return RemoteForwardAttemptResult {
+                response: error.into_response(),
+                should_failover: false,
+            };
+        }
     };
+    let target_region = plan.output.decision.target_region.clone();
+    let attempt = plan.output.commit.attempt;
 
     match CrossRegionForwarder::forward_to_target(&client, target, request).await {
-        Ok(response) => response,
-        Err(error) => InferenceDispatchError::from(error).into_response(),
+        Ok(response) => {
+            let status = response.status();
+            let streaming_started = is_streaming_remote_forward_response(&response);
+            let should_failover = should_failover_remote_forward(
+                &plan.failover_policy,
+                status,
+                streaming_started,
+                attempt,
+            );
+            if should_record_remote_forward_failure(status, streaming_started) {
+                state.cross_region_breaker.record_failure(&target_region);
+            } else if !is_retryable_response_after_stream_start(status, streaming_started) {
+                state.cross_region_breaker.record_success(&target_region);
+            }
+            RemoteForwardAttemptResult {
+                response,
+                should_failover,
+            }
+        }
+        Err(error) => {
+            state.cross_region_breaker.record_failure(&target_region);
+            let status = error.http_status();
+            RemoteForwardAttemptResult {
+                response: InferenceDispatchError::from(error).into_response(),
+                should_failover: should_failover_remote_forward(
+                    &plan.failover_policy,
+                    status,
+                    false,
+                    attempt,
+                ),
+            }
+        }
     }
+}
+
+/// Return true for retryable responses whose streaming body already started.
+fn is_retryable_response_after_stream_start(status: StatusCode, streaming_started: bool) -> bool {
+    streaming_started && crate::cross_region::forwarding::is_retryable_remote_forward_status(status)
 }
 
 async fn parse_function_call(
@@ -838,38 +930,69 @@ async fn unresolved_chat_request_plane_response(
         return response;
     }
 
-    let plan = match calculate_unresolved_route(&state, context, Endpoint::Chat) {
+    let mut plan = match calculate_unresolved_route(&state, context, Endpoint::Chat) {
         Ok(plan) => plan,
         Err(error) => return error.into_response(),
     };
 
-    match &plan.output.decision.execution_target {
-        ExecutionTarget::LocalRegion => {
-            debug!(
-                route_id = %plan.output.decision.route_id,
-                target_region = %plan.output.decision.target_region,
-                model = %plan.output.decision.model_id,
-                "executing unresolved cross-region chat request locally after route commit"
-            );
-            state
-                .router
-                .route_chat(Some(&headers), &tenant_meta, &body, &body.model)
-                .await
-        }
-        ExecutionTarget::RemoteRegion { region_id } => {
-            debug!(
-                route_id = %plan.output.decision.route_id,
-                target_region = %region_id,
-                model = %plan.output.decision.model_id,
-                path = "/v1/chat/completions",
-                "forwarding unresolved cross-region request to remote Region Agent"
-            );
-            let body = match serialize_forwarding_body(&body) {
-                Ok(body) => body,
-                Err(error) => return error.into_response(),
-            };
-            forward_unresolved_to_remote(&state, &headers, "/v1/chat/completions", body, &plan)
-                .await
+    loop {
+        match &plan.output.decision.execution_target {
+            ExecutionTarget::LocalRegion => {
+                debug!(
+                    route_id = %plan.output.decision.route_id,
+                    target_region = %plan.output.decision.target_region,
+                    model = %plan.output.decision.model_id,
+                    "executing unresolved cross-region chat request locally after route commit"
+                );
+                return state
+                    .router
+                    .route_chat(Some(&headers), &tenant_meta, &body, &body.model)
+                    .await;
+            }
+            ExecutionTarget::RemoteRegion { region_id } => {
+                debug!(
+                    route_id = %plan.output.decision.route_id,
+                    target_region = %region_id,
+                    model = %plan.output.decision.model_id,
+                    attempt = plan.output.commit.attempt,
+                    path = "/v1/chat/completions",
+                    "forwarding unresolved cross-region request to remote Region Agent"
+                );
+                let body = match serialize_forwarding_body(&body) {
+                    Ok(body) => body,
+                    Err(error) => return error.into_response(),
+                };
+                let result = forward_unresolved_to_remote_attempt(
+                    &state,
+                    &headers,
+                    "/v1/chat/completions",
+                    body,
+                    &plan,
+                )
+                .await;
+                if !result.should_failover {
+                    return result.response;
+                }
+                let next_attempt = plan.output.commit.attempt.saturating_add(1);
+                let previous_response = result.response;
+                plan = match calculate_unresolved_route_for_profile(
+                    &state,
+                    plan.profile.clone(),
+                    plan.entry_region.clone(),
+                    Endpoint::Chat,
+                    next_attempt,
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        debug!(
+                            error = %error.message,
+                            attempt = next_attempt,
+                            "no alternate cross-region chat route after remote failure"
+                        );
+                        return previous_response;
+                    }
+                };
+            }
         }
     }
 }
@@ -886,37 +1009,69 @@ async fn unresolved_responses_request_plane_response(
         return response;
     }
 
-    let plan = match calculate_unresolved_route(&state, context, Endpoint::Responses) {
+    let mut plan = match calculate_unresolved_route(&state, context, Endpoint::Responses) {
         Ok(plan) => plan,
         Err(error) => return error.into_response(),
     };
 
-    match &plan.output.decision.execution_target {
-        ExecutionTarget::LocalRegion => {
-            debug!(
-                route_id = %plan.output.decision.route_id,
-                target_region = %plan.output.decision.target_region,
-                model = %plan.output.decision.model_id,
-                "executing unresolved cross-region responses request locally after route commit"
-            );
-            state
-                .router
-                .route_responses(Some(&headers), &tenant_meta, &body, &body.model)
-                .await
-        }
-        ExecutionTarget::RemoteRegion { region_id } => {
-            debug!(
-                route_id = %plan.output.decision.route_id,
-                target_region = %region_id,
-                model = %plan.output.decision.model_id,
-                path = "/v1/responses",
-                "forwarding unresolved cross-region request to remote Region Agent"
-            );
-            let body = match serialize_forwarding_body(&body) {
-                Ok(body) => body,
-                Err(error) => return error.into_response(),
-            };
-            forward_unresolved_to_remote(&state, &headers, "/v1/responses", body, &plan).await
+    loop {
+        match &plan.output.decision.execution_target {
+            ExecutionTarget::LocalRegion => {
+                debug!(
+                    route_id = %plan.output.decision.route_id,
+                    target_region = %plan.output.decision.target_region,
+                    model = %plan.output.decision.model_id,
+                    "executing unresolved cross-region responses request locally after route commit"
+                );
+                return state
+                    .router
+                    .route_responses(Some(&headers), &tenant_meta, &body, &body.model)
+                    .await;
+            }
+            ExecutionTarget::RemoteRegion { region_id } => {
+                debug!(
+                    route_id = %plan.output.decision.route_id,
+                    target_region = %region_id,
+                    model = %plan.output.decision.model_id,
+                    attempt = plan.output.commit.attempt,
+                    path = "/v1/responses",
+                    "forwarding unresolved cross-region request to remote Region Agent"
+                );
+                let body = match serialize_forwarding_body(&body) {
+                    Ok(body) => body,
+                    Err(error) => return error.into_response(),
+                };
+                let result = forward_unresolved_to_remote_attempt(
+                    &state,
+                    &headers,
+                    "/v1/responses",
+                    body,
+                    &plan,
+                )
+                .await;
+                if !result.should_failover {
+                    return result.response;
+                }
+                let next_attempt = plan.output.commit.attempt.saturating_add(1);
+                let previous_response = result.response;
+                plan = match calculate_unresolved_route_for_profile(
+                    &state,
+                    plan.profile.clone(),
+                    plan.entry_region.clone(),
+                    Endpoint::Responses,
+                    next_attempt,
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        debug!(
+                            error = %error.message,
+                            attempt = next_attempt,
+                            "no alternate cross-region responses route after remote failure"
+                        );
+                        return previous_response;
+                    }
+                };
+            }
         }
     }
 }
@@ -2400,6 +2555,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         router_manager: Some(router_manager),
         mesh_handler,
         cross_region_sync,
+        cross_region_breaker: CrossRegionBreaker::new(),
     });
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {
@@ -2833,6 +2989,7 @@ mod tests {
             router_manager: None,
             mesh_handler: None,
             cross_region_sync: None,
+            cross_region_breaker: CrossRegionBreaker::new(),
         })
     }
 
