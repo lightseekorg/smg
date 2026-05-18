@@ -1,20 +1,9 @@
-"""Aggregate genai-bench output across the MLX bench backends.
+"""Aggregate genai-bench output into a markdown comparison table.
 
-Walks $RESULTS_DIR for sub-directories matching:
-    {label}_{scenario}_c{concurrency}/
-where label ∈ {mlx, grpc, vllm}, scenario ∈ {chat, agent}.
-
-Inside each, finds the genai-bench result JSON (filename pattern
-`<scenario_slug>_text-to-text_num_concurrency_<n>_time_<m>s.json`,
-skipping `experiment_metadata.json` and `gpu_utilization*.json`) and
-emits a per-scenario markdown comparison table.
-
-The set of backend rows in the rendered table is inferred from the
-data: phases that didn't run produce no `{label}_*` directories and
-their rows are simply omitted, rather than rendered as a column of
-`—`. The document title is "Two-Way" / "Three-Way" / "Single-backend"
-based on how many backends actually have data, so a CI run with
-`PHASES=mlx grpc` doesn't pretend it had a vllm-metal column.
+Walks $RESULTS_DIR for sub-directories matching `{label}_{scenario}_c{n}/`
+(label ∈ {mlx, grpc}) and renders one section per scenario. Rows for
+backends that produced no JSON are omitted, so a PHASES=mlx run renders
+as single-backend rather than padding with `—`.
 """
 
 from __future__ import annotations
@@ -25,17 +14,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-DIRNAME_RE = re.compile(r"^(?P<label>mlx|grpc|vllm)_(?P<scenario>[^_]+)_c(?P<concurrency>\d+)$")
+DIRNAME_RE = re.compile(r"^(?P<label>mlx|grpc)_(?P<scenario>[^_]+)_c(?P<concurrency>\d+)$")
 
-# Display order — earlier in this list is rendered first per scenario.
-LABEL_ORDER: tuple[str, ...] = ("mlx", "grpc", "vllm")
-LABEL_PRETTY = {"mlx": "mlx-lm.server", "grpc": "smg → mlx-grpc", "vllm": "vllm-metal"}
+LABEL_ORDER: tuple[str, ...] = ("mlx", "grpc")
+LABEL_PRETTY = {"mlx": "mlx-lm.server", "grpc": "smg → mlx-grpc"}
 LABEL_DESCRIPTION = {
     "mlx": "`mlx-lm.server` — direct HTTP (mlx-lm package)",
     "grpc": "`smg → mlx-grpc` — SMG router fronting our MLX gRPC servicer (PR #1099)",
-    "vllm": "`vllm-metal` — vllm-project/vllm-metal `vllm serve`",
 }
-WAY_NAME = {1: "Single-backend", 2: "Two-Way", 3: "Three-Way"}
+WAY_NAME = {1: "Single-backend", 2: "Two-Way"}
 
 
 def _find_result_json(folder: Path) -> Path | None:
@@ -58,9 +45,8 @@ def _read(folder: Path) -> dict[str, Any] | None:
 
 def collect(results_dir: Path) -> dict[tuple[str, str, int], dict[str, Any]]:
     out: dict[tuple[str, str, int], dict[str, Any]] = {}
-    # Aggregate runs under `if: always()`, so it can fire when no phase
-    # ever created the results dir (e.g., setup failed, or PHASES was
-    # empty). Return an empty result instead of crashing.
+    # Aggregate runs under `if: always()`; return empty instead of crashing
+    # when no phase produced output.
     if not results_dir.is_dir():
         return out
     for sub in sorted(results_dir.iterdir()):
@@ -137,9 +123,6 @@ def build_section(
 def build_table(results: dict[tuple[str, str, int], dict[str, Any]], model: str) -> str:
     if not results:
         return "_No results found._"
-    # Render only the backends that actually produced data, in the
-    # canonical LABEL_ORDER. A CI run with PHASES=mlx grpc gets a
-    # two-row table per scenario; PHASES=mlx grpc vllm gets three.
     present = {k[0] for k in results}
     labels = [label for label in LABEL_ORDER if label in present]
     scenarios = sorted({k[1] for k in results})

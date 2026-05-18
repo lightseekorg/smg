@@ -1,38 +1,21 @@
 #!/usr/bin/env bash
-# Three-way MLX inference comparison on Apple Silicon.
+# Compare MLX inference paths on Apple Silicon via genai-bench.
 #
-# Phases (each opt-in via PHASES env var):
-#   1. mlx   — mlx-lm.server (HTTP, port 8001)
-#   2. grpc  — SMG router → MLX gRPC servicer (router on 30000, servicer on 50051)
-#   3. vllm  — vllm-metal `vllm serve` (HTTP, port 8002)
+# Phases (opt-in via PHASES):
+#   mlx   — mlx-lm.server (HTTP, :8001)
+#   grpc  — SMG router → MLX gRPC servicer (:30000 → :50051)
 #
-# Driver: `genai-bench` (pip-installed, same CLI as the rest of the SMG
-# nightly benchmark suite). genai-bench writes one JSON per cell into
-# $RESULTS_DIR/<label>_<scenario>_c<concurrency>/, which aggregate.py
-# then reduces into a 3-way comparison markdown table.
+# Each cell writes one JSON into $RESULTS_DIR/<label>_<scenario>_c<concurrency>/,
+# which mlx_bench_aggregate.py reduces into a markdown table.
 #
 # Usage:
-#   ./run.sh                          # all three phases
-#   PHASES=mlx ./run.sh               # only mlx-lm.server
-#   PHASES="mlx grpc" ./run.sh        # skip vllm-metal
-#   CONCURRENCIES="1 4" ./run.sh      # quick local sweep
-#
-# Tunables (env):
-#   PHASES                space-sep subset of "mlx grpc vllm" (default: all three)
-#   MODEL                 default mlx-community/gemma-3-4b-it-qat-4bit
-#   CONCURRENCIES         default "1 4 16 64"
-#   SCENARIOS             space-sep subset of "chat agent" (default: both)
-#   DURATION_MIN          minutes per cell (default: 5)
-#   MAX_REQUESTS          hard cap per cell (default: 100000, effectively
-#                         unbounded; duration is the real limit)
-#   RESULTS_DIR           output dir (default: bench-results)
-#   SMG_BIN               path to smg binary (default: target/release/smg)
-#   VLLM_VENV             path to vllm-metal venv (default: ~/.venv-vllm-metal)
-#   MLX_PORT/GRPC_PORT/ROUTER_PORT/VLLM_PORT  port overrides
+#   ./scripts/mlx_bench.sh                          # both phases
+#   PHASES=mlx ./scripts/mlx_bench.sh               # only mlx-lm.server
+#   CONCURRENCIES="1 4" ./scripts/mlx_bench.sh      # quick sweep
 
 set -euo pipefail
 
-PHASES="${PHASES:-mlx grpc vllm}"
+PHASES="${PHASES:-mlx grpc}"
 MODEL="${MODEL:-mlx-community/gemma-3-4b-it-qat-4bit}"
 CONCURRENCIES="${CONCURRENCIES:-1 4 16 64}"
 SCENARIOS="${SCENARIOS:-chat agent}"
@@ -40,17 +23,13 @@ DURATION_MIN="${DURATION_MIN:-5}"
 MAX_REQUESTS="${MAX_REQUESTS:-100000}"
 RESULTS_DIR="${RESULTS_DIR:-bench-results}"
 SMG_BIN="${SMG_BIN:-target/release/smg}"
-VLLM_VENV="${VLLM_VENV:-$HOME/.venv-vllm-metal}"
 
 MLX_PORT="${MLX_PORT:-8001}"
 GRPC_PORT="${GRPC_PORT:-50051}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
-VLLM_PORT="${VLLM_PORT:-8002}"
 
-# Map our friendly scenario names to genai-bench traffic-scenario strings.
-# chat:  short prompt + medium output (typical chatbot turn).
-# agent: ~2.5k token context + medium output (RAG / code-edit / Cursor-style
-#        local agent traffic where prefill bandwidth dominates).
+# chat:  short prompt + medium output (typical chat turn).
+# agent: ~2.5k token context — RAG / code-edit traffic where prefill dominates.
 scenario_traffic() {
     case "$1" in
         chat)  echo "D(100,256)" ;;
@@ -103,9 +82,7 @@ wait_for_openai() {
     done
 }
 
-# Wait for a substring to appear in a log file. Used as a readiness gate
-# for processes that bind a port early but aren't actually serving until
-# warmup finishes (mlx-grpc is the case we care about).
+# Readiness gate for processes that bind a port before warmup finishes.
 wait_for_log_line() {
     local file="$1"
     local pattern="$2"
@@ -120,12 +97,11 @@ wait_for_log_line() {
     done
 }
 
-# Run one genai-bench cell against a backend. Tolerates per-cell failure:
-# writes a .failed marker and returns 0 so the loop continues.
+# Run one cell. Writes a .failed marker and continues on cell failure.
 run_bench_cell() {
-    local label="$1"          # mlx | grpc | vllm
+    local label="$1"
     local base_url="$2"
-    local scenario="$3"       # chat | agent
+    local scenario="$3"
     local concurrency="$4"
 
     local traffic
@@ -191,10 +167,7 @@ run_phase_grpc() {
     local grpc_pid=$!
     PIDS+=("$grpc_pid")
     wait_for_port "$GRPC_PORT" 300
-    # The port binds before warmup, so port-open is necessary but not
-    # sufficient. server.py logs "gRPC server listening on" only after
-    # warmup finishes and the gen loop is running, which is the real
-    # readiness signal the router needs to see before connecting.
+    # Port binds before warmup; the listening log line is the real ready signal.
     wait_for_log_line "$RESULTS_DIR/mlx-grpc.log" "gRPC server listening on" 300
     log "MLX gRPC servicer up on :$GRPC_PORT (pid=$grpc_pid)"
 
@@ -220,60 +193,13 @@ run_phase_grpc() {
     sleep 3
 }
 
-run_phase_vllm() {
-    log "=== Phase: vllm-metal serve ==="
-
-    if [ ! -f "$VLLM_VENV/bin/activate" ]; then
-        log "vllm-metal venv not found at $VLLM_VENV — skipping phase"
-        return 0
-    fi
-    if [ ! -x "$VLLM_VENV/bin/vllm" ]; then
-        log "vllm CLI not found at $VLLM_VENV/bin/vllm — skipping phase"
-        return 0
-    fi
-
-    # Invoke vllm directly via the venv binary (no `source activate`) so the
-    # background child inherits the right interpreter without depending on
-    # PATH state at the time of the `&` fork.
-    # Cap context: agent prompts are ~2.5k tokens + 256 output. 8192 is
-    # plenty and avoids vllm-metal's max-position-embeddings-derived budget
-    # (which can be huge for Gemma).
-    "$VLLM_VENV/bin/vllm" serve "$MODEL" --host 127.0.0.1 --port "$VLLM_PORT" \
-        --max-model-len 8192 \
-        >"$RESULTS_DIR/vllm-metal.log" 2>&1 &
-    local pid=$!
-    PIDS+=("$pid")
-
-    if ! wait_for_openai "http://127.0.0.1:$VLLM_PORT" 600; then
-        log "vllm-metal failed to come up — skipping vllm phase (last log lines):"
-        tail -20 "$RESULTS_DIR/vllm-metal.log" >&2 || true
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        PIDS=()
-        return 0
-    fi
-    log "vllm-metal up on :$VLLM_PORT (pid=$pid)"
-
-    for scenario in $SCENARIOS; do
-        for c in $CONCURRENCIES; do
-            run_bench_cell "vllm" "http://127.0.0.1:$VLLM_PORT" "$scenario" "$c"
-        done
-    done
-
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    PIDS=()
-    sleep 3
-}
-
 for phase in $PHASES; do
     case "$phase" in
         mlx)  run_phase_mlx ;;
         grpc) run_phase_grpc ;;
-        vllm) run_phase_vllm ;;
         *)    log "Unknown phase: $phase"; exit 1 ;;
     esac
 done
 
 log "Done. Results in $RESULTS_DIR"
-log "Run aggregator: python3 $(dirname "$0")/aggregate.py --results-dir $RESULTS_DIR"
+log "Aggregate: python3 $(dirname "$0")/mlx_bench_aggregate.py --results-dir $RESULTS_DIR"
