@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -30,6 +30,7 @@ use openai_protocol::{
     generate::GenerateRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
+    model_type::Endpoint,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
     realtime_session::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
@@ -49,7 +50,7 @@ use openai_protocol::{
     },
 };
 use rustls::crypto::ring;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use smg_mesh::{
     MTLSConfig, MTLSManager, MeshServerBuilder, MeshServerConfig, MeshServerHandler,
@@ -63,17 +64,20 @@ use tokio::{
 use tokio_rustls::server::TlsStream;
 use tower::Layer;
 use tracing::{debug, error, info, warn, Level};
+use uuid::Uuid;
 use wfaas::LoggingSubscriber;
 
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
     cross_region::{
-        config::seconds_to_millis_saturating, headers::REQUEST_MODE_HEADER,
-        validate_settled_local_execution, AuthenticatedPeerIdentity, CrossRegionContext,
-        CrossRegionError, CrossRegionHeaders, CrossRegionRuntimeConfig, CrossRegionState,
-        CrossRegionSyncRuntime, RegionPeer, RegionPeerRegistry, RemoteRegionView,
-        SettledRequestContext, UnresolvedRequestContext,
+        build_request_forwarding_http_client, config::seconds_to_millis_saturating,
+        headers::REQUEST_MODE_HEADER, validate_settled_local_execution, AuthenticatedPeerIdentity,
+        CandidateCalculationInput, CandidateCalculator, CrossRegionBreaker, CrossRegionContext,
+        CrossRegionError, CrossRegionForwarder, CrossRegionHeaders, CrossRegionRuntimeConfig,
+        CrossRegionState, CrossRegionSyncRuntime, ExecutionTarget, ForwardingRequest,
+        ForwardingTarget, RegionPeer, RegionPeerRegistry, RemoteRegionView, RouteCalculationInput,
+        RouteCalculationOutput, SettledRequestContext, UnresolvedRequestContext,
     },
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
@@ -365,6 +369,138 @@ fn validate_settled_dispatch(
     Ok(())
 }
 
+/// Route calculation output plus the peer registry required by remote forwarding.
+struct UnresolvedRoutePlan {
+    output: RouteCalculationOutput,
+    peer_registry: RegionPeerRegistry,
+}
+
+/// Return the current wall-clock timestamp in milliseconds for signal freshness checks.
+fn unix_epoch_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Snapshot the materialized cross-region state without holding locks across forwarding.
+fn cross_region_state_snapshot(state: &AppState) -> CrossRegionState {
+    state
+        .cross_region_sync
+        .as_ref()
+        .map(|runtime| runtime.sync().state().read().clone())
+        .unwrap_or_default()
+}
+
+/// Return the peer registry used by request-plane route calculation and forwarding.
+fn request_plane_peer_registry(state: &AppState) -> Result<RegionPeerRegistry, CrossRegionError> {
+    state
+        .cross_region_sync
+        .as_ref()
+        .map(|runtime| runtime.peers().clone())
+        .map(Ok)
+        .unwrap_or_else(|| settled_peer_registry(&state.context.router_config))
+}
+
+/// Calculate the committed route for an unresolved cross-region inference request.
+fn calculate_unresolved_route(
+    state: &AppState,
+    context: UnresolvedRequestContext,
+    endpoint_type: Endpoint,
+) -> Result<UnresolvedRoutePlan, InferenceDispatchError> {
+    let router_config = &state.context.router_config;
+    let local_region = local_cross_region_id(router_config)?.to_string();
+    let peer_registry = request_plane_peer_registry(state)?;
+    let remote_state = cross_region_state_snapshot(state);
+    let breaker = CrossRegionBreaker::new();
+    let stale_after_ms = seconds_to_millis_saturating(
+        router_config
+            .cross_region
+            .sync_plane
+            .signal_stale_after_seconds,
+    );
+
+    let output = CandidateCalculator::new()
+        .with_remote_signal_max_age_ms(stale_after_ms)
+        .calculate(RouteCalculationInput {
+            route_id: format!("crr-{}", Uuid::now_v7()),
+            entry_region: context.common.entry_region.clone(),
+            request_mode: crate::cross_region::RequestMode::Settled,
+            attempt: 1,
+            candidate_input: CandidateCalculationInput {
+                profile: context.profile,
+                local_region,
+                endpoint_type,
+                local_worker_registry: &state.context.worker_registry,
+                remote_state: &remote_state,
+                peer_registry: &peer_registry,
+                breaker: &breaker,
+                client_region: Some(context.common.entry_region),
+                now_ms: unix_epoch_millis(),
+            },
+        })?
+        .ok_or_else(|| CrossRegionError::NoCandidate {
+            reason: "no eligible cross-region candidate".to_string(),
+        })?;
+
+    Ok(UnresolvedRoutePlan {
+        output,
+        peer_registry,
+    })
+}
+
+/// Serialize a validated request body for Region Agent forwarding.
+fn serialize_forwarding_body<T: Serialize>(body: &T) -> Result<Vec<u8>, InferenceDispatchError> {
+    serde_json::to_vec(body).map_err(|error| {
+        InferenceDispatchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize cross-region forwarding body: {error}"),
+        )
+    })
+}
+
+/// Build the outbound mTLS HTTP client for a specific remote Region Agent target.
+async fn request_forwarding_client(
+    router_config: &RouterConfig,
+    target: &ForwardingTarget,
+) -> Result<reqwest::Client, InferenceDispatchError> {
+    let runtime_config = CrossRegionRuntimeConfig::from_router_config(&router_config.cross_region)?
+        .ok_or_else(|| CrossRegionError::InvalidConfig {
+            reason: "cross_region must be enabled for remote forwarding".to_string(),
+        })?;
+    let timeout = Duration::from_secs(router_config.request_timeout_secs);
+    Ok(build_request_forwarding_http_client(&runtime_config.mtls, target, timeout).await?)
+}
+
+/// Forward a committed remote route to the selected peer Region Agent.
+async fn forward_unresolved_to_remote(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &'static str,
+    body: Vec<u8>,
+    plan: &UnresolvedRoutePlan,
+) -> Response {
+    let forwarder = CrossRegionForwarder::new(plan.peer_registry.clone());
+    let request = match ForwardingRequest::from_unresolved(path, headers, body, &plan.output.commit)
+    {
+        Ok(request) => request,
+        Err(error) => return InferenceDispatchError::from(error).into_response(),
+    };
+    let target = match forwarder.forwarding_target_for_decision(&plan.output.decision, &request) {
+        Ok(target) => target,
+        Err(error) => return InferenceDispatchError::from(error).into_response(),
+    };
+    let client = match request_forwarding_client(&state.context.router_config, &target).await {
+        Ok(client) => client,
+        Err(error) => return error.into_response(),
+    };
+
+    match CrossRegionForwarder::forward_to_target(&client, target, request).await {
+        Ok(response) => response,
+        Err(error) => InferenceDispatchError::from(error).into_response(),
+    }
+}
+
 async fn parse_function_call(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ParseFunctionCallRequest>,
@@ -542,11 +678,9 @@ async fn route_chat_completion_for_listener(
                 .route_chat(Some(&headers), &tenant_meta, &body, &body.model)
                 .await
         }
-        Ok(InferenceRequestDispatch::Unresolved(context)) => unresolved_request_plane_response(
-            &state,
-            "/v1/chat/completions",
-            context.common.opc_request_id.as_str(),
-        ),
+        Ok(InferenceRequestDispatch::Unresolved(context)) => {
+            unresolved_chat_request_plane_response(state, headers, tenant_meta, body, context).await
+        }
         Err(error) => error.into_response(),
     }
 }
@@ -663,21 +797,16 @@ async fn route_responses_for_listener(
                 .route_responses(Some(&headers), &tenant_meta, &body, &body.model)
                 .await
         }
-        Ok(InferenceRequestDispatch::Unresolved(context)) => unresolved_request_plane_response(
-            &state,
-            "/v1/responses",
-            context.common.opc_request_id.as_str(),
-        ),
+        Ok(InferenceRequestDispatch::Unresolved(context)) => {
+            unresolved_responses_request_plane_response(state, headers, tenant_meta, body, context)
+                .await
+        }
         Err(error) => error.into_response(),
     }
 }
 
-/// Return the explicit request-plane stub response for unresolved requests.
-fn unresolved_request_plane_response(
-    state: &AppState,
-    path: &'static str,
-    opc_request_id: &str,
-) -> Response {
+/// Return an error response if the request plane is disabled.
+fn ensure_request_plane_enabled(state: &AppState) -> Option<Response> {
     if !state.context.router_config.cross_region.enabled
         || !state
             .context
@@ -686,20 +815,110 @@ fn unresolved_request_plane_response(
             .request_plane
             .enabled
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cross-region request plane is disabled",
-        )
-            .into_response();
+        return Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cross-region request plane is disabled",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
+/// Calculate and execute the request-plane path for an unresolved chat request.
+async fn unresolved_chat_request_plane_response(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    tenant_meta: middleware::TenantRequestMeta,
+    body: ChatCompletionRequest,
+    context: UnresolvedRequestContext,
+) -> Response {
+    if let Some(response) = ensure_request_plane_enabled(&state) {
+        return response;
     }
 
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!(
-            "cross-region request plane dispatch for {path} is not implemented yet; opc_request_id={opc_request_id}"
-        ),
-    )
-        .into_response()
+    let plan = match calculate_unresolved_route(&state, context, Endpoint::Chat) {
+        Ok(plan) => plan,
+        Err(error) => return error.into_response(),
+    };
+
+    match &plan.output.decision.execution_target {
+        ExecutionTarget::LocalRegion => {
+            debug!(
+                route_id = %plan.output.decision.route_id,
+                target_region = %plan.output.decision.target_region,
+                model = %plan.output.decision.model_id,
+                "executing unresolved cross-region chat request locally after route commit"
+            );
+            state
+                .router
+                .route_chat(Some(&headers), &tenant_meta, &body, &body.model)
+                .await
+        }
+        ExecutionTarget::RemoteRegion { region_id } => {
+            debug!(
+                route_id = %plan.output.decision.route_id,
+                target_region = %region_id,
+                model = %plan.output.decision.model_id,
+                path = "/v1/chat/completions",
+                "forwarding unresolved cross-region request to remote Region Agent"
+            );
+            let body = match serialize_forwarding_body(&body) {
+                Ok(body) => body,
+                Err(error) => return error.into_response(),
+            };
+            forward_unresolved_to_remote(&state, &headers, "/v1/chat/completions", body, &plan)
+                .await
+        }
+    }
+}
+
+/// Calculate and execute the request-plane path for an unresolved responses request.
+async fn unresolved_responses_request_plane_response(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    tenant_meta: middleware::TenantRequestMeta,
+    body: ResponsesRequest,
+    context: UnresolvedRequestContext,
+) -> Response {
+    if let Some(response) = ensure_request_plane_enabled(&state) {
+        return response;
+    }
+
+    let plan = match calculate_unresolved_route(&state, context, Endpoint::Responses) {
+        Ok(plan) => plan,
+        Err(error) => return error.into_response(),
+    };
+
+    match &plan.output.decision.execution_target {
+        ExecutionTarget::LocalRegion => {
+            debug!(
+                route_id = %plan.output.decision.route_id,
+                target_region = %plan.output.decision.target_region,
+                model = %plan.output.decision.model_id,
+                "executing unresolved cross-region responses request locally after route commit"
+            );
+            state
+                .router
+                .route_responses(Some(&headers), &tenant_meta, &body, &body.model)
+                .await
+        }
+        ExecutionTarget::RemoteRegion { region_id } => {
+            debug!(
+                route_id = %plan.output.decision.route_id,
+                target_region = %region_id,
+                model = %plan.output.decision.model_id,
+                path = "/v1/responses",
+                "forwarding unresolved cross-region request to remote Region Agent"
+            );
+            let body = match serialize_forwarding_body(&body) {
+                Ok(body) => body,
+                Err(error) => return error.into_response(),
+            };
+            forward_unresolved_to_remote(&state, &headers, "/v1/responses", body, &plan).await
+        }
+    }
 }
 
 async fn v1_interactions(
@@ -2650,6 +2869,61 @@ mod tests {
         .expect("responses request fixture should deserialize")
     }
 
+    #[test]
+    fn serialize_forwarding_body_preserves_chat_request_semantics() {
+        let body: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "cohere.command-r-plus",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "metadata": {"purpose": "forwarding"}
+        }))
+        .expect("chat request fixture should deserialize");
+
+        let bytes = serialize_forwarding_body(&body).expect("chat body should serialize");
+        let value: Value = serde_json::from_slice(&bytes).expect("chat body should parse");
+
+        assert_eq!(
+            value.get("model").and_then(Value::as_str),
+            Some(body.model.as_str())
+        );
+        assert_eq!(value.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            value.pointer("/messages/0/content").and_then(Value::as_str),
+            Some("hello")
+        );
+        assert_eq!(
+            value.pointer("/metadata/purpose").and_then(Value::as_str),
+            Some("forwarding")
+        );
+    }
+
+    #[test]
+    fn serialize_forwarding_body_preserves_responses_request_semantics() {
+        let body: ResponsesRequest = serde_json::from_value(json!({
+            "model": "cohere.command-r-plus",
+            "input": "hello",
+            "stream": true,
+            "store": false,
+            "metadata": {"purpose": "forwarding"}
+        }))
+        .expect("responses request fixture should deserialize");
+
+        let bytes = serialize_forwarding_body(&body).expect("responses body should serialize");
+        let value: Value = serde_json::from_slice(&bytes).expect("responses body should parse");
+
+        assert_eq!(
+            value.get("model").and_then(Value::as_str),
+            Some(body.model.as_str())
+        );
+        assert_eq!(value.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(value.get("input").and_then(Value::as_str), Some("hello"));
+        assert_eq!(value.get("store").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            value.pointer("/metadata/purpose").and_then(Value::as_str),
+            Some("forwarding")
+        );
+    }
+
     /// Add a static header value.
     fn insert(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
         headers.insert(name, HeaderValue::from_static(value));
@@ -2810,7 +3084,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unresolved_chat_request_enters_cross_region_request_plane_stub() {
+    async fn unresolved_chat_request_without_candidates_returns_service_unavailable() {
         let router = Arc::new(DispatchSpyRouter::default());
         let state = test_state(router.clone());
 
@@ -2824,8 +3098,8 @@ mod tests {
         let status = response.status();
         let body = body_text(response).await;
 
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body.contains("cross-region request plane"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("no eligible cross-region candidate"));
         assert_eq!(router.chat_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -2996,7 +3270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unresolved_responses_request_enters_cross_region_request_plane_stub() {
+    async fn unresolved_responses_request_without_candidates_returns_service_unavailable() {
         let router = Arc::new(DispatchSpyRouter::default());
         let state = test_state(router.clone());
 
@@ -3010,8 +3284,8 @@ mod tests {
         let status = response.status();
         let body = body_text(response).await;
 
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body.contains("cross-region request plane"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("no eligible cross-region candidate"));
         assert_eq!(router.responses_calls.load(Ordering::SeqCst), 0);
     }
 

@@ -1,12 +1,24 @@
 use std::{path::PathBuf, time::Duration};
 
+use axum::{body::Body, response::Response};
+use http::{HeaderMap, HeaderValue, StatusCode};
 use smg_mesh::{MTLSConfig, MTLSManager, SpiffeIdentity};
 use url::Url;
 
 use super::{
-    peers::RegionPeerRequestTarget, CrossRegionError, CrossRegionMtlsRuntimeConfig,
-    CrossRegionResult, ExecutionTarget, RegionPeerRegistry, RegionRouteDecision,
+    headers::{
+        ALLOWED_MODELS_HEADER, ALLOWED_REGIONS_HEADER, ATTEMPT_HEADER, COMMITTED_MODEL_HEADER,
+        FAILOVER_MODE_HEADER, INPUT_MODALITY_HEADER, MAX_RETRY_HEADER, OUTPUT_MODALITY_HEADER,
+        REQUEST_MODE_HEADER, REQUEST_MODE_SETTLED, ROUTE_ID_HEADER, SOURCE_SERVICE_HEADER,
+        TARGET_REGION_HEADER,
+    },
+    peers::RegionPeerRequestTarget,
+    CrossRegionError, CrossRegionMtlsRuntimeConfig, CrossRegionResult, ExecutionTarget,
+    RegionPeerRegistry, RegionRouteDecision, RouteCommit,
 };
+use crate::routers::common::header_utils;
+
+const LOCAL_WORKER_SELECTION_HEADERS: &[&str] = &["x-smg-target-worker", "x-smg-routing-key"];
 
 /// Existing SMG endpoint path that cannot be an absolute worker URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +63,7 @@ impl ExistingSmgPath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardingRequest {
     existing_smg_path: ExistingSmgPath,
+    headers: HeaderMap,
     body: Vec<u8>,
 }
 
@@ -59,6 +72,21 @@ impl ForwardingRequest {
     pub fn new(existing_smg_path: impl Into<String>, body: Vec<u8>) -> CrossRegionResult<Self> {
         Ok(Self {
             existing_smg_path: ExistingSmgPath::new(existing_smg_path)?,
+            headers: HeaderMap::new(),
+            body,
+        })
+    }
+
+    /// Build a settled forwarding request from an unresolved request and route commit.
+    pub fn from_unresolved(
+        existing_smg_path: impl Into<String>,
+        source_headers: &HeaderMap,
+        body: Vec<u8>,
+        commit: &RouteCommit,
+    ) -> CrossRegionResult<Self> {
+        Ok(Self {
+            existing_smg_path: ExistingSmgPath::new(existing_smg_path)?,
+            headers: settled_forwarding_headers(source_headers, commit)?,
             body,
         })
     }
@@ -66,6 +94,11 @@ impl ForwardingRequest {
     /// Return the existing SMG endpoint path for the remote request.
     pub fn existing_smg_path(&self) -> &ExistingSmgPath {
         &self.existing_smg_path
+    }
+
+    /// Return headers to send to the remote Region Agent.
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
     }
 
     /// Return the forwarding request body bytes.
@@ -99,6 +132,89 @@ impl ForwardingTarget {
     pub(crate) fn endpoint_origin(&self) -> String {
         self.url.origin().ascii_serialization()
     }
+}
+
+/// Build the SETTLED header set for a remote Region Agent forward.
+fn settled_forwarding_headers(
+    source_headers: &HeaderMap,
+    commit: &RouteCommit,
+) -> CrossRegionResult<HeaderMap> {
+    let mut headers = source_headers.clone();
+    remove_unresolved_profile_headers(&mut headers);
+    remove_local_worker_selection_headers(&mut headers);
+    remove_transport_headers(&mut headers);
+    insert_static_header(&mut headers, REQUEST_MODE_HEADER, REQUEST_MODE_SETTLED);
+    insert_static_header(&mut headers, SOURCE_SERVICE_HEADER, "smg");
+    insert_header(&mut headers, TARGET_REGION_HEADER, &commit.target_region)?;
+    insert_header(&mut headers, COMMITTED_MODEL_HEADER, &commit.model_id)?;
+    insert_header(&mut headers, ROUTE_ID_HEADER, &commit.route_id)?;
+    insert_header(&mut headers, ATTEMPT_HEADER, &commit.attempt.to_string())?;
+    Ok(headers)
+}
+
+/// Remove profile-only headers that the target Region Agent rejects for SETTLED requests.
+fn remove_unresolved_profile_headers(headers: &mut HeaderMap) {
+    for header in [
+        ALLOWED_REGIONS_HEADER,
+        ALLOWED_MODELS_HEADER,
+        FAILOVER_MODE_HEADER,
+        MAX_RETRY_HEADER,
+        INPUT_MODALITY_HEADER,
+        OUTPUT_MODALITY_HEADER,
+    ] {
+        headers.remove(header);
+    }
+}
+
+/// Remove worker-selection controls that are meaningful only inside the source SMG.
+fn remove_local_worker_selection_headers(headers: &mut HeaderMap) {
+    for header in LOCAL_WORKER_SELECTION_HEADERS {
+        headers.remove(*header);
+    }
+}
+
+/// Remove headers that reqwest must recompute for the outbound hop.
+fn remove_transport_headers(headers: &mut HeaderMap) {
+    for header in [
+        http::header::CONTENT_LENGTH,
+        http::header::HOST,
+        http::header::CONNECTION,
+        http::header::TRANSFER_ENCODING,
+    ] {
+        headers.remove(header);
+    }
+}
+
+/// Insert a known-good static header value.
+fn insert_static_header(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
+    headers.insert(name, HeaderValue::from_static(value));
+}
+
+/// Insert route metadata as a validated HTTP header value.
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: &'static str,
+    value: &str,
+) -> CrossRegionResult<()> {
+    let value = HeaderValue::from_str(value).map_err(|error| {
+        CrossRegionError::InvalidForwardingTarget {
+            reason: format!("route metadata header {name} is invalid: {error}"),
+        }
+    })?;
+    headers.insert(name, value);
+    Ok(())
+}
+
+/// Convert a reqwest response into an Axum response without buffering the body.
+fn response_from_reqwest(response: reqwest::Response) -> Response {
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let headers = header_utils::preserve_response_headers(response.headers());
+    let body = Body::from_stream(response.bytes_stream());
+    let mut forwarded = Response::new(body);
+    *forwarded.status_mut() = status;
+    *forwarded.headers_mut() = headers;
+    forwarded
 }
 
 /// Build a request-forwarding HTTP client with outbound mTLS identity enforcement.
@@ -202,12 +318,58 @@ impl CrossRegionForwarder {
 
         Ok(ForwardingTarget::new(url, target.expected_mtls_identity()))
     }
+
+    /// Forward a request to a remote Region Agent selected by route decision.
+    pub async fn forward(
+        &self,
+        client: &reqwest::Client,
+        decision: &RegionRouteDecision,
+        request: ForwardingRequest,
+    ) -> CrossRegionResult<Response> {
+        let target = self.forwarding_target_for_decision(decision, &request)?;
+        Self::forward_to_target(client, target, request).await
+    }
+
+    /// Send a settled request to an already-resolved forwarding target.
+    pub(crate) async fn forward_to_target(
+        client: &reqwest::Client,
+        target: ForwardingTarget,
+        request: ForwardingRequest,
+    ) -> CrossRegionResult<Response> {
+        let mut builder = client.post(target.url.clone());
+        for (name, value) in request.headers() {
+            builder = builder.header(name, value);
+        }
+
+        let response = builder.body(request.body).send().await.map_err(|error| {
+            CrossRegionError::InvalidForwardingTarget {
+                reason: format!(
+                    "failed to forward request to remote Region Agent {}: {error}",
+                    target.endpoint_origin()
+                ),
+            }
+        })?;
+        Ok(response_from_reqwest(response))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use axum::{body::Bytes, extract::State, routing::post, Router};
+    use tokio::sync::oneshot;
+
     use super::*;
-    use crate::cross_region::RegionPeer;
+    use crate::cross_region::{
+        headers::{
+            ALLOWED_MODELS_HEADER, ALLOWED_REGIONS_HEADER, ATTEMPT_HEADER, COMMITTED_MODEL_HEADER,
+            CONTRACT_VERSION_HEADER, ENTRY_REGION_HEADER, FAILOVER_MODE_HEADER, MAX_RETRY_HEADER,
+            OPC_REQUEST_ID_HEADER, REQUEST_MODE_HEADER, REQUEST_MODE_SETTLED,
+            REQUEST_MODE_UNRESOLVED, ROUTE_ID_HEADER, SOURCE_SERVICE_HEADER, TARGET_REGION_HEADER,
+        },
+        RegionPeer, RequestMode, RouteCommit,
+    };
 
     /// Build a remote route decision fixture.
     fn remote_decision(region_id: &str) -> RegionRouteDecision {
@@ -218,6 +380,210 @@ mod tests {
             execution_target: ExecutionTarget::RemoteRegion {
                 region_id: region_id.to_string(),
             },
+        }
+    }
+
+    /// Build a committed remote route fixture.
+    fn remote_commit(region_id: &str) -> RouteCommit {
+        RouteCommit {
+            route_id: "route-1".to_string(),
+            entry_region: "us-ashburn-1".to_string(),
+            target_region: region_id.to_string(),
+            model_id: "cohere.command-r-plus".to_string(),
+            request_mode: RequestMode::Settled,
+            attempt: 1,
+            failover_mode: crate::config::CrossRegionFailoverMode::Automatic,
+        }
+    }
+
+    /// Build unresolved headers as received from DP-API before route commitment.
+    fn unresolved_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        insert(&mut headers, CONTRACT_VERSION_HEADER, "1");
+        insert(&mut headers, REQUEST_MODE_HEADER, REQUEST_MODE_UNRESOLVED);
+        insert(&mut headers, ENTRY_REGION_HEADER, "us-ashburn-1");
+        insert(&mut headers, SOURCE_SERVICE_HEADER, "dp-api");
+        insert(&mut headers, OPC_REQUEST_ID_HEADER, "opc-request-1");
+        insert(
+            &mut headers,
+            ALLOWED_REGIONS_HEADER,
+            "us-ashburn-1, us-chicago-1",
+        );
+        insert(&mut headers, ALLOWED_MODELS_HEADER, "cohere.command-r-plus");
+        insert(&mut headers, FAILOVER_MODE_HEADER, "AUTO");
+        insert(&mut headers, MAX_RETRY_HEADER, "3");
+        insert(&mut headers, "x-smg-target-worker", "2");
+        insert(&mut headers, "x-smg-routing-key", "local-key");
+        insert(&mut headers, http::header::CONTENT_LENGTH.as_str(), "999");
+        headers
+    }
+
+    /// Add a static test header value.
+    fn insert(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
+
+    #[test]
+    fn forwarding_request_adds_settled_headers_and_removes_unresolved_profile_headers() {
+        let request = ForwardingRequest::from_unresolved(
+            "/v1/chat/completions",
+            &unresolved_headers(),
+            br#"{"model":"cohere.command-r-plus"}"#.to_vec(),
+            &remote_commit("us-chicago-1"),
+        )
+        .expect("forwarding request should build");
+
+        assert_eq!(
+            request.headers().get(REQUEST_MODE_HEADER),
+            Some(&HeaderValue::from_static(REQUEST_MODE_SETTLED))
+        );
+        assert_eq!(
+            request.headers().get(SOURCE_SERVICE_HEADER),
+            Some(&HeaderValue::from_static("smg"))
+        );
+        assert_eq!(
+            request.headers().get(TARGET_REGION_HEADER),
+            Some(&HeaderValue::from_static("us-chicago-1"))
+        );
+        assert_eq!(
+            request.headers().get(COMMITTED_MODEL_HEADER),
+            Some(&HeaderValue::from_static("cohere.command-r-plus"))
+        );
+        assert_eq!(
+            request.headers().get(ROUTE_ID_HEADER),
+            Some(&HeaderValue::from_static("route-1"))
+        );
+        assert_eq!(
+            request.headers().get(ATTEMPT_HEADER),
+            Some(&HeaderValue::from_static("1"))
+        );
+        assert!(!request.headers().contains_key(ALLOWED_REGIONS_HEADER));
+        assert!(!request.headers().contains_key(ALLOWED_MODELS_HEADER));
+        assert!(!request.headers().contains_key(FAILOVER_MODE_HEADER));
+        assert!(!request.headers().contains_key(MAX_RETRY_HEADER));
+        assert!(!request.headers().contains_key("x-smg-target-worker"));
+        assert!(!request.headers().contains_key("x-smg-routing-key"));
+        assert!(!request.headers().contains_key(http::header::CONTENT_LENGTH));
+        assert_eq!(request.body(), br#"{"model":"cohere.command-r-plus"}"#);
+    }
+
+    #[derive(Clone)]
+    struct CaptureState {
+        sender: Arc<tokio::sync::Mutex<Option<oneshot::Sender<(HeaderMap, Bytes)>>>>,
+    }
+
+    /// Capture the headers and body sent to the fake remote Region Agent.
+    async fn capture_forwarded_request(
+        State(state): State<CaptureState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> (StatusCode, [(&'static str, &'static str); 1], &'static str) {
+        if let Some(sender) = state.sender.lock().await.take() {
+            let _ = sender.send((headers, body));
+        }
+        (
+            StatusCode::ACCEPTED,
+            [("content-type", "text/event-stream")],
+            "data: ok\n\n",
+        )
+    }
+
+    /// Forward one request to a loopback fake Region Agent and return what it observed.
+    async fn forward_to_fake_region_agent(
+        path: &'static str,
+        request_body: Vec<u8>,
+    ) -> (Response, HeaderMap, Bytes) {
+        let (sender, receiver) = oneshot::channel();
+        let app = Router::new()
+            .route(path, post(capture_forwarded_request))
+            .with_state(CaptureState {
+                sender: Arc::new(tokio::sync::Mutex::new(Some(sender))),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should expose local addr");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test server lifetime is bounded by the test runtime"
+        )]
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should serve");
+        });
+
+        let target = ForwardingTarget::new(
+            Url::parse(&format!("http://{addr}{path}")).expect("target url should parse"),
+            "spiffe://oraclecorp.com/oci/oc1/prod/region/us-chicago-1/service/smg-region-agent",
+        );
+        let request = ForwardingRequest::from_unresolved(
+            path,
+            &unresolved_headers(),
+            request_body,
+            &remote_commit("us-chicago-1"),
+        )
+        .expect("forwarding request should build");
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            CrossRegionForwarder::forward_to_target(&reqwest::Client::new(), target, request),
+        )
+        .await
+        .expect("forwarding should not hang")
+        .expect("forwarding should succeed");
+        let (headers, body) = tokio::time::timeout(Duration::from_secs(5), receiver)
+            .await
+            .expect("remote capture should not hang")
+            .expect("remote should receive request");
+        (response, headers, body)
+    }
+
+    #[tokio::test]
+    async fn forward_to_target_sends_requests_to_existing_smg_paths() {
+        for (path, request_body) in [
+            (
+                "/v1/chat/completions",
+                br#"{"model":"cohere.command-r-plus","stream":true}"#.as_slice(),
+            ),
+            (
+                "/v1/responses",
+                br#"{"model":"cohere.command-r-plus","input":"hello","stream":true}"#.as_slice(),
+            ),
+        ] {
+            let (response, headers, body) =
+                forward_to_fake_region_agent(path, request_body.to_vec()).await;
+            let response_status = response.status();
+            let response_content_type = response.headers().get(http::header::CONTENT_TYPE).cloned();
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body should read");
+
+            assert_eq!(
+                headers
+                    .get(REQUEST_MODE_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some(REQUEST_MODE_SETTLED)
+            );
+            assert_eq!(
+                headers
+                    .get(TARGET_REGION_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+                Some("us-chicago-1")
+            );
+            assert!(!headers.contains_key("x-smg-target-worker"));
+            assert!(!headers.contains_key("x-smg-routing-key"));
+            assert_eq!(body, Bytes::copy_from_slice(request_body));
+            assert_eq!(response_status, StatusCode::ACCEPTED);
+            assert_eq!(
+                response_content_type
+                    .as_ref()
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/event-stream")
+            );
+            assert_eq!(response_body, Bytes::from_static(b"data: ok\n\n"));
         }
     }
 
@@ -292,6 +658,31 @@ mod tests {
             target.expected_mtls_identity(),
             "spiffe://oraclecorp.com/oci/oc1/prod/region/us-chicago-1/service/smg-region-agent"
         );
+    }
+
+    #[test]
+    fn forwarding_target_reuses_supported_smg_paths() {
+        let peer = RegionPeer::new(
+            "us-chicago-1",
+            "https://smg-region-agent.us-chicago-1.internal:8443",
+            "https://smg-region-agent.us-chicago-1.internal:9443",
+            "oc1",
+            "prod",
+            None,
+        )
+        .expect("peer should parse");
+        let registry = RegionPeerRegistry::new(vec![peer]).expect("registry should build");
+        let forwarder = CrossRegionForwarder::new(registry);
+
+        for path in ["/v1/chat/completions", "/v1/responses"] {
+            let request = ForwardingRequest::new(path, b"{}".to_vec())
+                .expect("supported SMG path should parse");
+            let target = forwarder
+                .forwarding_target_for_decision(&remote_decision("us-chicago-1"), &request)
+                .expect("target should resolve");
+
+            assert_eq!(target.url.path(), path);
+        }
     }
 
     #[test]

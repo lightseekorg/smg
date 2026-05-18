@@ -34,7 +34,10 @@ pub use config::{
     CrossRegionContext, CrossRegionMtlsRuntimeConfig, CrossRegionRuntimeConfig,
     RequestPlaneRuntimeConfig, SyncPlaneRuntimeConfig,
 };
-pub use forwarding::{CrossRegionForwarder, ExistingSmgPath, ForwardingRequest, ForwardingTarget};
+pub use forwarding::{
+    build_request_forwarding_http_client, CrossRegionForwarder, ExistingSmgPath, ForwardingRequest,
+    ForwardingTarget,
+};
 pub use headers::{
     CrossRegionCommonHeaders, CrossRegionHeaders, RequestMode, SettledRequestContext,
     SettledRouteMetadata, UnresolvedRequestContext,
