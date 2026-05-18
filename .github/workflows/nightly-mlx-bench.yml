@@ -52,7 +52,9 @@ jobs:
       SCENARIOS: >-
         ${{ github.event.inputs.scenarios || 'chat agent' }}
       DURATION_MIN: >-
-        ${{ github.event.inputs.duration_min || '10' }}
+        ${{ github.event.inputs.duration_min
+        || (github.event_name == 'pull_request' && '3'
+        || '10') }}
       RESULTS_DIR: bench-results
       PYTHONUNBUFFERED: "1"
     steps:
