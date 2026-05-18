@@ -234,6 +234,18 @@ impl GrpcClient {
         }
     }
 
+    pub async fn flush_cache(&self, timeout_s: f32) -> Result<(bool, String), tonic::Status> {
+        match self {
+            Self::Sglang(client) => {
+                let resp = client.flush_cache(timeout_s).await?;
+                Ok((resp.success, resp.message))
+            }
+            Self::Vllm(_) | Self::Trtllm(_) => Err(tonic::Status::unimplemented(
+                "flush_cache not supported for this backend",
+            )),
+        }
+    }
+
     /// Fetch tokenizer bundle from backend runtime and validate integrity/safety.
     pub async fn get_tokenizer(
         &self,

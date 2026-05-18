@@ -12,6 +12,7 @@ import os
 import signal
 import threading
 import time
+from collections.abc import Callable
 from concurrent import futures
 
 import grpc
@@ -36,8 +37,20 @@ logger = logging.getLogger(__name__)
 async def serve_grpc(
     server_args: ServerArgs,
     model_info: dict | None = None,
+    on_request_manager_ready: Callable | None = None,
 ):
-    """Start the standalone gRPC server with integrated scheduler."""
+    """Start the standalone gRPC server with integrated scheduler.
+
+    Args:
+        server_args: Server configuration.
+        model_info: Optional model metadata override.
+        on_request_manager_ready: Optional async callback invoked with
+            ``(request_manager, server_args, scheduler_info)`` once the
+            ``GrpcRequestManager`` has been created but before the gRPC
+            server starts accepting requests.  This allows callers (e.g.
+            sglang's HTTP sidecar) to wire up additional endpoints that
+            communicate with the scheduler.
+    """
 
     # Start bootstrap server BEFORE launching scheduler processes (only in PREFILL mode)
     # This ensures the bootstrap server is ready when prefill schedulers try to register
@@ -103,6 +116,9 @@ async def serve_grpc(
         port_args=port_args,
         bootstrap_server=bootstrap_server,
     )
+
+    if on_request_manager_ready is not None:
+        await on_request_manager_ready(request_manager, server_args, scheduler_info)
 
     # Create gRPC server
     server = grpc.aio.server(
