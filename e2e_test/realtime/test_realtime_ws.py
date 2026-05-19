@@ -29,7 +29,7 @@ import websockets
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"
+REALTIME_MODEL = "gpt-realtime"
 RECV_TIMEOUT = 30  # seconds — cloud latency can be high
 
 
