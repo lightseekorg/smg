@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
-        MiniMaxParser, NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
+        MiniMaxParser, NanoV3Parser, NoneParser, Qwen3Parser, QwenThinkingParser, Step3Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
@@ -175,6 +175,11 @@ impl ParserFactory {
         registry.register_parser("base", || {
             Box::new(BaseReasoningParser::new(ParserConfig::default()))
         });
+
+        // Register no-op parser: returns all text as normal content,
+        // never produces reasoning_content. Selectable via
+        // `--reasoning-parser none`.
+        registry.register_parser("none", || Box::new(NoneParser::new()));
 
         // Register DeepSeek-R1 parser (starts with in_reasoning=true)
         registry.register_parser("deepseek_r1", || Box::new(DeepSeekR1Parser::new()));
