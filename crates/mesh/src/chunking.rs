@@ -17,7 +17,6 @@ use std::sync::{
 use bytes::Bytes;
 
 use crate::{
-    flow_control::MAX_MESSAGE_SIZE,
     kv::MeshKV,
     service::gossip::{StreamBatch, StreamEntry},
 };
@@ -44,27 +43,6 @@ static STREAM_GENERATION: LazyLock<AtomicU64> = LazyLock::new(|| {
 pub fn next_generation() -> u64 {
     STREAM_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
-
-/// Maximum chunks packed into a single `StreamBatch` message. This is
-/// a message-shape cap, not a bandwidth throttle: `build_stream_batches`
-/// emits multiple batches as needed to carry every entry in the round.
-/// The bounded channel's backpressure provides rate limiting.
-/// A hard per-round chunk cap would combine with the drained-per-round
-/// buffer to make any value with more chunks than the cap permanently
-/// undeliverable, so none is enforced here.
-pub const DEFAULT_MAX_CHUNKS_PER_BATCH: usize = 5;
-
-/// Headroom reserved below `MAX_MESSAGE_SIZE` for protobuf envelope
-/// overhead (StreamMessage wrapper, StreamEntry metadata, per-field
-/// tags and length prefixes). Without this margin a chunk sized
-/// exactly at `MAX_MESSAGE_SIZE` pushes the serialised message past
-/// the receiver's `max_decoding_message_size` and tonic rejects it.
-pub const STREAM_CHUNK_OVERHEAD_MARGIN: usize = 64 * 1024;
-
-/// Maximum payload bytes per `StreamEntry`. Callers pass this to
-/// [`chunk_value`] so every emitted entry leaves room for the
-/// protobuf envelope within the gRPC message budget.
-pub const MAX_STREAM_CHUNK_BYTES: usize = MAX_MESSAGE_SIZE - STREAM_CHUNK_OVERHEAD_MARGIN;
 
 /// Split a stream value into one or more `StreamEntry`s.
 ///

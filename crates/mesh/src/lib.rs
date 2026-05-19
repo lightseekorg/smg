@@ -7,16 +7,16 @@
 
 mod chunk_assembler;
 mod chunking;
-mod controller;
 mod crdt_kv;
-mod flow_control;
+mod gossip_controller;
+mod gossip_service;
 mod hash;
 pub mod kv;
 mod metrics;
 mod mtls;
 mod partition;
-mod ping_server;
 mod service;
+mod transport;
 mod types;
 
 // Internal tests module with full access to private types
@@ -24,7 +24,6 @@ mod types;
 mod tests;
 
 // Re-export commonly used types
-pub use chunking::MAX_STREAM_CHUNK_BYTES;
 pub use crdt_kv::{
     decode as decode_epoch_count, encode as encode_epoch_count, merge as merge_epoch_max_wins,
     CrdtOrMap, EpochCount, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
@@ -38,4 +37,5 @@ pub use metrics::init_mesh_metrics;
 pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};
 pub use partition::PartitionDetector;
 pub use service::{gossip, ClusterState, MeshServerBuilder, MeshServerConfig, MeshServerHandler};
+pub use transport::limits::MAX_STREAM_CHUNK_BYTES;
 pub use types::WorkerState;

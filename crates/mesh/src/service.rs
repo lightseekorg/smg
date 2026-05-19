@@ -15,7 +15,7 @@ use tonic::{
 };
 use tracing as log;
 
-use crate::flow_control::MAX_MESSAGE_SIZE;
+use crate::transport::limits::MAX_MESSAGE_SIZE;
 
 pub mod gossip {
     #![allow(unused_qualifications, clippy::absolute_paths)]
@@ -28,10 +28,10 @@ use gossip::{
 };
 
 use crate::{
-    controller::MeshController,
+    gossip_controller::GossipController,
+    gossip_service::GossipService,
     mtls::{MTLSConfig, MTLSManager},
     partition::PartitionDetector,
-    ping_server::GossipService,
 };
 
 pub type ClusterState = Arc<RwLock<BTreeMap<String, NodeState>>>;
@@ -251,12 +251,12 @@ pub struct MeshServer {
     signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
-    /// Node-wide MeshKV handle shared by controller + ping_server.
+    /// Node-wide MeshKV handle shared by the gossip controller and service.
     mesh_kv: Arc<crate::kv::MeshKV>,
 }
 
 impl MeshServer {
-    fn build_ping_server(&self) -> GossipService {
+    fn build_gossip_service(&self) -> GossipService {
         GossipService::new(
             self.state.clone(),
             self.bind_addr,
@@ -266,8 +266,8 @@ impl MeshServer {
         .with_mesh_kv(self.mesh_kv.clone())
     }
 
-    fn build_controller(&self) -> MeshController {
-        MeshController::new(
+    fn build_controller(&self) -> GossipController {
+        GossipController::new(
             self.state.clone(),
             self.advertise_addr,
             &self.self_name,
@@ -317,7 +317,7 @@ impl MeshServer {
         // with server-side sync_stream handlers.
         let controller = self.build_controller();
 
-        let mut service = self.build_ping_server();
+        let mut service = self.build_gossip_service();
 
         service = service.with_partition_detector(partition_detector);
 

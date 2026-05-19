@@ -1,0 +1,5 @@
+//! Mesh transport layer: wire-size limits, idle timeouts, chunking,
+//! and reassembly. Subsystems that build or consume sync_stream frames
+//! depend on this module.
+
+pub mod limits;
