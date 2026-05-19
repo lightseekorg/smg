@@ -1591,7 +1591,7 @@ WEATHER_TOOL = {
 
 
 @pytest.mark.engine("sglang", "vllm", "trtllm")
-@pytest.mark.gpu(2)
+@pytest.mark.gpu(1)
 @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

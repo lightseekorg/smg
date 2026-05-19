@@ -69,6 +69,7 @@ from .process_utils import (
 )
 from .run_eval import run_eval
 from .worker import Worker, start_workers, stop_workers
+from .worker_pool import WorkerPool, cleanup_pool, get_pool
 
 __all__ = [
     # Enums
@@ -129,6 +130,10 @@ __all__ = [
     "Worker",
     "start_workers",
     "stop_workers",
+    # Session-scoped worker cache
+    "WorkerPool",
+    "get_pool",
+    "cleanup_pool",
     "MODEL_SPECS",
     # Gateway
     "Gateway",

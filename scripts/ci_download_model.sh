@@ -19,12 +19,15 @@ RETRY_DELAY=30
 
 resolve_models_for_tier() {
     local tier="$1"
-    # ROUTER_LOCAL_MODEL_PATH must be unset so model_specs doesn't resolve to local paths
+    # A tier-N runner has N GPUs; any model with tp <= N can run on it.
+    # PD-disaggregation jobs run on 2-GPU runners with tp=1 models, so an
+    # exact ``tp == tier`` match would leave them empty.
+    # ROUTER_LOCAL_MODEL_PATH must be unset so model_specs doesn't resolve to local paths.
     ROUTER_LOCAL_MODEL_PATH="" python3 -c "
 import sys
 from e2e_test.infra.model_specs import MODEL_SPECS
 for model_id, spec in MODEL_SPECS.items():
-    if spec['tp'] == int(sys.argv[1]):
+    if spec['tp'] <= int(sys.argv[1]):
         print(model_id)
 " "$tier"
 }
