@@ -13,9 +13,16 @@ use crate::{
         load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
         ChatTemplateState, ThinkingKeyName, ThinkingToggle,
     },
+    encoders::kimi_k25_tools::apply_kimi_k25_tools,
     factory::discover_chat_template_in_dir,
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
+
+#[derive(Debug, Clone, Copy)]
+enum Renderer {
+    Jinja,
+    KimiK25Tools,
+}
 
 /// Regex pattern for cl100k_base tokenization.
 ///
@@ -131,6 +138,7 @@ pub struct TiktokenTokenizer {
     vocab_size: usize,
     chat_template: ChatTemplateState,
     eos_token_ids: Vec<TokenIdType>,
+    renderer: Renderer,
 }
 
 /// Supported Tiktoken models
@@ -180,6 +188,7 @@ impl TiktokenTokenizer {
             vocab_size,
             chat_template: ChatTemplateState::empty(),
             eos_token_ids: Vec::new(), // No directory path in from_model
+            renderer: Renderer::Jinja,
         })
     }
 
@@ -264,6 +273,9 @@ impl TiktokenTokenizer {
         // Load merged EOS token IDs from config.json + generation_config.json
         let eos_token_ids = crate::eos::load_eos_token_ids(dir);
 
+        // Detect which chat-template renderer to use based on config.json::architectures
+        let renderer = detect_renderer_from_config(dir);
+
         Ok(TiktokenTokenizer {
             tokenizer,
             special_tokens: config.special_tokens,
@@ -272,6 +284,7 @@ impl TiktokenTokenizer {
             vocab_size,
             chat_template: ChatTemplateState::new(chat_template)?,
             eos_token_ids,
+            renderer,
         })
     }
 
@@ -518,14 +531,18 @@ impl TokenizerTrait for TiktokenTokenizer {
         params: ChatTemplateParams,
     ) -> Result<String> {
         // Inject special tokens if the caller didn't provide them
-        if params.special_tokens.is_some() {
-            return self.chat_template.apply(messages, params);
-        }
-        let params = ChatTemplateParams {
-            special_tokens: Some(&self.special_tokens),
-            ..params
+        let params = if params.special_tokens.is_some() {
+            params
+        } else {
+            ChatTemplateParams {
+                special_tokens: Some(&self.special_tokens),
+                ..params
+            }
         };
-        self.chat_template.apply(messages, params)
+        match self.renderer {
+            Renderer::Jinja => self.chat_template.apply(messages, params),
+            Renderer::KimiK25Tools => apply_kimi_k25_tools(&self.chat_template, messages, params),
+        }
     }
 
     fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
@@ -550,6 +567,45 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn set_chat_template(&mut self, template: String) -> Result<()> {
         self.chat_template.set(template)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Renderer detection (config.json::architectures)
+// ---------------------------------------------------------------------------
+/// Inspect the sibling `config.json` to decide which chat-template renderer to
+/// use. Missing / unreadable / malformed config falls back to `Renderer::Jinja`
+/// silently with a debug log, mirroring `huggingface.rs::detect_renderer_from_config`.
+fn detect_renderer_from_config(dir: &Path) -> Renderer {
+    let path = dir.join("config.json");
+    if !path.exists() {
+        return Renderer::Jinja;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::debug!(?err, ?path, "config.json unreadable; using Jinja renderer");
+            return Renderer::Jinja;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::debug!(?err, ?path, "config.json malformed; using Jinja renderer");
+            return Renderer::Jinja;
+        }
+    };
+    let is_kimi = value
+        .get("architectures")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| {
+            a.iter()
+                .any(|v| v.as_str() == Some("KimiK25ForConditionalGeneration"))
+        });
+    if is_kimi {
+        tracing::debug!(?path, "selected KimiK25Tools chat-template renderer");
+        return Renderer::KimiK25Tools;
+    }
+    Renderer::Jinja
 }
 
 #[cfg(test)]
