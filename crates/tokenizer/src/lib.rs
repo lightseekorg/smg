@@ -16,6 +16,7 @@ pub mod traits;
 
 pub mod chat_template;
 pub mod huggingface;
+mod kimi_k2_tokenizer;
 pub mod tiktoken;
 
 #[cfg(test)]
