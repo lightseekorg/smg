@@ -196,6 +196,10 @@ class GrpcRequestManager:
         # State Management (from TokenizerManager)
         self.rid_to_state: dict[str, GrpcReqState] = {}
         self.asyncio_tasks: set = set()
+        # Separate handle_loop ref so the drain loop can detect if scheduler
+        # output forwarding has died — without it, rid_to_state would never
+        # drain and the pod would wait for SIGKILL.
+        self.handle_loop_task: asyncio.Task | None = None
         self.gracefully_exit = False
         self.no_create_loop = False
         self.event_loop = None
@@ -480,8 +484,13 @@ class GrpcRequestManager:
         """
         Main event loop - processes outputs from scheduler.
         Mimics TokenizerManager's handle_loop.
+
+        Runs until the task is cancelled (by shutdown()) or an unrecoverable
+        ZMQ error. It must not gate on ``gracefully_exit`` — during drain
+        the health flag is set but scheduler outputs must still be forwarded
+        so in-flight streaming requests can finish their token sequences.
         """
-        while not self.gracefully_exit:
+        while True:
             try:
                 # Receive from scheduler
                 recv_obj = await self.recv_from_scheduler.recv_pyobj()
@@ -509,16 +518,14 @@ class GrpcRequestManager:
                     logger.warning(f"Unknown output type: {type(recv_obj)}")
 
             except zmq.error.Again:
-                # Timeout, check if we should exit
-                if self.gracefully_exit:
-                    break
+                # Timeout on non-blocking recv; keep polling.
                 continue
             except zmq.error.ZMQError as e:
-                # Socket closed or other ZMQ error - exit cleanly if shutting down
+                # Socket closed or unrecoverable ZMQ error.
                 if self.gracefully_exit:
                     logger.debug(f"ZMQ recv interrupted during shutdown: {e}")
-                    break
-                logger.error(f"ZMQ error in handle loop: {e}\n{get_exception_traceback()}")
+                else:
+                    logger.error(f"ZMQ error in handle loop: {e}\n{get_exception_traceback()}")
                 break
             except Exception as e:
                 logger.error(f"Handle loop error: {e}\n{get_exception_traceback()}")
@@ -829,6 +836,16 @@ class GrpcRequestManager:
                 }
             )
 
+    def begin_drain(self) -> None:
+        """Mark the manager as draining.
+
+        Idempotent and non-destructive: flips gracefully_exit so the health
+        servicer reports NOT_SERVING and the server-side drain loop can
+        begin, but does not cancel tasks or enqueue shutdown errors on
+        in-flight requests. Safe to call from a synchronous signal handler.
+        """
+        self.gracefully_exit = True
+
     async def shutdown(self):
         """Gracefully shutdown the request manager."""
         logger.info("Shutting down GrpcRequestManager")
@@ -915,24 +932,20 @@ class GrpcRequestManager:
 
         self.no_create_loop = True
         loop = get_or_create_event_loop()
-        self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.handle_loop)))
+        self.handle_loop_task = loop.create_task(print_exception_wrapper(self.handle_loop))
+        self.asyncio_tasks.add(self.handle_loop_task)
 
         self.event_loop = loop
 
         # We only add signal handler when the tokenizer manager is in the main thread
-        # due to the CPython limitation.
+        # due to the CPython limitation. The SIGTERM handler here is a startup-window
+        # fallback; once serve_grpc runs, it overrides SIGTERM with the drain-aware
+        # signal_handler in server.py. SIGQUIT stays owned here to forward scheduler
+        # crashes to a process-tree kill.
         if threading.current_thread() is threading.main_thread():
             signal_handler = GrpcSignalHandler(self)
             loop.add_signal_handler(signal.SIGTERM, signal_handler.sigterm_handler)
-            # Update the signal handler for the process. It overrides the sigquit handler in the launch phase.
             loop.add_signal_handler(signal.SIGQUIT, signal_handler.running_phase_sigquit_handler)
-
-        self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.sigterm_watchdog)))
-
-    async def sigterm_watchdog(self):
-        """Watchdog to handle SIGTERM gracefully, matching TokenizerManager pattern."""
-        while not self.gracefully_exit:
-            await asyncio.sleep(1.0)
 
     def _req_stats_init(
         self,
