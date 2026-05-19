@@ -8,7 +8,10 @@ pub use smg_data_connector::{
 };
 
 use super::{validation::ConfigValidator, ConfigResult, SkillsConfig};
-use crate::{tenant::DEFAULT_TENANT_HEADER_NAME, worker::ConnectionMode};
+use crate::{
+    rate_limit::MultiTenantRateLimitConfig, tenant::DEFAULT_TENANT_HEADER_NAME,
+    worker::ConnectionMode,
+};
 
 /// Runtime feature flags for memory behavior.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +113,8 @@ pub struct RouterConfig {
     pub background: BackgroundConfig,
     #[serde(default)]
     pub tenant_resolution: TenantResolutionConfig,
+    #[serde(default)]
+    pub multi_tenant_rate_limit: MultiTenantRateLimitConfig,
     /// Set to -1 to disable rate limiting
     pub max_concurrent_requests: i32,
     pub queue_size: usize,
@@ -658,6 +663,7 @@ impl Default for RouterConfig {
             memory_runtime: MemoryRuntimeConfig::default(),
             background: BackgroundConfig::default(),
             tenant_resolution: TenantResolutionConfig::default(),
+            multi_tenant_rate_limit: MultiTenantRateLimitConfig::default(),
             max_concurrent_requests: -1,
             queue_size: 100,
             queue_timeout_secs: 60,

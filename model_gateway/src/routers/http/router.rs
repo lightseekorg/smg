@@ -37,10 +37,12 @@ use crate::{
         otel_trace::inject_trace_context_http,
     },
     policies::{PolicyRegistry, SelectWorkerInfo},
+    rate_limit::{rate_limit_exceeded_response, LocalTokenRateLimiter},
     routers::{
         common::{
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
+            token_count::count_tokens,
         },
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},
@@ -55,6 +57,8 @@ pub struct Router {
     policy_registry: Arc<PolicyRegistry>,
     client: Client,
     retry_config: RetryConfig,
+    tokenizer_registry: Arc<llm_tokenizer::registry::TokenizerRegistry>,
+    app_token_rate_limiter: Option<Arc<LocalTokenRateLimiter>>,
 }
 
 impl std::fmt::Debug for Router {
@@ -64,11 +68,29 @@ impl std::fmt::Debug for Router {
             .field("policy_registry", &self.policy_registry)
             .field("client", &self.client)
             .field("retry_config", &self.retry_config)
+            .field("tokenizer_registry", &"configured")
+            .field(
+                "app_token_rate_limiter",
+                &self.app_token_rate_limiter.as_ref().map(|_| "configured"),
+            )
             .finish()
     }
 }
 
 impl Router {
+    fn enforce_token_rate_limit<T: GenerationRequest>(
+        &self,
+        tenant_meta: &TenantRequestMeta,
+        body: &T,
+        model_id: &str,
+    ) -> Option<Response> {
+        let limiter = self.app_token_rate_limiter.as_ref()?;
+        let estimated_tokens = count_tokens(&self.tokenizer_registry, body, model_id);
+        limiter
+            .check_and_consume(tenant_meta.tenant_key().as_str(), estimated_tokens)
+            .err()
+            .map(rate_limit_exceeded_response)
+    }
     /// Create a new router with injected policy and client
     #[expect(
         clippy::unused_async,
@@ -80,6 +102,8 @@ impl Router {
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
             retry_config: ctx.router_config.effective_retry_config(),
+            tokenizer_registry: ctx.tokenizer_registry.clone(),
+            app_token_rate_limiter: ctx.token_rate_limiter.clone(),
         })
     }
 
@@ -1106,10 +1130,13 @@ impl RouterTrait for Router {
     async fn route_generate(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &GenerateRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_typed_request(headers, body, "/generate", model_id)
             .await
     }
@@ -1117,10 +1144,13 @@ impl RouterTrait for Router {
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_typed_request(headers, body, "/v1/chat/completions", model_id)
             .await
     }
@@ -1128,10 +1158,13 @@ impl RouterTrait for Router {
     async fn route_completion(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &CompletionRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_typed_request(headers, body, "/v1/completions", model_id)
             .await
     }
@@ -1139,10 +1172,13 @@ impl RouterTrait for Router {
     async fn route_responses(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_typed_request(headers, body, "/v1/responses", model_id)
             .await
     }
@@ -1155,10 +1191,13 @@ impl RouterTrait for Router {
     async fn route_embeddings(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &EmbeddingRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_typed_request(headers, body, "/v1/embeddings", model_id)
             .await
     }
@@ -1166,10 +1205,13 @@ impl RouterTrait for Router {
     async fn route_classify(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &ClassifyRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_typed_request(headers, body, "/v1/classify", model_id)
             .await
     }
@@ -1177,11 +1219,14 @@ impl RouterTrait for Router {
     async fn route_audio_transcriptions(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &TranscriptionRequest,
         audio: AudioFile,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         self.route_multipart_transcription(
             headers,
             body,
@@ -1195,10 +1240,13 @@ impl RouterTrait for Router {
     async fn route_rerank(
         &self,
         headers: Option<&HeaderMap>,
-        _tenant_meta: &TenantRequestMeta,
+        tenant_meta: &TenantRequestMeta,
         body: &RerankRequest,
         model_id: &str,
     ) -> Response {
+        if let Some(response) = self.enforce_token_rate_limit(tenant_meta, body, model_id) {
+            return response;
+        }
         let response = self
             .route_typed_request(headers, body, "/v1/rerank", model_id)
             .await;
@@ -1259,6 +1307,8 @@ mod tests {
             policy_registry,
             client: Client::new(),
             retry_config: RetryConfig::default(),
+            tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
+            app_token_rate_limiter: None,
         }
     }
 
