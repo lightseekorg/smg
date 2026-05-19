@@ -116,15 +116,13 @@ impl FromStr for CrossRegionFailoverMode {
     }
 }
 
-/// Cross-region request-forwarding listener and routing decision defaults.
+/// Cross-region request-forwarding listener and retry settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CrossRegionRequestPlaneConfig {
     pub enabled: bool,
     pub listen_port: u16,
     pub max_platform_retries: u32,
-    pub default_failover_mode: CrossRegionFailoverMode,
-    pub local_first_tie_break: bool,
 }
 
 impl Default for CrossRegionRequestPlaneConfig {
@@ -133,8 +131,6 @@ impl Default for CrossRegionRequestPlaneConfig {
             enabled: true,
             listen_port: 8443,
             max_platform_retries: 5,
-            default_failover_mode: CrossRegionFailoverMode::Manual,
-            local_first_tie_break: true,
         }
     }
 }
@@ -215,7 +211,7 @@ pub struct CrossRegionMtlsConfig {
 
 /// Phase 1 cross-region routing configuration. This is only plumbing until the
 /// later sync and request-plane tasks consume it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CrossRegionConfig {
     pub enabled: bool,
@@ -227,28 +223,10 @@ pub struct CrossRegionConfig {
     pub realm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
-    pub local_only_on_degraded_sync: bool,
     pub request_plane: CrossRegionRequestPlaneConfig,
     pub sync_plane: CrossRegionSyncPlaneConfig,
     pub peers: Vec<CrossRegionPeerConfig>,
     pub mtls: CrossRegionMtlsConfig,
-}
-
-impl Default for CrossRegionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            region_id: None,
-            server_name: None,
-            realm: None,
-            environment: None,
-            local_only_on_degraded_sync: true,
-            request_plane: CrossRegionRequestPlaneConfig::default(),
-            sync_plane: CrossRegionSyncPlaneConfig::default(),
-            peers: Vec::new(),
-            mtls: CrossRegionMtlsConfig::default(),
-        }
-    }
 }
 
 /// Main router configuration
@@ -996,15 +974,9 @@ mod tests {
 
         assert!(!config.enabled);
         assert_eq!(config.region_id, None);
-        assert!(config.local_only_on_degraded_sync);
         assert!(config.request_plane.enabled);
         assert_eq!(config.request_plane.listen_port, 8443);
         assert_eq!(config.request_plane.max_platform_retries, 5);
-        assert_eq!(
-            config.request_plane.default_failover_mode,
-            CrossRegionFailoverMode::Manual
-        );
-        assert!(config.request_plane.local_first_tie_break);
         assert!(config.sync_plane.enabled);
         assert_eq!(config.sync_plane.signal_stale_after_seconds, 30);
         assert!(config.peers.is_empty());

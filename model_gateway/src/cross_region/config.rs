@@ -1,5 +1,5 @@
 use super::{CrossRegionError, CrossRegionResult, RegionPeer, RegionPeerRegistry};
-use crate::config::{CrossRegionConfig, CrossRegionFailoverMode};
+use crate::config::CrossRegionConfig;
 
 /// Runtime-friendly request-plane settings derived from RouterConfig.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7,8 +7,6 @@ pub struct RequestPlaneRuntimeConfig {
     pub enabled: bool,
     pub listen_port: u16,
     pub max_platform_retries: u32,
-    pub default_failover_mode: CrossRegionFailoverMode,
-    pub local_first_tie_break: bool,
 }
 
 /// Runtime-friendly sync-plane settings derived from RouterConfig.
@@ -35,7 +33,6 @@ pub struct CrossRegionRuntimeConfig {
     pub server_name: String,
     pub realm: String,
     pub environment: String,
-    pub local_only_on_degraded_sync: bool,
     pub request_plane: RequestPlaneRuntimeConfig,
     pub sync_plane: SyncPlaneRuntimeConfig,
     pub mtls: CrossRegionMtlsRuntimeConfig,
@@ -53,13 +50,10 @@ impl CrossRegionRuntimeConfig {
             server_name: required("server_name", config.server_name.as_deref())?.to_string(),
             realm: required("realm", config.realm.as_deref())?.to_string(),
             environment: required("environment", config.environment.as_deref())?.to_string(),
-            local_only_on_degraded_sync: config.local_only_on_degraded_sync,
             request_plane: RequestPlaneRuntimeConfig {
                 enabled: config.request_plane.enabled,
                 listen_port: config.request_plane.listen_port,
                 max_platform_retries: config.request_plane.max_platform_retries,
-                default_failover_mode: config.request_plane.default_failover_mode,
-                local_first_tie_break: config.request_plane.local_first_tie_break,
             },
             sync_plane: SyncPlaneRuntimeConfig {
                 enabled: config.sync_plane.enabled,
@@ -156,7 +150,6 @@ mod tests {
             server_name: Some("smg-router-a".to_string()),
             realm: Some("oc1".to_string()),
             environment: Some("prod".to_string()),
-            local_only_on_degraded_sync: true,
             request_plane: CrossRegionRequestPlaneConfig::default(),
             sync_plane: CrossRegionSyncPlaneConfig::default(),
             peers: vec![CrossRegionPeerConfig {

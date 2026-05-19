@@ -429,13 +429,10 @@ cross_region:
   region_id: us-ashburn-1
   realm: oc1
   environment: prod
-  local_only_on_degraded_sync: true
   request_plane:
     enabled: true
     listen_port: 8443
     max_platform_retries: 5
-    default_failover_mode: MANUAL
-    local_first_tie_break: true
   sync_plane:
     enabled: true
     signal_stale_after_seconds: 30
@@ -453,6 +450,11 @@ cross_region:
     client_key_path: /etc/smg/certs/client.key
 ```
 
+Phase 1 request-plane routing uses fixed conservative policies instead of
+operator-tunable knobs: stale or missing remote sync signals exclude remote
+candidates, missing `x-failover-mode` defaults to `MANUAL`, and equivalent
+candidates prefer the local region before stable region-id ordering.
+
 ### CLI Options
 
 | Option | Description | Default |
@@ -461,12 +463,9 @@ cross_region:
 | `--cross-region-region-id` | Local OCI region id, for example `us-ashburn-1` | Required when enabled |
 | `--cross-region-realm` | Local OCI realm, for example `oc1` | Required when enabled |
 | `--cross-region-environment` | Local deployment environment, for example `prod` | Required when enabled |
-| `--cross-region-local-only-on-degraded-sync` | Keep serving local-only when remote signal state is degraded | `true` |
 | `--cross-region-request-plane-enabled` | Parse and validate request-forwarding plane settings for later runtime wiring | `true` |
 | `--cross-region-request-plane-listen-port` | Private NLB request-forwarding listener port | `8443` |
 | `--cross-region-request-plane-max-platform-retries` | Maximum platform-owned cross-region retries | `5` |
-| `--cross-region-request-plane-default-failover-mode` | Default failover mode: `MANUAL`, `AUTOMATIC`, or `AUTO` | `MANUAL` |
-| `--cross-region-request-plane-local-first-tie-break` | Prefer local region when candidates tie | `true` |
 | `--cross-region-sync-plane-enabled` | Enable mesh-backed cross-region signal sync | `true` |
 | `--cross-region-sync-plane-signal-stale-after-seconds` | Consumer-side freshness window: replica signals older than this are excluded from cross-region rankings | `30` |
 | `--cross-region-peer` | Peer Region Agent mapping | None |

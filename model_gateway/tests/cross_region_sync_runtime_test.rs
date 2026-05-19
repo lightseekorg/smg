@@ -35,7 +35,6 @@ fn valid_cross_region_config() -> CrossRegionConfig {
         server_name: Some("smg-router-a".to_string()),
         realm: Some("oc1".to_string()),
         environment: Some("prod".to_string()),
-        local_only_on_degraded_sync: true,
         request_plane: CrossRegionRequestPlaneConfig::default(),
         sync_plane: CrossRegionSyncPlaneConfig::default(),
         peers: vec![CrossRegionPeerConfig {
