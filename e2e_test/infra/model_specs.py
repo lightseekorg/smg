@@ -61,7 +61,26 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "reasoning"],
     },
-    # Thinking/reasoning model (larger)
+    # Qwen3 instruct (non-thinking variant) — emits the same
+    # `<tool_call>\n{"name": ..., "arguments": ...}\n</tool_call>` format as
+    # Qwen 2.5, so the gateway's ``qwen`` tool-call parser applies. Used by
+    # ``TestToolChoiceQwen`` and ``TestMultiTurnToolCall``: a Qwen3 model is
+    # required because the Qwen2 family is not in TokenSpeed's model registry.
+    "Qwen/Qwen3-4B-Instruct-2507": {
+        "model": _resolve_model_path("Qwen/Qwen3-4B-Instruct-2507"),
+        "tp": 1,
+        "features": ["chat", "streaming", "function_calling", "tool_choice"],
+    },
+    # Hybrid Qwen3 with the ``enable_thinking`` chat-template toggle. Used
+    # by ``TestEnableThinking``. Dense (``Qwen3ForCausalLM``), so it lands
+    # on tokenspeed's current model registry where the larger
+    # ``Qwen3-30B-A3B`` (``Qwen3MoeForCausalLM``) does not. Uses the
+    # existing ``qwen3`` reasoning parser.
+    "Qwen/Qwen3-4B": {
+        "model": _resolve_model_path("Qwen/Qwen3-4B"),
+        "tp": 1,
+        "features": ["chat", "streaming", "thinking", "reasoning"],
+    },
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
         "tp": 1,
@@ -95,6 +114,10 @@ MODEL_SPECS: dict[str, dict] = {
             "--structured-outputs-config",
             '{"enable_in_reasoning": true}',
         ],
+        # Tells the engine to wrap ``response_format=json_schema`` as the
+        # Harmony structural tag so the grammar only activates inside the
+        # final channel — otherwise xgrammar fights the analysis preamble.
+        "tokenspeed_args": ["--reasoning-parser", "gpt-oss"],
     },
     "openai/gpt-oss-120b": {
         "model": _resolve_model_path("openai/gpt-oss-120b"),
@@ -105,6 +128,7 @@ MODEL_SPECS: dict[str, dict] = {
             "--structured-outputs-config",
             '{"enable_in_reasoning": true}',
         ],
+        "tokenspeed_args": ["--reasoning-parser", "gpt-oss"],
     },
     # MiniMax M2 - nightly benchmarks
     "minimaxai/minimax-m2": {
@@ -242,7 +266,7 @@ FUNCTION_CALLING_MODELS = get_models_with_feature("function_calling")
 DEFAULT_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.1-8B-Instruct"]["model"]
 DEFAULT_SMALL_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.2-1B-Instruct"]["model"]
 DEFAULT_REASONING_MODEL_PATH = MODEL_SPECS["deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"]["model"]
-DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3-30B-A3B"]["model"]
+DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3-4B"]["model"]
 DEFAULT_QWEN_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen2.5-7B-Instruct"]["model"]
 DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistralai/Mistral-7B-Instruct-v0.3"][
     "model"

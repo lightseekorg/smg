@@ -219,6 +219,11 @@ class TestIGWMultiWorker:
 
 
 @pytest.mark.e2e
+# TokenSpeed deliberately excluded: this test class spins up its worker
+# via ``ConnectionMode.HTTP``, and ``Worker._build_tokenspeed_grpc_cmd``
+# rejects HTTP mode — TokenSpeed has no HTTP frontend in this repo.
+# Including ``tokenspeed`` here would fail deterministically on every
+# run rather than validate health-check behaviour.
 @pytest.mark.engine("sglang", "vllm")
 @pytest.mark.gpu(1)
 class TestDisableHealthCheck:
@@ -436,9 +441,11 @@ class TestIGWMixedWorkerClassification:
                     if "api.openai.com" in url or "api.x.ai" in url:
                         assert rt == "external", f"Cloud worker {url} should be external, got {rt}"
                     else:
-                        assert rt in ("sglang", "vllm", "trtllm"), (
-                            f"Local worker {url} should have local runtime, got {rt}"
-                        )
+                        assert rt in (
+                            "sglang",
+                            "vllm",
+                            "trtllm",
+                        ), f"Local worker {url} should have local runtime, got {rt}"
                     logger.info("Worker %s → runtime_type=%s", url, rt)
 
                 # Verify /v1/models returns models from ALL workers
@@ -540,9 +547,10 @@ class TestWorkerAPIRestSemantics:
                     json={"priority": 100, "cost": 2.5, "labels": {"env": "test"}},
                     timeout=10,
                 )
-                assert resp.status_code in (200, 202), (
-                    f"PATCH should succeed, got {resp.status_code}: {resp.text}"
-                )
+                assert resp.status_code in (
+                    200,
+                    202,
+                ), f"PATCH should succeed, got {resp.status_code}: {resp.text}"
                 logger.info("PATCH succeeded: %s", resp.json())
 
                 # Poll until the update is applied (async 202)
@@ -598,9 +606,10 @@ class TestWorkerAPIRestSemantics:
                     json={"url": http_worker.base_url},
                     timeout=10,
                 )
-                assert resp.status_code in (200, 202), (
-                    f"PUT should succeed, got {resp.status_code}: {resp.text}"
-                )
+                assert resp.status_code in (
+                    200,
+                    202,
+                ), f"PUT should succeed, got {resp.status_code}: {resp.text}"
                 logger.info("PUT full replace succeeded: %s", resp.json())
 
                 # Worker should still be registered

@@ -34,7 +34,7 @@ class Worker:
     """A single inference worker process."""
 
     model_id: str
-    engine: str  # "sglang", "vllm", or "trtllm"
+    engine: str  # "sglang", "vllm", "trtllm", or "tokenspeed"
     port: int
     gpu_ids: list[int]
     mode: ConnectionMode = ConnectionMode.HTTP
@@ -180,6 +180,13 @@ class Worker:
             return self._build_trtllm_cmd(model_path, tp_size, spec)
         elif self.engine == "mlx":
             return self._build_mlx_cmd(model_path, spec)
+        elif self.engine == "tokenspeed":
+            if self.mode != ConnectionMode.GRPC:
+                raise ValueError(
+                    "TokenSpeed e2e workers only support gRPC mode; "
+                    "HTTP mode would go through the existing OpenAI frontend."
+                )
+            return self._build_tokenspeed_grpc_cmd(model_path, tp_size, spec)
         else:
             raise ValueError(f"Unsupported engine: {self.engine}")
 
@@ -279,6 +286,41 @@ class Worker:
             str(self.port),
         ]
         extra = spec.get("mlx_args", [])
+        if extra:
+            cmd.extend(extra)
+        return cmd
+
+    def _build_tokenspeed_grpc_cmd(self, model_path: str, tp_size: int, spec: dict) -> list[str]:
+        """Build TokenSpeed gRPC server command.
+
+        Launches ``smg_grpc_servicer.tokenspeed`` which wraps TokenSpeed's
+        ``AsyncLLM`` behind the dedicated ``tokenspeed.grpc.scheduler``
+        service.
+        """
+        cmd = [
+            "python3",
+            "-m",
+            "smg_grpc_servicer.tokenspeed",
+            "--model",
+            model_path,
+            "--host",
+            DEFAULT_HOST,
+            "--port",
+            str(self.port),
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--log-level",
+            "warning",
+            # ``tool_choice=required`` / ``tool_choice={function}`` becomes a
+            # json_schema constraint on the wire; TokenSpeed only honors that
+            # when a grammar backend is configured (default is ``None``).
+            "--grammar-backend",
+            "xgrammar",
+            # Output logprobs default OFF in tokenspeed; flip them on so
+            # ``logprobs=True`` requests get real per-token data back.
+            "--enable-output-logprobs",
+        ]
+        extra = spec.get("tokenspeed_args", [])
         if extra:
             cmd.extend(extra)
         return cmd

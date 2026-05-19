@@ -1,0 +1,13 @@
+name: 'Setup TokenSpeed Backend'
+description: 'Create Python venv and install TokenSpeed (engine + kernel + scheduler) from source.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python venv
+      shell: bash
+      run: bash scripts/ci_setup_python_venv.sh
+
+    - name: Install TokenSpeed
+      shell: bash
+      run: bash scripts/ci_install_tokenspeed.sh

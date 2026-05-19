@@ -18,13 +18,13 @@ API_KEY = "not-used"
 
 
 # =============================================================================
-# Enable Thinking Tests (Qwen 30B)
+# Enable Thinking Tests (Qwen3)
 # =============================================================================
 
 
-@pytest.mark.engine("sglang", "vllm", "trtllm")
+@pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
 @pytest.mark.gpu(1)
-@pytest.mark.model("Qwen/Qwen3-30B-A3B")
+@pytest.mark.model("Qwen/Qwen3-4B")
 @pytest.mark.gateway(extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 @pytest.mark.parametrize("api_client", ["openai", "smg"], indirect=True)
