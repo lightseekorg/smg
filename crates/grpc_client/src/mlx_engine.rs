@@ -96,9 +96,6 @@ impl MlxEngineClient {
     //   - Parallel samples (n > 1) — mlx-lm server doesn't expose this
     //   - response_format — same as constrained decoding
     //
-    // Servicer limitations (fixable without mlx-lm changes):
-    //   - String stop sequences: supported in chat and completion pipelines.
-    //     Messages and Generate pipelines still reject string stops (see reject_stop_strings).
     // Track upstream: https://github.com/ml-explore/mlx-lm
 
     fn reject_constraint(constraint: Option<&(String, String)>) -> Result<(), String> {
@@ -113,13 +110,6 @@ impl MlxEngineClient {
     fn reject_n(n: Option<u32>) -> Result<(), String> {
         if n.is_some_and(|n| n > 1) {
             return Err("MLX backend does not support n > 1 (parallel samples)".to_string());
-        }
-        Ok(())
-    }
-
-    fn reject_stop_strings(has_stop_strings: bool) -> Result<(), String> {
-        if has_stop_strings {
-            return Err("MLX backend does not support string stop sequences".to_string());
         }
         Ok(())
     }
@@ -216,7 +206,6 @@ impl MlxEngineClient {
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
-        Self::reject_stop_strings(body.stop_sequences.as_ref().is_some_and(|s| !s.is_empty()))?;
 
         let sampling_params = Self::build_sampling_params_from_messages(body);
         Ok(Self::make_generate_request(
@@ -242,7 +231,6 @@ impl MlxEngineClient {
     ) -> Result<proto::GenerateRequest, String> {
         if let Some(ref sp) = body.sampling_params {
             Self::reject_n(sp.n)?;
-            Self::reject_stop_strings(sp.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
             Self::reject_if_any_constraint(
                 sp.json_schema.as_ref(),
                 sp.regex.as_ref(),
@@ -274,7 +262,6 @@ impl MlxEngineClient {
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
         Self::reject_constraint(constraint.as_ref())?;
-        Self::reject_stop_strings(body.stop.as_ref().is_some_and(|s| !s.is_empty()))?;
 
         let sampling_params = Self::build_sampling_params_from_responses(body);
         Ok(Self::make_generate_request(

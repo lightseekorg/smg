@@ -881,10 +881,9 @@ impl ProtoGenerateComplete {
     /// - MatchedTokenId → Number
     /// - MatchedStopStr → String
     /// - None → None
-    #[expect(
-        clippy::unreachable,
-        reason = "MLX must use matched_stop_json_with_context"
-    )]
+    ///
+    /// For MLX, returns the raw token ID (no string reverse-mapping). Use
+    /// `matched_stop_json_with_context` when the original stop strings are available.
     pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
         macro_rules! convert {
             ($oneof:expr, $token_id:path, $stop_str:path) => {
@@ -918,8 +917,9 @@ impl ProtoGenerateComplete {
                 TokenSpeedMatchedStop::MatchedTokenId,
                 TokenSpeedMatchedStop::MatchedStopStr
             ),
-            // MLX requires request context to resolve the token ID; use matched_stop_json_with_context.
-            Self::Mlx(_) => unreachable!("matched_stop_json called for MLX backend"),
+            // MLX only carries a token ID; callers with stop string context should use
+            // matched_stop_json_with_context for proper string reverse-mapping.
+            Self::Mlx(c) => c.matched_stop_token_id.map(|id| serde_json::Value::Number(id.into())),
         }
     }
 

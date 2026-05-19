@@ -11,7 +11,7 @@ use llm_tokenizer::{
 };
 use openai_protocol::{
     chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue, Usage},
+    common::{FunctionCallResponse, StringOrArray, ToolCall, ToolChoice, ToolChoiceValue, Usage},
     completion::{CompletionChoice, CompletionRequest, CompletionResponse},
     generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
     messages::{self, CreateMessageRequest, Message},
@@ -710,7 +710,15 @@ impl ResponseProcessor {
 
         // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
         let finish_reason_str = complete.finish_reason();
-        let matched_stop = complete.matched_stop_json();
+        let stop_for_mlx = messages_request
+            .stop_sequences
+            .as_ref()
+            .map(|v| StringOrArray::Array(v.clone()));
+        let matched_stop = complete.matched_stop_json_with_context(
+            stop_for_mlx.as_ref(),
+            None, // Messages API has no stop_token_ids
+            tokenizer.as_ref(),
+        );
         let stop_sequence = matched_stop.and_then(|v| v.as_str().map(String::from));
 
         let stop_reason = if tool_calls.is_some() || finish_reason_str == "tool_calls" {

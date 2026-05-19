@@ -12,6 +12,7 @@ use crate::routers::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, PreparationOutput, RequestContext, RequestType},
         proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
+        utils,
     },
 };
 
@@ -376,6 +377,35 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     }
                 }
             }
+        }
+
+        // Apply user-provided string stop sequences for MLX backend (single-token only).
+        // Other backends handle string stops natively; this is a no-op for them.
+        let mlx_stop = if matches!(&proto_request, ProtoGenerateRequest::Mlx(_)) {
+            match &ctx.input.request_type {
+                RequestType::Chat(request) => modified_request
+                    .as_deref()
+                    .unwrap_or_else(|| request.as_ref())
+                    .stop
+                    .clone(),
+                RequestType::Responses(request) => request.stop.clone(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(ref stop) = mlx_stop {
+            // Tokenizer not loaded by Harmony preparation; load it here on demand.
+            if ctx.state.tokenizer.is_none() {
+                let tok = utils::resolve_tokenizer(ctx, "HarmonyRequestBuildingStage::execute")
+                    .map_err(|e| *e)?;
+                ctx.state.tokenizer = Some(tok);
+            }
+            helpers::apply_mlx_stop_sequences(
+                &mut proto_request,
+                Some(stop),
+                ctx.state.tokenizer.as_deref(),
+            )?;
         }
 
         if self.inject_pd_metadata {
