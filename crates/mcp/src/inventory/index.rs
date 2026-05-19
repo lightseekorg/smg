@@ -13,7 +13,10 @@ use dashmap::DashMap;
 use tracing::warn;
 
 use super::types::{QualifiedToolName, ToolCategory, ToolEntry};
-use crate::core::config::{Prompt, RawResource, Tool};
+use crate::core::{
+    config::{Prompt, RawResource, Tool},
+    pool::PoolKey,
+};
 
 /// Cached prompt with metadata
 #[derive(Clone)]
@@ -31,8 +34,13 @@ pub(crate) struct CachedResource {
 
 pub struct ToolInventory {
     tools_by_qualified: DashMap<QualifiedToolName, ToolEntry>,
-    tools_by_simple_name: DashMap<String, Vec<QualifiedToolName>>,
+    /// Tools indexed by simple (unqualified) name. Multiple servers may register
+    /// the same simple name; the `HashSet` enforces structural deduplication so
+    /// repeated re-discovery cannot create duplicate entries even if a caller
+    /// bypasses the explicit dedup check in `insert_entry`.
+    tools_by_simple_name: DashMap<String, HashSet<QualifiedToolName>>,
     tools_by_server: DashMap<String, HashSet<String>>,
+    tools_by_pool: DashMap<PoolKey, HashSet<String>>,
     tools_by_category: DashMap<ToolCategory, HashSet<QualifiedToolName>>,
     aliases: DashMap<String, QualifiedToolName>,
     prompts: DashMap<String, CachedPrompt>,
@@ -45,6 +53,7 @@ impl ToolInventory {
             tools_by_qualified: DashMap::new(),
             tools_by_simple_name: DashMap::new(),
             tools_by_server: DashMap::new(),
+            tools_by_pool: DashMap::new(),
             tools_by_category: DashMap::new(),
             aliases: DashMap::new(),
             prompts: DashMap::new(),
@@ -60,12 +69,13 @@ impl Default for ToolInventory {
 }
 
 impl ToolInventory {
-    /// Returns first registered tool on collision. Use `get_tool_qualified()` for specific server.
+    /// Returns an arbitrary registered tool on collision (HashSet iteration order).
+    /// Use `get_tool_qualified()` to target a specific server deterministically.
     pub fn get_tool(&self, tool_name: &str) -> Option<(String, Tool)> {
         let qualified_names = self.tools_by_simple_name.get(tool_name)?;
-        let qualified = qualified_names.first()?;
+        let qualified = qualified_names.iter().next()?.clone();
         self.tools_by_qualified
-            .get(qualified)
+            .get(&qualified)
             .map(|entry| (entry.server_key().to_string(), entry.tool.clone()))
     }
 
@@ -81,6 +91,16 @@ impl ToolInventory {
     pub fn insert_tool(&self, _tool_name: String, server_key: String, tool: Tool) {
         let entry = ToolEntry::from_server_tool(&server_key, tool);
         self.insert_entry(entry);
+    }
+
+    /// Insert a tool discovered for a specific dynamic pool identity.
+    pub fn insert_pool_entry(&self, pool_key: &PoolKey, entry: ToolEntry) {
+        let tool_name = entry.qualified_name.tool_name().to_string();
+        self.insert_entry(entry);
+        self.tools_by_pool
+            .entry(pool_key.clone())
+            .or_default()
+            .insert(tool_name);
     }
 
     /// Insert a full tool entry with all metadata.
@@ -109,15 +129,11 @@ impl ToolInventory {
         // Insert into primary index
         self.tools_by_qualified.insert(qualified.clone(), entry);
 
-        // Update simple name index
+        // Update simple name index — HashSet guarantees deduplication.
         self.tools_by_simple_name
             .entry(tool_name.clone())
-            .and_modify(|v| {
-                if !v.contains(&qualified) {
-                    v.push(qualified.clone());
-                }
-            })
-            .or_insert_with(|| vec![qualified]);
+            .or_default()
+            .insert(qualified);
 
         // Update server index
         self.tools_by_server
@@ -328,8 +344,21 @@ impl ToolInventory {
             .collect()
     }
 
+    /// True if at least one tool is currently registered for this exact pool identity.
+    ///
+    /// Used as a defensive invariant by the dynamic-connect fast path: the pool
+    /// is keyed by `(url, auth_hash, tenant_id)`, so this check must not let a
+    /// sibling pool entry's inventory stand in for the current entry.
+    pub fn has_server_tools(&self, pool_key: &PoolKey) -> bool {
+        self.tools_by_pool
+            .get(pool_key)
+            .is_some_and(|tools| !tools.is_empty())
+    }
+
     /// Clear all cached items for a server. Uses server index for O(tools_per_server) removal.
     pub fn clear_server_tools(&self, server_key: &str) {
+        self.tools_by_pool.retain(|key, _| key.url != server_key);
+
         if let Some((_, tool_names)) = self.tools_by_server.remove(server_key) {
             for tool_name in tool_names {
                 let qualified = QualifiedToolName::new(server_key, &tool_name);
@@ -344,7 +373,7 @@ impl ToolInventory {
 
                 // Remove from simple name index
                 if let Some(mut entry) = self.tools_by_simple_name.get_mut(&tool_name) {
-                    entry.retain(|q| q != &qualified);
+                    entry.remove(&qualified);
                 }
                 self.tools_by_simple_name
                     .remove_if(&tool_name, |_, v| v.is_empty());
@@ -379,6 +408,7 @@ impl ToolInventory {
         self.tools_by_qualified.clear();
         self.tools_by_simple_name.clear();
         self.tools_by_server.clear();
+        self.tools_by_pool.clear();
         self.tools_by_category.clear();
         self.aliases.clear();
         self.prompts.clear();
@@ -540,6 +570,23 @@ mod tests {
     }
 
     #[test]
+    fn test_has_server_tools_is_pool_scoped() {
+        let inventory = ToolInventory::new();
+        let pool_key = PoolKey::new("server1", 1, None);
+        let sibling_key = PoolKey::new("server1", 2, None);
+        let entry = ToolEntry::from_server_tool("server1", create_test_tool("tool1"));
+
+        inventory.insert_pool_entry(&pool_key, entry);
+
+        assert!(inventory.has_server_tools(&pool_key));
+        assert!(!inventory.has_server_tools(&sibling_key));
+
+        inventory.clear_server_tools("server1");
+
+        assert!(!inventory.has_server_tools(&pool_key));
+    }
+
+    #[test]
     fn test_prompt_operations() {
         let inventory = ToolInventory::new();
         let prompt = create_test_prompt("test_prompt");
@@ -687,9 +734,13 @@ mod tests {
         // Both stored (counts total tools including collisions)
         assert_eq!(inventory.counts().0, 2);
 
-        // Simple lookup returns first registered
+        // Simple lookup returns one of the registered servers (HashSet iteration
+        // order is unspecified; callers must use the qualified API for determinism).
         let (server, _) = inventory.get_tool("read_file").unwrap();
-        assert_eq!(server, "server-a");
+        assert!(
+            server == "server-a" || server == "server-b",
+            "unexpected server returned from simple lookup: {server}"
+        );
 
         // Qualified lookup can access both
         assert!(inventory
@@ -722,15 +773,20 @@ mod tests {
             create_test_tool("read_file"),
         );
 
-        // Initial state: 2 tools, simple lookup returns server-a
+        // Initial state: 2 tools, simple lookup returns one of the registered
+        // servers (HashSet iteration order is unspecified — use the qualified
+        // API to assert deterministically).
         assert_eq!(inventory.counts().0, 2);
         let (server, _) = inventory.get_tool("read_file").unwrap();
-        assert_eq!(server, "server-a");
+        assert!(
+            server == "server-a" || server == "server-b",
+            "unexpected server before clear: {server}"
+        );
 
         // Clear server-a
         inventory.clear_server_tools("server-a");
 
-        // After clear: 1 tool, simple lookup should return server-b
+        // After clear: 1 tool, simple lookup must return server-b (only survivor).
         assert_eq!(inventory.counts().0, 1);
         let (server, _) = inventory.get_tool("read_file").unwrap();
         assert_eq!(server, "server-b");
