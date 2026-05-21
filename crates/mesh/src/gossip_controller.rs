@@ -30,11 +30,9 @@ use super::{
 use crate::{
     metrics,
     transport::{
-        chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
-        limits::{
-            DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES,
-            STREAM_IDLE_TIMEOUT,
-        },
+        chunking::dispatch_stream_batch,
+        limits::{MAX_MESSAGE_SIZE, STREAM_IDLE_TIMEOUT},
+        sync_stream_messages::{build_heartbeat, build_peer_stream_batches, wrap_stream_batch},
     },
 };
 
@@ -417,12 +415,8 @@ impl GossipController {
                 let sequence = Arc::new(AtomicU64::new(0));
 
                 // Send initial heartbeat
-                let heartbeat = StreamMessage {
-                    message_type: StreamMessageType::Heartbeat as i32,
-                    payload: None,
-                    sequence: sequence.fetch_add(1, Ordering::Relaxed),
-                    peer_id: self_name.clone(),
-                };
+                let heartbeat =
+                    build_heartbeat(sequence.fetch_add(1, Ordering::Relaxed), self_name.clone());
                 if tx.send(heartbeat).await.is_err() {
                     log::warn!("Failed to send initial heartbeat to {}", peer_name);
                     return;
@@ -449,10 +443,9 @@ impl GossipController {
                             let round_start = Instant::now();
 
                             // Stream batches: drain-portion (broadcast) +
-                            // targeted entries addressed to this peer. Each
-                            // entry is chunked if oversized. On channel
-                            // full, the round's stream traffic for this
-                            // peer is dropped — no retry (at-most-once).
+                            // targeted entries addressed to this peer. On
+                            // channel full, the round's stream traffic for
+                            // this peer is dropped — no retry (at-most-once).
                             // Application regenerates on its own retry cycle.
                             let stream_batch = stream_batch_handle.read().clone();
                             let fresh_batch = last_stream_batch
@@ -460,60 +453,32 @@ impl GossipController {
                                 .is_none_or(|last| !Arc::ptr_eq(last, &stream_batch));
                             if fresh_batch {
                                 last_stream_batch = Some(stream_batch.clone());
-                                let mut entries = Vec::new();
-                                // Drain entries are broadcast: every peer emits.
-                                // Generation is per-value so concurrent publishes
-                                // to the same key get distinct tags.
-                                for (key, value) in &stream_batch.drain_entries {
-                                    entries.extend(chunk_value(
-                                        key.clone(),
-                                        next_generation(),
-                                        value.clone(),
-                                        MAX_STREAM_CHUNK_BYTES,
-                                    ));
-                                }
-                                // Targeted entries: only those addressed to this peer.
-                                for (target, key, value) in &stream_batch.targeted_entries {
-                                    if target == &peer_name_incremental {
-                                        entries.extend(chunk_value(
-                                            key.clone(),
-                                            next_generation(),
-                                            value.clone(),
-                                            MAX_STREAM_CHUNK_BYTES,
-                                        ));
-                                    }
-                                }
-                                if !entries.is_empty() {
-                                    for batch in build_stream_batches(
-                                        entries,
-                                        DEFAULT_MAX_CHUNKS_PER_BATCH,
-                                        MAX_STREAM_CHUNK_BYTES,
-                                    ) {
-                                        let msg = StreamMessage {
-                                            message_type: StreamMessageType::StreamBatch as i32,
-                                            payload: Some(StreamPayload::StreamBatch(batch)),
-                                            sequence: shared_sequence
-                                                .fetch_add(1, Ordering::Relaxed),
-                                            peer_id: self_name_incremental.clone(),
-                                        };
-                                        match tx_incremental.try_send(msg) {
-                                            Ok(()) => {}
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                log::debug!(
-                                                    peer = %peer_name_incremental,
-                                                    "stream batch dropped on backpressure"
-                                                );
-                                                // TODO(metrics): bump
-                                                // stream_dropped_on_backpressure
-                                                break;
-                                            }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                log::warn!(
-                                                    peer = %peer_name_incremental,
-                                                    "stream sender: channel closed, stopping"
-                                                );
-                                                return;
-                                            }
+                                for batch in build_peer_stream_batches(
+                                    &stream_batch,
+                                    &peer_name_incremental,
+                                ) {
+                                    let msg = wrap_stream_batch(
+                                        batch,
+                                        shared_sequence.fetch_add(1, Ordering::Relaxed),
+                                        self_name_incremental.clone(),
+                                    );
+                                    match tx_incremental.try_send(msg) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            log::debug!(
+                                                peer = %peer_name_incremental,
+                                                "stream batch dropped on backpressure"
+                                            );
+                                            // TODO(metrics): bump
+                                            // stream_dropped_on_backpressure
+                                            break;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            log::warn!(
+                                                peer = %peer_name_incremental,
+                                                "stream sender: channel closed, stopping"
+                                            );
+                                            return;
                                         }
                                     }
                                 }
@@ -544,13 +509,10 @@ impl GossipController {
                             match msg.message_type() {
                                 StreamMessageType::Heartbeat => {
                                     log::trace!("Received heartbeat from {}", peer_name);
-                                    // Send heartbeat back
-                                    let heartbeat = StreamMessage {
-                                        message_type: StreamMessageType::Heartbeat as i32,
-                                        payload: None,
-                                        sequence: sequence.fetch_add(1, Ordering::Relaxed),
-                                        peer_id: self_name.clone(),
-                                    };
+                                    let heartbeat = build_heartbeat(
+                                        sequence.fetch_add(1, Ordering::Relaxed),
+                                        self_name.clone(),
+                                    );
                                     if tx.send(heartbeat).await.is_err() {
                                         log::warn!("Failed to send heartbeat to {}", peer_name);
                                         break;

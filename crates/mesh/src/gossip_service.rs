@@ -25,11 +25,9 @@ use super::{
         try_ping, ClusterState,
     },
     transport::{
-        chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
-        limits::{
-            DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES,
-            STREAM_IDLE_TIMEOUT,
-        },
+        chunking::dispatch_stream_batch,
+        limits::{MAX_MESSAGE_SIZE, STREAM_IDLE_TIMEOUT},
+        sync_stream_messages::{build_heartbeat, build_peer_stream_batches, wrap_stream_batch},
     },
 };
 
@@ -250,51 +248,14 @@ impl Gossip for GossipService {
                     }
                     last_stream_batch = Some(stream_batch.clone());
 
-                    let peer_for_targeted = learned_peer_sender.read().clone();
-                    let has_targeted = peer_for_targeted.as_ref().is_some_and(|p| {
-                        stream_batch.targeted_entries.iter().any(|(t, _, _)| t == p)
-                    });
-                    if stream_batch.drain_entries.is_empty() && !has_targeted {
-                        continue;
-                    }
-
-                    let mut entries = Vec::new();
-                    for (key, value) in &stream_batch.drain_entries {
-                        entries.extend(chunk_value(
-                            key.clone(),
-                            next_generation(),
-                            value.clone(),
-                            MAX_STREAM_CHUNK_BYTES,
-                        ));
-                    }
-                    if let Some(ref peer) = peer_for_targeted {
-                        for (target, key, value) in &stream_batch.targeted_entries {
-                            if target == peer {
-                                entries.extend(chunk_value(
-                                    key.clone(),
-                                    next_generation(),
-                                    value.clone(),
-                                    MAX_STREAM_CHUNK_BYTES,
-                                ));
-                            }
-                        }
-                    }
-                    if entries.is_empty() {
-                        continue;
-                    }
-
-                    for batch in build_stream_batches(
-                        entries,
-                        DEFAULT_MAX_CHUNKS_PER_BATCH,
-                        MAX_STREAM_CHUNK_BYTES,
-                    ) {
+                    // Empty string disables targeted-entry inclusion when
+                    // the inbound peer identity hasn't been learned yet —
+                    // drain entries still go out (broadcast).
+                    let peer_for_targeted = learned_peer_sender.read().clone().unwrap_or_default();
+                    for batch in build_peer_stream_batches(&stream_batch, &peer_for_targeted) {
                         sequence_counter += 1;
-                        let msg = StreamMessage {
-                            message_type: StreamMessageType::StreamBatch as i32,
-                            payload: Some(gossip::stream_message::Payload::StreamBatch(batch)),
-                            sequence: sequence_counter,
-                            peer_id: self_name_sender.clone(),
-                        };
+                        let msg =
+                            wrap_stream_batch(batch, sequence_counter, self_name_sender.clone());
                         match tx_sender.try_send(Ok(msg)) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -363,12 +324,7 @@ impl Gossip for GossipService {
 
                 match msg.message_type() {
                     StreamMessageType::Heartbeat => {
-                        let heartbeat = StreamMessage {
-                            message_type: StreamMessageType::Heartbeat as i32,
-                            payload: None,
-                            sequence,
-                            peer_id: self_name.clone(),
-                        };
+                        let heartbeat = build_heartbeat(sequence, self_name.clone());
                         if tx.send(Ok(heartbeat)).await.is_err() {
                             break;
                         }
