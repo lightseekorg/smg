@@ -248,16 +248,12 @@ impl Gossip for GossipService {
                     }
                     last_stream_batch = Some(stream_batch.clone());
 
-                    // Empty string disables targeted-entry inclusion when
-                    // the inbound peer identity hasn't been learned yet —
-                    // drain entries still go out (broadcast). Build the
-                    // batches while holding the read guard (sync, no
-                    // awaits) so we don't allocate an owned String per
-                    // tick just to drop it again.
+                    // `peer_id = ""` => peer not yet learned; drain still
+                    // emits, targeted skipped. Hold the guard across the
+                    // sync helper call to avoid a per-tick String alloc.
                     let batches = {
                         let guard = learned_peer_sender.read();
-                        let peer_for_targeted = guard.as_deref().unwrap_or("");
-                        build_peer_stream_batches(&stream_batch, peer_for_targeted)
+                        build_peer_stream_batches(&stream_batch, guard.as_deref().unwrap_or(""))
                     };
                     for batch in batches {
                         sequence_counter += 1;
