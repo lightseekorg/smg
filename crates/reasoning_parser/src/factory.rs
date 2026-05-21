@@ -9,7 +9,8 @@ use tokio::sync::Mutex;
 use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
-        MiniMaxParser, NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
+        MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser,
+        Step3Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
@@ -176,19 +177,10 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(ParserConfig::default()))
         });
 
-        // Passthrough parser: returns all text as normal content with no
+        // Passthrough parser: forwards all text as normal content with no
         // reasoning extraction. Used both as the fallback for unknown models
-        // and as an explicit `--reasoning-parser passthrough` option. Empty
-        // think tokens trigger the byte-faithful passthrough path in
-        // BaseReasoningParser (no trim).
-        registry.register_parser("passthrough", || {
-            let config = ParserConfig {
-                think_start_token: String::new(),
-                think_end_token: String::new(),
-                ..Default::default()
-            };
-            Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))
-        });
+        // and as an explicit `--reasoning-parser passthrough` option.
+        registry.register_parser("passthrough", || Box::new(PassthroughParser::new()));
 
         // Register DeepSeek-R1 parser (starts with in_reasoning=true)
         registry.register_parser("deepseek_r1", || Box::new(DeepSeekR1Parser::new()));
