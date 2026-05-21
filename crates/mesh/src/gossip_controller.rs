@@ -416,7 +416,7 @@ impl GossipController {
 
                 // Send initial heartbeat
                 let heartbeat =
-                    build_heartbeat(sequence.fetch_add(1, Ordering::Relaxed), self_name.clone());
+                    build_heartbeat(sequence.fetch_add(1, Ordering::Relaxed), &self_name);
                 if tx.send(heartbeat).await.is_err() {
                     log::warn!("Failed to send initial heartbeat to {}", peer_name);
                     return;
@@ -460,7 +460,7 @@ impl GossipController {
                                     let msg = wrap_stream_batch(
                                         batch,
                                         shared_sequence.fetch_add(1, Ordering::Relaxed),
-                                        self_name_incremental.clone(),
+                                        &self_name_incremental,
                                     );
                                     match tx_incremental.try_send(msg) {
                                         Ok(()) => {}
@@ -511,7 +511,7 @@ impl GossipController {
                                     log::trace!("Received heartbeat from {}", peer_name);
                                     let heartbeat = build_heartbeat(
                                         sequence.fetch_add(1, Ordering::Relaxed),
-                                        self_name.clone(),
+                                        &self_name,
                                     );
                                     if tx.send(heartbeat).await.is_err() {
                                         log::warn!("Failed to send heartbeat to {}", peer_name);

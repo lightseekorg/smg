@@ -25,13 +25,16 @@ use crate::{
 ///
 /// `drain_entries` are broadcast: every peer's emitter includes
 /// them. `targeted_entries` are only included when their target
-/// matches `peer_id` — pass `""` to skip all targeted entries
-/// (e.g. when the inbound peer identity is not yet learned).
+/// matches `peer_id` AND `peer_id` is non-empty — pass `""` to
+/// disable targeted entries entirely (e.g. when the inbound peer
+/// identity is not yet learned). The explicit empty-check guards
+/// against the degenerate `target == "" == peer_id` match.
 /// Oversized values are split via [`chunk_value`]; the returned
 /// batches respect the `DEFAULT_MAX_CHUNKS_PER_BATCH` /
 /// `MAX_STREAM_CHUNK_BYTES` caps.
 pub fn build_peer_stream_batches(round_batch: &RoundBatch, peer_id: &str) -> Vec<StreamBatch> {
-    let mut entries = Vec::new();
+    let mut entries =
+        Vec::with_capacity(round_batch.drain_entries.len() + round_batch.targeted_entries.len());
     for (key, value) in &round_batch.drain_entries {
         entries.extend(chunk_value(
             key.clone(),
@@ -40,14 +43,16 @@ pub fn build_peer_stream_batches(round_batch: &RoundBatch, peer_id: &str) -> Vec
             MAX_STREAM_CHUNK_BYTES,
         ));
     }
-    for (target, key, value) in &round_batch.targeted_entries {
-        if target == peer_id {
-            entries.extend(chunk_value(
-                key.clone(),
-                next_generation(),
-                value.clone(),
-                MAX_STREAM_CHUNK_BYTES,
-            ));
+    if !peer_id.is_empty() {
+        for (target, key, value) in &round_batch.targeted_entries {
+            if target == peer_id {
+                entries.extend(chunk_value(
+                    key.clone(),
+                    next_generation(),
+                    value.clone(),
+                    MAX_STREAM_CHUNK_BYTES,
+                ));
+            }
         }
     }
     if entries.is_empty() {
@@ -61,22 +66,22 @@ pub fn build_peer_stream_batches(round_batch: &RoundBatch, peer_id: &str) -> Vec
 }
 
 /// Wrap a `StreamBatch` in a `StreamMessage` envelope.
-pub fn wrap_stream_batch(batch: StreamBatch, sequence: u64, self_name: String) -> StreamMessage {
+pub fn wrap_stream_batch(batch: StreamBatch, sequence: u64, self_name: &str) -> StreamMessage {
     StreamMessage {
         message_type: StreamMessageType::StreamBatch as i32,
         payload: Some(StreamPayload::StreamBatch(batch)),
         sequence,
-        peer_id: self_name,
+        peer_id: self_name.to_owned(),
     }
 }
 
 /// Build a heartbeat `StreamMessage` (no payload, message_type = Heartbeat).
-pub fn build_heartbeat(sequence: u64, self_name: String) -> StreamMessage {
+pub fn build_heartbeat(sequence: u64, self_name: &str) -> StreamMessage {
     StreamMessage {
         message_type: StreamMessageType::Heartbeat as i32,
         payload: None,
         sequence,
-        peer_id: self_name,
+        peer_id: self_name.to_owned(),
     }
 }
 
@@ -151,9 +156,20 @@ mod tests {
     }
 
     #[test]
+    fn empty_peer_id_skips_target_with_empty_string() {
+        // Defensive: a targeted entry whose `target` is the empty
+        // string MUST NOT match the "peer unknown" sentinel
+        // (`peer_id = ""`). Without the explicit `is_empty` guard the
+        // `target == peer_id` comparison would let it through.
+        let rb = round_batch_with(vec![], vec![("", "tree:req:bad", b"oops".as_slice())]);
+        let batches = build_peer_stream_batches(&rb, "");
+        assert!(batches.is_empty(), "empty peer_id must skip all targeted");
+    }
+
+    #[test]
     fn wrap_stream_batch_envelope_shape() {
         let batch = StreamBatch::default();
-        let msg = wrap_stream_batch(batch, 42, "node-1".to_string());
+        let msg = wrap_stream_batch(batch, 42, "node-1");
         assert_eq!(msg.message_type, StreamMessageType::StreamBatch as i32);
         assert_eq!(msg.sequence, 42);
         assert_eq!(msg.peer_id, "node-1");
@@ -162,7 +178,7 @@ mod tests {
 
     #[test]
     fn build_heartbeat_envelope_shape() {
-        let msg = build_heartbeat(7, "node-2".to_string());
+        let msg = build_heartbeat(7, "node-2");
         assert_eq!(msg.message_type, StreamMessageType::Heartbeat as i32);
         assert_eq!(msg.sequence, 7);
         assert_eq!(msg.peer_id, "node-2");

@@ -250,12 +250,18 @@ impl Gossip for GossipService {
 
                     // Empty string disables targeted-entry inclusion when
                     // the inbound peer identity hasn't been learned yet —
-                    // drain entries still go out (broadcast).
-                    let peer_for_targeted = learned_peer_sender.read().clone().unwrap_or_default();
-                    for batch in build_peer_stream_batches(&stream_batch, &peer_for_targeted) {
+                    // drain entries still go out (broadcast). Build the
+                    // batches while holding the read guard (sync, no
+                    // awaits) so we don't allocate an owned String per
+                    // tick just to drop it again.
+                    let batches = {
+                        let guard = learned_peer_sender.read();
+                        let peer_for_targeted = guard.as_deref().unwrap_or("");
+                        build_peer_stream_batches(&stream_batch, peer_for_targeted)
+                    };
+                    for batch in batches {
                         sequence_counter += 1;
-                        let msg =
-                            wrap_stream_batch(batch, sequence_counter, self_name_sender.clone());
+                        let msg = wrap_stream_batch(batch, sequence_counter, &self_name_sender);
                         match tx_sender.try_send(Ok(msg)) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -324,7 +330,7 @@ impl Gossip for GossipService {
 
                 match msg.message_type() {
                     StreamMessageType::Heartbeat => {
-                        let heartbeat = build_heartbeat(sequence, self_name.clone());
+                        let heartbeat = build_heartbeat(sequence, &self_name);
                         if tx.send(Ok(heartbeat)).await.is_err() {
                             break;
                         }
