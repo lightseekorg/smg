@@ -50,6 +50,13 @@ impl ReasoningParser for BaseReasoningParser {
             return Err(ParseError::BufferOverflow(text.len()));
         }
 
+        // Passthrough: no start token configured means there's no reasoning
+        // block to detect — forward the input byte-faithfully as normal text
+        // (skipping the trim that's only correct inside a real reasoning block).
+        if self.config.think_start_token.is_empty() {
+            return Ok(ParserResult::normal(text.to_string()));
+        }
+
         let in_reasoning = self.in_reasoning || text.contains(&self.config.think_start_token);
 
         if !in_reasoning {
@@ -87,6 +94,12 @@ impl ReasoningParser for BaseReasoningParser {
         // Check if adding this text would exceed buffer limit
         if self.buffer.len() + text.len() > self.config.max_buffer_size {
             return Err(ParseError::BufferOverflow(self.buffer.len() + text.len()));
+        }
+
+        // Passthrough: no start token configured means there's no reasoning
+        // block to detect — forward the chunk byte-faithfully as normal text.
+        if self.config.think_start_token.is_empty() {
+            return Ok(ParserResult::normal(text.to_string()));
         }
 
         // Incrementally parse the streaming text
@@ -367,5 +380,56 @@ mod tests {
             }
             _ => panic!("Expected BufferOverflow error"),
         }
+    }
+
+    fn create_passthrough_parser() -> BaseReasoningParser {
+        let config = ParserConfig {
+            think_start_token: String::new(),
+            think_end_token: String::new(),
+            ..Default::default()
+        };
+        BaseReasoningParser::new(config)
+    }
+
+    #[test]
+    fn test_passthrough_preserves_whitespace_non_streaming() {
+        // Empty think tokens take the passthrough fast-path: input must be
+        // forwarded byte-for-byte, with no trim of leading/trailing whitespace
+        // and no leakage into reasoning_text.
+        let mut parser = create_passthrough_parser();
+        let result = parser
+            .detect_and_parse_reasoning("  leading and trailing  \n")
+            .unwrap();
+        assert_eq!(result.normal_text, "  leading and trailing  \n");
+        assert_eq!(result.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_passthrough_keeps_think_tags_in_normal_text() {
+        // When configured as passthrough, even literal <think>/</think> markers
+        // in the input must not be interpreted as reasoning delimiters.
+        let mut parser = create_passthrough_parser();
+        let result = parser
+            .detect_and_parse_reasoning("<think>cot</think>answer")
+            .unwrap();
+        assert_eq!(result.normal_text, "<think>cot</think>answer");
+        assert_eq!(result.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_passthrough_streaming_preserves_whitespace() {
+        let mut parser = create_passthrough_parser();
+
+        let r1 = parser
+            .parse_reasoning_streaming_incremental("  hello")
+            .unwrap();
+        assert_eq!(r1.normal_text, "  hello");
+        assert_eq!(r1.reasoning_text, "");
+
+        let r2 = parser
+            .parse_reasoning_streaming_incremental(" world  \n")
+            .unwrap();
+        assert_eq!(r2.normal_text, " world  \n");
+        assert_eq!(r2.reasoning_text, "");
     }
 }

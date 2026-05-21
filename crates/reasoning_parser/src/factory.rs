@@ -178,14 +178,14 @@ impl ParserFactory {
 
         // Passthrough parser: returns all text as normal content with no
         // reasoning extraction. Used both as the fallback for unknown models
-        // and as an explicit `--reasoning-parser passthrough` option.
+        // and as an explicit `--reasoning-parser passthrough` option. Empty
+        // think tokens trigger the byte-faithful passthrough path in
+        // BaseReasoningParser (no trim).
         registry.register_parser("passthrough", || {
             let config = ParserConfig {
                 think_start_token: String::new(),
                 think_end_token: String::new(),
-                stream_reasoning: true,
-                max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                always_in_reasoning: false,
+                ..Default::default()
             };
             Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))
         });
