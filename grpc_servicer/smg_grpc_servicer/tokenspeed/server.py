@@ -33,8 +33,9 @@ async def serve_grpc(server_args: ServerArgs) -> None:
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=10),
         options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 256),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 256),
+            # VLM pixel_values can be large; raise to gRPC's max (2 GiB - 1).
+            ("grpc.max_send_message_length", (2 << 30) - 1),
+            ("grpc.max_receive_message_length", (2 << 30) - 1),
             # Permissive keepalive so long prefill stalls don't trip GOAWAY.
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
             ("grpc.keepalive_permit_without_calls", True),
@@ -123,8 +124,8 @@ def _wait_and_warmup(
     channel = grpc.insecure_channel(
         grpc_url,
         options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 256),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 256),
+            ("grpc.max_send_message_length", (2 << 30) - 1),
+            ("grpc.max_receive_message_length", (2 << 30) - 1),
         ],
     )
     stub = tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerStub(channel)

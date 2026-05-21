@@ -179,6 +179,7 @@ impl TokenSpeedSchedulerClient {
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
+        multimodal_inputs: Option<tokenspeed_proto::MultimodalInputs>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
         let sampling_params = Self::build_sampling_params_from_chat(body, tool_call_constraint)?;
@@ -193,6 +194,7 @@ impl TokenSpeedSchedulerClient {
             logprob_start_len: Some(-1),
             top_logprobs_num: body.top_logprobs.unwrap_or(0) as i32,
             stream: body.stream,
+            mm_inputs: multimodal_inputs,
             ..Default::default()
         })
     }
@@ -222,6 +224,7 @@ impl TokenSpeedSchedulerClient {
             top_logprobs_num: body.top_logprobs_num.unwrap_or(0),
             token_ids_logprob: body.token_ids_logprob.clone().unwrap_or_default(),
             stream: body.stream,
+            mm_inputs: None,
         })
     }
 
@@ -260,6 +263,7 @@ impl TokenSpeedSchedulerClient {
         body: &CreateMessageRequest,
         processed_text: String,
         token_ids: Vec<u32>,
+        multimodal_inputs: Option<tokenspeed_proto::MultimodalInputs>,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<tokenspeed_proto::GenerateRequest, String> {
         let sampling_params =
@@ -272,6 +276,7 @@ impl TokenSpeedSchedulerClient {
             }),
             sampling_params: Some(sampling_params),
             stream: body.stream.unwrap_or(false),
+            mm_inputs: multimodal_inputs,
             ..Default::default()
         })
     }
