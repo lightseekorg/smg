@@ -145,7 +145,6 @@ def ws_headers():
     """Build the WebSocket connection headers."""
     return {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1",
     }
 
 
