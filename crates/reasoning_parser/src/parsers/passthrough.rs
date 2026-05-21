@@ -59,9 +59,11 @@ mod tests {
             .parse_reasoning_streaming_incremental("  <think>cot")
             .unwrap();
         assert_eq!(r1.normal_text, "  <think>cot");
+        assert_eq!(r1.reasoning_text, "");
         let r2 = parser
             .parse_reasoning_streaming_incremental("</think>answer  \n")
             .unwrap();
         assert_eq!(r2.normal_text, "</think>answer  \n");
+        assert_eq!(r2.reasoning_text, "");
     }
 }
