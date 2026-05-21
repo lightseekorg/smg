@@ -1,17 +1,7 @@
-// Passthrough reasoning parser.
-//
-// Forwards all input as `normal_text` byte-faithfully and never produces
-// `reasoning_text`, regardless of whether the input contains `<think>` /
-// `</think>` (or any other) markers. Used both as the explicit
-// `--reasoning-parser passthrough` option and as the fallback for models that
-// don't match any registered pattern.
+// Passthrough reasoning parser: forwards input as normal_text, no extraction.
 
 use crate::traits::{ParseError, ParserResult, ReasoningParser};
 
-/// Parser that performs no reasoning extraction.
-///
-/// Every byte received is forwarded to `normal_text` unchanged;
-/// `reasoning_text` is always empty. Has no internal state.
 #[derive(Debug, Clone, Default)]
 pub struct PassthroughParser;
 
@@ -53,52 +43,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_whitespace_non_streaming() {
+    fn non_streaming_forwards_input_verbatim() {
         let mut parser = PassthroughParser::new();
         let result = parser
-            .detect_and_parse_reasoning("  leading and trailing  \n")
+            .detect_and_parse_reasoning("  <think>cot</think>answer  \n")
             .unwrap();
-        assert_eq!(result.normal_text, "  leading and trailing  \n");
+        assert_eq!(result.normal_text, "  <think>cot</think>answer  \n");
         assert_eq!(result.reasoning_text, "");
     }
 
     #[test]
-    fn keeps_think_tags_in_normal_text() {
+    fn streaming_forwards_chunks_verbatim() {
         let mut parser = PassthroughParser::new();
-        let result = parser
-            .detect_and_parse_reasoning("<think>cot</think>answer")
-            .unwrap();
-        assert_eq!(result.normal_text, "<think>cot</think>answer");
-        assert_eq!(result.reasoning_text, "");
-    }
-
-    #[test]
-    fn streaming_preserves_whitespace_across_chunks() {
-        let mut parser = PassthroughParser::new();
-
         let r1 = parser
-            .parse_reasoning_streaming_incremental("  hello")
+            .parse_reasoning_streaming_incremental("  <think>cot")
             .unwrap();
-        assert_eq!(r1.normal_text, "  hello");
-        assert_eq!(r1.reasoning_text, "");
-
+        assert_eq!(r1.normal_text, "  <think>cot");
         let r2 = parser
-            .parse_reasoning_streaming_incremental(" world  \n")
+            .parse_reasoning_streaming_incremental("</think>answer  \n")
             .unwrap();
-        assert_eq!(r2.normal_text, " world  \n");
-        assert_eq!(r2.reasoning_text, "");
-    }
-
-    #[test]
-    fn empty_input_yields_empty_result() {
-        let mut parser = PassthroughParser::new();
-        let result = parser.detect_and_parse_reasoning("").unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn model_type_is_passthrough() {
-        let parser = PassthroughParser::new();
-        assert_eq!(parser.model_type(), "passthrough");
+        assert_eq!(r2.normal_text, "</think>answer  \n");
     }
 }

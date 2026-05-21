@@ -177,9 +177,7 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(ParserConfig::default()))
         });
 
-        // Passthrough parser: forwards all text as normal content with no
-        // reasoning extraction. Used both as the fallback for unknown models
-        // and as an explicit `--reasoning-parser passthrough` option.
+        // Passthrough: explicit `--reasoning-parser passthrough` and unknown-model fallback.
         registry.register_parser("passthrough", || Box::new(PassthroughParser::new()));
 
         // Register DeepSeek-R1 parser (starts with in_reasoning=true)
