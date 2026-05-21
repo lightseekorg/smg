@@ -30,9 +30,10 @@ use super::{
 use crate::{
     metrics,
     transport::{
-        chunking::dispatch_stream_batch,
         limits::{MAX_MESSAGE_SIZE, STREAM_IDLE_TIMEOUT},
-        sync_stream_messages::{build_heartbeat, build_peer_stream_batches, wrap_stream_batch},
+        sync_stream::{
+            build_heartbeat, build_peer_stream_batches, dispatch_stream_batch, wrap_stream_batch,
+        },
     },
 };
 

@@ -5,4 +5,4 @@
 pub mod chunk_assembler;
 pub mod chunking;
 pub mod limits;
-pub mod sync_stream_messages;
+pub mod sync_stream;
