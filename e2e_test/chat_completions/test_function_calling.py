@@ -267,8 +267,8 @@ class TestOpenAIServerFunctionCalling:
                         },
                         "required": ["a", "b"],
                     },
-                    # Llama-3.2-1B is flaky in tool call format, so we force it
-                    # with strict mode.
+                    # Llama-3.2-1B is flaky in tool call. It won't always respond with
+                    # parameters unless we set strict.
                     "strict": True,
                 },
             }
