@@ -4,7 +4,7 @@ Tests the gateway's ability to proxy OpenAI Realtime API WebSocket sessions:
 - Session lifecycle (connect, session.created, session.update)
 - Text generation (single-turn and multi-turn conversations)
 - Response cancellation mid-stream
-- Response format validation (session.created, response.done, response.text.delta)
+- Response format validation (session.created, response.done, response.output_text.delta)
 - Error handling (invalid events, missing model, missing auth)
 
 Prerequisites:
@@ -97,7 +97,7 @@ async def _collect_response_text(ws, *, timeout: float = RECV_TIMEOUT) -> str:
         if event is None:
             continue
         etype = event.get("type", "")
-        if etype == "response.text.delta" and event.get("delta"):
+        if etype == "response.output_text.delta" and event.get("delta"):
             parts.append(event["delta"])
         elif etype == "response.done":
             break
@@ -111,7 +111,12 @@ async def _realtime_session(ws_url: str, ws_headers: dict):
     """Connect, wait for session.created, configure text modality, yield ws."""
     async with websockets.connect(ws_url, additional_headers=ws_headers) as ws:
         await _recv_event(ws, event_type="session.created")
-        await ws.send(_make_event("session.update", session={"modalities": ["text"]}))
+        await ws.send(
+            _make_event(
+                "session.update",
+                session={"type": "realtime", "output_modalities": ["text"]},
+            )
+        )
         await _recv_event(ws, event_type="session.updated")
         yield ws
 
@@ -178,11 +183,16 @@ class TestRealtimeWebSocket:
         async def _run():
             async with websockets.connect(ws_url, additional_headers=ws_headers) as ws:
                 await _recv_event(ws, event_type="session.created")
-                await ws.send(_make_event("session.update", session={"modalities": ["text"]}))
+                await ws.send(
+                    _make_event(
+                        "session.update",
+                        session={"type": "realtime", "output_modalities": ["text"]},
+                    )
+                )
                 event = await _recv_event(ws, event_type="session.updated")
                 assert event["type"] == "session.updated"
                 assert "session" in event
-                assert event["session"].get("modalities") == ["text"]
+                assert event["session"].get("output_modalities") == ["text"]
                 logger.info("Session updated successfully")
 
         asyncio.run(_run())
@@ -196,7 +206,7 @@ class TestRealtimeWebSocket:
                 await ws.send(
                     _make_event(
                         "response.create",
-                        response={"modalities": ["text"]},
+                        response={"output_modalities": ["text"]},
                     )
                 )
 
@@ -213,14 +223,18 @@ class TestRealtimeWebSocket:
             async with _realtime_session(ws_url, ws_headers) as ws:
                 # Turn 1
                 await ws.send(_make_user_message("My name is Alice."))
-                await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
+                await ws.send(
+                    _make_event("response.create", response={"output_modalities": ["text"]})
+                )
                 text1 = await _collect_response_text(ws)
                 assert len(text1) > 0
                 logger.info("Turn 1: %s", text1[:100])
 
                 # Turn 2 — model should remember the name
                 await ws.send(_make_user_message("What is my name?"))
-                await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
+                await ws.send(
+                    _make_event("response.create", response={"output_modalities": ["text"]})
+                )
                 text2 = await _collect_response_text(ws)
                 assert "alice" in text2.lower(), f"Expected 'Alice' in response, got: {text2}"
                 logger.info("Turn 2: %s", text2[:100])
@@ -248,10 +262,12 @@ class TestRealtimeWebSocket:
                 await ws.send(
                     _make_user_message("Write a very long essay about the history of computing.")
                 )
-                await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
+                await ws.send(
+                    _make_event("response.create", response={"output_modalities": ["text"]})
+                )
 
                 # Wait for first delta to confirm streaming started
-                await _recv_event(ws, event_type="response.text.delta")
+                await _recv_event(ws, event_type="response.output_text.delta")
 
                 # Cancel mid-stream
                 await ws.send(_make_event("response.cancel"))
@@ -272,15 +288,20 @@ class TestRealtimeWebSocket:
                 # Top-level fields
                 assert "event_id" in event, "Missing event_id"
                 assert event["type"] == "session.created"
-                # Session object
+                # Session object (GA shape)
                 session = event["session"]
                 assert isinstance(session, dict)
                 assert isinstance(session.get("id"), str)
                 assert len(session["id"]) > 0
                 assert isinstance(session.get("model"), str)
-                assert isinstance(session.get("modalities"), list)
-                assert isinstance(session.get("voice"), str)
-                assert isinstance(session.get("turn_detection"), (dict, type(None)))
+                assert isinstance(session.get("output_modalities"), list)
+                # In GA, voice/turn_detection moved under audio.{output,input}.
+                audio = session.get("audio")
+                assert isinstance(audio, dict), f"Expected session.audio dict, got: {audio!r}"
+                output = audio.get("output") or {}
+                assert isinstance(output.get("voice"), str)
+                input_cfg = audio.get("input") or {}
+                assert isinstance(input_cfg.get("turn_detection"), (dict, type(None)))
                 logger.info(
                     "session.created schema OK: id=%s model=%s",
                     session["id"],
@@ -295,7 +316,9 @@ class TestRealtimeWebSocket:
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
                 await ws.send(_make_user_message("Say hi."))
-                await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
+                await ws.send(
+                    _make_event("response.create", response={"output_modalities": ["text"]})
+                )
 
                 event = await _recv_event(ws, event_type="response.done")
                 # Top-level
@@ -308,14 +331,14 @@ class TestRealtimeWebSocket:
                 assert resp.get("status") == "completed"
                 assert isinstance(resp.get("output"), list)
                 assert len(resp["output"]) > 0
-                # Output item
+                # Output item — GA shape uses content type "output_text".
                 item = resp["output"][0]
                 assert item.get("type") == "message"
                 assert item.get("role") == "assistant"
                 assert isinstance(item.get("content"), list)
                 assert len(item["content"]) > 0
                 content = item["content"][0]
-                assert content.get("type") == "text"
+                assert content.get("type") == "output_text"
                 assert isinstance(content.get("text"), str)
                 assert len(content["text"]) > 0
                 # Usage
@@ -332,12 +355,14 @@ class TestRealtimeWebSocket:
         asyncio.run(_run())
 
     def test_response_text_delta_format(self, ws_url, ws_headers):
-        """Validate response.text.delta events have the expected schema."""
+        """Validate response.output_text.delta events have the expected schema."""
 
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
                 await ws.send(_make_user_message("Say hello."))
-                await ws.send(_make_event("response.create", response={"modalities": ["text"]}))
+                await ws.send(
+                    _make_event("response.create", response={"output_modalities": ["text"]})
+                )
 
                 # Collect a few deltas and validate schema
                 delta_count = 0
@@ -350,7 +375,7 @@ class TestRealtimeWebSocket:
                     event = _parse_event(raw)
                     if event is None:
                         continue
-                    if event.get("type") == "response.text.delta":
+                    if event.get("type") == "response.output_text.delta":
                         assert "event_id" in event
                         assert isinstance(event.get("delta"), str)
                         assert len(event["delta"]) > 0
@@ -362,8 +387,8 @@ class TestRealtimeWebSocket:
                     elif event.get("type") == "response.done":
                         break
 
-                assert delta_count > 0, "Expected at least one response.text.delta"
-                logger.info("response.text.delta schema OK: %d deltas received", delta_count)
+                assert delta_count > 0, "Expected at least one response.output_text.delta"
+                logger.info("response.output_text.delta schema OK: %d deltas received", delta_count)
 
         asyncio.run(_run())
 
