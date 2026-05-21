@@ -1,3 +1,34 @@
+//! Inbound `Gossip` gRPC service.
+//!
+//! Implements the proto-defined `Gossip` service (see
+//! `proto/gossip.proto`). For each accepted connection this file
+//! handles both RPCs:
+//!
+//! - **`PingServer` (unary)**: SWIM-style ping with optional embedded
+//!   `state_sync` and `ping_req` indirect-probe forwarding. Used by
+//!   the membership channel; no streaming, no per-call task state.
+//! - **`SyncStream` (bidirectional streaming)**: spawns **two tasks**
+//!   per accepted stream that share a few small pieces of state:
+//!   - **Inbound-handler task** — reads frames the dialer sends.
+//!     The first non-empty `msg.peer_id` is written into
+//!     `learned_peer: Arc<RwLock<Option<String>>>`. Dispatches
+//!     received `StreamBatch` payloads into local `MeshKV` via
+//!     [`dispatch_stream_batch`](crate::transport::sync_stream::dispatch_stream_batch).
+//!     Idle-timeout wraps `incoming.next()` so unhealthy peers don't
+//!     pin the task indefinitely.
+//!   - **Inbound-sender task** — every 1 Hz, reads the shared
+//!     [`RoundBatch`](crate::kv::RoundBatch) slot produced by
+//!     [`gossip_controller`](crate::gossip_controller)'s event loop,
+//!     filters targeted entries for the learned peer, and emits
+//!     `StreamBatch` envelopes on this stream.
+//!
+//! Asymmetry with the outbound side: the dialer (gossip_controller)
+//! knows its counterparty by name at task-spawn time. The acceptor
+//! here does not — the only way to associate the in-flight TCP/gRPC
+//! connection with a logical mesh identity (today, pre-mTLS-derived
+//! identity) is to read the first inbound frame's `peer_id`. That
+//! learning step is what `learned_peer` exists for.
+
 use std::{net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -32,6 +63,14 @@ use super::{
     },
 };
 
+/// Server-side handler for the proto-defined `Gossip` service.
+///
+/// One instance per mesh node. Configured at startup by
+/// `service.rs::MeshServerBuilder` and registered with tonic. Holds
+/// shared references to the cluster state, mTLS config, partition
+/// detector, the per-node `RoundBatch` slot owned by the controller,
+/// and the node's `MeshKV`. See module docs for the per-accepted-
+/// stream task topology spawned by `sync_stream`.
 #[derive(Debug)]
 pub struct GossipService {
     state: ClusterState,
