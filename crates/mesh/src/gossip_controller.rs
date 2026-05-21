@@ -1,3 +1,29 @@
+//! Node-wide gossip event loop and outbound stream management.
+//!
+//! Despite the name, this file does more than outbound gossip. It owns the
+//! single per-node tick (1 Hz) that drives several responsibilities:
+//!
+//! 1. **SWIM-style peer probing.** Picks a peer from cluster state, sends a
+//!    `Ping` (with `ping_req` indirect-probe fallback), updates membership.
+//! 2. **Outbound `sync_stream` lifecycle.** Dials peers that need a stream,
+//!    spawns the per-peer outbound sender task, retries with exponential
+//!    backoff on failure, garbage-collects finished connections.
+//! 3. **Round collection (node-wide housekeeping).** Drains the local
+//!    [`MeshKV`](crate::kv::MeshKV) into a fresh [`RoundBatch`](crate::kv::RoundBatch)
+//!    and publishes it into a shared `Arc<RwLock<Arc<RoundBatch>>>` slot
+//!    that is read by BOTH the outbound senders here AND the inbound
+//!    senders in [`gossip_service`](crate::gossip_service). This step is
+//!    not outbound-specific — it produces the shared per-round data that
+//!    every outgoing stream (in either direction) consumes.
+//! 4. **Periodic housekeeping**: chunk-assembler GC, retry-manager pruning.
+//!
+//! Per-peer outbound sender tasks also live here. They are spawned by
+//! [`GossipController::event_loop`] when this node initiates a stream to a
+//! peer. The peer's name is captured as a `String` at task-spawn time, so
+//! these senders never need to learn peer identity at runtime — contrast
+//! with the inbound senders in `gossip_service.rs`, which must learn the
+//! counterparty from the first inbound frame.
+
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -37,6 +63,12 @@ use crate::{
     },
 };
 
+/// The per-node event loop driver. Holds the cluster-state reference,
+/// self-identity, init-peer address, mTLS config, the live set of
+/// outbound sync_stream task handles, and the shared `RoundBatch` slot.
+///
+/// One instance per mesh node. See module docs for the full set of
+/// responsibilities driven by [`event_loop`](Self::event_loop).
 pub struct GossipController {
     state: ClusterState,
     self_name: String,
