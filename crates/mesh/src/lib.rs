@@ -5,8 +5,6 @@
 //! - CRDT-based state synchronization across cluster nodes
 //! - Partition detection and recovery
 
-mod chunk_assembler;
-mod chunking;
 mod crdt_kv;
 mod gossip_controller;
 mod gossip_service;

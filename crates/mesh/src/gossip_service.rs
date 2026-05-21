@@ -12,7 +12,6 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
     metrics::{record_ack, record_nack, record_peer_reconnect, update_peer_connections},
     mtls::MTLSManager,
     partition::PartitionDetector,
@@ -25,8 +24,12 @@ use super::{
         },
         try_ping, ClusterState,
     },
-    transport::limits::{
-        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT,
+    transport::{
+        chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
+        limits::{
+            DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES,
+            STREAM_IDLE_TIMEOUT,
+        },
     },
 };
 

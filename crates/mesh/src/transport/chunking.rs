@@ -6,7 +6,7 @@
 //!
 //! Receiver: [`dispatch_stream_batch`] routes inbound entries —
 //! single-chunk entries fire subscribers directly, multi-chunk entries
-//! go through the [`ChunkAssembler`](crate::chunk_assembler::ChunkAssembler)
+//! go through the [`ChunkAssembler`](super::chunk_assembler::ChunkAssembler)
 //! and fire subscribers only on full reassembly.
 
 use std::sync::{

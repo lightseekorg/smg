@@ -28,10 +28,13 @@ use super::{
     },
 };
 use crate::{
-    chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
     metrics,
-    transport::limits::{
-        DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT,
+    transport::{
+        chunking::{build_stream_batches, chunk_value, dispatch_stream_batch, next_generation},
+        limits::{
+            DEFAULT_MAX_CHUNKS_PER_BATCH, MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES,
+            STREAM_IDLE_TIMEOUT,
+        },
     },
 };
 
