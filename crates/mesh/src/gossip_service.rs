@@ -364,7 +364,7 @@ impl Gossip for GossipService {
                 // identity is the authoritative long-term fix.
                 if peer_id.is_empty() {
                     if !msg.peer_id.is_empty() {
-                        peer_id = msg.peer_id.clone();
+                        peer_id.clone_from(&msg.peer_id);
                         update_peer_connections(&peer_id, true);
                         *learned_peer_inbound.write() = Some(peer_id.clone());
                     }
