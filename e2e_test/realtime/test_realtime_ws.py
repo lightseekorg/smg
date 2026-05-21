@@ -241,16 +241,21 @@ class TestRealtimeWebSocket:
 
         asyncio.run(_run())
 
-    def test_conversation_item_created_event(self, ws_url, ws_headers):
-        """Sending conversation.item.create should echo conversation.item.created."""
+    def test_conversation_item_added_event(self, ws_url, ws_headers):
+        """Sending conversation.item.create should echo conversation.item.added.
+
+        GA renamed the legacy `conversation.item.created` event to
+        `conversation.item.added` (emitted when an item is added to the default
+        conversation).
+        """
 
         async def _run():
             async with _realtime_session(ws_url, ws_headers) as ws:
                 await ws.send(_make_user_message("Hi"))
-                event = await _recv_event(ws, event_type="conversation.item.created")
-                assert event["type"] == "conversation.item.created"
+                event = await _recv_event(ws, event_type="conversation.item.added")
+                assert event["type"] == "conversation.item.added"
                 assert event["item"]["role"] == "user"
-                logger.info("conversation.item.created received: id=%s", event["item"].get("id"))
+                logger.info("conversation.item.added received: id=%s", event["item"].get("id"))
 
         asyncio.run(_run())
 
