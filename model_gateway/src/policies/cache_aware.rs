@@ -41,7 +41,10 @@
     block_size:              Backend KV cache block size for event-driven routing
 */
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
@@ -98,6 +101,13 @@ pub struct CacheAwarePolicy {
     ///   attach remote tenants at the correct node. This path
     ///   runs at replay frequency, not request rate.
     hash_index: Arc<DashMap<String, PerModelHashIndex>>,
+    /// Gate request-hot-path `hash_index` writes. The index's only
+    /// consumers are mesh paths (`apply_known_remote_insert` reads,
+    /// `apply_repair_page` writes). When mesh is disabled the
+    /// hot-path writes accumulate with no reader and OOM the
+    /// gateway. Off by default; the mesh wiring code flips it on
+    /// when it attaches.
+    populate_hash_index: AtomicBool,
 }
 
 /// Per-model inner container for [`CacheAwarePolicy::hash_index`].
@@ -205,7 +215,19 @@ impl CacheAwarePolicy {
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
             hash_index,
+            populate_hash_index: AtomicBool::new(false),
         }
+    }
+
+    /// Enable request-hot-path `hash_index` population. Called by mesh
+    /// wiring when the policy is attached to a mesh adapter; otherwise
+    /// the index stays empty (its only readers are mesh-only paths).
+    pub fn set_populate_hash_index(&self, enabled: bool) {
+        self.populate_hash_index.store(enabled, Ordering::Relaxed);
+    }
+
+    fn should_populate_hash_index(&self) -> bool {
+        self.populate_hash_index.load(Ordering::Relaxed)
     }
 
     /// Set event-driven KV cache monitor (thread-safe, can be called after construction).
@@ -390,15 +412,20 @@ impl CacheAwarePolicy {
                 // match returns the entire input length and we'd
                 // store the full sequence — at 32K tokens × 4 bytes
                 // × max_tree_size that's multi-GB per model.
-                let result = tree.match_prefix_with_counts(tokens);
-                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
-
+                let matched_prefix = if self.should_populate_hash_index() {
+                    let result = tree.match_prefix_with_counts(tokens);
+                    Some(tokens[..result.matched_token_count].to_vec())
+                } else {
+                    None
+                };
                 tree.insert_tokens(tokens, worker_url);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .token_tree
-                    .insert(kv_index::hash_token_path(tokens), matched_prefix);
+                if let Some(matched_prefix) = matched_prefix {
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .token_tree
+                        .insert(kv_index::hash_token_path(tokens), matched_prefix);
+                }
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -414,17 +441,21 @@ impl CacheAwarePolicy {
                 // store the full prompt — exactly the memory leak
                 // we're trying to avoid. The pre-insert match
                 // returns the prior shared prefix (~50-200 chars).
-                let result = tree.match_prefix_with_counts(text);
-                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
-
+                let matched_prefix = if self.should_populate_hash_index() {
+                    let result = tree.match_prefix_with_counts(text);
+                    Some(text.chars().take(result.matched_char_count).collect::<String>())
+                } else {
+                    None
+                };
                 tree.insert_text(text, worker_url);
-
-                let path_hash = kv_index::hash_node_path(text);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .string_tree
-                    .insert(path_hash, matched_prefix);
+                if let Some(matched_prefix) = matched_prefix {
+                    let path_hash = kv_index::hash_node_path(text);
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .string_tree
+                        .insert(path_hash, matched_prefix);
+                }
             } else {
                 debug!(
                     "Warning: No string tree found for model '{}', skipping cache update",
@@ -878,13 +909,14 @@ impl CacheAwarePolicy {
                 // the tree. Mirrors the string side at the
                 // analogous block; reuses the match `result`
                 // already computed at the top of this branch.
-                let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .token_tree
-                    .insert(kv_index::hash_token_path(tokens), matched_prefix);
-
+                if self.should_populate_hash_index() {
+                    let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .token_tree
+                        .insert(kv_index::hash_token_path(tokens), matched_prefix);
+                }
                 workers[idx].increment_processed();
                 return Some(idx);
             }
@@ -947,13 +979,16 @@ impl CacheAwarePolicy {
                 // remote delta arrives, we look up the hash and call
                 // insert_text(matched_prefix, worker) which routes to the same
                 // tree node. This keeps the index memory-bounded.
-                let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
-                let path_hash = kv_index::hash_node_path(text);
-                self.hash_index
-                    .entry(model_id.to_string())
-                    .or_default()
-                    .string_tree
-                    .insert(path_hash, matched_prefix);
+                if self.should_populate_hash_index() {
+                    let matched_prefix: String =
+                        text.chars().take(result.matched_char_count).collect();
+                    let path_hash = kv_index::hash_node_path(text);
+                    self.hash_index
+                        .entry(model_id.to_string())
+                        .or_default()
+                        .string_tree
+                        .insert(path_hash, matched_prefix);
+                }
 
                 workers[idx].increment_processed();
                 return Some(idx);
@@ -1301,10 +1336,17 @@ mod tests {
         // instead. A regression on the matched-prefix apply path
         // would still pass the full-path test, so seed via
         // `select_worker` here and assert apply succeeds.
+        //
+        // Opt into request-hot-path hash_index population — without
+        // this the populate sites are no-ops and the apply call
+        // below would have nothing to resolve. In production this
+        // flag is flipped by the mesh wiring code; here we set it
+        // directly because the test mimics the mesh consumer.
         let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
             eviction_interval_secs: 0,
             ..Default::default()
         });
+        policy.set_populate_hash_index(true);
         let workers: Vec<Arc<dyn Worker>> = vec![
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
