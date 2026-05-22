@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-use crate::{skills::MessagesSkillRef, validated::Normalizable};
+use crate::{common::GenerationRequest, skills::MessagesSkillRef, validated::Normalizable};
 
 // ============================================================================
 // Request Types
@@ -102,6 +102,58 @@ impl CreateMessageRequest {
         self.mcp_servers
             .as_deref()
             .filter(|servers| !servers.is_empty())
+    }
+}
+
+impl GenerationRequest for CreateMessageRequest {
+    fn is_stream(&self) -> bool {
+        self.stream.unwrap_or(false)
+    }
+
+    fn get_model(&self) -> Option<&str> {
+        Some(&self.model)
+    }
+
+    fn extract_text_for_routing(&self) -> String {
+        let mut buffer = String::new();
+        let mut has_content = false;
+
+        let push = |s: &str, has_content: &mut bool, buffer: &mut String| {
+            if s.is_empty() {
+                return;
+            }
+            if *has_content {
+                buffer.push(' ');
+            }
+            buffer.push_str(s);
+            *has_content = true;
+        };
+
+        if let Some(system) = &self.system {
+            match system {
+                SystemContent::String(s) => push(s, &mut has_content, &mut buffer),
+                SystemContent::Blocks(blocks) => {
+                    for block in blocks {
+                        push(&block.text, &mut has_content, &mut buffer);
+                    }
+                }
+            }
+        }
+
+        for msg in &self.messages {
+            match &msg.content {
+                InputContent::String(s) => push(s, &mut has_content, &mut buffer),
+                InputContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let InputContentBlock::Text(text_block) = block {
+                            push(&text_block.text, &mut has_content, &mut buffer);
+                        }
+                    }
+                }
+            }
+        }
+
+        buffer
     }
 }
 

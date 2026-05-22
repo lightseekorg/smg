@@ -15,6 +15,7 @@ use openai_protocol::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    messages::CreateMessageRequest,
     rerank::{RerankRequest, RerankResponse, RerankResult},
     responses::ResponsesRequest,
     transcription::TranscriptionRequest,
@@ -1122,6 +1123,17 @@ impl RouterTrait for Router {
         model_id: &str,
     ) -> Response {
         self.route_typed_request(headers, body, "/v1/chat/completions", model_id)
+            .await
+    }
+
+    async fn route_messages(
+        &self,
+        headers: Option<&HeaderMap>,
+        _tenant_meta: &TenantRequestMeta,
+        body: &CreateMessageRequest,
+        model_id: &str,
+    ) -> Response {
+        self.route_typed_request(headers, body, "/v1/messages", model_id)
             .await
     }
 
