@@ -23,7 +23,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
-use super::pd_types::api_path;
 use crate::{
     config::types::RetryConfig,
     middleware::TenantRequestMeta,
@@ -360,6 +359,9 @@ impl PDRouter {
                         let mut prefill_json_request = json_request.clone();
                         let mut decode_json_request = json_request;
 
+                        let mut prefill_rank = prefill.dp_rank().map(|rank| rank as isize);
+                        let mut decode_rank = decode.dp_rank().map(|rank| rank as isize);
+
                         let dp_rank_policy_opt = self.policy_registry.get_dp_rank_policy();
                         if let Some(dp_rank_policy) = dp_rank_policy_opt.as_ref() {
                             let estimated_cost: isize = match context.request_text.as_ref() {
@@ -374,28 +376,42 @@ impl PDRouter {
                                 }
                                 None => 1, // Use at least 1 to avoid no-op
                             };
-                            let prefill_rank =
+                            let policy_prefill_rank =
                                 dp_rank_policy.select_dp_rank(prefill.as_ref(), estimated_cost);
-                            let decode_rank =
+                            let policy_decode_rank =
                                 dp_rank_policy.select_dp_rank(decode.as_ref(), estimated_cost);
-                            if let (Some(p_rank), Some(d_rank)) = (prefill_rank, decode_rank) {
-                                debug!("prefill_rank is {}, decode_rank {}", p_rank, d_rank);
-                                Self::inject_dp_rank_to_json(
-                                    &mut prefill_json_request,
-                                    p_rank,
-                                    "routed_dp_rank",
-                                );
-                                Self::inject_dp_rank_to_json(
-                                    &mut decode_json_request,
-                                    d_rank,
-                                    "routed_dp_rank",
-                                );
-                                Self::inject_dp_rank_to_json(
-                                    &mut decode_json_request,
-                                    p_rank,
-                                    "disagg_prefill_dp_rank",
-                                );
+                            if let Some(rank) = policy_prefill_rank {
+                                prefill_rank = Some(rank);
                             }
+                            if let Some(rank) = policy_decode_rank {
+                                decode_rank = Some(rank);
+                            }
+                        }
+
+                        if let Some(p_rank) = prefill_rank {
+                            Self::inject_dp_rank_to_json(
+                                &mut prefill_json_request,
+                                p_rank,
+                                "routed_dp_rank",
+                            );
+                            Self::inject_dp_rank_to_json(
+                                &mut decode_json_request,
+                                p_rank,
+                                "disagg_prefill_dp_rank",
+                            );
+                        }
+                        if let Some(d_rank) = decode_rank {
+                            Self::inject_dp_rank_to_json(
+                                &mut decode_json_request,
+                                d_rank,
+                                "routed_dp_rank",
+                            );
+                        }
+                        if prefill_rank.is_some() || decode_rank.is_some() {
+                            debug!(
+                                "PD selected DP ranks prefill={:?} decode={:?}",
+                                prefill_rank, decode_rank
+                            );
                         }
 
                         let response = self
@@ -612,7 +628,7 @@ impl PDRouter {
         // Build both requests
         let prefill_request = self.build_post_with_headers(
             &self.client,
-            prefill.url(),
+            prefill.as_ref(),
             context.route,
             &prefill_json_request,
             headers,
@@ -620,7 +636,7 @@ impl PDRouter {
         );
         let decode_request = self.build_post_with_headers(
             &self.client,
-            decode.url(),
+            decode.as_ref(),
             context.route,
             &decode_json_request,
             headers,
@@ -1081,13 +1097,14 @@ impl PDRouter {
     fn build_post_with_headers(
         &self,
         client: &Client,
-        url: &str,
+        worker: &dyn Worker,
         route: &'static str,
         json_request: &Value,
         headers: Option<&HeaderMap>,
         connection_close: bool,
     ) -> reqwest::RequestBuilder {
-        let mut request = client.post(api_path(url, route)).json(json_request);
+        let endpoint_url = worker.endpoint_url(route);
+        let mut request = client.post(endpoint_url).json(json_request);
         if connection_close {
             request = request.header("Connection", "close");
         }
@@ -1448,6 +1465,34 @@ mod tests {
         };
         worker.set_status(status);
         Box::new(worker)
+    }
+
+    #[test]
+    fn test_build_post_uses_dp_base_url_for_logical_worker() {
+        let router = create_test_pd_router();
+        let worker = BasicWorkerBuilder::new("http://127.0.0.1:30000")
+            .worker_type(WorkerType::Decode)
+            .dp_config(2, 4)
+            .build();
+
+        let request = router
+            .build_post_with_headers(
+                &router.client,
+                &worker,
+                "/generate",
+                &json!({"text": "hello"}),
+                None,
+                false,
+            )
+            .build()
+            .expect("request should build");
+
+        assert_eq!(worker.url(), "http://127.0.0.1:30000@2");
+        assert_eq!(
+            worker.endpoint_url("/generate"),
+            "http://127.0.0.1:30000/generate"
+        );
+        assert_eq!(request.url().as_str(), "http://127.0.0.1:30000/generate");
     }
 
     #[tokio::test]
