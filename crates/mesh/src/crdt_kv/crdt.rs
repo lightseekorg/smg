@@ -229,12 +229,23 @@ impl CrdtOrMap {
             key, timestamp, self.replica_id
         );
 
-        let removed = if self.record_remove_metadata(key, timestamp, self.replica_id) {
-            let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
-            self.append_operation(operation);
-            self.store.remove(key)
-        } else {
-            None
+        let removed = match self.merge_strategy_for_key(key) {
+            MergeStrategy::EpochMaxWins => {
+                if self.apply_epoch_remove_locked(key, timestamp, self.replica_id) {
+                    let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
+                    self.append_operation(operation);
+                }
+                None
+            }
+            MergeStrategy::LastWriterWins => {
+                if self.record_remove_metadata(key, timestamp, self.replica_id) {
+                    let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
+                    self.append_operation(operation);
+                    self.store.remove(key)
+                } else {
+                    None
+                }
+            }
         };
 
         drop(key_guard);
@@ -587,15 +598,96 @@ impl CrdtOrMap {
         let key_lock = self.key_lock_for(key);
         let key_guard = key_lock.lock();
 
-        let removed = if self.record_remove_metadata(key, timestamp, replica_id) {
-            self.store.remove(key)
-        } else {
-            None
+        let removed = match self.merge_strategy_for_key(key) {
+            MergeStrategy::EpochMaxWins => {
+                self.apply_epoch_remove_locked(key, timestamp, replica_id);
+                None
+            }
+            MergeStrategy::LastWriterWins => {
+                if self.record_remove_metadata(key, timestamp, replica_id) {
+                    self.store.remove(key)
+                } else {
+                    None
+                }
+            }
         };
 
         drop(key_guard);
         self.try_cleanup_key_lock(key, &key_lock);
         removed
+    }
+
+    // Per-point tombstone application for EpochMaxWins keys. The stored shard
+    // is filtered against the merged (existing ∪ incoming) tombstone so live
+    // path and `compact_operations` agree (spec §2.5). Returns whether the
+    // tombstone was newly accepted (used by `remove` to decide whether to
+    // append an operation).
+    fn apply_epoch_remove_locked(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
+        let incoming_tombstone = epoch_max_wins::RateLimitVersion::new(timestamp, replica_id);
+        let current = self.store.get(key);
+
+        match self.metadata.entry(key.to_string()) {
+            MapEntry::Occupied(mut entry) => {
+                let versions = entry.get_mut();
+                let already_recorded = versions
+                    .iter()
+                    .any(|v| v.is_tombstone && v.matches_version(timestamp, replica_id));
+                if already_recorded {
+                    Self::compact_key_metadata(versions);
+                    return false;
+                }
+                let current_tombstone = Self::newest_rate_limit_tombstone_version(versions);
+                let result = epoch_max_wins::apply_tombstone(
+                    current.as_deref(),
+                    current_tombstone,
+                    incoming_tombstone,
+                );
+                versions.clear();
+                match result {
+                    epoch_max_wins::TombstoneApply::Surviving {
+                        value,
+                        live_version,
+                    } => {
+                        versions.push(ValueMetadata::from_rate_limit_live_version(live_version));
+                        self.store.insert(key.to_string(), value);
+                    }
+                    epoch_max_wins::TombstoneApply::Empty { tombstone_version } => {
+                        versions.push(ValueMetadata::tombstone(
+                            tombstone_version.timestamp,
+                            tombstone_version.replica_id,
+                        ));
+                        self.store.remove(key);
+                    }
+                }
+                true
+            }
+            MapEntry::Vacant(entry) => {
+                if !self.store.contains_key(key) {
+                    return false;
+                }
+                let result =
+                    epoch_max_wins::apply_tombstone(current.as_deref(), None, incoming_tombstone);
+                let mut versions = Vec::new();
+                match result {
+                    epoch_max_wins::TombstoneApply::Surviving {
+                        value,
+                        live_version,
+                    } => {
+                        versions.push(ValueMetadata::from_rate_limit_live_version(live_version));
+                        self.store.insert(key.to_string(), value);
+                    }
+                    epoch_max_wins::TombstoneApply::Empty { tombstone_version } => {
+                        versions.push(ValueMetadata::tombstone(
+                            tombstone_version.timestamp,
+                            tombstone_version.replica_id,
+                        ));
+                        self.store.remove(key);
+                    }
+                }
+                entry.insert(versions);
+                true
+            }
+        }
     }
 
     fn record_remove_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {

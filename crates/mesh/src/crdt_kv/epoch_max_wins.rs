@@ -304,6 +304,50 @@ pub(super) fn merge_live_value(
     })
 }
 
+/// Outcome of applying a tombstone to a stored shard. `Surviving` means some
+/// live points outlasted the tombstone and the (filtered) shard stays in the
+/// store; `Empty` means every live point was killed and only the tombstone
+/// remains.
+pub(super) enum TombstoneApply {
+    Surviving {
+        value: Vec<u8>,
+        live_version: RateLimitVersion,
+    },
+    Empty {
+        tombstone_version: RateLimitVersion,
+    },
+}
+
+/// Apply `incoming_tombstone_version` to the current shard, filtering live
+/// points per-point against the merged (existing ∪ incoming) tombstone. Mirrors
+/// what `compact_operations` does so live store and operation log agree.
+pub(super) fn apply_tombstone(
+    current_value: Option<&[u8]>,
+    current_tombstone_version: Option<RateLimitVersion>,
+    incoming_tombstone_version: RateLimitVersion,
+) -> TombstoneApply {
+    let merged_tombstone = current_tombstone_version
+        .map(|existing| existing.max(incoming_tombstone_version))
+        .unwrap_or(incoming_tombstone_version);
+    let current = current_value.and_then(state_from_stored_value);
+    let state = match current {
+        Some(state) => state.merge(RateLimitState::Tombstone(merged_tombstone)),
+        None => Some(RateLimitState::Tombstone(merged_tombstone)),
+    };
+    match state.unwrap_or(RateLimitState::Tombstone(merged_tombstone)) {
+        RateLimitState::Live(shard) => match (shard.newest_live_version(), encode_shard(&shard)) {
+            (Some(live_version), Some(value)) => TombstoneApply::Surviving {
+                value,
+                live_version,
+            },
+            _ => TombstoneApply::Empty {
+                tombstone_version: merged_tombstone,
+            },
+        },
+        RateLimitState::Tombstone(tombstone_version) => TombstoneApply::Empty { tombstone_version },
+    }
+}
+
 pub(super) fn compact_operations<'a>(
     operations: impl IntoIterator<Item = &'a Operation>,
 ) -> Option<Operation> {

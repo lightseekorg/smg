@@ -283,45 +283,128 @@ fn test_epoch_max_wins_local_write_cannot_rewind_epoch() {
 }
 
 #[test]
-fn test_epoch_max_wins_tombstone_compares_against_newest_live_version() {
+fn test_epoch_max_wins_tombstone_filters_pre_tombstone_inserts_per_point() {
+    // Spec §2.5: a tombstone partitions history by (timestamp, replica_id).
+    // Inserts before the newest tombstone are stale and dropped; inserts
+    // after it survive. Verified per-point so the live store matches what
+    // `compact_operations` would produce.
     init_test_logging();
     let replica = CrdtOrMap::new();
     replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
 
     let key = "rl:global:node-a";
-    let stale_newer_timestamp = Operation::insert(
+    let post_tombstone_low_epoch = Operation::insert(
         key.to_string(),
         encode(5, 100).to_vec(),
         100,
         ReplicaId::new(),
     );
-    let epoch_winner_older_timestamp =
+    let pre_tombstone_high_epoch =
         Operation::insert(key.to_string(), encode(6, 0).to_vec(), 90, ReplicaId::new());
-    let tombstone_after_epoch_winner = Operation::remove(key.to_string(), 95, ReplicaId::new());
+    let tombstone_between_them = Operation::remove(key.to_string(), 95, ReplicaId::new());
 
-    let mut stale_log = OperationLog::new();
-    stale_log.append(stale_newer_timestamp);
-    replica.merge(&stale_log);
+    let mut log1 = OperationLog::new();
+    log1.append(post_tombstone_low_epoch);
+    replica.merge(&log1);
 
-    let mut reset_log = OperationLog::new();
-    reset_log.append(epoch_winner_older_timestamp);
-    replica.merge(&reset_log);
+    let mut log2 = OperationLog::new();
+    log2.append(pre_tombstone_high_epoch);
+    replica.merge(&log2);
     assert_eq!(
-        decode(&replica.get(key).expect("reset should win stale count")),
+        decode(&replica.get(key).expect("high-epoch insert merges in")),
         Some(EpochCount { epoch: 6, count: 0 }),
     );
 
-    let mut tombstone_log = OperationLog::new();
-    tombstone_log.append(tombstone_after_epoch_winner);
-    replica.merge(&tombstone_log);
+    let mut log3 = OperationLog::new();
+    log3.append(tombstone_between_them);
+    replica.merge(&log3);
 
     assert_eq!(
         decode(
             &replica
                 .get(key)
-                .expect("newer live version suppresses tombstone")
+                .expect("post-tombstone live point still exists"),
         ),
-        Some(EpochCount { epoch: 6, count: 0 }),
+        Some(EpochCount {
+            epoch: 5,
+            count: 100,
+        }),
+        "pre-tombstone (ts=90) high-epoch point must be filtered out; \
+         post-tombstone (ts=100) low-epoch point survives",
+    );
+}
+
+#[test]
+fn test_epoch_max_wins_live_store_matches_compacted_log_after_tombstone() {
+    // After sequential merges, the live store and the canonical compacted
+    // operation log must decode to the same EpochCount. Without per-point
+    // tombstone filtering in the live path, they diverge.
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    for op in [
+        Operation::insert(
+            key.to_string(),
+            encode(5, 100).to_vec(),
+            100,
+            ReplicaId::new(),
+        ),
+        Operation::insert(key.to_string(), encode(6, 0).to_vec(), 90, ReplicaId::new()),
+        Operation::remove(key.to_string(), 95, ReplicaId::new()),
+    ] {
+        let mut log = OperationLog::new();
+        log.append(op);
+        replica.merge(&log);
+    }
+
+    let live_value = decode(&replica.get(key).expect("store has a survivor"));
+    let log = replica.get_operation_log();
+    let compacted_value = log
+        .operations()
+        .iter()
+        .find_map(|op| match op {
+            Operation::Insert { value, .. } => Some(decode(value)),
+            Operation::Remove { .. } => None,
+        })
+        .expect("compacted log retains the surviving insert");
+    assert_eq!(live_value, compacted_value);
+}
+
+#[test]
+fn test_epoch_max_wins_tombstone_kills_all_points_removes_key() {
+    // When the tombstone is newer than every live point, the key is removed
+    // from the store but the tombstone metadata persists so a delayed
+    // pre-tombstone insert cannot resurrect it.
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+    let mut log = OperationLog::new();
+    log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        50,
+        ReplicaId::new(),
+    ));
+    log.append(Operation::remove(key.to_string(), 100, ReplicaId::new()));
+    replica.merge(&log);
+
+    assert!(replica.get(key).is_none(), "all live points killed");
+
+    let mut late_log = OperationLog::new();
+    late_log.append(Operation::insert(
+        key.to_string(),
+        encode(8, 88).to_vec(),
+        40,
+        ReplicaId::new(),
+    ));
+    replica.merge(&late_log);
+    assert!(
+        replica.get(key).is_none(),
+        "pre-tombstone insert must not resurrect a fully-killed key",
     );
 }
 
