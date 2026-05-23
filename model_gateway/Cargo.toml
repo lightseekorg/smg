@@ -138,7 +138,7 @@ portpicker = "0.1"
 lazy_static = "1.4"
 wasm-encoder = "0.248"
 npyz = { version = "0.9", features = ["npz"] }
-opentelemetry-proto = { version = "0.31", features = ["gen-tonic"] }
+opentelemetry-proto = { version = "0.32", features = ["gen-tonic"] }
 serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
