@@ -1231,10 +1231,6 @@ async fn flush_cache_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
     .into_response()
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "test helper - panicking on failure is intentional"
-)]
 async fn v1_models_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
