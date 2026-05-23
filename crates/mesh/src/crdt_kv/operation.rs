@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -284,15 +284,46 @@ impl OperationLog {
     /// INVARIANT: `Operation::operation_id()` (`ReplicaId`, `timestamp`) is unique per operation
     /// because each replica's `LamportClock::tick()` is monotonic and never repeats a timestamp.
     pub fn merge(&mut self, other: &OperationLog) {
-        let mut seen_ids: HashSet<(ReplicaId, u64)> = self
+        self.merge_with_strategy(other, |_| MergeStrategy::LastWriterWins);
+    }
+
+    /// Like [`merge`](Self::merge) but per-key strategy-aware. For
+    /// `EpochMaxWins` keys, an incoming operation that collides on
+    /// `(replica_id, timestamp)` with an existing local op is folded via
+    /// `epoch_max_wins::compact_operations` so a compacted payload
+    /// (carrying an embedded tombstone_version or richer frontier) replaces
+    /// the older raw payload at the same op id.
+    pub(super) fn merge_with_strategy<F>(&mut self, other: &OperationLog, strategy_for_key: F)
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
+        let mut local_index: HashMap<(ReplicaId, u64), usize> = self
             .operations
             .iter()
-            .map(Operation::operation_id)
+            .enumerate()
+            .map(|(idx, op)| (op.operation_id(), idx))
             .collect();
 
         for operation in &other.operations {
-            if seen_ids.insert(operation.operation_id()) {
-                self.operations.push(operation.clone());
+            let op_id = operation.operation_id();
+            match local_index.get(&op_id).copied() {
+                None => {
+                    local_index.insert(op_id, self.operations.len());
+                    self.operations.push(operation.clone());
+                }
+                Some(local_idx) => {
+                    if matches!(
+                        strategy_for_key(operation.key()),
+                        MergeStrategy::EpochMaxWins
+                    ) {
+                        let local_op = self.operations[local_idx].clone();
+                        if let Some(folded) =
+                            epoch_max_wins::compact_operations([&local_op, operation])
+                        {
+                            self.operations[local_idx] = folded;
+                        }
+                    }
+                }
             }
         }
     }

@@ -481,6 +481,87 @@ fn test_epoch_max_wins_snapshot_only_propagation_preserves_tombstone_boundary() 
     );
 }
 
+#[test]
+fn test_epoch_max_wins_compacted_snapshot_applies_when_op_id_already_seen() {
+    // Receiver sees the post-tombstone raw insert first (op-id (70, c)),
+    // then the source's compacted snapshot that reuses that same op-id but
+    // carries the embedded tombstone_version. Without strategy-aware merge
+    // the op-id collision drops the richer payload, and a delayed
+    // pre-tombstone insert can resurrect the deleted shard.
+    init_test_logging();
+    let key = "rl:global:node-a";
+
+    let pre_tombstone_replica = ReplicaId::new();
+    let tombstone_replica = ReplicaId::new();
+    let post_tombstone_replica = ReplicaId::new();
+
+    // Source applies the full history and compacts into one Insert that
+    // embeds tombstone_version=65 and reuses the post-tombstone op-id.
+    let source = CrdtOrMap::new();
+    source.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    let mut source_log = OperationLog::new();
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        pre_tombstone_replica,
+    ));
+    source_log.append(Operation::remove(key.to_string(), 65, tombstone_replica));
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(6, 1).to_vec(),
+        70,
+        post_tombstone_replica,
+    ));
+    source.merge(&source_log);
+    let compacted_log = source.get_operation_log();
+    assert_eq!(compacted_log.operations().len(), 1);
+
+    // Receiver already has the raw post-tombstone insert (same op-id as the
+    // compacted snapshot will use), but no tombstone information yet.
+    let receiver = CrdtOrMap::new();
+    receiver.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    let mut raw_log = OperationLog::new();
+    raw_log.append(Operation::insert(
+        key.to_string(),
+        encode(6, 1).to_vec(),
+        70,
+        post_tombstone_replica,
+    ));
+    receiver.merge(&raw_log);
+
+    // Compacted snapshot arrives. Op-id collides with the raw insert, but
+    // the payload now embeds tombstone_version=65 - it must be applied.
+    receiver.merge(&compacted_log);
+    assert_eq!(
+        decode(&receiver.get(key).expect("post-tombstone shard remains")),
+        Some(EpochCount { epoch: 6, count: 1 }),
+    );
+
+    // Delayed pre-tombstone insert from yet another replica. Without the
+    // embedded tombstone_version reaching the receiver, this would
+    // resurrect epoch=7 (the high-epoch deleted value).
+    let mut delayed = OperationLog::new();
+    delayed.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    receiver.merge(&delayed);
+
+    assert_eq!(
+        decode(
+            &receiver
+                .get(key)
+                .expect("post-tombstone live point still survives")
+        ),
+        Some(EpochCount { epoch: 6, count: 1 }),
+        "compacted snapshot must override the same-op-id raw payload so \
+         delayed pre-tombstone inserts cannot resurrect",
+    );
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================

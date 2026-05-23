@@ -389,6 +389,7 @@ impl CrdtOrMap {
             self.replica_id
         );
 
+        let strategies = self.merge_strategies.read().clone();
         let seen_operations: HashSet<(ReplicaId, u64)> = {
             let local_log = self.operation_log.read();
             local_log
@@ -398,19 +399,29 @@ impl CrdtOrMap {
                 .collect()
         };
 
-        let mut unseen_operations: Vec<Operation> = log
-            .operations()
-            .iter()
-            .filter(|operation| {
-                !seen_operations.contains(&(operation.replica_id(), operation.timestamp()))
-            })
-            .cloned()
-            .collect();
+        // EpochMaxWins re-applies same-op-id operations because a compacted
+        // payload may carry an embedded tombstone_version that the receiver's
+        // raw-payload version is missing (`merge_live_value.changed` gates the
+        // store update so identical bytes are still a no-op).
+        let mut unseen_operations: Vec<Operation> =
+            log.operations()
+                .iter()
+                .filter(|operation| {
+                    match Self::merge_strategy_for_key_from(&strategies, operation.key()) {
+                        MergeStrategy::LastWriterWins => !seen_operations
+                            .contains(&(operation.replica_id(), operation.timestamp())),
+                        MergeStrategy::EpochMaxWins => true,
+                    }
+                })
+                .cloned()
+                .collect();
         unseen_operations.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
 
         {
             let mut local_log = self.operation_log.write();
-            local_log.merge(log);
+            local_log.merge_with_strategy(log, |key| {
+                Self::merge_strategy_for_key_from(&strategies, key)
+            });
             self.compact_operation_log(&mut local_log);
         }
 
@@ -553,15 +564,10 @@ impl CrdtOrMap {
         match self.metadata.entry(key.to_string()) {
             MapEntry::Occupied(mut entry) => {
                 let versions = entry.get_mut();
-
-                let has_existing_entry = versions
-                    .iter()
-                    .any(|v| v.matches_version(timestamp, replica_id));
-                if has_existing_entry {
-                    Self::compact_key_metadata(versions);
-                    return None;
-                }
-
+                // No op-id short-circuit: a same-(timestamp, replica_id) op
+                // may carry a richer payload (e.g. a compacted shard with an
+                // embedded tombstone_version). `merge_live_value.changed`
+                // gates the store update so identical bytes are still a no-op.
                 let current_tombstone = Self::newest_rate_limit_tombstone_version(versions);
                 let Some(merged) = epoch_max_wins::merge_live_value(
                     current.as_deref(),
