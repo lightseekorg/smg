@@ -46,6 +46,7 @@ impl GeminiRouter {
             client: ctx.client.clone(),
             worker_registry: ctx.worker_registry.clone(),
             mcp_orchestrator,
+            mcp_format_registry: ctx.mcp_format_registry.clone(),
             request_timeout,
         });
         let retry_config = ctx.router_config.effective_retry_config();

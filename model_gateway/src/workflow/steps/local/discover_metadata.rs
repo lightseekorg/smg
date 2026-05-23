@@ -11,7 +11,7 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use crate::{
     routers::grpc::client::{flat_labels, GrpcClient},
-    worker::ConnectionMode,
+    worker::{sampling_defaults::SamplingDefaults, ConnectionMode, DEFAULT_SAMPLING_PARAMS_LABEL},
     workflow::{
         data::{WorkerKind, WorkerWorkflowData},
         steps::util::{grpc_base_url, http_base_url},
@@ -271,6 +271,29 @@ fn normalize_grpc_keys(labels: &mut HashMap<String, String>) {
         "server_type",
     ] {
         labels.remove(key);
+    }
+    normalize_default_sampling_params_label(labels);
+}
+
+fn normalize_default_sampling_params_label(labels: &mut HashMap<String, String>) {
+    let Some(raw) = labels.get(DEFAULT_SAMPLING_PARAMS_LABEL).cloned() else {
+        return;
+    };
+
+    match SamplingDefaults::canonical_json_from_str(&raw) {
+        Ok(Some(canonical)) => {
+            labels.insert(DEFAULT_SAMPLING_PARAMS_LABEL.to_string(), canonical);
+        }
+        Ok(None) => {
+            labels.remove(DEFAULT_SAMPLING_PARAMS_LABEL);
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Ignoring invalid default sampling params label"
+            );
+            labels.remove(DEFAULT_SAMPLING_PARAMS_LABEL);
+        }
     }
 }
 

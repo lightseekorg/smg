@@ -835,14 +835,19 @@ impl ConfigValidator {
                 });
             }
 
-            if !url.starts_with("http://")
-                && !url.starts_with("https://")
-                && !url.starts_with("grpc://")
+            // Case-insensitive scheme allow-list. Compare just the scheme
+            // segment so we don't allocate a lowercased copy of the full URL.
+            const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs"];
+            let scheme = url.split_once("://").map_or("", |(s, _)| s);
+            if !ALLOWED_SCHEMES
+                .iter()
+                .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
             {
                 return Err(ConfigError::InvalidValue {
                     field: "worker_url".to_string(),
                     value: url.clone(),
-                    reason: "URL must start with http://, https://, or grpc://".to_string(),
+                    reason: "URL must start with http://, https://, grpc://, or grpcs://"
+                        .to_string(),
                 });
             }
 
@@ -1224,6 +1229,22 @@ mod tests {
         let mut config = RouterConfig::new(
             RoutingMode::Regular {
                 worker_urls: vec!["grpc://worker:50051".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+
+        config.connection_mode = ConnectionMode::Grpc;
+        config.model_path = Some("meta-llama/Llama-3-8B".to_string());
+
+        let result = ConfigValidator::validate(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_grpcs_worker_url() {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["grpcs://worker:50051".to_string()],
             },
             PolicyConfig::Random,
         );

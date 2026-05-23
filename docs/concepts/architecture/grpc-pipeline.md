@@ -51,7 +51,7 @@ Parse function calls and execute MCP tools with automatic result injection.
 ## Pipeline Architecture
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/grpc-pipeline.svg" alt="gRPC Pipeline Architecture">
+  <img src="../../assets/images/grpc-pipeline.svg" alt="gRPC Pipeline Architecture">
 </div>
 
 <div class="grid" markdown>

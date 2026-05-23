@@ -543,28 +543,7 @@ impl HarmonyBuilder {
             let tool_types: Vec<&str> = request
                 .tools
                 .as_ref()
-                .map(|tools| {
-                    tools
-                        .iter()
-                        .map(|tool| match tool {
-                            ResponseTool::Function(_) => "function",
-                            ResponseTool::WebSearchPreview(_) => "web_search_preview",
-                            ResponseTool::WebSearch(_) => "web_search",
-                            ResponseTool::CodeInterpreter(_) => "code_interpreter",
-                            ResponseTool::Mcp(_) => "mcp",
-                            ResponseTool::FileSearch(_) => "file_search",
-                            ResponseTool::ImageGeneration(_) => "image_generation",
-                            ResponseTool::Computer => "computer",
-                            ResponseTool::ComputerUsePreview(_) => "computer_use_preview",
-                            ResponseTool::Custom(_) => "custom",
-                            ResponseTool::Namespace(_) => "namespace",
-                            ResponseTool::Shell(_) => "shell",
-                            ResponseTool::ApplyPatch => "apply_patch",
-                            // T5 schema-only: forced-cascade arm, no behavior.
-                            ResponseTool::LocalShell => "local_shell",
-                        })
-                        .collect()
-                })
+                .map(|tools| tools.iter().map(ResponseTool::as_str).collect())
                 .unwrap_or_default();
 
             let with_custom_tools = has_custom_tools(&tool_types);

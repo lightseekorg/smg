@@ -9,7 +9,8 @@ use tokio::sync::Mutex;
 use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
-        MiniMaxParser, NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
+        MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser,
+        Step3Parser,
     },
     traits::{ParserConfig, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
@@ -176,6 +177,9 @@ impl ParserFactory {
             Box::new(BaseReasoningParser::new(ParserConfig::default()))
         });
 
+        // Passthrough: explicit `--reasoning-parser passthrough` and unknown-model fallback.
+        registry.register_parser("passthrough", || Box::new(PassthroughParser::new()));
+
         // Register DeepSeek-R1 parser (starts with in_reasoning=true)
         registry.register_parser("deepseek_r1", || Box::new(DeepSeekR1Parser::new()));
 
@@ -273,10 +277,10 @@ impl ParserFactory {
 
     /// Get a pooled parser for the given model ID.
     /// Returns a shared instance that can be used concurrently.
-    /// Falls back to a passthrough parser if model is not recognized.
+    /// Falls back to the passthrough parser if model is not recognized.
     #[expect(
         clippy::expect_used,
-        reason = "passthrough parser is registered on the line above; None indicates a bug in registration logic"
+        reason = "passthrough parser is registered eagerly in new(); None indicates a bug in registration logic"
     )]
     pub fn get_pooled(&self, model_id: &str) -> PooledParser {
         // First try to find by pattern
@@ -284,47 +288,29 @@ impl ParserFactory {
             return parser;
         }
 
-        // Fall back to no-op parser (get or create passthrough in pool)
+        // Fall back to passthrough
         self.registry
             .get_pooled_parser("passthrough")
-            .unwrap_or_else(|| {
-                // Register passthrough if not already registered
-                self.registry.register_parser("passthrough", || {
-                    let config = ParserConfig {
-                        think_start_token: String::new(),
-                        think_end_token: String::new(),
-                        stream_reasoning: true,
-                        max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-                        always_in_reasoning: false,
-                    };
-                    Box::new(
-                        BaseReasoningParser::new(config).with_model_type("passthrough".to_string()),
-                    )
-                });
-                self.registry
-                    .get_pooled_parser("passthrough")
-                    .expect("passthrough parser was just registered")
-            })
+            .expect("passthrough parser is registered in new()")
     }
 
     /// Create a new parser instance for the given model ID.
     /// Returns a fresh instance (not pooled).
     /// Use this when you need an isolated parser instance.
+    #[expect(
+        clippy::expect_used,
+        reason = "passthrough parser is registered eagerly in new(); None indicates a bug in registration logic"
+    )]
     pub fn create(&self, model_id: &str) -> Box<dyn ReasoningParser> {
         // First try to find by pattern
         if let Some(parser) = self.registry.create_for_model(model_id) {
             return parser;
         }
 
-        // Fall back to no-op parser (base parser without reasoning detection)
-        let config = ParserConfig {
-            think_start_token: String::new(),
-            think_end_token: String::new(),
-            stream_reasoning: true,
-            max_buffer_size: DEFAULT_MAX_BUFFER_SIZE,
-            always_in_reasoning: false,
-        };
-        Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))
+        // Fall back to passthrough
+        self.registry
+            .create_parser("passthrough")
+            .expect("passthrough parser is registered in new()")
     }
 
     /// Get the internal registry for custom registration.

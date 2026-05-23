@@ -407,6 +407,14 @@ fn queue_due_probes(
             }
             continue;
         }
+        if launched_status == WorkerStatus::Draining {
+            // Drain is owned by the worker_removal workflow's
+            // DrainWorkersStep — probing here would only churn metrics
+            // and `compute_next_status` is a no-op for Draining anyway.
+            // Don't push a removal: the workflow already has one in flight.
+            next_check.remove(&worker_id);
+            continue;
+        }
 
         let next_deadline = now
             + Duration::from_secs(resolved_interval_secs(
@@ -635,8 +643,10 @@ fn compute_next_status(
                     return Some(WorkerStatus::Failed);
                 }
             }
-            WorkerStatus::Failed => {
-                // Terminal — handled outside.
+            WorkerStatus::Failed | WorkerStatus::Draining => {
+                // Terminal for the health-state machine. Failed is removed
+                // by `--remove-unhealthy-workers`; Draining is removed by
+                // the discovery drain timer once in-flight requests settle.
             }
         }
 
@@ -854,6 +864,7 @@ mod tests {
                     timeout_secs: 1,
                     check_interval_secs: 1,
                     disable_health_check: false,
+                    drain_settle_secs: 0,
                 })
                 .build(),
         )
@@ -866,6 +877,7 @@ mod tests {
             timeout_secs: 1,
             check_interval_secs: 1,
             disable_health_check: false,
+            drain_settle_secs: 0,
         }
     }
 

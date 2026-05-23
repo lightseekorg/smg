@@ -19,7 +19,7 @@ use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use crate::{chunk_assembler::ChunkAssembler, crdt_kv::CrdtOrMap};
+use crate::{crdt_kv::CrdtOrMap, transport::chunk_assembler::ChunkAssembler};
 
 // ============================================================================
 // Type Definitions

@@ -14,6 +14,7 @@ use smg_mcp::McpOrchestrator;
 use super::state::RequestState;
 use crate::{
     middleware::TenantRequestMeta,
+    routers::common::openai_bridge::FormatRegistry,
     worker::{Worker, WorkerRegistry},
 };
 
@@ -37,6 +38,9 @@ pub(crate) struct SharedComponents {
     /// MCP orchestrator for creating tool sessions (used in Phase 2).
     #[expect(dead_code, reason = "MCP tool integration is Phase 2")]
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+
+    #[expect(dead_code, reason = "MCP tool integration is Phase 2")]
+    pub mcp_format_registry: FormatRegistry,
 
     /// Per-request timeout from router config.
     pub request_timeout: Duration,

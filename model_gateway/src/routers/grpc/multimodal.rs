@@ -708,6 +708,9 @@ pub(crate) fn assemble_multimodal_data(
         GrpcClient::Mlx(_) => unreachable!(
             "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
         ),
+        GrpcClient::TokenSpeed(_) => unreachable!(
+            "TokenSpeed backend does not support multimodal; preparation stage should reject earlier"
+        ),
     }
 }
 

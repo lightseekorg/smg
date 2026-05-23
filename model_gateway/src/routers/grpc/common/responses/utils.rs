@@ -18,7 +18,8 @@ use tracing::{debug, error, warn};
 use crate::{
     routers::{
         common::{
-            mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+            mcp_utils::ensure_request_mcp_client, openai_bridge,
+            persistence_utils::persist_conversation_items,
         },
         error,
     },
@@ -34,6 +35,7 @@ use crate::{
 /// Returns Ok((has_mcp_tools, mcp_servers)) on success.
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
+    format_registry: &openai_bridge::FormatRegistry,
     tools: Option<&[ResponseTool]>,
 ) -> Result<(bool, Vec<McpServerBinding>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
@@ -53,14 +55,8 @@ pub(crate) async fn ensure_mcp_connection(
     // dispatches.
     let has_builtin_tools = tools
         .map(|t| {
-            t.iter().any(|tool| {
-                matches!(
-                    tool,
-                    ResponseTool::WebSearchPreview(_)
-                        | ResponseTool::CodeInterpreter(_)
-                        | ResponseTool::ImageGeneration(_)
-                )
-            })
+            t.iter()
+                .any(|tool| openai_bridge::builtin_type_for_response_tool(tool).is_some())
         })
         .unwrap_or(false);
 
@@ -72,7 +68,7 @@ pub(crate) async fn ensure_mcp_connection(
     if let Some(tools) = tools {
         // TODO: Thread real request headers through the gRPC responses path if/when
         // gRPC MCP flows need the same forwarded-header preservation contract.
-        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
+        match ensure_request_mcp_client(mcp_orchestrator, format_registry, tools).await {
             Some(mcp_servers) => {
                 return Ok((true, mcp_servers));
             }

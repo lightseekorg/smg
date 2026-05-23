@@ -303,6 +303,7 @@ message GetModelInfoResponse {
   int32 pad_token_id = 11;
   int32 bos_token_id = 12;
   int32 max_req_input_len = 13;
+  string default_sampling_params_json = 14;
 }
 
 message GetServerInfoRequest {}

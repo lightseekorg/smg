@@ -61,7 +61,16 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 1,
         "features": ["chat", "streaming", "reasoning"],
     },
-    # Thinking/reasoning model (larger)
+    # Qwen3 instruct (non-thinking variant) — emits the same
+    # `<tool_call>\n{"name": ..., "arguments": ...}\n</tool_call>` format as
+    # Qwen 2.5, so the gateway's ``qwen`` tool-call parser applies. Used by
+    # ``TestToolChoiceQwen`` and ``TestMultiTurnToolCall``: a Qwen3 model is
+    # required because the Qwen2 family is not in TokenSpeed's model registry.
+    "Qwen/Qwen3-4B-Instruct-2507": {
+        "model": _resolve_model_path("Qwen/Qwen3-4B-Instruct-2507"),
+        "tp": 1,
+        "features": ["chat", "streaming", "function_calling", "tool_choice"],
+    },
     "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
         "tp": 1,
@@ -183,6 +192,12 @@ MODEL_SPECS: dict[str, dict] = {
             "--gpu-memory-utilization=0.9",
             "--enable-chunked-prefill",
         ],
+    },
+    # MLX (Apple Silicon). Smallest Qwen3 with tool calling + thinking (~400 MB).
+    "mlx-community/Qwen3-0.6B-4bit": {
+        "model": _resolve_model_path("mlx-community/Qwen3-0.6B-4bit"),
+        "tp": 1,
+        "features": ["chat", "streaming", "function_calling", "reasoning", "thinking"],
     },
 }
 

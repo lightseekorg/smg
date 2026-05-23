@@ -3,7 +3,7 @@
 //! This module provides functionality to apply chat templates to messages,
 //! similar to HuggingFace transformers' apply_chat_template method.
 
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, io};
 
 use anyhow::{anyhow, Result};
 use minijinja::{
@@ -17,7 +17,7 @@ use minijinja::{
     Environment, Error as MinijinjaError, ErrorKind, Value,
 };
 use serde::Serialize;
-use serde_json::{self, ser::PrettyFormatter, Value as JsonValue};
+use serde_json::{self, ser::Formatter, Value as JsonValue};
 
 /// Chat template content format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -474,21 +474,304 @@ pub struct ChatTemplateParams<'a> {
     pub special_tokens: Option<&'a crate::traits::SpecialTokens>,
 }
 
+/// JSON separator pair passed through HuggingFace's `tojson` filter.
+#[derive(Debug, Clone)]
+struct JsonSeparators {
+    item: Vec<u8>,
+    key: Vec<u8>,
+}
+
+impl JsonSeparators {
+    fn python_default(indent: Option<i64>) -> Self {
+        // Python's json.dumps defaults to `(', ', ': ')` for compact output
+        // and `(',', ': ')` when pretty indentation is enabled.
+        let item = if indent.is_some() { "," } else { ", " };
+        Self {
+            item: item.as_bytes().to_vec(),
+            key: b": ".to_vec(),
+        }
+    }
+}
+
+/// Formatter matching Python's `json.dumps` separator and ASCII escaping rules.
+#[derive(Debug, Clone)]
+struct PythonJsonFormatter {
+    current_indent: usize,
+    has_value: bool,
+    indent: Option<Vec<u8>>,
+    separators: JsonSeparators,
+    ensure_ascii: bool,
+}
+
+impl PythonJsonFormatter {
+    fn new(indent: Option<usize>, separators: JsonSeparators, ensure_ascii: bool) -> Self {
+        Self {
+            current_indent: 0,
+            has_value: false,
+            indent: indent.map(|spaces| vec![b' '; spaces]),
+            separators,
+            ensure_ascii,
+        }
+    }
+}
+
+fn write_indent<W>(writer: &mut W, count: usize, indent: &[u8]) -> io::Result<()>
+where
+    W: ?Sized + io::Write,
+{
+    for _ in 0..count {
+        writer.write_all(indent)?;
+    }
+    Ok(())
+}
+
+fn write_u_escape<W>(writer: &mut W, code: u16) -> io::Result<()>
+where
+    W: ?Sized + io::Write,
+{
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    writer.write_all(&[
+        b'\\',
+        b'u',
+        HEX[((code >> 12) & 0xF) as usize],
+        HEX[((code >> 8) & 0xF) as usize],
+        HEX[((code >> 4) & 0xF) as usize],
+        HEX[(code & 0xF) as usize],
+    ])
+}
+
+impl Formatter for PythonJsonFormatter {
+    fn write_string_fragment<W>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if !self.ensure_ascii {
+            return writer.write_all(fragment.as_bytes());
+        }
+
+        for ch in fragment.chars() {
+            if ch.is_ascii() {
+                let mut buf = [0; 4];
+                writer.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
+                continue;
+            }
+
+            let code = ch as u32;
+            if code <= 0xFFFF {
+                write_u_escape(writer, code as u16)?;
+            } else {
+                let shifted = code - 0x1_0000;
+                let high = 0xD800 + ((shifted >> 10) as u16);
+                let low = 0xDC00 + ((shifted & 0x3FF) as u16);
+                write_u_escape(writer, high)?;
+                write_u_escape(writer, low)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_array<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if self.indent.is_some() {
+            self.current_indent += 1;
+            self.has_value = false;
+        }
+        writer.write_all(b"[")
+    }
+
+    fn end_array<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if let Some(indent) = self.indent.as_deref() {
+            self.current_indent -= 1;
+            if self.has_value {
+                writer.write_all(b"\n")?;
+                write_indent(writer, self.current_indent, indent)?;
+            }
+        }
+        writer.write_all(b"]")
+    }
+
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if let Some(indent) = self.indent.as_deref() {
+            if first {
+                writer.write_all(b"\n")?;
+            } else {
+                writer.write_all(&self.separators.item)?;
+                writer.write_all(b"\n")?;
+            }
+            write_indent(writer, self.current_indent, indent)
+        } else if first {
+            Ok(())
+        } else {
+            writer.write_all(&self.separators.item)
+        }
+    }
+
+    fn end_array_value<W>(&mut self, _writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        self.has_value = true;
+        Ok(())
+    }
+
+    fn begin_object<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if self.indent.is_some() {
+            self.current_indent += 1;
+            self.has_value = false;
+        }
+        writer.write_all(b"{")
+    }
+
+    fn end_object<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if let Some(indent) = self.indent.as_deref() {
+            self.current_indent -= 1;
+            if self.has_value {
+                writer.write_all(b"\n")?;
+                write_indent(writer, self.current_indent, indent)?;
+            }
+        }
+        writer.write_all(b"}")
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if let Some(indent) = self.indent.as_deref() {
+            if first {
+                writer.write_all(b"\n")?;
+            } else {
+                writer.write_all(&self.separators.item)?;
+                writer.write_all(b"\n")?;
+            }
+            write_indent(writer, self.current_indent, indent)
+        } else if first {
+            Ok(())
+        } else {
+            writer.write_all(&self.separators.item)
+        }
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        writer.write_all(&self.separators.key)
+    }
+
+    fn end_object_value<W>(&mut self, _writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        self.has_value = true;
+        Ok(())
+    }
+}
+
+fn invalid_tojson_option(message: impl Into<String>) -> MinijinjaError {
+    MinijinjaError::new(ErrorKind::InvalidOperation, message.into())
+}
+
+fn parse_separators(
+    separators: Option<Value>,
+    indent: Option<i64>,
+) -> std::result::Result<JsonSeparators, MinijinjaError> {
+    let Some(separators) = separators else {
+        return Ok(JsonSeparators::python_default(indent));
+    };
+    if separators.is_none() || separators.is_undefined() {
+        return Ok(JsonSeparators::python_default(indent));
+    }
+
+    let parsed: serde_json::Value = serde_json::to_value(&separators).map_err(|e| {
+        invalid_tojson_option(format!("Failed to convert separators to JSON value: {e}"))
+    })?;
+    let JsonValue::Array(values) = parsed else {
+        return Err(invalid_tojson_option(
+            "separators must be a two-item sequence",
+        ));
+    };
+    if values.len() != 2 {
+        return Err(invalid_tojson_option(
+            "separators must be a two-item sequence",
+        ));
+    }
+
+    let item = values[0]
+        .as_str()
+        .ok_or_else(|| invalid_tojson_option("item separator must be a string"))?;
+    let key = values[1]
+        .as_str()
+        .ok_or_else(|| invalid_tojson_option("key separator must be a string"))?;
+
+    Ok(JsonSeparators {
+        item: item.as_bytes().to_vec(),
+        key: key.as_bytes().to_vec(),
+    })
+}
+
+fn serialize_with_python_json<T: Serialize>(
+    value: &T,
+    indent: Option<i64>,
+    separators: JsonSeparators,
+    ensure_ascii: bool,
+) -> std::result::Result<String, MinijinjaError> {
+    let indent = indent
+        .map(|spaces| {
+            if spaces < 0 {
+                Err(invalid_tojson_option("indent cannot be negative"))
+            } else {
+                Ok(spaces as usize)
+            }
+        })
+        .transpose()?;
+
+    let formatter = PythonJsonFormatter::new(indent, separators, ensure_ascii);
+    let mut buf = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut serializer).map_err(|e| {
+        MinijinjaError::new(
+            ErrorKind::InvalidOperation,
+            format!("Failed to serialize JSON: {e}"),
+        )
+    })?;
+    String::from_utf8(buf).map_err(|e| {
+        MinijinjaError::new(
+            ErrorKind::InvalidOperation,
+            format!("Invalid UTF-8 in JSON output: {e}"),
+        )
+    })
+}
+
 /// Custom tojson filter compatible with HuggingFace transformers' implementation.
 ///
 /// HuggingFace transformers registers a custom `tojson` filter that accepts additional
 /// keyword arguments beyond what standard Jinja2 provides:
-/// - `ensure_ascii` (bool): Whether to escape non-ASCII characters (ignored in Rust, always UTF-8)
+/// - `ensure_ascii` (bool): Whether to escape non-ASCII characters
 /// - `indent` (int): Number of spaces for indentation (pretty-printing)
-/// - `separators` (ignored): Custom separators for JSON output
+/// - `separators`: Custom item/key separators for JSON output
 /// - `sort_keys` (bool): Whether to sort dictionary keys
 ///
 /// This is necessary for compatibility with chat templates from HuggingFace Hub models.
 /// See: https://github.com/huggingface/transformers/blob/main/src/transformers/utils/chat_template_utils.py
 fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, MinijinjaError> {
-    let _ensure_ascii: Option<bool> = kwargs.get("ensure_ascii")?;
+    let ensure_ascii: Option<bool> = kwargs.get("ensure_ascii")?;
     let indent: Option<i64> = kwargs.get("indent")?;
-    let _separators: Option<Value> = kwargs.get("separators")?;
+    let separators: Option<Value> = kwargs.get("separators")?;
     let sort_keys: Option<bool> = kwargs.get("sort_keys")?;
 
     // Ensure all kwargs are consumed to avoid "unknown keyword argument" errors
@@ -501,29 +784,6 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
         )
     })?;
 
-    // Helper to serialize with custom indentation
-    fn serialize_with_indent<T: Serialize>(
-        value: &T,
-        spaces: usize,
-    ) -> std::result::Result<String, MinijinjaError> {
-        let indent_str = vec![b' '; spaces];
-        let formatter = PrettyFormatter::with_indent(&indent_str);
-        let mut buf = Vec::new();
-        let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
-        value.serialize(&mut serializer).map_err(|e| {
-            MinijinjaError::new(
-                ErrorKind::InvalidOperation,
-                format!("Failed to serialize JSON: {e}"),
-            )
-        })?;
-        String::from_utf8(buf).map_err(|e| {
-            MinijinjaError::new(
-                ErrorKind::InvalidOperation,
-                format!("Invalid UTF-8 in JSON output: {e}"),
-            )
-        })
-    }
-
     // Serialize with options
     let json_str: std::result::Result<String, MinijinjaError> = {
         let sorted_json;
@@ -534,22 +794,13 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
             &json_value
         };
 
-        if let Some(spaces) = indent {
-            if spaces < 0 {
-                return Err(MinijinjaError::new(
-                    ErrorKind::InvalidOperation,
-                    "indent cannot be negative",
-                ));
-            }
-            serialize_with_indent(value_to_serialize, spaces as usize)
-        } else {
-            serde_json::to_string(value_to_serialize).map_err(|e| {
-                MinijinjaError::new(
-                    ErrorKind::InvalidOperation,
-                    format!("Failed to serialize JSON: {e}"),
-                )
-            })
-        }
+        let separators = parse_separators(separators, indent)?;
+        serialize_with_python_json(
+            value_to_serialize,
+            indent,
+            separators,
+            ensure_ascii.unwrap_or(false),
+        )
     };
 
     json_str.map(Value::from_safe_string)

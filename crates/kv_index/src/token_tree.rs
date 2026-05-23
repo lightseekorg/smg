@@ -1022,6 +1022,125 @@ impl TokenTree {
             self.evict_tenant(&tenant_id, max_size);
         }
     }
+
+    /// Lazily walk the tree in pre-order, yielding each node's
+    /// `(prefix_tokens, [(tenant, epoch)])` pair without
+    /// materializing the full tree as a single buffer.
+    /// Empty-tenant nodes are skipped (they're routing
+    /// intermediates, not real entries). Children are visited in
+    /// lexicographic page-key order so callers paging the
+    /// iterator can resume by re-running and skipping the first
+    /// N items if the tree is unchanged.
+    ///
+    /// The walk is not atomic — concurrent `insert_tokens` may
+    /// split or replace nodes mid-walk; the iterator may then
+    /// reflect a mix of pre- and post-split state. Acceptable
+    /// for mesh sync (eventual consistency).
+    pub fn iter_entries(&self) -> EntriesIter {
+        EntriesIter::new(self)
+    }
+}
+
+/// Iterator yielded by [`TokenTree::iter_entries`]. Owns
+/// `Arc<Node>` clones for the path it's currently inside so it
+/// survives across awaits or temporary releases of `&TokenTree`.
+pub struct EntriesIter {
+    /// DFS frame stack. The top frame's `remaining_children` is
+    /// the queue of children we still have to visit at the
+    /// current depth. Frames are pushed when descending, popped
+    /// when their children exhaust.
+    stack: Vec<EntryFrame>,
+    /// Mutable accumulated path-from-root tokens. Pushed when
+    /// descending into a child, truncated when popping a frame.
+    path: Vec<TokenId>,
+    /// Pre-staged emission. Set when a node with tenants is
+    /// entered; consumed by the next `next()` call before
+    /// continuing the walk.
+    pending: Option<EntryItem>,
+}
+
+type EntryItem = (Vec<TokenId>, Vec<(TenantId, u64)>);
+
+struct EntryFrame {
+    remaining_children: std::vec::IntoIter<NodeRef>,
+    /// Number of tokens contributed by this frame's edge — used
+    /// to truncate the path buffer correctly when popping.
+    edge_token_count: usize,
+}
+
+impl EntriesIter {
+    fn new(tree: &TokenTree) -> Self {
+        let root_tenants = snapshot_tenants(&tree.root);
+        let pending = (!root_tenants.is_empty()).then(|| (Vec::<TokenId>::new(), root_tenants));
+        Self {
+            stack: vec![EntryFrame {
+                remaining_children: collect_sorted_children(&tree.root).into_iter(),
+                edge_token_count: 0,
+            }],
+            path: Vec::new(),
+            pending,
+        }
+    }
+}
+
+impl Iterator for EntriesIter {
+    type Item = EntryItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.pending.take() {
+            return Some(entry);
+        }
+        loop {
+            let frame = self.stack.last_mut()?;
+            if let Some(child) = frame.remaining_children.next() {
+                // Extend the path directly through the lock guard
+                // — no intermediate Vec<TokenId> clone.
+                let edge_token_count = {
+                    let guard = child.tokens.read();
+                    self.path.extend_from_slice(&guard);
+                    guard.len()
+                };
+
+                let tenants = snapshot_tenants(&child);
+                self.stack.push(EntryFrame {
+                    remaining_children: collect_sorted_children(&child).into_iter(),
+                    edge_token_count,
+                });
+                if !tenants.is_empty() {
+                    return Some((self.path.clone(), tenants));
+                }
+                // Empty tenants → loop continues, descending into
+                // this child's children on the next iteration.
+            } else {
+                let edge_token_count = frame.edge_token_count;
+                self.stack.pop();
+                let new_len = self.path.len().saturating_sub(edge_token_count);
+                self.path.truncate(new_len);
+            }
+        }
+    }
+}
+
+fn snapshot_tenants(node: &NodeRef) -> Vec<(TenantId, u64)> {
+    let mut tenants: Vec<(TenantId, u64)> = node
+        .tenant_last_access_time
+        .iter()
+        .map(|entry| (Arc::clone(entry.key()), *entry.value()))
+        .collect();
+    tenants.sort_by(|a, b| a.0.cmp(&b.0));
+    tenants
+}
+
+fn collect_sorted_children(node: &NodeRef) -> Vec<NodeRef> {
+    let mut children: Vec<(TokenPageKey, NodeRef)> = node
+        .children
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect();
+    // Lexicographic order over the page key — deterministic
+    // traversal across hash-shard layouts.
+    children.sort_by_key(|(k, _)| *k);
+    children.into_iter().map(|(_, n)| n).collect()
 }
 
 impl RadixTree for TokenTree {
@@ -2525,5 +2644,54 @@ mod tests {
     fn test_tree_with_config_invalid_page_size() {
         // Test that invalid page_size panics
         let _tree = TokenTree::with_config(32, EvictionPolicy::Lru);
+    }
+
+    #[test]
+    fn test_iter_entries_empty_tree() {
+        let tree = TokenTree::new();
+        let entries: Vec<_> = tree.iter_entries().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_iter_entries_single_insert() {
+        let tree = TokenTree::new();
+        let tokens: Vec<TokenId> = (0..16).collect();
+        tree.insert_tokens(&tokens, "worker-1");
+
+        let entries: Vec<(Vec<TokenId>, Vec<String>)> = tree
+            .iter_entries()
+            .map(|(p, ts)| (p, ts.into_iter().map(|(t, _)| t.to_string()).collect()))
+            .collect();
+        let leaf = entries
+            .iter()
+            .find(|(p, _)| p == &tokens)
+            .expect("leaf with the inserted tokens");
+        assert_eq!(leaf.1, vec!["worker-1".to_string()]);
+    }
+
+    #[test]
+    fn test_iter_entries_pre_order_lex_sorted() {
+        // Two inserts with a shared prefix produce a split node.
+        // Children sort by `TokenPageKey` lexicographically, so
+        // the smaller-page-key child emits first.
+        let tree = TokenTree::new();
+        let prefix: Vec<TokenId> = (0..16).collect();
+        let mut a: Vec<TokenId> = prefix.clone();
+        a.extend(0..16); // child page = [0..16]
+        let mut b: Vec<TokenId> = prefix.clone();
+        b.extend(100..116); // child page = [100..116]
+        tree.insert_tokens(&a, "wa");
+        tree.insert_tokens(&b, "wb");
+
+        let paths: Vec<Vec<TokenId>> = tree.iter_entries().map(|(p, _)| p).collect();
+        // Order: shared "0..16" parent appears first via wa being
+        // present at index 0 of children; the actual leaves come
+        // through in lex order.
+        assert!(paths.contains(&a));
+        assert!(paths.contains(&b));
+        let pos_a = paths.iter().position(|p| p == &a).unwrap();
+        let pos_b = paths.iter().position(|p| p == &b).unwrap();
+        assert!(pos_a < pos_b, "page-key 0..16 < 100..116");
     }
 }

@@ -7,11 +7,13 @@ use std::{
 
 use openai_protocol::responses::{McpAllowedTools, ResponseTool, ResponsesRequest};
 use serde_json::{json, Value};
-use smg_mcp::{
-    apply_hosted_tool_overrides, extract_hosted_tool_overrides, BuiltinToolType, McpOrchestrator,
-    McpServerBinding, McpServerConfig, McpTransport, ResponseFormat,
-};
+use smg_mcp::{BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport};
 use tracing::{debug, warn};
+
+use crate::routers::common::openai_bridge::{
+    self, apply_hosted_tool_overrides, extract_hosted_tool_overrides, FormatRegistry,
+    ResponseFormat,
+};
 
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
@@ -66,6 +68,7 @@ pub struct McpServerInput {
 /// Returns a list of [`McpServerBinding`]s for successfully connected servers.
 pub async fn connect_mcp_servers(
     mcp_orchestrator: &Arc<McpOrchestrator>,
+    format_registry: &FormatRegistry,
     inputs: &[McpServerInput],
 ) -> Vec<McpServerBinding> {
     let mut mcp_servers: Vec<McpServerBinding> = Vec::new();
@@ -117,7 +120,13 @@ pub async fn connect_mcp_servers(
 
             let server_key = McpOrchestrator::server_key(&server_config);
 
-            match mcp_orchestrator.connect_dynamic_server(server_config).await {
+            match openai_bridge::connect_dynamic_server(
+                mcp_orchestrator,
+                format_registry,
+                server_config,
+            )
+            .await
+            {
                 Ok(_) => {
                     if !mcp_servers.iter().any(|b| b.server_key == server_key) {
                         mcp_servers.push(McpServerBinding {
@@ -175,6 +184,7 @@ pub struct BuiltinToolRouting {
 /// Empty if no built-in tools are found or none have MCP server configurations.
 pub fn collect_builtin_routing(
     mcp_orchestrator: &Arc<McpOrchestrator>,
+    format_registry: &FormatRegistry,
     tools: Option<&[ResponseTool]>,
 ) -> Vec<BuiltinToolRouting> {
     let Some(tools) = tools else {
@@ -184,22 +194,22 @@ pub fn collect_builtin_routing(
     let mut routing = Vec::new();
 
     for tool in tools {
-        let builtin_type = match tool {
-            ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
-            ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
-            ResponseTool::ImageGeneration(_) => BuiltinToolType::ImageGeneration,
-            _ => continue,
+        let Some(builtin_type) = openai_bridge::builtin_type_for_response_tool(tool) else {
+            continue;
         };
 
-        if let Some((server_name, tool_name, response_format)) =
-            mcp_orchestrator.find_builtin_server(builtin_type)
-        {
+        if let Some((server_name, tool_name)) = mcp_orchestrator.find_builtin_server(builtin_type) {
             debug!(
                 builtin_type = ?builtin_type,
                 server = %server_name,
                 tool = %tool_name,
                 "Found MCP server for built-in tool type"
             );
+
+            // ResponseFormat for the routed (server, tool) pair lives in the
+            // gateway-side registry — populated at server-registration time
+            // (see FormatRegistry::populate_from_server_config).
+            let response_format = format_registry.lookup_by_names(&server_name, &tool_name);
 
             routing.push(BuiltinToolRouting {
                 builtin_type,
@@ -225,13 +235,19 @@ pub fn collect_builtin_routing(
 pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
     tools
         .iter()
-        .filter_map(|t| match t {
-            ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
-            ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
-            ResponseTool::ImageGeneration(_) => Some(BuiltinToolType::ImageGeneration),
-            _ => None,
-        })
+        .filter_map(openai_bridge::builtin_type_for_response_tool)
         .collect()
+}
+
+/// True if `tools` carries any MCP-routed entry (declared MCP server or a
+/// builtin family that the gateway intercepts via MCP).
+///
+/// Derived from [`extract_builtin_types`] so the predicate and the actual
+/// routing path can't drift — adding a new builtin to the routing path
+/// (e.g. `file_search`) makes this predicate cover it too.
+pub fn request_uses_mcp_routing(tools: &[ResponseTool]) -> bool {
+    tools.iter().any(|t| matches!(t, ResponseTool::Mcp(_)))
+        || !extract_builtin_types(tools).is_empty()
 }
 
 /// Collect user-declared function tool names from a Responses request.
@@ -256,14 +272,15 @@ pub(crate) fn collect_user_function_names(request: &ResponsesRequest) -> HashSet
 /// Returns `Some(servers)` if at least one server is available, `None` otherwise.
 pub async fn ensure_mcp_servers(
     orchestrator: &Arc<McpOrchestrator>,
+    format_registry: &FormatRegistry,
     inputs: &[McpServerInput],
     builtin_types: &[BuiltinToolType],
 ) -> Option<Vec<McpServerBinding>> {
-    let mut mcp_servers = connect_mcp_servers(orchestrator, inputs).await;
+    let mut mcp_servers = connect_mcp_servers(orchestrator, format_registry, inputs).await;
 
     // Add builtin tool routing servers
     for &builtin_type in builtin_types {
-        if let Some((server_name, tool_name, _)) = orchestrator.find_builtin_server(builtin_type) {
+        if let Some((server_name, tool_name)) = orchestrator.find_builtin_server(builtin_type) {
             debug!(
                 builtin_type = ?builtin_type,
                 server = %server_name,
@@ -298,6 +315,7 @@ pub async fn ensure_mcp_servers(
 /// then delegates to [`ensure_mcp_servers`].
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
+    format_registry: &FormatRegistry,
     tools: &[ResponseTool],
 ) -> Option<Vec<McpServerBinding>> {
     let inputs: Vec<McpServerInput> = tools
@@ -320,7 +338,7 @@ pub async fn ensure_request_mcp_client(
 
     let builtin_types = extract_builtin_types(tools);
 
-    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
+    ensure_mcp_servers(mcp_orchestrator, format_registry, &inputs, &builtin_types).await
 }
 
 /// Forward the caller's `user` identifier into hosted-tool dispatch arguments.
@@ -343,9 +361,9 @@ pub async fn ensure_request_mcp_client(
 /// - No-op if `arguments` already contains a `user` key — model-supplied
 ///   values win over the request-level identifier.
 /// - Otherwise inserts `arguments["user"] = json!(user)`.
-pub(crate) fn inject_user_into_hosted_args(
+fn inject_user_into_hosted_args(
     arguments: &mut Value,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
     user: Option<&str>,
 ) {
     if response_format.to_builtin_tool_type().is_none() {
@@ -394,7 +412,7 @@ pub(crate) fn inject_user_into_hosted_args(
 /// a single chokepoint.
 pub(crate) fn prepare_hosted_dispatch_args(
     arguments: &mut Value,
-    response_format: &ResponseFormat,
+    response_format: ResponseFormat,
     request_tools: &[ResponseTool],
     request_user: Option<&str>,
 ) {
@@ -422,32 +440,36 @@ mod tests {
 
     use super::*;
 
-    /// Create a test orchestrator with a built-in server configuration
-    async fn create_test_orchestrator_with_builtin() -> Arc<McpOrchestrator> {
+    /// Create a test orchestrator with a built-in server configuration,
+    /// plus a `FormatRegistry` mirroring the same per-tool ResponseFormat
+    /// values that production code populates at server-registration time.
+    async fn create_test_orchestrator_with_builtin() -> (Arc<McpOrchestrator>, FormatRegistry) {
         let mut tools_config = HashMap::new();
         tools_config.insert(
             "web_search".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 ..Default::default()
             },
         );
 
+        let server = McpServerConfig {
+            name: "search-server".to_string(),
+            transport: McpTransport::Streamable {
+                url: "http://localhost:9999/mcp".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: Some(tools_config),
+            builtin_type: Some(BuiltinToolType::WebSearchPreview),
+            builtin_tool_name: Some("web_search".to_string()),
+            internal: false,
+        };
+
         let config = McpConfig {
-            servers: vec![McpServerConfig {
-                name: "search-server".to_string(),
-                transport: McpTransport::Streamable {
-                    url: "http://localhost:9999/mcp".to_string(),
-                    token: None,
-                    headers: HashMap::new(),
-                },
-                proxy: None,
-                required: false,
-                tools: Some(tools_config),
-                builtin_type: Some(BuiltinToolType::WebSearchPreview),
-                builtin_tool_name: Some("web_search".to_string()),
-                internal: false,
-            }],
+            servers: vec![server.clone()],
             pool: Default::default(),
             proxy: None,
             warmup: Vec::new(),
@@ -455,12 +477,18 @@ mod tests {
             policy: Default::default(),
         };
 
+        let registry = FormatRegistry::new();
+        registry.populate_from_server_config(&server);
+
         // Note: This will fail to connect but still create the orchestrator with config
-        Arc::new(McpOrchestrator::new(config).await.unwrap())
+        (
+            Arc::new(McpOrchestrator::new(config).await.unwrap()),
+            registry,
+        )
     }
 
     /// Create a test orchestrator without built-in server configuration
-    async fn create_test_orchestrator_no_builtin() -> Arc<McpOrchestrator> {
+    async fn create_test_orchestrator_no_builtin() -> (Arc<McpOrchestrator>, FormatRegistry) {
         let config = McpConfig {
             servers: vec![],
             pool: Default::default(),
@@ -470,18 +498,21 @@ mod tests {
             policy: Default::default(),
         };
 
-        Arc::new(McpOrchestrator::new(config).await.unwrap())
+        (
+            Arc::new(McpOrchestrator::new(config).await.unwrap()),
+            FormatRegistry::new(),
+        )
     }
 
     #[tokio::test]
     async fn test_collect_builtin_routing_with_configured_server() {
-        let orchestrator = create_test_orchestrator_with_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_with_builtin().await;
 
         let tools = vec![ResponseTool::WebSearchPreview(
             WebSearchPreviewTool::default(),
         )];
 
-        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, Some(&tools));
 
         assert_eq!(routing.len(), 1);
         assert_eq!(routing[0].builtin_type, BuiltinToolType::WebSearchPreview);
@@ -492,13 +523,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_builtin_routing_no_configured_server() {
-        let orchestrator = create_test_orchestrator_no_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_no_builtin().await;
 
         let tools = vec![ResponseTool::WebSearchPreview(
             WebSearchPreviewTool::default(),
         )];
 
-        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, Some(&tools));
 
         // No routing because no server configured for this built-in type
         assert!(routing.is_empty());
@@ -506,7 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_builtin_routing_ignores_mcp_tools() {
-        let orchestrator = create_test_orchestrator_with_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_with_builtin().await;
 
         let tools = vec![ResponseTool::Mcp(McpTool {
             server_url: Some("http://example.com/mcp".to_string()),
@@ -520,7 +551,7 @@ mod tests {
             defer_loading: None,
         })];
 
-        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, Some(&tools));
 
         // MCP tools are not built-in types, should be empty
         assert!(routing.is_empty());
@@ -528,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_builtin_routing_ignores_function_tools() {
-        let orchestrator = create_test_orchestrator_with_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_with_builtin().await;
 
         let tools = vec![ResponseTool::Function(FunctionTool {
             function: Function {
@@ -539,7 +570,7 @@ mod tests {
             },
         })];
 
-        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, Some(&tools));
 
         // Function tools are not built-in types, should be empty
         assert!(routing.is_empty());
@@ -547,9 +578,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_builtin_routing_none_tools() {
-        let orchestrator = create_test_orchestrator_no_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_no_builtin().await;
 
-        let routing = collect_builtin_routing(&orchestrator, None);
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, None);
 
         assert!(routing.is_empty());
     }
@@ -561,7 +592,7 @@ mod tests {
         web_search_tools.insert(
             "web_search".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::WebSearchCall,
+                response_format: Some(ResponseFormatConfig::WebSearchCall),
                 ..Default::default()
             },
         );
@@ -570,7 +601,7 @@ mod tests {
         code_interp_tools.insert(
             "run_code".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::CodeInterpreterCall,
+                response_format: Some(ResponseFormatConfig::CodeInterpreterCall),
                 ..Default::default()
             },
         );
@@ -613,6 +644,10 @@ mod tests {
             policy: Default::default(),
         };
 
+        let format_registry = FormatRegistry::new();
+        for server in &config.servers {
+            format_registry.populate_from_server_config(server);
+        }
         let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
 
         let tools = vec![
@@ -620,7 +655,7 @@ mod tests {
             ResponseTool::CodeInterpreter(CodeInterpreterTool::default()),
         ];
 
-        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, Some(&tools));
 
         assert_eq!(routing.len(), 2);
 
@@ -656,7 +691,7 @@ mod tests {
         image_gen_tools.insert(
             "generate_image".to_string(),
             ToolConfig {
-                response_format: ResponseFormatConfig::ImageGenerationCall,
+                response_format: Some(ResponseFormatConfig::ImageGenerationCall),
                 ..Default::default()
             },
         );
@@ -683,11 +718,15 @@ mod tests {
             policy: Default::default(),
         };
 
+        let format_registry = FormatRegistry::new();
+        for server in &config.servers {
+            format_registry.populate_from_server_config(server);
+        }
         let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
 
         let tools = vec![ResponseTool::ImageGeneration(ImageGenerationTool::default())];
 
-        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+        let routing = collect_builtin_routing(&orchestrator, &format_registry, Some(&tools));
 
         assert_eq!(routing.len(), 1);
         assert_eq!(routing[0].builtin_type, BuiltinToolType::ImageGeneration);
@@ -706,14 +745,14 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_request_mcp_client_with_builtin_routing() {
         // Create orchestrator with a built-in server configured
-        let orchestrator = create_test_orchestrator_with_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_with_builtin().await;
 
         // Request has web_search_preview tool (no server_url, not MCP type)
         let tools = vec![ResponseTool::WebSearchPreview(
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &format_registry, &tools).await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
@@ -729,14 +768,14 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_request_mcp_client_no_builtin_routing() {
         // Create orchestrator WITHOUT built-in server configured
-        let orchestrator = create_test_orchestrator_no_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_no_builtin().await;
 
         // Request has web_search_preview tool
         let tools = vec![ResponseTool::WebSearchPreview(
             WebSearchPreviewTool::default(),
         )];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &format_registry, &tools).await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -744,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_request_mcp_client_function_tools_only() {
-        let orchestrator = create_test_orchestrator_with_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_with_builtin().await;
 
         // Request has only function tools (no MCP, no built-in)
         let tools = vec![ResponseTool::Function(FunctionTool {
@@ -756,7 +795,7 @@ mod tests {
             },
         })];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &format_registry, &tools).await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -765,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_request_mcp_client_mixed_tools() {
         // Create orchestrator with built-in server
-        let orchestrator = create_test_orchestrator_with_builtin().await;
+        let (orchestrator, format_registry) = create_test_orchestrator_with_builtin().await;
 
         // Request has mixed tools: function + web_search_preview
         let tools = vec![
@@ -780,7 +819,7 @@ mod tests {
             ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &format_registry, &tools).await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
@@ -866,7 +905,7 @@ mod tests {
         let mut args = json!({"prompt": "a cat", "user": null});
         inject_user_into_hosted_args(
             &mut args,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             Some("user-123"),
         );
         assert_eq!(args.get("user"), Some(&json!("user-123")));
@@ -877,7 +916,7 @@ mod tests {
         let mut args = json!({"prompt": "a cat"});
         inject_user_into_hosted_args(
             &mut args,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             Some("user-123"),
         );
         assert_eq!(args.get("user"), Some(&json!("user-123")));
@@ -891,7 +930,7 @@ mod tests {
         let mut args = json!({"prompt": "a cat", "user": "model-supplied"});
         inject_user_into_hosted_args(
             &mut args,
-            &ResponseFormat::ImageGenerationCall,
+            ResponseFormat::ImageGenerationCall,
             Some("request-level"),
         );
         assert_eq!(args.get("user"), Some(&json!("model-supplied")));
@@ -902,7 +941,7 @@ mod tests {
         // Plain MCP function tools have caller-defined schemas; injecting
         // `user` could surprise tools that don't expect that key.
         let mut args = json!({"q": "weather"});
-        inject_user_into_hosted_args(&mut args, &ResponseFormat::Passthrough, Some("user-123"));
+        inject_user_into_hosted_args(&mut args, ResponseFormat::Passthrough, Some("user-123"));
         assert!(
             !args.as_object().unwrap().contains_key("user"),
             "passthrough format must not receive an injected user key"
@@ -912,18 +951,18 @@ mod tests {
     #[test]
     fn inject_user_empty_or_missing_user_is_noop() {
         let mut args_none = json!({"prompt": "x"});
-        inject_user_into_hosted_args(&mut args_none, &ResponseFormat::WebSearchCall, None);
+        inject_user_into_hosted_args(&mut args_none, ResponseFormat::WebSearchCall, None);
         assert!(!args_none.as_object().unwrap().contains_key("user"));
 
         let mut args_empty = json!({"prompt": "x"});
-        inject_user_into_hosted_args(&mut args_empty, &ResponseFormat::WebSearchCall, Some(""));
+        inject_user_into_hosted_args(&mut args_empty, ResponseFormat::WebSearchCall, Some(""));
         assert!(!args_empty.as_object().unwrap().contains_key("user"));
     }
 
     #[test]
     fn inject_user_non_object_args_is_noop() {
         let mut args = json!("not-an-object");
-        inject_user_into_hosted_args(&mut args, &ResponseFormat::FileSearchCall, Some("u1"));
+        inject_user_into_hosted_args(&mut args, ResponseFormat::FileSearchCall, Some("u1"));
         assert_eq!(args, json!("not-an-object"));
     }
 
@@ -937,7 +976,7 @@ mod tests {
             ResponseFormat::FileSearchCall,
         ] {
             let mut args = json!({});
-            inject_user_into_hosted_args(&mut args, &format, Some("user-xyz"));
+            inject_user_into_hosted_args(&mut args, format, Some("user-xyz"));
             assert_eq!(
                 args.get("user"),
                 Some(&json!("user-xyz")),

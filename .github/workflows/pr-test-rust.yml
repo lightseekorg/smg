@@ -233,6 +233,15 @@ jobs:
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
   unit-tests:
+    needs: [detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.detect-changes.result == 'success'
+      && (
+        github.event_name != 'pull_request'
+        || needs.detect-changes.outputs.rust-ci == 'true'
+      )
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -267,9 +276,8 @@ jobs:
 
       - name: Generate vision golden fixtures
         run: |
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-          pip install transformers pillow numpy scipy
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install transformers pillow numpy scipy
           python crates/multimodal/scripts/generate_vision_golden.py
 
       - name: Run Rust tests
@@ -359,7 +367,6 @@ jobs:
 
   detect-changes:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: read
@@ -370,6 +377,7 @@ jobs:
       agentic: ${{ steps.filter.outputs.agentic }}
       embeddings: ${{ steps.filter.outputs.embeddings }}
       go-bindings: ${{ steps.filter.outputs.go-bindings }}
+      rust-ci: ${{ steps.filter.outputs.rust-ci }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
@@ -390,6 +398,7 @@ jobs:
               - 'scripts/ci_setup_python_venv.sh'
               - 'scripts/ci_install_sglang.sh'
               - 'scripts/ci_install_vllm.sh'
+              - 'scripts/ci_install_tokenspeed.sh'
               - 'scripts/ci_install_e2e_deps.sh'
               - 'scripts/ci_killall_sglang.sh'
               - 'scripts/ci_build_wheel.sh'
@@ -404,6 +413,7 @@ jobs:
               - 'e2e_test/router/**'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
+              - 'scripts/ci_install_tokenspeed.sh'
             agentic:
               - 'crates/mcp/**'
               - 'crates/data_connector/**'
@@ -419,6 +429,28 @@ jobs:
               - 'e2e_test/embeddings/**'
             go-bindings:
               - 'e2e_test/bindings_go/**'
+            rust-ci:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rustfmt.toml'
+              - 'clippy.toml'
+              - 'crates/**'
+              - 'test_support/**'
+              - 'model_gateway/**'
+              - 'bindings/python/Cargo.toml'
+              - 'bindings/python/build.rs'
+              - 'bindings/python/src/**'
+              - 'bindings/golang/Cargo.toml'
+              - 'bindings/golang/src/**'
+              - 'clients/rust/**'
+              - 'clients/openapi-gen/**'
+              - 'tui/**'
+              - '.cargo/**'
+              - '.github/actions/setup-rust/**'
+              - 'scripts/ci_install_rust.sh'
+              - '.github/workflows/pr-test-rust.yml'
+              - 'examples/wasm/wasm-guest-storage-hook/**'
+              - 'examples/wasm/wasm-guest-storage-hook-passthrough/**'
 
   # --- GPU E2E: organized by GPU tier + API, engine as matrix axis ---
 
@@ -445,6 +477,10 @@ jobs:
             timeout: 20
           - engine: trtllm
             timeout: 90
+          # TokenSpeed builds kernel (CUDA) + scheduler (C++/CMake) from
+          # source, so first run takes ~30 min; cached runs are faster.
+          - engine: tokenspeed
+            timeout: 60
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -555,6 +591,11 @@ jobs:
             timeout: 20
           - engine: trtllm
             timeout: 30
+          # Picks up TestChatCompletionGptOss (gpt-oss-20b, ``@pytest.mark.gpu(2)``)
+          # on the tokenspeed engine; the 1-GPU job collected the test class but
+          # pytest skipped it at collection because the runner only had 1 GPU.
+          - engine: tokenspeed
+            timeout: 60
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}

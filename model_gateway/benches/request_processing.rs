@@ -72,6 +72,7 @@ fn default_generate_request() -> GenerateRequest {
         return_bytes: false,
         return_entropy: false,
         rid: None,
+        other: serde_json::Map::new(),
     }
 }
 

@@ -647,6 +647,7 @@ async fn test_unsupported_endpoints() {
         return_bytes: false,
         return_entropy: false,
         rid: None,
+        other: serde_json::Map::new(),
     };
 
     let tenant_meta = test_tenant_meta();

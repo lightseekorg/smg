@@ -47,6 +47,9 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromPolicyRegistryStep {
             app_context
                 .policy_registry
                 .remove_worker_from_cache_aware(&model_id, worker_url);
+            app_context
+                .policy_registry
+                .remove_worker_from_pd_cache_aware(worker_url);
 
             // Notify policy registry
             app_context.policy_registry.on_worker_removed(&model_id);

@@ -44,14 +44,15 @@ pub async fn run_ws_proxy(
     // Connect to upstream WebSocket with auth.
     // Let tungstenite auto-add WebSocket handshake headers (Connection, Upgrade,
     // Sec-WebSocket-Version, Sec-WebSocket-Key); we only add app-specific headers.
+    //
+    // Do not send `OpenAI-Beta: realtime=v1` — OpenAI's GA Realtime API rejects
+    // it with `beta_api_shape_disabled` ("The Realtime Beta API is no longer
+    // supported. Please use /v1/realtime for the GA API.").
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = upstream_url.into_client_request()?;
     request
         .headers_mut()
         .insert("Authorization", auth_header.parse()?);
-    request
-        .headers_mut()
-        .insert("OpenAI-Beta", "realtime=v1".parse()?);
 
     // Build an explicit rustls TLS connector so we don't depend on the
     // process-level CryptoProvider being installed.
