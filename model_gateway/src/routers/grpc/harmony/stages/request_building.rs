@@ -395,11 +395,12 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             None
         };
         if let Some(ref stop) = mlx_stop {
-            // Tokenizer not loaded by Harmony preparation; load it here on demand.
+            // The Harmony preparation stage does not load the tokenizer (unlike the regular
+            // pipeline), so we load it on demand here. resolve_tokenizer also caches the
+            // result in ctx.state.tokenizer, making subsequent uses in this request free.
             if ctx.state.tokenizer.is_none() {
-                let tok = utils::resolve_tokenizer(ctx, "HarmonyRequestBuildingStage::execute")
+                utils::resolve_tokenizer(ctx, "HarmonyRequestBuildingStage::execute")
                     .map_err(|e| *e)?;
-                ctx.state.tokenizer = Some(tok);
             }
             helpers::apply_mlx_stop_sequences(
                 &mut proto_request,
