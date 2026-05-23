@@ -882,9 +882,10 @@ impl ProtoGenerateComplete {
     /// - MatchedStopStr → String
     /// - None → None
     ///
-    /// For MLX, returns the raw token ID (no string reverse-mapping). Use
-    /// `matched_stop_json_with_context` when the original stop strings are available.
-    pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
+    /// For MLX, returns the raw token ID (no string reverse-mapping). Prefer
+    /// `matched_stop_json_with_context` when the original stop strings are available
+    /// so that string stops are returned as strings rather than token IDs.
+    pub(crate) fn matched_stop_json(&self) -> Option<serde_json::Value> {
         macro_rules! convert {
             ($oneof:expr, $token_id:path, $stop_str:path) => {
                 $oneof.as_ref().map(|m| match m {
