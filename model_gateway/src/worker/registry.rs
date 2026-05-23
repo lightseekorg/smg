@@ -162,8 +162,11 @@ impl WorkerRegistry {
     ///
     /// Returns `Some(worker)` when a worker with this URL is registered,
     /// `None` otherwise. Read-only, lock-free. Emits no events.
+    ///
+    /// A scheme-less `host:port` input is canonicalized against the registered
+    /// `http://`/`grpc://` form — see [`Self::resolve_url_to_id`].
     pub fn get_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
-        self.url_to_id.get(url).and_then(|id| self.get(&id))
+        self.resolve_url_to_id(url).and_then(|id| self.get(&id))
     }
 
     /// Look up a worker's ID by its URL.
@@ -172,8 +175,39 @@ impl WorkerRegistry {
     /// `None` otherwise. Read-only, lock-free. Emits no events. Useful for
     /// callers that need to invoke `transition_status_if_revision` with
     /// the current worker revision.
+    ///
+    /// A scheme-less `host:port` input is canonicalized against the registered
+    /// `http://`/`grpc://` form — see [`Self::resolve_url_to_id`].
     pub fn get_id_by_url(&self, url: &str) -> Option<WorkerId> {
-        self.url_to_id.get(url).map(|id| id.clone())
+        self.resolve_url_to_id(url)
+    }
+
+    /// Resolve a URL string to the `WorkerId` it is registered under.
+    ///
+    /// Tries exact match first. If the input has no recognized scheme
+    /// (`http://`, `https://`, `grpc://`, `grpcs://`), retries with
+    /// `http://` and `grpc://` prefixes — service discovery synthesizes
+    /// bare `host:port` URLs and the workflow normalizes them to either
+    /// scheme based on probe results, so removal-by-url needs to match
+    /// either canonical form.
+    fn resolve_url_to_id(&self, url: &str) -> Option<WorkerId> {
+        if let Some(id) = self.url_to_id.get(url) {
+            return Some(id.clone());
+        }
+        let has_scheme = url.starts_with("http://")
+            || url.starts_with("https://")
+            || url.starts_with("grpc://")
+            || url.starts_with("grpcs://");
+        if has_scheme {
+            return None;
+        }
+        for scheme in ["http://", "grpc://"] {
+            let candidate = format!("{scheme}{url}");
+            if let Some(id) = self.url_to_id.get(&candidate) {
+                return Some(id.clone());
+            }
+        }
+        None
     }
 
     /// Reverse-lookup the URL for a given worker ID.
@@ -932,7 +966,7 @@ impl WorkerRegistry {
     /// `WorkerId` before `remove()` takes the lock, and the subsequent
     /// teardown would then delete the new mapping.
     pub fn remove_by_url(&self, url: &str) -> Option<Arc<dyn Worker>> {
-        let worker_id = self.url_to_id.get(url).map(|entry| entry.clone())?;
+        let worker_id = self.resolve_url_to_id(url)?;
         self.remove(&worker_id)
     }
 
@@ -1560,6 +1594,76 @@ mod tests {
     fn test_get_id_by_url_returns_none_for_unknown_url() {
         let registry = WorkerRegistry::new();
         assert!(registry.get_id_by_url("http://missing:8080").is_none());
+    }
+
+    #[test]
+    fn test_url_lookup_canonicalizes_bare_host_port_to_http_form() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://canon:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let worker_id = registry.register(worker).unwrap();
+
+        assert_eq!(registry.get_id_by_url("canon:8080"), Some(worker_id));
+        assert!(registry.get_by_url("canon:8080").is_some());
+    }
+
+    #[test]
+    fn test_url_lookup_canonicalizes_bare_host_port_to_grpc_form() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://canon-grpc:8080")
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Grpc)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let worker_id = registry.register(worker).unwrap();
+
+        assert_eq!(registry.get_id_by_url("canon-grpc:8080"), Some(worker_id));
+        assert!(registry.get_by_url("canon-grpc:8080").is_some());
+    }
+
+    #[test]
+    fn test_remove_by_url_canonicalizes_bare_host_port() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://to-remove:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let worker_id = registry.register(worker).unwrap();
+
+        assert!(registry.remove_by_url("to-remove:8080").is_some());
+        assert!(registry.get(&worker_id).is_none());
+        assert!(registry.get_by_url("http://to-remove:8080").is_none());
+    }
+
+    #[test]
+    fn test_url_lookup_does_not_cross_match_explicit_schemes() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://strict:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        registry.register(worker).unwrap();
+
+        assert!(registry.get_by_url("grpc://strict:8080").is_none());
+        assert!(registry.get_id_by_url("grpcs://strict:8080").is_none());
+    }
+
+    #[test]
+    fn test_url_lookup_returns_none_for_bare_host_port_with_no_match() {
+        let registry = WorkerRegistry::new();
+        assert!(registry.get_by_url("nothing:8080").is_none());
+        assert!(registry.get_id_by_url("nothing:8080").is_none());
+        assert!(registry.remove_by_url("nothing:8080").is_none());
     }
 
     /// `transition_status_inner` (the shared backend used by both
