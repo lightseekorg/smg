@@ -909,9 +909,6 @@ impl ProtoGenerateComplete {
                 TrtllmMatchedStop::MatchedTokenId,
                 TrtllmMatchedStop::MatchedStopStr
             ),
-            Self::Mlx(c) => c
-                .matched_stop_token_id
-                .map(|id| serde_json::Value::Number(id.into())),
             Self::TokenSpeed(c) => convert!(
                 &c.matched_stop,
                 TokenSpeedMatchedStop::MatchedTokenId,
