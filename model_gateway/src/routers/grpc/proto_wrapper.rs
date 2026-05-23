@@ -910,14 +910,14 @@ impl ProtoGenerateComplete {
                 TrtllmMatchedStop::MatchedTokenId,
                 TrtllmMatchedStop::MatchedStopStr
             ),
+            Self::Mlx(c) => c
+                .matched_stop_token_id
+                .map(|id| serde_json::Value::Number(id.into())),
             Self::TokenSpeed(c) => convert!(
                 &c.matched_stop,
                 TokenSpeedMatchedStop::MatchedTokenId,
                 TokenSpeedMatchedStop::MatchedStopStr
             ),
-            // MLX only carries a token ID; callers with stop string context should use
-            // matched_stop_json_with_context for proper string reverse-mapping.
-            Self::Mlx(c) => c.matched_stop_token_id.map(|id| serde_json::Value::Number(id.into())),
         }
     }
 

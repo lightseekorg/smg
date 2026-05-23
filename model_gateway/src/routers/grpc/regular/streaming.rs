@@ -2007,12 +2007,12 @@ impl StreamingProcessor {
                     prompt_tokens = complete.prompt_tokens();
                     completion_tokens.record_complete(&complete);
                     finish_reason_str = complete.finish_reason().to_string();
-                    let stop_for_mlx = original_request
+                    let stop = original_request
                         .stop_sequences
                         .as_ref()
                         .map(|v| StringOrArray::Array(v.clone()));
                     matched_stop = complete.matched_stop_json_with_context(
-                        stop_for_mlx.as_ref(),
+                        stop.as_ref(),
                         None, // Messages API has no stop_token_ids
                         tokenizer.as_ref(),
                     );

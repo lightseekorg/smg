@@ -710,12 +710,12 @@ impl ResponseProcessor {
 
         // Step 4: Determine stop_reason and stop_sequence (derived from same conditions)
         let finish_reason_str = complete.finish_reason();
-        let stop_for_mlx = messages_request
+        let stop = messages_request
             .stop_sequences
             .as_ref()
             .map(|v| StringOrArray::Array(v.clone()));
         let matched_stop = complete.matched_stop_json_with_context(
-            stop_for_mlx.as_ref(),
+            stop.as_ref(),
             None, // Messages API has no stop_token_ids
             tokenizer.as_ref(),
         );
