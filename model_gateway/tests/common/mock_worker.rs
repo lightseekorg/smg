@@ -502,10 +502,6 @@ async fn chat_completions_handler(
     }
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "test helper - panicking on failure is intentional"
-)]
 async fn messages_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Json(payload): Json<serde_json::Value>,
@@ -1231,6 +1227,10 @@ async fn flush_cache_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
     .into_response()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn v1_models_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 

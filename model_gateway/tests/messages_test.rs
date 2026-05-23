@@ -150,7 +150,10 @@ fn test_generation_request_impl_is_stream_and_model() {
     .unwrap();
 
     assert!(req.is_stream());
-    assert_eq!(req.get_model(), Some("claude-sonnet-4-5-20250929"));
+    assert_eq!(
+        GenerationRequest::get_model(&req),
+        Some("claude-sonnet-4-5-20250929")
+    );
 
     let no_stream: CreateMessageRequest = serde_json::from_value(json!({
         "model": "claude-sonnet-4-5-20250929",
