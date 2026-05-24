@@ -35,10 +35,16 @@ async fn prometheus_handler(State(state): State<MetricsState>) -> impl IntoRespo
     )
 }
 
+async fn bind_metrics_listener(addr: SocketAddr) -> Result<tokio::net::TcpListener, String> {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("failed to bind metrics server on {addr}: {e}"))
+}
+
 /// Start the metrics HTTP/WS server. Binds eagerly so callers fail fast on
 /// port conflicts or bad addresses.
 #[expect(
-    clippy::expect_used,
+    clippy::panic,
     reason = "startup initialization — metrics server must bind or the process cannot serve metrics"
 )]
 pub async fn start_metrics_server(
@@ -54,9 +60,9 @@ pub async fn start_metrics_server(
     });
     let addr = SocketAddr::new(ip_addr, port);
 
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = bind_metrics_listener(addr)
         .await
-        .expect("failed to bind metrics server");
+        .unwrap_or_else(|msg| panic!("{msg}"));
 
     info!("Metrics server listening on {addr} (/metrics + /ws/metrics)");
 
@@ -96,4 +102,21 @@ pub async fn start_metrics_server(
             error!("Metrics server error: {e}");
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_metrics_listener_error_includes_addr() {
+        let pre =
+            tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .await
+                .unwrap();
+        let busy = pre.local_addr().unwrap();
+        let err = bind_metrics_listener(busy).await.unwrap_err();
+        assert!(err.contains(&busy.to_string()), "got: {err}");
+        assert!(err.contains("failed to bind metrics server"), "got: {err}");
+    }
 }
