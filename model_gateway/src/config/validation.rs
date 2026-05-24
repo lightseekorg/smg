@@ -827,51 +827,44 @@ impl ConfigValidator {
 
     fn validate_urls(urls: &[String]) -> ConfigResult<()> {
         for url in urls {
-            if url.is_empty() {
+            if let Err(reason) = validate_worker_url(url) {
                 return Err(ConfigError::InvalidValue {
                     field: "worker_url".to_string(),
                     value: url.clone(),
-                    reason: "URL cannot be empty".to_string(),
+                    reason,
                 });
-            }
-
-            // Case-insensitive scheme allow-list. Compare just the scheme
-            // segment so we don't allocate a lowercased copy of the full URL.
-            const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs"];
-            let scheme = url.split_once("://").map_or("", |(s, _)| s);
-            if !ALLOWED_SCHEMES
-                .iter()
-                .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-            {
-                return Err(ConfigError::InvalidValue {
-                    field: "worker_url".to_string(),
-                    value: url.clone(),
-                    reason: "URL must start with http://, https://, grpc://, or grpcs://"
-                        .to_string(),
-                });
-            }
-
-            match ::url::Url::parse(url) {
-                Ok(parsed) => {
-                    if parsed.host_str().is_none() {
-                        return Err(ConfigError::InvalidValue {
-                            field: "worker_url".to_string(),
-                            value: url.clone(),
-                            reason: "URL must have a valid host".to_string(),
-                        });
-                    }
-                }
-                Err(e) => {
-                    return Err(ConfigError::InvalidValue {
-                        field: "worker_url".to_string(),
-                        value: url.clone(),
-                        reason: format!("Invalid URL format: {e}"),
-                    });
-                }
             }
         }
         Ok(())
     }
+}
+
+/// Reject empty / schemeless / unparsable worker URLs so callers can wrap the
+/// failure reason in whatever error type fits their layer.
+pub(crate) fn validate_worker_url(url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Err("URL cannot be empty".to_string());
+    }
+
+    const ALLOWED_SCHEMES: &[&str] = &["http", "https", "grpc", "grpcs"];
+    let scheme = url.split_once("://").map_or("", |(s, _)| s);
+    if !ALLOWED_SCHEMES
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    {
+        return Err("URL must start with http://, https://, grpc://, or grpcs://".to_string());
+    }
+
+    match ::url::Url::parse(url) {
+        Ok(parsed) => {
+            if parsed.host_str().is_none() {
+                return Err("URL must have a valid host".to_string());
+            }
+        }
+        Err(e) => return Err(format!("Invalid URL format: {e}")),
+    }
+
+    Ok(())
 }
 
 fn validate_mebibyte_limit(field: &str, value_mb: usize) -> ConfigResult<()> {
