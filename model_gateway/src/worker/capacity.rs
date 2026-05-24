@@ -8,6 +8,7 @@ use std::sync::{
     Arc,
 };
 
+use futures::FutureExt as _;
 use tokio::sync::watch;
 
 use super::{registry::WorkerRegistry, Worker};
@@ -151,11 +152,40 @@ impl WorkerCapacity {
             capacity: AtomicU16::new(initial_capacity),
             source: AtomicU8::new(initial_source as u8),
             watch_tx,
-            _registry: Some(registry),
-            _settings: settings,
+            _registry: Some(registry.clone()),
+            _settings: settings.clone(),
         });
 
-        // Event task wiring lands in the next commit.
+        // Supervised loop: any panic in the inner future restarts the task
+        // after a 1s backoff. Graceful exit (Ok) breaks out.
+        let task_self = this.clone();
+        let task_registry = registry;
+        let task_settings = settings;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "supervised long-lived task: panics are caught and restarted, lifetime tied to the registry"
+        )]
+        tokio::spawn(async move {
+            loop {
+                let result = std::panic::AssertUnwindSafe(run_event_loop(
+                    task_self.clone(),
+                    task_registry.clone(),
+                    task_settings.clone(),
+                ))
+                .catch_unwind()
+                .await;
+                match result {
+                    Ok(()) => break,
+                    Err(_) => {
+                        tracing::error!(
+                            "WorkerCapacity event task panicked; restarting in 1s"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
+
         this
     }
 }
@@ -168,6 +198,50 @@ fn healthy_workers(registry: &WorkerRegistry) -> Vec<Arc<dyn Worker>> {
         .into_iter()
         .filter(|w| w.is_healthy())
         .collect()
+}
+
+async fn run_event_loop(
+    tracker: Arc<WorkerCapacity>,
+    registry: Arc<WorkerRegistry>,
+    settings: CapacityTrackerSettings,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut events = registry.subscribe_events();
+    loop {
+        let workers = healthy_workers(&registry);
+        let (new_capacity, new_source) = recompute(&settings, &workers);
+
+        let old_capacity = tracker.capacity.swap(new_capacity, Ordering::AcqRel);
+        tracker.source.store(new_source as u8, Ordering::Release);
+
+        if new_capacity != old_capacity {
+            // send() returns Err if there are no subscribers; we don't care.
+            let _ = tracker.watch_tx.send(new_capacity);
+            tracing::info!(
+                old = old_capacity,
+                new = new_capacity,
+                source = ?new_source,
+                "backend capacity updated"
+            );
+        }
+
+        // Wait for the next worker lifecycle event.
+        match events.recv().await {
+            Ok(_event) => continue,
+            Err(RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    skipped = n,
+                    "WorkerCapacity event task lagged; recomputing from snapshot"
+                );
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                tracing::info!("WorkerCapacity event task exiting: registry dropped");
+                break;
+            }
+        }
+    }
 }
 
 /// Compute capacity and source tier from settings + a snapshot of healthy workers.
@@ -371,7 +445,46 @@ mod tests {
         assert_eq!(*rx.borrow(), 123);
     }
 
+    use std::time::Duration;
+
+    use openai_protocol::worker::WorkerStatus;
+    use tokio::time::timeout;
+
     use crate::worker::WorkerRegistry;
+
+    #[tokio::test]
+    async fn test_event_task_recomputes_on_registered() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let settings = CapacityTrackerSettings {
+            slots_per_worker: 64,
+            legacy_max_concurrent_requests: 0,
+            ..Default::default()
+        };
+        let tracker = WorkerCapacity::spawn(registry.clone(), settings);
+
+        // Initial: 0 workers → tier 4 fallback (0).
+        assert_eq!(tracker.current(), 0);
+
+        let mut rx = tracker.watch();
+        rx.borrow_and_update();
+
+        // Register a worker reporting 256 capacity.
+        let mut labels = HashMap::new();
+        labels.insert("max_running_requests".to_string(), "256".to_string());
+        let worker: Arc<dyn crate::worker::Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .labels(labels)
+                .build(),
+        );
+        let worker_id = registry.register(worker).expect("registered");
+        registry.transition_status(&worker_id, WorkerStatus::Ready);
+
+        // Wait for the watch channel to update.
+        let changed = timeout(Duration::from_secs(2), rx.changed()).await;
+        assert!(changed.is_ok(), "watch channel did not signal a change");
+        assert_eq!(*rx.borrow(), 256);
+        assert_eq!(tracker.source(), CapacitySource::WorkerReported);
+    }
 
     #[tokio::test]
     async fn test_spawn_computes_initial_capacity_from_empty_registry() {
