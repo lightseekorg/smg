@@ -10,22 +10,22 @@ use std::{
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    Client,
     api::{Api, ListParams},
-    runtime::watcher::{Config, Event, watcher},
+    runtime::watcher::{watcher, Config, Event},
+    Client,
 };
 use openai_protocol::worker::{WorkerSpec, WorkerType};
 use rustls::crypto::ring;
 use smg_mesh::{
-    ClusterState,
     gossip::{NodeState, NodeStatus},
+    ClusterState,
 };
 use tokio::{task, time};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     app_context::AppContext,
-    observability::metrics::{Metrics, metrics_labels},
+    observability::metrics::{metrics_labels, Metrics},
     workflow::Job,
 };
 
@@ -2145,12 +2145,10 @@ mod tests {
         .await;
 
         // Pod should be removed from tracking
-        assert!(
-            !tracked_pods
-                .lock()
-                .unwrap()
-                .contains_key("default/test-pod")
-        );
+        assert!(!tracked_pods
+            .lock()
+            .unwrap()
+            .contains_key("default/test-pod"));
         wait_for_worker_absent(&app_context, &worker_url).await;
     }
 
@@ -2332,12 +2330,10 @@ mod tests {
         .await;
 
         // Pod should be removed from tracking
-        assert!(
-            !tracked_pods
-                .lock()
-                .unwrap()
-                .contains_key("default/decode-pod")
-        );
+        assert!(!tracked_pods
+            .lock()
+            .unwrap()
+            .contains_key("default/decode-pod"));
         wait_for_worker_absent(&app_context, &worker_url).await;
     }
 
@@ -2452,12 +2448,10 @@ mod tests {
         .await;
 
         assert_eq!(tracked_pods.lock().unwrap().get(key), Some(&replacement));
-        assert!(
-            app_context
-                .worker_registry
-                .get_by_url(&replacement_url)
-                .is_some()
-        );
+        assert!(app_context
+            .worker_registry
+            .get_by_url(&replacement_url)
+            .is_some());
     }
 
     #[tokio::test]
@@ -2489,12 +2483,10 @@ mod tests {
         .await;
 
         assert_eq!(tracked_pods.lock().unwrap().get(key), Some(&replacement));
-        assert!(
-            app_context
-                .worker_registry
-                .get_by_url(&replacement_url)
-                .is_some()
-        );
+        assert!(app_context
+            .worker_registry
+            .get_by_url(&replacement_url)
+            .is_some());
     }
 
     #[tokio::test]
