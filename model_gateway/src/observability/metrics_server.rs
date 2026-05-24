@@ -44,7 +44,7 @@ async fn bind_metrics_listener(addr: SocketAddr) -> Result<tokio::net::TcpListen
 /// Start the metrics HTTP/WS server. Binds eagerly so callers fail fast on
 /// port conflicts or bad addresses.
 #[expect(
-    clippy::panic,
+    clippy::expect_used,
     reason = "startup initialization — metrics server must bind or the process cannot serve metrics"
 )]
 pub async fn start_metrics_server(
