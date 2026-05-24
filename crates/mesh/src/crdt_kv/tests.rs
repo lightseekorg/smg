@@ -599,6 +599,53 @@ fn test_epoch_max_wins_remove_for_never_seen_key_blocks_delayed_pre_tombstone_in
 }
 
 #[test]
+fn test_epoch_max_wins_older_delayed_remove_preserves_tombstone_age() {
+    // After the dominant tombstone is recorded, an older delayed Remove
+    // from a lagging peer must not refresh the existing tombstone's
+    // `created_at`. Otherwise stale gossip from a slow node pins the GC
+    // clock and the tombstone never gets collected, leaking metadata and
+    // key-lock entries indefinitely.
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+
+    // Live insert at ts=50, then dominant Remove at ts=100. After merge, the
+    // key is tombstoned and metadata holds the (100, _) tombstone.
+    let mut initial = OperationLog::new();
+    initial.append(Operation::insert(
+        key.to_string(),
+        encode(1, 1).to_vec(),
+        50,
+        ReplicaId::new(),
+    ));
+    initial.append(Operation::remove(key.to_string(), 100, ReplicaId::new()));
+    replica.merge(&initial);
+    assert!(replica.get(key).is_none(), "key fully tombstoned");
+
+    // Let the tombstone age past the GC grace window we will use below.
+    thread::sleep(Duration::from_millis(60));
+
+    // Older Remove from a different replica arrives (stale gossip from a
+    // lagging peer). It is dominated by the existing (100, _) tombstone, so
+    // the on-disk shape doesn't change - but if the metadata entry is
+    // re-created with `Instant::now()`, the GC clock resets.
+    let mut delayed = OperationLog::new();
+    delayed.append(Operation::remove(key.to_string(), 50, ReplicaId::new()));
+    replica.merge(&delayed);
+
+    // Grace is shorter than the time since the original tombstone but longer
+    // than the time since the delayed Remove. With the fix, GC sees the
+    // tombstone as old enough and collects it.
+    let removed = replica.gc_tombstones_with_grace(Duration::from_millis(50));
+    assert_eq!(
+        removed, 1,
+        "older delayed Remove must not refresh the tombstone GC clock",
+    );
+}
+
+#[test]
 fn test_lww_remove_for_never_seen_key_blocks_delayed_insert() {
     // Same gap exists for LWW: a tombstone for a never-seen key must record
     // metadata so a delayed older insert cannot win by LWW comparison.

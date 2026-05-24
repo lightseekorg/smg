@@ -662,20 +662,34 @@ impl CrdtOrMap {
                     current_tombstone,
                     incoming_tombstone,
                 );
-                versions.clear();
                 match result {
                     epoch_max_wins::TombstoneApply::Surviving {
                         value,
                         live_version,
                     } => {
+                        versions.clear();
                         versions.push(ValueMetadata::from_rate_limit_live_version(live_version));
                         self.store.insert(key.to_string(), value);
                     }
                     epoch_max_wins::TombstoneApply::Empty { tombstone_version } => {
-                        versions.push(ValueMetadata::tombstone(
-                            tombstone_version.timestamp,
-                            tombstone_version.replica_id,
-                        ));
+                        // Preserve `created_at` on an existing tombstone whose
+                        // (timestamp, replica_id) already matches the merged
+                        // result - older delayed Removes from a lagging peer
+                        // must not refresh the GC clock.
+                        let already_matches = versions.iter().any(|v| {
+                            v.is_tombstone
+                                && v.matches_version(
+                                    tombstone_version.timestamp,
+                                    tombstone_version.replica_id,
+                                )
+                        });
+                        if !already_matches {
+                            versions.clear();
+                            versions.push(ValueMetadata::tombstone(
+                                tombstone_version.timestamp,
+                                tombstone_version.replica_id,
+                            ));
+                        }
                         self.store.remove(key);
                     }
                 }
