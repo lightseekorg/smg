@@ -3,9 +3,14 @@
 //! See `.claude/priority-scheduling/01-worker-capacity-design.md` for the
 //! full design rationale.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU16, AtomicU8, Ordering},
+    Arc,
+};
 
-use super::Worker;
+use tokio::sync::watch;
+
+use super::{registry::WorkerRegistry, Worker};
 
 /// Which precedence tier produced the most recently computed capacity value.
 /// Exposed as a Prometheus gauge so operators can debug capacity decisions.
@@ -75,6 +80,54 @@ impl Default for CapacityTrackerSettings {
             slots_per_worker: 64,
             legacy_max_concurrent_requests: 1024,
         }
+    }
+}
+
+/// Tracks aggregate backend capacity derived from a `WorkerRegistry`.
+///
+/// One supervised tokio task subscribes to worker lifecycle events and
+/// recomputes capacity by the 4-tier precedence (see `recompute`).
+/// Consumers read the current value via `current()` or react to changes
+/// via `watch()`.
+pub struct WorkerCapacity {
+    capacity: AtomicU16,
+    source: AtomicU8,
+    watch_tx: watch::Sender<u16>,
+    // Held for the lifetime of the tracker so the registry stays alive
+    // as long as the event task references it. Set to None in test builders.
+    _registry: Option<Arc<WorkerRegistry>>,
+    _settings: CapacityTrackerSettings,
+}
+
+impl WorkerCapacity {
+    /// Synchronous current capacity. Hot-path safe — single atomic load.
+    #[inline]
+    pub fn current(&self) -> u16 {
+        self.capacity.load(Ordering::Acquire)
+    }
+
+    /// Which tier produced the current capacity.
+    pub fn source(&self) -> CapacitySource {
+        CapacitySource::from_u8(self.source.load(Ordering::Acquire))
+    }
+
+    /// Receiver for reacting to capacity changes. Cheap to clone.
+    pub fn watch(&self) -> watch::Receiver<u16> {
+        self.watch_tx.subscribe()
+    }
+
+    /// Test-only constructor that bypasses the event task. Used in unit tests
+    /// that only need to exercise the read API.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_value(capacity: u16, source: CapacitySource) -> Arc<Self> {
+        let (tx, _rx) = watch::channel(capacity);
+        Arc::new(Self {
+            capacity: AtomicU16::new(capacity),
+            source: AtomicU8::new(source as u8),
+            watch_tx: tx,
+            _registry: None,
+            _settings: CapacityTrackerSettings::default(),
+        })
     }
 }
 
@@ -263,5 +316,19 @@ mod tests {
         let (capacity, source) = recompute(&settings, &workers);
         assert_eq!(capacity, u16::MAX);
         assert_eq!(source, CapacitySource::WorkerReported);
+    }
+
+    #[test]
+    fn test_worker_capacity_initial_value_visible_via_current() {
+        let tracker = WorkerCapacity::for_test_with_value(777, CapacitySource::Override);
+        assert_eq!(tracker.current(), 777);
+        assert_eq!(tracker.source(), CapacitySource::Override);
+    }
+
+    #[test]
+    fn test_worker_capacity_watch_returns_current_value() {
+        let tracker = WorkerCapacity::for_test_with_value(123, CapacitySource::Mixed);
+        let rx = tracker.watch();
+        assert_eq!(*rx.borrow(), 123);
     }
 }
