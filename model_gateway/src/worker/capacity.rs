@@ -5,7 +5,7 @@
 
 use std::sync::{
     atomic::{AtomicU16, AtomicU8, Ordering},
-    Arc,
+    Arc, Weak,
 };
 
 use futures::FutureExt as _;
@@ -66,9 +66,21 @@ impl CapacityTrackerSettings {
     /// Constructor that maps an `i32` override (0 = derive) to the
     /// internal `Option<u16>` representation. Matches the shape of
     /// the `--worker-capacity-override` CLI flag.
+    ///
+    /// Values that don't fit in `u16` (negative or > 65 535) fall back
+    /// to "derive from workers" *and* log a warning so operators notice
+    /// that their override was ignored.
     pub fn with_override(raw: i32) -> Self {
+        let override_capacity = u16::try_from(raw).ok().filter(|n| *n > 0);
+        if override_capacity.is_none() && raw != 0 {
+            tracing::warn!(
+                value = raw,
+                max = u16::MAX,
+                "worker-capacity-override out of u16 range; falling back to dynamic capacity"
+            );
+        }
         Self {
-            override_capacity: u16::try_from(raw).ok().filter(|n| *n > 0),
+            override_capacity,
             ..Self::default()
         }
     }
@@ -90,14 +102,17 @@ impl Default for CapacityTrackerSettings {
 /// recomputes capacity by the 4-tier precedence (see `recompute`).
 /// Consumers read the current value via `current()` or react to changes
 /// via `watch()`.
+///
+/// **Lifecycle.** The struct itself holds no `Arc` to the registry or
+/// to its own settings; the event task holds `Weak` references and
+/// upgrades them per iteration. When the caller drops their last
+/// `Arc<WorkerCapacity>`, the next event in the task triggers an exit
+/// (or the task exits on `RecvError::Closed` when the registry itself
+/// drops). This avoids the obvious Arc cycle.
 pub struct WorkerCapacity {
     capacity: AtomicU16,
     source: AtomicU8,
     watch_tx: watch::Sender<u16>,
-    // Held for the lifetime of the tracker so the registry stays alive
-    // as long as the event task references it. Set to None in test builders.
-    _registry: Option<Arc<WorkerRegistry>>,
-    _settings: CapacityTrackerSettings,
 }
 
 impl WorkerCapacity {
@@ -126,17 +141,16 @@ impl WorkerCapacity {
             capacity: AtomicU16::new(capacity),
             source: AtomicU8::new(source as u8),
             watch_tx: tx,
-            _registry: None,
-            _settings: CapacityTrackerSettings::default(),
         })
     }
 
     /// Construct a `WorkerCapacity`, compute the initial value
     /// synchronously, and spawn the supervised event-loop task.
     ///
-    /// The returned `Arc<Self>` is referenced both by the event task
-    /// (which holds it until the registry is dropped) and by any
-    /// number of consumers.
+    /// The task holds only `Weak` references to the registry and tracker
+    /// (and an owned copy of the settings). When the caller drops their
+    /// last `Arc<WorkerCapacity>` or the registry is dropped, the task
+    /// exits on the next iteration — no Arc cycle.
     pub fn spawn(registry: Arc<WorkerRegistry>, settings: CapacityTrackerSettings) -> Arc<Self> {
         // Initial compute: synchronous over the current registry state,
         // so callers see a valid `current()` immediately after spawn.
@@ -149,32 +163,39 @@ impl WorkerCapacity {
             capacity: AtomicU16::new(initial_capacity),
             source: AtomicU8::new(initial_source as u8),
             watch_tx,
-            _registry: Some(registry.clone()),
-            _settings: settings.clone(),
         });
 
         // Supervised loop: any panic in the inner future restarts the task
         // after a 1s backoff. Graceful exit (Ok) breaks out.
-        let task_self = this.clone();
-        let task_registry = registry;
+        let weak_tracker = Arc::downgrade(&this);
+        let weak_registry = Arc::downgrade(&registry);
         let task_settings = settings;
         #[expect(
             clippy::disallowed_methods,
-            reason = "supervised long-lived task: panics are caught and restarted, lifetime tied to the registry"
+            reason = "supervised long-lived task: panics are caught and restarted; holds Weak refs so it cannot keep the tracker or registry alive"
         )]
         tokio::spawn(async move {
             loop {
                 let result = std::panic::AssertUnwindSafe(run_event_loop(
-                    task_self.clone(),
-                    task_registry.clone(),
+                    weak_tracker.clone(),
+                    weak_registry.clone(),
                     task_settings.clone(),
                 ))
                 .catch_unwind()
                 .await;
                 match result {
                     Ok(()) => break,
-                    Err(_) => {
-                        tracing::error!("WorkerCapacity event task panicked; restarting in 1s");
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .map(String::from)
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "(non-string panic)".into());
+                        tracing::error!(
+                            panic.message = %msg,
+                            "WorkerCapacity event task panicked; restarting in 1s"
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
@@ -196,32 +217,66 @@ fn healthy_workers(registry: &WorkerRegistry) -> Vec<Arc<dyn Worker>> {
 }
 
 async fn run_event_loop(
-    tracker: Arc<WorkerCapacity>,
-    registry: Arc<WorkerRegistry>,
+    tracker: Weak<WorkerCapacity>,
+    registry: Weak<WorkerRegistry>,
     settings: CapacityTrackerSettings,
 ) {
     use tokio::sync::broadcast::error::RecvError;
 
-    let mut events = registry.subscribe_events();
+    // Acquire the receiver up front. If the registry is already gone we
+    // have nothing to do; the receiver does not keep the registry alive.
+    let mut events = match registry.upgrade() {
+        Some(r) => r.subscribe_events(),
+        None => return,
+    };
+
     loop {
-        let workers = healthy_workers(&registry);
+        // Upgrade weak refs briefly to do the recompute. If either is gone,
+        // exit cleanly. Holding only Weak means the task itself cannot keep
+        // the tracker or registry alive.
+        let Some(t) = tracker.upgrade() else {
+            tracing::info!("WorkerCapacity event task exiting: tracker dropped");
+            break;
+        };
+        let Some(r) = registry.upgrade() else {
+            tracing::info!("WorkerCapacity event task exiting: registry dropped");
+            break;
+        };
+
+        let workers = healthy_workers(&r);
         let (new_capacity, new_source) = recompute(&settings, &workers);
 
-        let old_capacity = tracker.capacity.swap(new_capacity, Ordering::AcqRel);
-        tracker.source.store(new_source as u8, Ordering::Release);
+        let old_capacity = t.capacity.swap(new_capacity, Ordering::AcqRel);
+        let old_source_raw = t.source.swap(new_source as u8, Ordering::AcqRel);
+        let new_source_raw = new_source as u8;
 
-        if new_capacity != old_capacity {
+        let capacity_changed = new_capacity != old_capacity;
+        let source_changed = new_source_raw != old_source_raw;
+
+        if capacity_changed {
             // send() returns Err if there are no subscribers; we don't care.
-            let _ = tracker.watch_tx.send(new_capacity);
+            // The stored watch value is still updated, so late subscribers
+            // see the latest.
+            let _ = t.watch_tx.send(new_capacity);
+        }
+
+        if capacity_changed || source_changed {
             tracing::info!(
                 old = old_capacity,
                 new = new_capacity,
-                source = ?new_source,
+                old_source = ?CapacitySource::from_u8(old_source_raw),
+                new_source = ?new_source,
                 "backend capacity updated"
             );
         }
 
-        // Wait for the next worker lifecycle event.
+        // Drop the strong refs before awaiting so the task does not keep
+        // the tracker or registry alive while it sleeps.
+        drop(t);
+        drop(r);
+
+        // Wait for the next worker lifecycle event. `RecvError::Closed`
+        // fires when the registry is fully dropped (sender gone).
         match events.recv().await {
             Ok(_event) => continue,
             Err(RecvError::Lagged(n)) => {
@@ -263,14 +318,10 @@ pub(super) fn recompute(
     }
 
     let mut sum_reported: u32 = 0;
-    let mut reporters: usize = 0;
     let mut non_reporters: usize = 0;
     for w in workers {
         match w.max_running_requests() {
-            Some(n) => {
-                sum_reported = sum_reported.saturating_add(u32::from(n));
-                reporters += 1;
-            }
+            Some(n) => sum_reported = sum_reported.saturating_add(u32::from(n)),
             None => non_reporters += 1,
         }
     }
@@ -281,9 +332,8 @@ pub(super) fn recompute(
         return (capped, CapacitySource::WorkerReported);
     }
 
-    // Tier 3 (Mixed): reporters contribute reported, non-reporters contribute slots_per_worker.
-    // Also covers "zero reporters" since non_reporters > 0 here.
-    let _ = reporters; // reporters count is implied; non_reporters drives the formula
+    // Tier 3 (Mixed): reporters contribute reported, non-reporters contribute
+    // slots_per_worker. Also covers "zero reporters" since non_reporters > 0 here.
     let from_non_reporters =
         (non_reporters as u32).saturating_mul(u32::from(settings.slots_per_worker));
     let total = sum_reported.saturating_add(from_non_reporters);
@@ -479,6 +529,68 @@ mod tests {
         assert!(changed.is_ok(), "watch channel did not signal a change");
         assert_eq!(*rx.borrow(), 256);
         assert_eq!(tracker.source(), CapacitySource::WorkerReported);
+    }
+
+    #[tokio::test]
+    async fn test_event_task_shrinks_capacity_when_worker_goes_unhealthy() {
+        // Primary safety property: capacity must shed when a worker stops being
+        // healthy, otherwise the gateway over-admits while the backend is hurt.
+        let registry = Arc::new(WorkerRegistry::new());
+        let settings = CapacityTrackerSettings {
+            slots_per_worker: 64,
+            legacy_max_concurrent_requests: 0,
+            ..Default::default()
+        };
+        let tracker = WorkerCapacity::spawn(registry.clone(), settings);
+
+        // Register two reporting workers, mark both Ready, wait for both updates.
+        let mut rx = tracker.watch();
+        rx.borrow_and_update();
+        let mk = |url: &str, cap: u16| -> Arc<dyn Worker> {
+            let mut labels = HashMap::new();
+            labels.insert("max_running_requests".to_string(), cap.to_string());
+            Arc::new(BasicWorkerBuilder::new(url).labels(labels).build())
+        };
+        let id1 = registry.register(mk("http://w1", 256)).expect("registered");
+        registry.transition_status(&id1, WorkerStatus::Ready);
+        let id2 = registry.register(mk("http://w2", 256)).expect("registered");
+        registry.transition_status(&id2, WorkerStatus::Ready);
+
+        // Drain updates until we see 512 (the registrations may coalesce).
+        let deadline = Duration::from_secs(2);
+        let combined_seen = timeout(deadline, async {
+            loop {
+                if *rx.borrow_and_update() == 512 {
+                    break;
+                }
+                rx.changed().await.expect("watch not closed");
+            }
+        })
+        .await;
+        assert!(
+            combined_seen.is_ok(),
+            "never observed combined capacity 512"
+        );
+        assert_eq!(tracker.source(), CapacitySource::WorkerReported);
+
+        // Take one worker unhealthy → capacity must drop.
+        registry.transition_status(&id1, WorkerStatus::NotReady);
+
+        let shrunk = timeout(Duration::from_secs(2), async {
+            loop {
+                rx.changed().await.expect("watch not closed");
+                if *rx.borrow() < 512 {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(shrunk.is_ok(), "watch did not signal capacity shrink");
+        assert_eq!(
+            tracker.current(),
+            256,
+            "only the remaining healthy worker counts"
+        );
     }
 
     #[tokio::test]
