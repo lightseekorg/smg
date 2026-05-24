@@ -129,6 +129,45 @@ impl WorkerCapacity {
             _settings: CapacityTrackerSettings::default(),
         })
     }
+
+    /// Construct a `WorkerCapacity`, compute the initial value
+    /// synchronously, and spawn the supervised event-loop task.
+    ///
+    /// The returned `Arc<Self>` is referenced both by the event task
+    /// (which holds it until the registry is dropped) and by any
+    /// number of consumers.
+    pub fn spawn(
+        registry: Arc<WorkerRegistry>,
+        settings: CapacityTrackerSettings,
+    ) -> Arc<Self> {
+        // Initial compute: synchronous over the current registry state,
+        // so callers see a valid `current()` immediately after spawn.
+        let workers = healthy_workers(&registry);
+        let (initial_capacity, initial_source) = recompute(&settings, &workers);
+
+        let (watch_tx, _initial_rx) = watch::channel(initial_capacity);
+
+        let this = Arc::new(Self {
+            capacity: AtomicU16::new(initial_capacity),
+            source: AtomicU8::new(initial_source as u8),
+            watch_tx,
+            _registry: Some(registry),
+            _settings: settings,
+        });
+
+        // Event task wiring lands in the next commit.
+        this
+    }
+}
+
+/// Filter the registry to healthy workers only. Allocates a Vec so we
+/// don't hold the registry's internal locks while iterating.
+fn healthy_workers(registry: &WorkerRegistry) -> Vec<Arc<dyn Worker>> {
+    registry
+        .get_all()
+        .into_iter()
+        .filter(|w| w.is_healthy())
+        .collect()
 }
 
 /// Compute capacity and source tier from settings + a snapshot of healthy workers.
@@ -330,5 +369,34 @@ mod tests {
         let tracker = WorkerCapacity::for_test_with_value(123, CapacitySource::Mixed);
         let rx = tracker.watch();
         assert_eq!(*rx.borrow(), 123);
+    }
+
+    use crate::worker::WorkerRegistry;
+
+    #[tokio::test]
+    async fn test_spawn_computes_initial_capacity_from_empty_registry() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let settings = CapacityTrackerSettings {
+            legacy_max_concurrent_requests: 999,
+            ..Default::default()
+        };
+        let tracker = WorkerCapacity::spawn(registry, settings);
+
+        // Empty registry → tier 4 fallback.
+        assert_eq!(tracker.current(), 999);
+        assert_eq!(tracker.source(), CapacitySource::LegacyFallback);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_watch_starts_at_initial_value() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let settings = CapacityTrackerSettings {
+            legacy_max_concurrent_requests: 42,
+            ..Default::default()
+        };
+        let tracker = WorkerCapacity::spawn(registry, settings);
+
+        let rx = tracker.watch();
+        assert_eq!(*rx.borrow(), 42);
     }
 }
