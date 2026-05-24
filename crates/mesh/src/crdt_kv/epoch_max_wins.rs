@@ -109,12 +109,25 @@ fn decode_raw_epoch_count(bytes: &[u8]) -> Option<EpochCount> {
     Some(EpochCount { epoch, count })
 }
 
+/// Hard cap on a bincode-decoded shard. Real `rl:` shards are dozens of
+/// bytes (per-node sharded keys yield at most one live point plus an
+/// optional tombstone). 64 KiB is far above any legitimate shard but
+/// keeps a malformed/hostile peer from triggering a multi-MB allocation
+/// via a forged `live_points` length prefix.
+const MAX_SHARD_BYTES: u64 = 64 * 1024;
+
 fn encode_shard(shard: &RateLimitShard) -> Option<Vec<u8>> {
     bincode::serialize(shard).ok()
 }
 
 fn decode_shard(bytes: &[u8]) -> Option<RateLimitShard> {
-    let shard: RateLimitShard = bincode::deserialize(bytes).ok()?;
+    use bincode::Options;
+    let shard: RateLimitShard = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_SHARD_BYTES)
+        .deserialize(bytes)
+        .ok()?;
     (!shard.live_points.is_empty()).then_some(shard)
 }
 
