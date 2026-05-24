@@ -137,10 +137,7 @@ impl WorkerCapacity {
     /// The returned `Arc<Self>` is referenced both by the event task
     /// (which holds it until the registry is dropped) and by any
     /// number of consumers.
-    pub fn spawn(
-        registry: Arc<WorkerRegistry>,
-        settings: CapacityTrackerSettings,
-    ) -> Arc<Self> {
+    pub fn spawn(registry: Arc<WorkerRegistry>, settings: CapacityTrackerSettings) -> Arc<Self> {
         // Initial compute: synchronous over the current registry state,
         // so callers see a valid `current()` immediately after spawn.
         let workers = healthy_workers(&registry);
@@ -177,9 +174,7 @@ impl WorkerCapacity {
                 match result {
                     Ok(()) => break,
                     Err(_) => {
-                        tracing::error!(
-                            "WorkerCapacity event task panicked; restarting in 1s"
-                        );
+                        tracing::error!("WorkerCapacity event task panicked; restarting in 1s");
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
@@ -329,7 +324,10 @@ mod tests {
     #[test]
     fn test_settings_override_zero_treated_as_none() {
         let s = CapacityTrackerSettings::with_override(0);
-        assert!(s.override_capacity.is_none(), "0 is the sentinel for 'derive'");
+        assert!(
+            s.override_capacity.is_none(),
+            "0 is the sentinel for 'derive'"
+        );
     }
 
     #[test]
@@ -342,15 +340,12 @@ mod tests {
 
     use crate::worker::BasicWorkerBuilder;
 
-    fn worker_with_capacity(
-        url: &str,
-        reported: Option<u16>,
-    ) -> std::sync::Arc<dyn crate::worker::Worker> {
+    fn worker_with_capacity(url: &str, reported: Option<u16>) -> Arc<dyn Worker> {
         let mut labels = HashMap::new();
         if let Some(n) = reported {
             labels.insert("max_running_requests".to_string(), n.to_string());
         }
-        std::sync::Arc::new(BasicWorkerBuilder::new(url).labels(labels).build())
+        Arc::new(BasicWorkerBuilder::new(url).labels(labels).build())
     }
 
     #[test]
@@ -471,7 +466,7 @@ mod tests {
         // Register a worker reporting 256 capacity.
         let mut labels = HashMap::new();
         labels.insert("max_running_requests".to_string(), "256".to_string());
-        let worker: Arc<dyn crate::worker::Worker> = Arc::new(
+        let worker: Arc<dyn Worker> = Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .labels(labels)
                 .build(),
