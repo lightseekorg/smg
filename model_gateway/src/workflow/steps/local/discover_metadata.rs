@@ -50,6 +50,11 @@ pub struct ServerInfo {
     pub is_embedding: Option<bool>,
     pub context_length: Option<usize>,
     pub max_total_tokens: Option<usize>,
+    /// Per-instance concurrency cap. CLI flag `--max-running-requests` on SGLang.
+    /// Already extracted by the SGLang gRPC label pipeline; surfacing it here
+    /// closes the HTTP-only path so capacity-aware consumers (e.g. WorkerCapacity)
+    /// see the same label regardless of transport.
+    pub max_running_requests: Option<usize>,
     pub weight_version: Option<String>,
 }
 
@@ -430,5 +435,41 @@ mod tests {
             .expect("grpc metadata");
         dump_labels("vLLM gRPC", &labels);
         assert!(!labels.is_empty());
+    }
+
+    #[test]
+    fn test_sglang_server_info_surfaces_max_running_requests_label() {
+        // Subset of an actual SGLang /server_info response. The full payload has
+        // many more fields; `serde(deny_unknown_fields)` is off by default so
+        // they're silently ignored.
+        let body = serde_json::json!({
+            "model_path": "Qwen/Qwen3-8B",
+            "tp_size": 1,
+            "dp_size": 1,
+            "max_running_requests": 256,
+            "context_length": 32768,
+        });
+        let info: ServerInfo = serde_json::from_value(body).expect("deserialize ServerInfo");
+        assert_eq!(info.max_running_requests, Some(256));
+
+        let labels = flat_labels(&info);
+        assert_eq!(
+            labels.get("max_running_requests").map(String::as_str),
+            Some("256")
+        );
+    }
+
+    #[test]
+    fn test_sglang_server_info_max_running_requests_optional() {
+        // Older SGLang versions or special configurations may omit the field.
+        let body = serde_json::json!({
+            "model_path": "Qwen/Qwen3-8B",
+            "tp_size": 1,
+        });
+        let info: ServerInfo = serde_json::from_value(body).expect("deserialize ServerInfo");
+        assert_eq!(info.max_running_requests, None);
+
+        let labels = flat_labels(&info);
+        assert!(!labels.contains_key("max_running_requests"));
     }
 }
