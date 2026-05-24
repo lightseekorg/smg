@@ -182,7 +182,7 @@ impl WorkerRegistry {
         self.resolve_url_to_id(url)
     }
 
-    /// Resolve a URL string to the `WorkerId` it is registered under.
+    /// Resolve a URL string to the `WorkerId` of a live worker.
     ///
     /// Tries exact match first. If the input has no recognized scheme
     /// (`http://`, `https://`, `grpc://`, `grpcs://`), retries with
@@ -190,9 +190,20 @@ impl WorkerRegistry {
     /// bare `host:port` URLs and the workflow normalizes them to either
     /// scheme based on probe results, so removal-by-url needs to match
     /// either canonical form.
+    ///
+    /// Skips ids that are present in `url_to_id` but missing from `workers`.
+    /// [`Self::reserve_id_for_url`] writes the URL→ID mapping before the
+    /// worker is built, so a bare URL submitted to `WorkerService::create_worker`
+    /// can shadow the canonical `http://`/`grpc://` entry that the
+    /// AddWorker workflow later registers under.
     fn resolve_url_to_id(&self, url: &str) -> Option<WorkerId> {
+        let is_live = |id: &WorkerId| self.workers.contains_key(id);
+
         if let Some(id) = self.url_to_id.get(url) {
-            return Some(id.clone());
+            let id = id.clone();
+            if is_live(&id) {
+                return Some(id);
+            }
         }
         let has_scheme = url.starts_with("http://")
             || url.starts_with("https://")
@@ -204,7 +215,10 @@ impl WorkerRegistry {
         for scheme in ["http://", "grpc://"] {
             let candidate = format!("{scheme}{url}");
             if let Some(id) = self.url_to_id.get(&candidate) {
-                return Some(id.clone());
+                let id = id.clone();
+                if is_live(&id) {
+                    return Some(id);
+                }
             }
         }
         None
@@ -1664,6 +1678,45 @@ mod tests {
         assert!(registry.get_by_url("nothing:8080").is_none());
         assert!(registry.get_id_by_url("nothing:8080").is_none());
         assert!(registry.remove_by_url("nothing:8080").is_none());
+    }
+
+    /// Regression for the bare-URL reservation shadowing the canonical
+    /// scheme-prefixed entry. `WorkerService::create_worker` reserves an
+    /// ID against `config.url` *before* `normalize_url` runs in the
+    /// AddWorker workflow, so when service discovery submits bare
+    /// `host:port` the registry briefly holds two `url_to_id` entries:
+    /// the bare reservation (no live worker) and the canonical
+    /// scheme-prefixed entry (live worker). Lookups for the bare URL
+    /// must skip the reservation and resolve to the live worker.
+    #[test]
+    fn test_url_lookup_skips_orphan_reservation_for_bare_host_port() {
+        let registry = WorkerRegistry::new();
+        let _reserved = registry.reserve_id_for_url("orphan:8080");
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://orphan:8080")
+                .worker_type(WorkerType::Regular)
+                .connection_mode(ConnectionMode::Grpc)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let live_id = registry.register(worker).unwrap();
+
+        assert_eq!(registry.get_id_by_url("orphan:8080"), Some(live_id.clone()));
+        assert!(registry
+            .get_by_url("orphan:8080")
+            .is_some_and(|w| w.url() == "grpc://orphan:8080"));
+        assert!(registry.remove_by_url("orphan:8080").is_some());
+        assert!(registry.get(&live_id).is_none());
+    }
+
+    #[test]
+    fn test_url_lookup_returns_none_when_only_reservation_exists() {
+        let registry = WorkerRegistry::new();
+        registry.reserve_id_for_url("pending:8080");
+        assert!(registry.get_by_url("pending:8080").is_none());
+        assert!(registry.get_id_by_url("pending:8080").is_none());
+        assert!(registry.remove_by_url("pending:8080").is_none());
     }
 
     /// `transition_status_inner` (the shared backend used by both
