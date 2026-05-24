@@ -682,11 +682,11 @@ fn test_operation_log_merge_deduplicates() {
     let log = map.get_operation_log();
 
     let mut merged_log = OperationLog::new();
-    merged_log.merge(&log);
+    merged_log.merge_with_strategy(&log, |_| MergeStrategy::LastWriterWins);
     let merged_once_len = merged_log.len();
 
     // Re-merging the same log should be a no-op for log length.
-    merged_log.merge(&log);
+    merged_log.merge_with_strategy(&log, |_| MergeStrategy::LastWriterWins);
     assert_eq!(merged_log.len(), merged_once_len);
 }
 

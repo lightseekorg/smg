@@ -213,17 +213,6 @@ impl OperationLog {
             .collect()
     }
 
-    /// Keep only latest operation per key to bound log growth.
-    ///
-    /// This uses `latest_operations_by_key` LWW tie-breaking by `(timestamp, ReplicaId)`.
-    /// As a result, concurrent operations may be compacted away deterministically, so
-    /// `compact()` + `merge()` can be non-idempotent in raw log contents even though
-    /// `apply_operation` and `operation_id` guards keep state semantics safe.
-    /// Stronger concurrency retention would require vector-clock/version-vector metadata.
-    pub fn compact(&mut self) {
-        self.compact_with_strategy(|_| MergeStrategy::LastWriterWins);
-    }
-
     pub(super) fn compact_with_strategy<F>(&mut self, strategy_for_key: F)
     where
         F: Fn(&str) -> MergeStrategy,
@@ -279,20 +268,12 @@ impl OperationLog {
         }
     }
 
-    /// Merge another operation log.
-    ///
-    /// INVARIANT: `Operation::operation_id()` (`ReplicaId`, `timestamp`) is unique per operation
-    /// because each replica's `LamportClock::tick()` is monotonic and never repeats a timestamp.
-    pub fn merge(&mut self, other: &OperationLog) {
-        self.merge_with_strategy(other, |_| MergeStrategy::LastWriterWins);
-    }
-
-    /// Like [`merge`](Self::merge) but per-key strategy-aware. For
-    /// `EpochMaxWins` keys, an incoming operation that collides on
-    /// `(replica_id, timestamp)` with an existing local op is folded via
-    /// `epoch_max_wins::compact_operations` so a compacted payload
-    /// (carrying an embedded tombstone_version or richer frontier) replaces
-    /// the older raw payload at the same op id.
+    /// Per-key strategy-aware merge. For `EpochMaxWins` keys, an incoming
+    /// operation that collides on `(replica_id, timestamp)` with an existing
+    /// local op is folded via `epoch_max_wins::compact_operations` so a
+    /// compacted payload (carrying an embedded tombstone_version or richer
+    /// frontier) replaces the older raw payload at the same op id. LWW keys
+    /// dedup by op id.
     pub(super) fn merge_with_strategy<F>(&mut self, other: &OperationLog, strategy_for_key: F)
     where
         F: Fn(&str) -> MergeStrategy,
