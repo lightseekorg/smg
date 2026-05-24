@@ -543,6 +543,7 @@ pub async fn start_service_discovery(
             let watcher_config = build_watcher_config("worker", &config_arc.list_label_selector());
             let mut watcher_stream = std::pin::pin!(watcher(pods.clone(), watcher_config));
             let mut init_snapshot = HashSet::new();
+            let mut pre_init_keys: HashSet<String> = HashSet::new();
             let mut watcher_ok = Ok(());
 
             while let Some(event_result) = watcher_stream.next().await {
@@ -572,6 +573,10 @@ pub async fn start_service_discovery(
                     }
                     Ok(Event::Init) => {
                         init_snapshot.clear();
+                        pre_init_keys = tracked_pods
+                            .lock()
+                            .map(|t| t.keys().cloned().collect())
+                            .unwrap_or_default();
                     }
                     Ok(Event::InitApply(pod)) => {
                         let key = tracking_key(&pod);
@@ -590,11 +595,13 @@ pub async fn start_service_discovery(
                         reconcile_stale_snapshot(
                             Arc::clone(&tracked_pods),
                             &init_snapshot,
+                            &pre_init_keys,
                             Arc::clone(&app_context),
                             port,
                         )
                         .await;
                         init_snapshot.clear();
+                        pre_init_keys.clear();
                     }
                     Err(err) => {
                         watcher_ok = Err(err);
@@ -951,13 +958,14 @@ async fn handle_pod_deletion_by_key(
 async fn reconcile_stale_snapshot(
     tracked_pods: Arc<Mutex<TrackedPods>>,
     init_snapshot: &HashSet<String>,
+    pre_init_keys: &HashSet<String>,
     app_context: Arc<AppContext>,
     port: u16,
 ) {
     let stale_keys: Vec<String> = match tracked_pods.lock() {
         Ok(tracked) => tracked
             .keys()
-            .filter(|key| !init_snapshot.contains(*key))
+            .filter(|key| !init_snapshot.contains(*key) && pre_init_keys.contains(*key))
             .cloned()
             .collect(),
         Err(e) => {
@@ -1269,14 +1277,8 @@ fn handle_router_apply_event(
         let node_address = format!("{}:{}", pod_info.ip, mesh_port);
         let node_name = pod_info.name.clone();
         let mut state = cluster_state.write();
-        if let Some(previous_node_name) = tracked_router_nodes.get(key) {
-            if previous_node_name != &node_name {
-                if let Some(node) = state.get_mut(previous_node_name) {
-                    node.status = NodeStatus::Down as i32;
-                    node.version += 1;
-                }
-            }
-        }
+        // key is `namespace/name`, so node_name is invariant for a given key;
+        // state.insert handles IP/port changes for the same pod.
         let existing_version = state.get(&node_name).map(|n| n.version).unwrap_or(0);
 
         let node_state = NodeState {
@@ -2346,9 +2348,11 @@ mod tests {
         register_test_worker(&app_context, &live_url, WorkerType::Regular);
 
         let init_snapshot = HashSet::from(["ns/live".to_string()]);
+        let pre_init_keys = HashSet::from(["ns/stale".to_string(), "ns/live".to_string()]);
         reconcile_stale_snapshot(
             Arc::clone(&tracked_pods),
             &init_snapshot,
+            &pre_init_keys,
             Arc::clone(&app_context),
             port,
         )
@@ -2356,6 +2360,7 @@ mod tests {
         reconcile_stale_snapshot(
             Arc::clone(&tracked_pods),
             &init_snapshot,
+            &pre_init_keys,
             Arc::clone(&app_context),
             port,
         )
