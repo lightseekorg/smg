@@ -562,6 +562,71 @@ fn test_epoch_max_wins_compacted_snapshot_applies_when_op_id_already_seen() {
     );
 }
 
+#[test]
+fn test_epoch_max_wins_remove_for_never_seen_key_blocks_delayed_pre_tombstone_insert() {
+    // Replica receives a tombstone for a key it has never seen, then later
+    // receives a delayed pre-tombstone insert for the same key. The tombstone
+    // must record ordering metadata so the delayed insert is suppressed -
+    // otherwise the live store resurrects state the compacted operation log
+    // says is dead (spec §2.5 / §5.8).
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+    replica.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let key = "rl:global:node-a";
+
+    let mut remove_log = OperationLog::new();
+    remove_log.append(Operation::remove(key.to_string(), 100, ReplicaId::new()));
+    replica.merge(&remove_log);
+    assert!(
+        replica.get(key).is_none(),
+        "no live value after remove-only merge"
+    );
+
+    let mut insert_log = OperationLog::new();
+    insert_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    replica.merge(&insert_log);
+
+    assert!(
+        replica.get(key).is_none(),
+        "pre-tombstone insert (ts=60) must not resurrect a never-seen-key tombstone (ts=100)",
+    );
+}
+
+#[test]
+fn test_lww_remove_for_never_seen_key_blocks_delayed_insert() {
+    // Same gap exists for LWW: a tombstone for a never-seen key must record
+    // metadata so a delayed older insert cannot win by LWW comparison.
+    init_test_logging();
+    let replica = CrdtOrMap::new();
+
+    let key = "worker:1";
+
+    let mut remove_log = OperationLog::new();
+    remove_log.append(Operation::remove(key.to_string(), 100, ReplicaId::new()));
+    replica.merge(&remove_log);
+    assert!(replica.get(key).is_none());
+
+    let mut insert_log = OperationLog::new();
+    insert_log.append(Operation::insert(
+        key.to_string(),
+        b"stale".to_vec(),
+        50,
+        ReplicaId::new(),
+    ));
+    replica.merge(&insert_log);
+
+    assert!(
+        replica.get(key).is_none(),
+        "older insert (ts=50) must lose to never-seen-key tombstone (ts=100)",
+    );
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================

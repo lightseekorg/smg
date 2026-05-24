@@ -668,9 +668,8 @@ impl CrdtOrMap {
                 true
             }
             MapEntry::Vacant(entry) => {
-                if !self.store.contains_key(key) {
-                    return false;
-                }
+                // A tombstone for a never-seen key still records ordering
+                // information so a delayed pre-tombstone insert is suppressed.
                 let result =
                     epoch_max_wins::apply_tombstone(current.as_deref(), None, incoming_tombstone);
                 let mut versions = Vec::new();
@@ -723,12 +722,10 @@ impl CrdtOrMap {
                 true
             }
             MapEntry::Vacant(entry) => {
-                if self.store.contains_key(key) {
-                    entry.insert(vec![tombstone]);
-                    true
-                } else {
-                    false
-                }
+                // Record the tombstone even for a never-seen key so a delayed
+                // older insert cannot resurrect it (CRDT OR-map semantics).
+                entry.insert(vec![tombstone]);
+                true
             }
         }
     }
