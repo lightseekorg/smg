@@ -1,6 +1,7 @@
 //! Worker domain — identity, registry, health, resilience, monitoring, service.
 
 pub mod builder;
+pub mod capacity;
 pub mod circuit_breaker;
 pub mod error;
 pub mod event;
