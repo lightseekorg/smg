@@ -88,13 +88,18 @@ impl ValueMetadata {
     }
 }
 
+/// Immutable snapshot of registered prefix→strategy mappings.
+/// `register_merge_strategy` builds a new snapshot copy-on-write; readers
+/// take a cheap `Arc::clone` and traverse it without holding any lock.
+type StrategyTable = Arc<[(String, MergeStrategy)]>;
+
 /// CRDT OR-Map
 #[derive(Clone)]
 pub struct CrdtOrMap {
     store: KvStore,
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>, // Key to list of versions
     key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,    // Per-key critical section lock
-    merge_strategies: Arc<RwLock<Vec<(String, MergeStrategy)>>>,
+    merge_strategies: Arc<RwLock<StrategyTable>>,
     replica_id: ReplicaId,
     clock: LamportClock,
     operation_log: Arc<RwLock<OperationLog>>,
@@ -113,29 +118,38 @@ impl CrdtOrMap {
             store: KvStore::new(),
             metadata: Arc::new(DashMap::new()),
             key_locks: Arc::new(DashMap::new()),
-            merge_strategies: Arc::new(RwLock::new(Vec::new())),
+            merge_strategies: Arc::new(RwLock::new(Arc::from(Vec::new()))),
             replica_id,
             clock: LamportClock::new(),
             operation_log: Arc::new(RwLock::new(OperationLog::new())),
         }
     }
 
-    /// Register the merge strategy for a key prefix.
+    /// Register the merge strategy for a key prefix. Copy-on-write: builds
+    /// a new immutable snapshot so readers (`compact`, `append`, `merge`)
+    /// can grab a cheap `Arc::clone` of the current snapshot instead of
+    /// cloning the underlying Vec on every gossip round.
     pub(crate) fn register_merge_strategy(&self, prefix: String, strategy: MergeStrategy) {
-        let mut strategies = self.merge_strategies.write();
-        if let Some((_, existing)) = strategies
+        let mut guard = self.merge_strategies.write();
+        let mut next: Vec<(String, MergeStrategy)> = guard.iter().cloned().collect();
+        if let Some((_, existing)) = next
             .iter_mut()
             .find(|(registered_prefix, _)| registered_prefix == &prefix)
         {
             *existing = strategy;
         } else {
-            strategies.push((prefix, strategy));
+            next.push((prefix, strategy));
         }
-        strategies.sort_by_key(|(prefix, _)| Reverse(prefix.len()));
+        next.sort_by_key(|(prefix, _)| Reverse(prefix.len()));
+        *guard = Arc::from(next);
+    }
+
+    fn merge_strategies_snapshot(&self) -> StrategyTable {
+        Arc::clone(&self.merge_strategies.read())
     }
 
     fn merge_strategy_for_key(&self, key: &str) -> MergeStrategy {
-        let strategies = self.merge_strategies.read();
+        let strategies = self.merge_strategies_snapshot();
         Self::merge_strategy_for_key_from(&strategies, key)
     }
 
@@ -145,19 +159,19 @@ impl CrdtOrMap {
     ) -> MergeStrategy {
         strategies
             .iter()
-            .find_map(|(prefix, strategy)| key.starts_with(prefix).then(|| strategy.clone()))
+            .find_map(|(prefix, strategy)| key.starts_with(prefix).then_some(*strategy))
             .unwrap_or(MergeStrategy::LastWriterWins)
     }
 
     fn compact_operation_log(&self, operation_log: &mut OperationLog) {
-        let strategies = self.merge_strategies.read().clone();
+        let strategies = self.merge_strategies_snapshot();
         operation_log
             .compact_with_strategy(|key| Self::merge_strategy_for_key_from(&strategies, key));
     }
 
     fn append_operation(&self, operation: Operation) {
         let mut operation_log = self.operation_log.write();
-        let strategies = self.merge_strategies.read().clone();
+        let strategies = self.merge_strategies_snapshot();
         operation_log.append_with_strategy(operation, |key| {
             Self::merge_strategy_for_key_from(&strategies, key)
         });
@@ -389,7 +403,7 @@ impl CrdtOrMap {
             self.replica_id
         );
 
-        let strategies = self.merge_strategies.read().clone();
+        let strategies = self.merge_strategies_snapshot();
         let seen_operations: HashSet<(ReplicaId, u64)> = {
             let local_log = self.operation_log.read();
             local_log

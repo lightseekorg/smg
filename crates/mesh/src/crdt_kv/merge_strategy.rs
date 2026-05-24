@@ -1,6 +1,6 @@
 /// Merge strategy for CRDT namespaces. Determines how conflicts are resolved
 /// when two nodes write the same key concurrently.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeStrategy {
     /// Higher (version, replica_id) wins. Used for worker:*, policy:*, config:*.
     LastWriterWins,

@@ -329,12 +329,16 @@ pub(super) fn apply_tombstone(
     let merged_tombstone = current_tombstone_version
         .map(|existing| existing.max(incoming_tombstone_version))
         .unwrap_or(incoming_tombstone_version);
-    let current = current_value.and_then(state_from_stored_value);
-    let state = match current {
-        Some(state) => state.merge(RateLimitState::Tombstone(merged_tombstone)),
-        None => Some(RateLimitState::Tombstone(merged_tombstone)),
+    // `state.merge(Tombstone)` returns None only when both live points and
+    // tombstone are absent; we always supply `merged_tombstone`, so we can
+    // skip the indirect call entirely on the None path.
+    let state = match current_value.and_then(state_from_stored_value) {
+        Some(state) => state
+            .merge(RateLimitState::Tombstone(merged_tombstone))
+            .unwrap_or(RateLimitState::Tombstone(merged_tombstone)),
+        None => RateLimitState::Tombstone(merged_tombstone),
     };
-    match state.unwrap_or(RateLimitState::Tombstone(merged_tombstone)) {
+    match state {
         RateLimitState::Live(shard) => match (shard.newest_live_version(), encode_shard(&shard)) {
             (Some(live_version), Some(value)) => TombstoneApply::Surviving {
                 value,

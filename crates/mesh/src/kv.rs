@@ -555,15 +555,10 @@ impl MeshKV {
                 !prefixes.contains_key(prefix),
                 "Prefix '{prefix}' is already configured. Each prefix must be configured exactly once."
             );
-            prefixes.insert(
-                prefix.to_string(),
-                StoreMode::Crdt {
-                    merge_strategy: merge_strategy.clone(),
-                },
-            );
+            prefixes.insert(prefix.to_string(), StoreMode::Crdt { merge_strategy });
         }
         self.store
-            .register_merge_strategy(prefix.to_string(), merge_strategy.clone());
+            .register_merge_strategy(prefix.to_string(), merge_strategy);
 
         Arc::new(CrdtNamespace {
             prefix: prefix.to_string(),
