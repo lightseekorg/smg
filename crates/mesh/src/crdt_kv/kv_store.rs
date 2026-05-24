@@ -17,7 +17,7 @@ use dashmap::DashMap;
 #[derive(Debug, Clone)]
 pub struct KvStore {
     store: Arc<DashMap<String, Vec<u8>>>,
-    /// Monotonically increasing counter, bumped on every insert/remove/upsert.
+    /// Monotonically increasing counter, bumped on every insert/remove.
     generation: Arc<AtomicU64>,
 }
 

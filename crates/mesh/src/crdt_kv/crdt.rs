@@ -277,7 +277,7 @@ impl CrdtOrMap {
         self.store.contains_key(key)
     }
 
-    /// Mutation generation counter. Increments on every insert/remove/upsert.
+    /// Mutation generation counter. Increments on every insert/remove.
     pub fn generation(&self) -> u64 {
         self.store.generation()
     }
