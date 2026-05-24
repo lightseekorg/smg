@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: gateway-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: gateway-tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  cancel-in-progress: true
 
 env:
   RUSTC_WRAPPER: sccache

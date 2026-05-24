@@ -1,0 +1,30 @@
+name: Cancel Merged PR Tests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  gateway-tests:
+    name: Cancel PR Test (SMG)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    concurrency:
+      group: gateway-tests-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - run: echo "Cancelling in-progress PR Test (SMG) runs for merged PR #${{ github.event.pull_request.number }}."
+
+  mlx-tests:
+    name: Cancel PR Test (MLX)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mlx-tests-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - run: echo "Cancelling in-progress PR Test (MLX) runs for merged PR #${{ github.event.pull_request.number }}."

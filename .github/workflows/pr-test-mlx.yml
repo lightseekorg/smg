@@ -36,8 +36,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: mlx-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: mlx-tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   e2e-mlx:
