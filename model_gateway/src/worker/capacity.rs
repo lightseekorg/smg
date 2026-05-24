@@ -33,6 +33,47 @@ impl CapacitySource {
     }
 }
 
+/// Configuration for the WorkerCapacity tracker.
+///
+/// Built once at gateway startup from CLI flags. None of the fields
+/// change at runtime (use a future `ArcSwap<Settings>` if hot-reload
+/// is ever needed).
+#[derive(Debug, Clone)]
+pub struct CapacityTrackerSettings {
+    /// Tier 1 override. `Some(n)` with `n > 0` pins capacity to `n`
+    /// regardless of the fleet. `None` (or originally-zero) means
+    /// "derive from workers."
+    pub override_capacity: Option<u16>,
+    /// Per-worker slot count used for tier 3 (mixed) and pure tier-3
+    /// (workers known, none report).
+    pub slots_per_worker: u16,
+    /// Tier 4 fallback when no healthy workers are known.
+    /// Typically sourced from the existing `--max-concurrent-requests` flag.
+    pub legacy_max_concurrent_requests: u16,
+}
+
+impl CapacityTrackerSettings {
+    /// Constructor that maps an `i32` override (0 = derive) to the
+    /// internal `Option<u16>` representation. Matches the shape of
+    /// the `--worker-capacity-override` CLI flag.
+    pub fn with_override(raw: i32) -> Self {
+        Self {
+            override_capacity: u16::try_from(raw).ok().filter(|n| *n > 0),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for CapacityTrackerSettings {
+    fn default() -> Self {
+        Self {
+            override_capacity: None,
+            slots_per_worker: 64,
+            legacy_max_concurrent_requests: 1024,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +94,25 @@ mod tests {
     #[test]
     fn test_capacity_source_unknown_u8_decodes_to_legacy() {
         assert_eq!(CapacitySource::from_u8(99), CapacitySource::LegacyFallback);
+    }
+
+    #[test]
+    fn test_settings_default_has_sensible_values() {
+        let s = CapacityTrackerSettings::default();
+        assert_eq!(s.override_capacity, None);
+        assert_eq!(s.slots_per_worker, 64);
+        assert_eq!(s.legacy_max_concurrent_requests, 1024);
+    }
+
+    #[test]
+    fn test_settings_override_zero_treated_as_none() {
+        let s = CapacityTrackerSettings::with_override(0);
+        assert!(s.override_capacity.is_none(), "0 is the sentinel for 'derive'");
+    }
+
+    #[test]
+    fn test_settings_override_nonzero_preserved() {
+        let s = CapacityTrackerSettings::with_override(2048);
+        assert_eq!(s.override_capacity, Some(2048));
     }
 }
