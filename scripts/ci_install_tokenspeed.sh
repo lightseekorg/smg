@@ -1,18 +1,15 @@
 #!/bin/bash
 # Install TokenSpeed from source (engine + kernel + scheduler) for CI.
 #
-# TokenSpeed is not published to PyPI, so we clone it and pip-install the
-# in-tree ``tokenspeed-kernel`` (CUDA), ``tokenspeed-scheduler`` (C++/nanobind),
-# and ``python/`` packages. Mirrors the upstream ``docker/Dockerfile`` pipeline.
+# Mirrors the upstream install pattern (see tokenspeed's docs / test/ci_system/
+# install_deps.sh): one editable pip install per package, in engine →
+# kernel → scheduler order. The kernel package's metadata pulls in its
+# own CUDA dependencies, so we don't pre-install requirements files.
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
 #   - CUDA 13.0 toolkit at /usr/local/cuda-13.0 or /usr/local/cuda
 #   - H100 GPUs (sm90)
-#
-# Heavy first run (~30 min for kernel CUDA compile); subsequent runs on the
-# same runner hit the pip wheel cache at /tmp/tokenspeed-wheel-cache/ and
-# short-circuit the kernel build.
 
 set -euo pipefail
 
@@ -25,10 +22,9 @@ fi
 # a scheduled bump-and-CI routine) rather than floating against ``main`` —
 # upstream has renamed APIs before and the gRPC servicer broke until we
 # caught up.
-TOKENSPEED_REF="${TOKENSPEED_REF:-70030b298bc6abf6903348057605cc083bf70746}"
+TOKENSPEED_REF="${TOKENSPEED_REF:-5e145afae8e5651cd66234e68c988c31aac6639f}"
 TOKENSPEED_REPO="${TOKENSPEED_REPO:-https://github.com/lightseekorg/tokenspeed.git}"
 TOKENSPEED_DIR="${TOKENSPEED_DIR:-/tmp/tokenspeed-src}"
-WHEEL_CACHE="${TOKENSPEED_WHEEL_CACHE:-/tmp/tokenspeed-wheel-cache}"
 
 # Install uv for faster package management (mirrors ci_install_sglang.sh).
 if ! command -v uv &> /dev/null; then
@@ -41,10 +37,7 @@ echo "uv version: $(uv --version)"
 # ── CUDA runtime setup ─────────────────────────────────────────────────────
 # k8s-runner-gpu ships the NVIDIA driver + CUDA runtime libs but not the
 # SDK (nvcc, headers). Install them on demand — same approach as
-# ``ci_install_sglang.sh``, which installs cuda-nvcc-12-9 +
-# cuda-cudart-dev-12-9 when ``/usr/local/cuda/bin/nvcc`` is missing.
-# TokenSpeed's Dockerfile targets CUDA 13.0, so install the matching
-# toolkit packages here.
+# ``ci_install_sglang.sh``.
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
     echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
@@ -53,12 +46,6 @@ if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
     sudo dpkg -i /tmp/cuda-keyring.deb
     rm /tmp/cuda-keyring.deb
     sudo apt-get update -qq
-    # cuda-nvcc-13-0:          provides nvcc + cuda_runtime_api.h
-    # cuda-cudart-dev-13-0:    provides cuda_runtime.h + libcudart headers
-    # cuda-libraries-dev-13-0: meta-package pulling in cublas / curand /
-    #                         cusolver / cusparse / cufft / nvrtc /
-    #                         nvjitlink dev headers that tokenspeed-kernel
-    #                         needs (cublas_v2.h, curand.h, cublasLt.h, ...)
     sudo apt-get install -y --no-install-recommends \
         cuda-nvcc-13-0 \
         cuda-cudart-dev-13-0 \
@@ -104,38 +91,18 @@ export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends libssl-dev libopenmpi-dev cmake
 
-# ── Kernel + scheduler + engine install ────────────────────────────────────
-# Step 1: plain Python requirements.
-uv pip install -r tokenspeed-kernel/python/requirements/cuda.txt
+# ── TokenSpeed packages ────────────────────────────────────────────────────
+export MAX_JOBS="${MAX_JOBS:-16}"
+export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a 10.0a}"
 
-# Step 2: build-isolation=off so nanobind/cutlass build dependencies are shared.
-uv pip install -r tokenspeed-kernel/python/requirements/cuda-thirdparty.txt \
-    --no-build-isolation
+# Preseed build-time tooling: ``./python`` and ``tokenspeed-kernel`` use
+# ``setuptools.build_meta`` without declaring ``setuptools`` in
+# ``build-system.requires``, and we install with ``--no-build-isolation``.
+uv pip install setuptools wheel pybind11
 
-# Step 3: kernel (CUDA compile — the expensive one). Try the cached wheel first.
-CACHED_KERNEL_WHEEL=$(find "$WHEEL_CACHE" -name "tokenspeed_kernel-*.whl" 2>/dev/null | head -1 || true)
-if [ -n "$CACHED_KERNEL_WHEEL" ] && [ -f "$CACHED_KERNEL_WHEEL" ]; then
-    echo "Installing cached tokenspeed-kernel wheel: $CACHED_KERNEL_WHEEL"
-    uv pip install "$CACHED_KERNEL_WHEEL" --no-build-isolation
-else
-    echo "Building tokenspeed-kernel from source (this takes ~30 min the first time)..."
-    MAX_JOBS="${MAX_JOBS:-16}" FLASHINFER_CUDA_ARCH_LIST="9.0a 10.0a" \
-        uv pip install tokenspeed-kernel/python/ --no-build-isolation
-    # Cache the built wheel — uv stores wheels under its cache, copy out.
-    mkdir -p "$WHEEL_CACHE"
-    python3 -c "import tokenspeed_kernel, os, shutil, glob; \
-        d = os.path.dirname(tokenspeed_kernel.__file__); \
-        site = os.path.dirname(d); \
-        whls = glob.glob(os.path.join(site, 'tokenspeed_kernel-*.dist-info')); \
-        print('kernel install dir:', whls)" || true
-fi
-
-# Step 4: scheduler (scikit-build-core + nanobind + CMake).
-echo "Building tokenspeed-scheduler..."
-uv pip install tokenspeed-scheduler/
-
-# Step 5: the Python runtime (pure-Python).
-uv pip install "./python" --no-build-isolation
+uv pip install -e tokenspeed-kernel/python/ --no-build-isolation
+uv pip install -e tokenspeed-scheduler/
+uv pip install -e "./python" --no-build-isolation
 
 # ── Persist env to subsequent CI steps ─────────────────────────────────────
 if [ -n "${GITHUB_ENV:-}" ]; then
