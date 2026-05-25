@@ -363,8 +363,8 @@ impl PodInfo {
     }
 
     pub fn worker_url(&self, port: u16) -> String {
-        // Default to http:// prefix; workflow will detect actual protocol (HTTP vs gRPC)
-        format!("http://{}:{}", self.ip, port)
+        // Bare host:port lets DetectConnectionModeStep dual-probe HTTP and gRPC.
+        format!("{}:{}", self.ip, port)
     }
 }
 

@@ -398,7 +398,7 @@ impl CacheAwarePolicy {
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
+                    .insert(kv_index::hash_token_path(tokens), matched_prefix);
             }
         } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
@@ -419,7 +419,7 @@ impl CacheAwarePolicy {
 
                 tree.insert_text(text, worker_url);
 
-                let path_hash = smg_mesh::hash_node_path(text);
+                let path_hash = kv_index::hash_node_path(text);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
@@ -595,7 +595,7 @@ impl TreeHandle for CacheAwarePolicy {
                                 .entry(model_id.to_string())
                                 .or_default()
                                 .string_tree
-                                .insert(smg_mesh::hash_node_path(path), path.clone());
+                                .insert(kv_index::hash_node_path(path), path.clone());
                             applied += 1;
                         }
                         RepairEntry::Token { .. } => {
@@ -625,7 +625,7 @@ impl TreeHandle for CacheAwarePolicy {
                                 .entry(model_id.to_string())
                                 .or_default()
                                 .token_tree
-                                .insert(smg_mesh::hash_token_path(tokens), tokens.clone());
+                                .insert(kv_index::hash_token_path(tokens), tokens.clone());
                             applied += 1;
                         }
                         RepairEntry::String { .. } => {
@@ -883,7 +883,7 @@ impl CacheAwarePolicy {
                     .entry(model_id.to_string())
                     .or_default()
                     .token_tree
-                    .insert(smg_mesh::hash_token_path(tokens), matched_prefix);
+                    .insert(kv_index::hash_token_path(tokens), matched_prefix);
 
                 workers[idx].increment_processed();
                 return Some(idx);
@@ -948,7 +948,7 @@ impl CacheAwarePolicy {
                 // insert_text(matched_prefix, worker) which routes to the same
                 // tree node. This keeps the index memory-bounded.
                 let matched_prefix: String = text.chars().take(result.matched_char_count).collect();
-                let path_hash = smg_mesh::hash_node_path(text);
+                let path_hash = kv_index::hash_node_path(text);
                 self.hash_index
                     .entry(model_id.to_string())
                     .or_default()
@@ -1200,8 +1200,8 @@ mod tests {
         };
         assert_eq!(policy.apply_repair_page(&token_page), 1);
 
-        let text_hash = smg_mesh::hash_node_path(text);
-        let token_hash = smg_mesh::hash_token_path(&tokens);
+        let text_hash = kv_index::hash_node_path(text);
+        let token_hash = kv_index::hash_token_path(&tokens);
 
         // Known hashes apply for the matching kind.
         assert!(policy.apply_known_remote_insert(
@@ -1266,7 +1266,7 @@ mod tests {
         assert!(policy.apply_known_remote_insert(
             "model1",
             TreeKind::String,
-            smg_mesh::hash_node_path(text),
+            kv_index::hash_node_path(text),
             "http://w2",
         ));
 
@@ -1286,7 +1286,7 @@ mod tests {
         assert!(policy.apply_known_remote_insert(
             "model1",
             TreeKind::Token,
-            smg_mesh::hash_token_path(&tokens),
+            kv_index::hash_token_path(&tokens),
             "http://w2",
         ));
     }
@@ -1333,7 +1333,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let text_hash = smg_mesh::hash_node_path(text);
+        let text_hash = kv_index::hash_node_path(text);
 
         // Drive a token request — populates the token-side
         // hash_index. select_worker uses the model_id from the
@@ -1349,7 +1349,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let token_hash = smg_mesh::hash_token_path(&tokens);
+        let token_hash = kv_index::hash_token_path(&tokens);
 
         // Both populate sites use UNKNOWN_MODEL_ID for these
         // workers (no model_id set on the builder), and the

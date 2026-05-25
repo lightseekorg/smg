@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::replica::ReplicaId;
+use super::{epoch_max_wins, merge_strategy::MergeStrategy, replica::ReplicaId};
 
 // ============================================================================
 // Operation Type Definition - Atomic Unit of State Change
@@ -112,9 +112,16 @@ impl OperationLog {
     /// new appends, not on every append. If compaction doesn't reduce below
     /// threshold (very high key cardinality), the oldest entries are truncated.
     pub fn append(&mut self, operation: Operation) {
+        self.append_with_strategy(operation, |_| MergeStrategy::LastWriterWins);
+    }
+
+    pub(super) fn append_with_strategy<F>(&mut self, operation: Operation, strategy_for_key: F)
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
         self.operations.push(operation);
         if self.operations.len() > Self::AUTO_COMPACT_THRESHOLD {
-            self.compact();
+            self.compact_with_strategy(strategy_for_key);
             // If still over threshold after dedup (extremely high key cardinality
             // >10K unique keys), truncate oldest entries. This drops state for the
             // oldest keys, which will be re-synced from peers on the next merge.
@@ -159,34 +166,59 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
-    fn latest_operations_by_key(&self) -> HashMap<String, Operation> {
-        let mut latest_by_key: HashMap<String, Operation> = HashMap::new();
-
-        for operation in &self.operations {
-            let key = operation.key().to_string();
-            match latest_by_key.get(&key) {
-                Some(current)
-                    if (current.timestamp(), current.replica_id())
-                        >= (operation.timestamp(), operation.replica_id()) => {}
-                _ => {
-                    latest_by_key.insert(key, operation.clone());
-                }
-            }
-        }
-
-        latest_by_key
+    fn latest_lww_operation<'a, I>(operations: I) -> Option<&'a Operation>
+    where
+        I: IntoIterator<Item = &'a Operation>,
+    {
+        operations
+            .into_iter()
+            .max_by_key(|operation| (operation.timestamp(), operation.replica_id()))
     }
 
-    /// Keep only latest operation per key to bound log growth.
-    ///
-    /// This uses `latest_operations_by_key` LWW tie-breaking by `(timestamp, ReplicaId)`.
-    /// As a result, concurrent operations may be compacted away deterministically, so
-    /// `compact()` + `merge()` can be non-idempotent in raw log contents even though
-    /// `apply_operation` and `operation_id` guards keep state semantics safe.
-    /// Stronger concurrency retention would require vector-clock/version-vector metadata.
-    pub fn compact(&mut self) {
+    fn latest_epoch_max_wins_operation<'a>(
+        operations: impl IntoIterator<Item = &'a Operation>,
+    ) -> Option<Operation> {
+        epoch_max_wins::compact_operations(operations)
+    }
+
+    fn latest_operations_by_key_with_strategy<F>(
+        &self,
+        strategy_for_key: F,
+    ) -> HashMap<String, Operation>
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
+        let mut operations_by_key: HashMap<String, Vec<&Operation>> = HashMap::new();
+
+        for operation in &self.operations {
+            operations_by_key
+                .entry(operation.key().to_string())
+                .or_default()
+                .push(operation);
+        }
+
+        operations_by_key
+            .into_iter()
+            .filter_map(|(key, operations)| {
+                let latest = match strategy_for_key(&key) {
+                    MergeStrategy::LastWriterWins => {
+                        Self::latest_lww_operation(operations).cloned()
+                    }
+                    MergeStrategy::EpochMaxWins => {
+                        Self::latest_epoch_max_wins_operation(operations)
+                    }
+                }?;
+                Some((key, latest))
+            })
+            .collect()
+    }
+
+    pub(super) fn compact_with_strategy<F>(&mut self, strategy_for_key: F)
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
         self.operations = self
-            .latest_operations_by_key()
+            .latest_operations_by_key_with_strategy(strategy_for_key)
             .into_values()
             .collect::<Vec<_>>();
         self.operations
@@ -199,9 +231,12 @@ impl OperationLog {
             .retain(|operation| operation.timestamp() > watermark);
     }
 
-    /// Build a latest-state snapshot and clear the operation log.
-    pub fn snapshot_and_truncate(&mut self) -> HashMap<String, Operation> {
-        let snapshot = self.latest_operations_by_key();
+    /// Build a latest-state snapshot with the configured merge strategy and clear the operation log.
+    pub fn snapshot_and_truncate<F>(&mut self, strategy_for_key: F) -> HashMap<String, Operation>
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
+        let snapshot = self.latest_operations_by_key_with_strategy(strategy_for_key);
         self.operations.clear();
         snapshot
     }
@@ -233,20 +268,43 @@ impl OperationLog {
         }
     }
 
-    /// Merge another operation log.
-    ///
-    /// INVARIANT: `Operation::operation_id()` (`ReplicaId`, `timestamp`) is unique per operation
-    /// because each replica's `LamportClock::tick()` is monotonic and never repeats a timestamp.
-    pub fn merge(&mut self, other: &OperationLog) {
-        let mut seen_ids: HashSet<(ReplicaId, u64)> = self
+    /// Per-key strategy-aware merge. For `EpochMaxWins` keys, an incoming
+    /// operation that collides on `(replica_id, timestamp)` with an existing
+    /// local op is folded via `epoch_max_wins::compact_operations` so a
+    /// compacted payload (carrying an embedded tombstone_version or richer
+    /// frontier) replaces the older raw payload at the same op id. LWW keys
+    /// dedup by op id.
+    pub(super) fn merge_with_strategy<F>(&mut self, other: &OperationLog, strategy_for_key: F)
+    where
+        F: Fn(&str) -> MergeStrategy,
+    {
+        let mut local_index: HashMap<(ReplicaId, u64), usize> = self
             .operations
             .iter()
-            .map(Operation::operation_id)
+            .enumerate()
+            .map(|(idx, op)| (op.operation_id(), idx))
             .collect();
 
         for operation in &other.operations {
-            if seen_ids.insert(operation.operation_id()) {
-                self.operations.push(operation.clone());
+            let op_id = operation.operation_id();
+            match local_index.get(&op_id).copied() {
+                None => {
+                    local_index.insert(op_id, self.operations.len());
+                    self.operations.push(operation.clone());
+                }
+                Some(local_idx) => {
+                    if matches!(
+                        strategy_for_key(operation.key()),
+                        MergeStrategy::EpochMaxWins
+                    ) {
+                        let local_op = self.operations[local_idx].clone();
+                        if let Some(folded) =
+                            epoch_max_wins::compact_operations([&local_op, operation])
+                        {
+                            self.operations[local_idx] = folded;
+                        }
+                    }
+                }
             }
         }
     }
