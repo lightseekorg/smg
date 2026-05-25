@@ -13,6 +13,7 @@
 
 mod common;
 mod event_tree;
+mod path_hash;
 pub mod snapshot;
 mod string_tree;
 mod token_tree;
@@ -22,6 +23,7 @@ pub use event_tree::{
     compute_content_hash, compute_request_content_hashes, ApplyError, ContentHash, OverlapScores,
     PositionalIndexer, SequenceHash, StoredBlock, WorkerBlockMap, WorkerId,
 };
+pub use path_hash::{hash_node_path, hash_token_path, GLOBAL_EVICTION_HASH};
 // Re-export under names matching old tree.rs API for easier migration
 pub use string_tree::Tree;
 pub use string_tree::{

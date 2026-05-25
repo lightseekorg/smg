@@ -8,7 +8,6 @@
 mod crdt_kv;
 mod gossip_controller;
 mod gossip_service;
-mod hash;
 pub mod kv;
 mod metrics;
 mod mtls;
@@ -26,7 +25,6 @@ pub use crdt_kv::{
     decode as decode_epoch_count, encode as encode_epoch_count, CrdtOrMap, EpochCount,
     MergeStrategy, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
 };
-pub use hash::{hash_node_path, hash_token_path, GLOBAL_EVICTION_HASH};
 pub use kv::{
     CrdtNamespace, DrainHandle, MeshKV, StreamConfig, StreamDrainFn, StreamNamespace,
     StreamRouting, Subscription,
