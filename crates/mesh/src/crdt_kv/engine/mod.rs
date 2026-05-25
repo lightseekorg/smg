@@ -1,0 +1,78 @@
+//! Namespace CRDT engines.
+//!
+//! Each namespace (`worker:`, `rl:`, `config:`, ...) is owned by exactly one
+//! engine that implements [`NamespaceCrdtEngine`]. The engine owns its live
+//! state, metadata, operation log, per-key locks, and logical clock - all the
+//! invariants that make its CRDT strategy work.
+//!
+//! [`crdt::CrdtOrMap`](super::crdt::CrdtOrMap) above this layer is just a
+//! router: it matches each key to the right engine by registered prefix and
+//! delegates. The router does not know LWW vs EpochMaxWins.
+//!
+//! This split exists so a new strategy (EpochMaxWins today, future ones later)
+//! does not require strategy branches inside every entry point of the shared
+//! store - the seam that produced most of the bug class in PR #1469.
+
+use std::{sync::Arc, time::Duration};
+
+use super::operation::Operation;
+
+mod epoch_max_wins;
+mod lww;
+
+pub(super) use epoch_max_wins::EpochMaxWinsLegacyEngine;
+pub(super) use lww::LwwEngine;
+
+/// The state machine a single namespace runs.
+///
+/// All methods are byte-oriented at this boundary. Engines are free to use
+/// typed internal representations (e.g. `RateLimitShard` inside
+/// `EpochMaxWinsLegacyEngine`); the trait deliberately does not expose those
+/// types so the dispatch layer stays strategy-agnostic.
+pub(super) trait NamespaceCrdtEngine: Send + Sync {
+    // ---- Local writes ----
+
+    /// Apply a local put. Returns the previous live bytes when the write was
+    /// accepted, or `None` when the write was rejected or did not displace a
+    /// well-defined previous value (e.g. per-point shard updates).
+    fn put_local(&self, key: &str, value: Vec<u8>) -> Option<Vec<u8>>;
+
+    /// Apply a local delete. Returns the previous live bytes when the delete
+    /// removed an existing value, or `None` otherwise.
+    fn delete_local(&self, key: &str) -> Option<Vec<u8>>;
+
+    // ---- Reads ----
+
+    fn get(&self, key: &str) -> Option<Vec<u8>>;
+    fn contains_key(&self, key: &str) -> bool;
+    fn keys(&self) -> Vec<String>;
+    fn len(&self) -> usize;
+
+    /// Monotonically increasing mutation counter. Increments on every accepted
+    /// local or remote write that changes live state.
+    fn generation(&self) -> u64;
+
+    // ---- Replication ----
+
+    /// Snapshot every operation this engine has retained, in deterministic
+    /// order. The router concatenates snapshots from all engines to build the
+    /// gossip-visible operation log.
+    fn export_ops(&self) -> Vec<Operation>;
+
+    /// Merge a batch of incoming operations into this engine. The engine
+    /// merges into its log, canonicalises (compaction, tombstone collapse,
+    /// same-op-id folding), and applies only the post-canonicalisation result
+    /// to live state. This is where the "post-compaction-replay footgun" (PR
+    /// #1469) gets sealed inside the engine.
+    fn apply_remote_ops(&self, ops: &[Operation]);
+
+    // ---- Maintenance ----
+
+    /// Garbage-collect tombstones older than `grace`. Returns the number of
+    /// metadata entries removed.
+    fn gc_tombstones(&self, grace: Duration) -> usize;
+}
+
+/// Strategy-agnostic engine handle. Routers hold `Arc<dyn
+/// NamespaceCrdtEngine>` keyed by registered prefix.
+pub(super) type EngineHandle = Arc<dyn NamespaceCrdtEngine>;

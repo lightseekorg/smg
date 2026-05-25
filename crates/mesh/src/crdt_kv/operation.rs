@@ -101,6 +101,13 @@ impl OperationLog {
         }
     }
 
+    /// Build an operation log from a pre-collected vector. Used by the
+    /// engine router to concatenate per-engine ops back into a single log
+    /// for gossip export.
+    pub(super) fn from_operations(operations: Vec<Operation>) -> Self {
+        Self { operations }
+    }
+
     /// Threshold at which auto-compaction triggers. After compaction, the log
     /// shrinks to at most one entry per unique key, so the next compaction
     /// won't trigger until enough new operations accumulate again.

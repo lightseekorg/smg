@@ -3,6 +3,7 @@
 // ============================================================================
 
 mod crdt;
+mod engine;
 mod epoch_max_wins;
 mod kv_store;
 mod merge_strategy;
