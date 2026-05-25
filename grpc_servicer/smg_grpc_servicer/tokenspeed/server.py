@@ -23,6 +23,45 @@ from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer
 
 logger = logging.getLogger(__name__)
 
+# Match the other SMG servicers' 256 MiB default — a single oversized or
+# malformed gRPC frame can otherwise trigger a multi-GiB transient
+# allocation. VLM deployments that genuinely need bigger ``pixel_values``
+# raise it via ``TOKENSPEED_GRPC_MAX_MESSAGE_BYTES``; the env value is
+# clamped to gRPC's hard ceiling (``INT32_MAX`` = 2 GiB - 1).
+_GRPC_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+_GRPC_HARD_CEILING_BYTES = (1 << 31) - 1
+
+
+def _grpc_max_message_bytes() -> int:
+    """Return the configured gRPC message ceiling (send + receive use the same)."""
+    raw = os.getenv("TOKENSPEED_GRPC_MAX_MESSAGE_BYTES")
+    if not raw:
+        return _GRPC_DEFAULT_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "TOKENSPEED_GRPC_MAX_MESSAGE_BYTES=%r is not an int; falling back to %d",
+            raw,
+            _GRPC_DEFAULT_MAX_BYTES,
+        )
+        return _GRPC_DEFAULT_MAX_BYTES
+    if value <= 0:
+        logger.warning(
+            "TOKENSPEED_GRPC_MAX_MESSAGE_BYTES=%d must be positive; falling back to %d",
+            value,
+            _GRPC_DEFAULT_MAX_BYTES,
+        )
+        return _GRPC_DEFAULT_MAX_BYTES
+    if value > _GRPC_HARD_CEILING_BYTES:
+        logger.warning(
+            "TOKENSPEED_GRPC_MAX_MESSAGE_BYTES=%d exceeds gRPC ceiling %d; clamping",
+            value,
+            _GRPC_HARD_CEILING_BYTES,
+        )
+        return _GRPC_HARD_CEILING_BYTES
+    return value
+
 
 async def serve_grpc(server_args: ServerArgs) -> None:
     """Run the TokenSpeed gRPC server until a shutdown signal is received."""
@@ -30,12 +69,12 @@ async def serve_grpc(server_args: ServerArgs) -> None:
     logger.info("Launching TokenSpeed scheduler + AsyncLLM...")
     async_llm, scheduler_info = launch_engine(server_args)
 
+    max_message_bytes = _grpc_max_message_bytes()
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=10),
         options=[
-            # VLM pixel_values can be large; raise to gRPC's max (2 GiB - 1).
-            ("grpc.max_send_message_length", (2 << 30) - 1),
-            ("grpc.max_receive_message_length", (2 << 30) - 1),
+            ("grpc.max_send_message_length", max_message_bytes),
+            ("grpc.max_receive_message_length", max_message_bytes),
             # Permissive keepalive so long prefill stalls don't trip GOAWAY.
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
             ("grpc.keepalive_permit_without_calls", True),
@@ -121,11 +160,12 @@ def _wait_and_warmup(
     # Wildcard bind hosts aren't routable as destinations; dial loopback instead.
     warmup_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(server_args.host, server_args.host)
     grpc_url = f"{warmup_host}:{server_args.port}"
+    max_message_bytes = _grpc_max_message_bytes()
     channel = grpc.insecure_channel(
         grpc_url,
         options=[
-            ("grpc.max_send_message_length", (2 << 30) - 1),
-            ("grpc.max_receive_message_length", (2 << 30) - 1),
+            ("grpc.max_send_message_length", max_message_bytes),
+            ("grpc.max_receive_message_length", max_message_bytes),
         ],
     )
     stub = tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedulerStub(channel)

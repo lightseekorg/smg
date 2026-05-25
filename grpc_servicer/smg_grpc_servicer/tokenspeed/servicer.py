@@ -21,17 +21,23 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import grpc
+import numpy as np
+import torch
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
 from smg_grpc_proto import tokenspeed_scheduler_pb2_grpc
 from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
+from tokenspeed.runtime.multimodal.inputs import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
 
 if TYPE_CHECKING:
-    # Type-only imports, not resolved at module load, so the servicer stays
-    # importable where the engine / torch are stubbed.
-    import torch
+    # Type-only — keeps these out of the cold-path graph when the servicer is
+    # imported by tooling that stubs the engine surface.
     from tokenspeed.runtime.engine.async_llm import AsyncLLM
     from tokenspeed.runtime.utils.server_args import ServerArgs
 
@@ -712,12 +718,6 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         (``precomputed_multimodal_inputs`` is set); this just boxes the tensors and
         placeholder offsets into the engine's data class.
         """
-        from tokenspeed.runtime.multimodal.inputs import (
-            Modality,
-            MultimodalDataItem,
-            MultimodalInputs,
-        )
-
         feature = self._tensor_from_proto(mm_inputs.pixel_values, cast_to=model_dtype)
         model_specific_data = {}
         for name, tensor_data in mm_inputs.model_specific_tensors.items():
@@ -753,13 +753,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     ):
         """Reconstruct a torch.Tensor from a proto TensorData.
 
-        numpy/torch are imported lazily so the module loads where the engine is
-        stubbed. Floats are cast to ``cast_to``, fused into the decode; the buffer
-        is copied so it never aliases the transient proto bytes.
+        Floats are cast to ``cast_to``, fused into the decode; the buffer is
+        copied so it never aliases the transient proto bytes.
         """
-        import numpy as np
-        import torch
-
         shape = list(tensor_data.shape)
         if tensor_data.dtype == "bfloat16":
             # numpy has no bfloat16 — read the raw bits as uint16, reinterpret.
