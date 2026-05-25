@@ -115,14 +115,25 @@ jobs:
               ### Solution
               ## Changes
               ## Test Plan
-            The trailing <details>Checklist</details> block is optional; ignore.
+            The trailing <details>Checklist</details> block is template
+            boilerplate, not content — strip it before computing section
+            content (see pre-processing below).
+
+            Pre-processing: before computing section content, strip from
+            BODY any <details>...</details> block whose <summary> line,
+            after trimming, is exactly "Checklist". This is the trailing
+            block from PULL_REQUEST_TEMPLATE.md and must not count as
+            content for any section — otherwise an empty Test Plan would
+            be falsely treated as filled, because there is no later ##
+            header so the checklist sits inside the Test Plan section.
 
             "Section content" = text between a header and the NEXT ## or ###
-            header line (or end of body). After stripping all HTML comments
-            (<!-- ... -->, including multi-line) and trimming whitespace,
-            content must be non-empty. For "## Description", the Problem and
-            Solution subsections count as content — Description is filled if
-            both subsections are filled, even if no prose sits directly under it.
+            header line (or end of body) in the pre-processed BODY. After
+            stripping all HTML comments (<!-- ... -->, including multi-line)
+            and trimming whitespace, content must be non-empty. For
+            "## Description", the Problem and Solution subsections count
+            as content — Description is filled if both subsections are
+            filled, even if no prose sits directly under it.
 
             To check:
             a. Fetch the body:
