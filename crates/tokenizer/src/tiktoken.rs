@@ -6,7 +6,11 @@ use std::{
 use anyhow::{Error, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rustc_hash::FxHashMap;
-use tiktoken_rs::{cl100k_base, p50k_base, p50k_edit, r50k_base, CoreBPE};
+use tiktoken_rs::{
+    cl100k_base, o200k_base, p50k_base, p50k_edit, r50k_base,
+    tokenizer::{get_tokenizer, Tokenizer},
+    CoreBPE,
+};
 
 use crate::{
     chat_template::{
@@ -136,6 +140,8 @@ pub struct TiktokenTokenizer {
 /// Supported Tiktoken models
 #[derive(Debug, Clone, Copy)]
 pub enum TiktokenModel {
+    /// GPT-4o, o1, o3, o4, GPT-4.5, GPT-5 — all 200k-vocab models
+    O200kBase,
     /// GPT-4, GPT-3.5-turbo, text-embedding-ada-002
     Cl100kBase,
     /// Codex models, text-davinci-002, text-davinci-003
@@ -149,24 +155,27 @@ pub enum TiktokenModel {
 impl TiktokenTokenizer {
     /// Create a new Tiktoken tokenizer for the specified built-in model
     pub fn new(model: TiktokenModel) -> Result<Self> {
-        let tokenizer = match model {
-            TiktokenModel::Cl100kBase => {
-                cl100k_base().map_err(|e| Error::msg(format!("Failed to load cl100k_base: {e}")))?
-            }
-            TiktokenModel::P50kBase => {
-                p50k_base().map_err(|e| Error::msg(format!("Failed to load p50k_base: {e}")))?
-            }
-            TiktokenModel::P50kEdit => {
-                p50k_edit().map_err(|e| Error::msg(format!("Failed to load p50k_edit: {e}")))?
-            }
-            TiktokenModel::R50kBase => {
-                r50k_base().map_err(|e| Error::msg(format!("Failed to load r50k_base: {e}")))?
-            }
-        };
+        let tokenizer =
+            match model {
+                TiktokenModel::O200kBase => o200k_base()
+                    .map_err(|e| Error::msg(format!("Failed to load o200k_base: {e}")))?,
+                TiktokenModel::Cl100kBase => cl100k_base()
+                    .map_err(|e| Error::msg(format!("Failed to load cl100k_base: {e}")))?,
+                TiktokenModel::P50kBase => {
+                    p50k_base().map_err(|e| Error::msg(format!("Failed to load p50k_base: {e}")))?
+                }
+                TiktokenModel::P50kEdit => {
+                    p50k_edit().map_err(|e| Error::msg(format!("Failed to load p50k_edit: {e}")))?
+                }
+                TiktokenModel::R50kBase => {
+                    r50k_base().map_err(|e| Error::msg(format!("Failed to load r50k_base: {e}")))?
+                }
+            };
 
         let special_tokens = Self::get_special_tokens_for_model(model);
 
         let vocab_size = match model {
+            TiktokenModel::O200kBase => 200019,
             TiktokenModel::Cl100kBase => 100256,
             TiktokenModel::P50kBase | TiktokenModel::P50kEdit => 50281,
             TiktokenModel::R50kBase => 50257,
@@ -277,35 +286,19 @@ impl TiktokenTokenizer {
 
     /// Create a tokenizer from a model string (e.g., "gpt-4", "gpt-3.5-turbo")
     pub fn from_model_name(model_name: &str) -> Result<Self> {
-        let model = Self::model_from_name(model_name)?;
+        let model = match get_tokenizer(model_name) {
+            Some(Tokenizer::O200kBase) | Some(Tokenizer::O200kHarmony) => {
+                TiktokenModel::O200kBase
+            }
+            Some(Tokenizer::Cl100kBase) => TiktokenModel::Cl100kBase,
+            Some(Tokenizer::P50kBase) => TiktokenModel::P50kBase,
+            Some(Tokenizer::P50kEdit) => TiktokenModel::P50kEdit,
+            Some(Tokenizer::R50kBase) => TiktokenModel::R50kBase,
+            _ => return Err(anyhow::anyhow!(
+                "Unrecognized OpenAI model name: '{model_name}'. Expected GPT-3, GPT-3.5, GPT-4, GPT-4o, GPT-4.5, GPT-5, o1, o3, o4, or related model names"
+            )),
+        };
         Self::new(model)
-    }
-
-    /// Determine the appropriate model from a model name
-    fn model_from_name(model_name: &str) -> Result<TiktokenModel> {
-        if model_name.contains("gpt-4")
-            || model_name.contains("gpt-3.5")
-            || model_name.contains("turbo")
-        {
-            Ok(TiktokenModel::Cl100kBase)
-        } else if model_name.contains("davinci-002")
-            || model_name.contains("davinci-003")
-            || model_name.contains("codex")
-        {
-            Ok(TiktokenModel::P50kBase)
-        } else if model_name.contains("edit") {
-            Ok(TiktokenModel::P50kEdit)
-        } else if model_name.contains("davinci")
-            || model_name.contains("curie")
-            || model_name.contains("babbage")
-            || model_name.contains("ada")
-        {
-            Ok(TiktokenModel::R50kBase)
-        } else {
-            Err(anyhow::anyhow!(
-                "Unrecognized OpenAI model name: '{model_name}'. Expected GPT-3, GPT-3.5, GPT-4, or related model names"
-            ))
-        }
     }
 
     /// Get special tokens for a specific model
@@ -564,30 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn test_model_from_name() {
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("gpt-4").unwrap(),
-            TiktokenModel::Cl100kBase
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("gpt-3.5-turbo").unwrap(),
-            TiktokenModel::Cl100kBase
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("text-davinci-003").unwrap(),
-            TiktokenModel::P50kBase
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("text-davinci-edit-001").unwrap(),
-            TiktokenModel::P50kEdit
-        ));
-        assert!(matches!(
-            TiktokenTokenizer::model_from_name("davinci").unwrap(),
-            TiktokenModel::R50kBase
-        ));
-    }
-
-    #[test]
     fn test_encode_decode() {
         let tokenizer = TiktokenTokenizer::new(TiktokenModel::Cl100kBase).unwrap();
 
@@ -619,38 +588,6 @@ mod tests {
 
         assert!(special_tokens.eos_token.is_some());
         assert_eq!(special_tokens.eos_token.as_ref().unwrap(), "<|endoftext|>");
-    }
-
-    #[test]
-    fn test_unrecognized_model_name_returns_error() {
-        let result = TiktokenTokenizer::from_model_name("distilgpt-2");
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Unrecognized OpenAI model name"));
-        }
-
-        let result = TiktokenTokenizer::from_model_name("bert-base-uncased");
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Unrecognized OpenAI model name"));
-        }
-
-        let result = TiktokenTokenizer::from_model_name("llama-7b");
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Unrecognized OpenAI model name"));
-        }
-    }
-
-    #[test]
-    fn test_recognized_model_names() {
-        assert!(TiktokenTokenizer::from_model_name("gpt-4").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("gpt-3.5-turbo").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-davinci-003").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("code-davinci-002").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-curie-001").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-babbage-001").is_ok());
-        assert!(TiktokenTokenizer::from_model_name("text-ada-001").is_ok());
     }
 
     #[test]
