@@ -1,6 +1,8 @@
 //! Scheduler config: on-disk YAML shape + runtime form.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
+
+use serde::{Deserialize, Serialize};
 
 use super::Class;
 
@@ -10,7 +12,7 @@ use super::Class;
 /// uses primitive types friendly to serde and human editing, while the
 /// runtime form pre-converts seconds into [`Duration`] so hot paths
 /// don't repeat the conversion.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClassConfig {
     /// Slots reserved for this class. Higher-class reservations are
     /// honored by lower-class admissions via the packed-CAS slot
@@ -101,6 +103,30 @@ impl ClassRuntimeConfig {
     }
 }
 
+/// Per-tenant policy entry in the YAML file.
+///
+/// Future fields (`weight`, `slot_quota`, `rps_cap`) are additive: adding
+/// them is non-breaking because the trait
+/// [`super::policy::TenantPolicyResolver`] returns the whole struct.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TenantPolicyConfig {
+    pub max_class: Class,
+}
+
+/// Optional YAML config loaded via `--priority-scheduler-config <path>`.
+///
+/// Both maps are absent-as-empty: an empty document parses to
+/// `PrioritySchedulerYaml::default()`, and downstream
+/// [`super::SchedulerSettings::from_cli_and_yaml`] fills in built-in
+/// defaults for any class that wasn't overridden.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PrioritySchedulerYaml {
+    #[serde(default)]
+    pub classes: HashMap<Class, ClassConfig>,
+    #[serde(default)]
+    pub tenant_policies: HashMap<String, TenantPolicyConfig>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -168,5 +194,84 @@ mod tests {
         assert!(interactive.can_preempt);
         let bulk = ClassRuntimeConfig::from_class_config(&ClassConfig::default_for(Class::Bulk));
         assert!(!bulk.can_preempt);
+    }
+
+    // ── PrioritySchedulerYaml serde ───────────────────────────────────
+
+    #[test]
+    fn test_yaml_empty_document_yields_default() {
+        let parsed: PrioritySchedulerYaml = serde_yaml::from_str("").unwrap();
+        assert!(parsed.classes.is_empty());
+        assert!(parsed.tenant_policies.is_empty());
+    }
+
+    #[test]
+    fn test_yaml_partial_class_override_round_trips() {
+        let yaml = r"
+classes:
+  interactive:
+    reserved: 200
+    queue_size: 256
+    queue_size_per_slot: 0.25
+    queue_timeout_secs: 30
+    starvation_threshold_secs: 5
+    can_preempt: true
+";
+        let parsed: PrioritySchedulerYaml = serde_yaml::from_str(yaml).unwrap();
+        let interactive = parsed
+            .classes
+            .get(&Class::Interactive)
+            .expect("interactive present");
+        assert_eq!(interactive.reserved, 200);
+        // Only one class entry — others are absent (settings layer fills defaults).
+        assert_eq!(parsed.classes.len(), 1);
+        assert!(parsed.tenant_policies.is_empty());
+    }
+
+    #[test]
+    fn test_yaml_tenant_policy_round_trips() {
+        let yaml = r#"
+tenant_policies:
+  "auth:acme":
+    max_class: interactive
+  "auth:internal-cron":
+    max_class: system
+"#;
+        let parsed: PrioritySchedulerYaml = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.tenant_policies.len(), 2);
+        assert_eq!(
+            parsed.tenant_policies["auth:acme"].max_class,
+            Class::Interactive
+        );
+        assert_eq!(
+            parsed.tenant_policies["auth:internal-cron"].max_class,
+            Class::System
+        );
+    }
+
+    #[test]
+    fn test_yaml_unknown_class_value_is_serde_error() {
+        let yaml = r#"
+tenant_policies:
+  "auth:acme":
+    max_class: garbage
+"#;
+        let result: Result<PrioritySchedulerYaml, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "expected serde error for unknown class");
+    }
+
+    #[test]
+    fn test_yaml_class_name_serializes_as_lowercase() {
+        let mut classes = HashMap::new();
+        classes.insert(Class::Bulk, ClassConfig::default_for(Class::Bulk));
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: Default::default(),
+        };
+        let rendered = serde_yaml::to_string(&yaml).unwrap();
+        assert!(
+            rendered.contains("bulk:"),
+            "class key should serialize as lowercase: {rendered}"
+        );
     }
 }

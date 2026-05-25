@@ -8,4 +8,4 @@ pub mod class;
 pub mod config;
 
 pub use class::{Class, PRIORITY_HEADER};
-pub use config::{ClassConfig, ClassRuntimeConfig};
+pub use config::{ClassConfig, ClassRuntimeConfig, PrioritySchedulerYaml, TenantPolicyConfig};

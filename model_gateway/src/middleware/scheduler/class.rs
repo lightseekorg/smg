@@ -9,8 +9,12 @@ pub const PRIORITY_HEADER: &str = "x-smg-priority";
 ///
 /// Numeric values are load-bearing: `Ord` is derived so the tenant clamp is
 /// `std::cmp::min(header_class, max_class)`, and `repr(u8)` lets the scheduler
-/// pack per-class inflight counts into a single `AtomicU64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// pack per-class inflight counts into a single `AtomicU64`. Serde encoding is
+/// lowercase so YAML files use `system`/`interactive`/`default`/`bulk`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum Class {
     /// Background / batch jobs. Lowest priority; preemptible by everyone else.
