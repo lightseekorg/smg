@@ -6,9 +6,11 @@
 
 pub mod class;
 pub mod config;
+pub mod policy;
 
 pub use class::{Class, PRIORITY_HEADER};
 pub use config::{
     ClassConfig, ClassRuntimeConfig, PrioritySchedulerYaml, SchedulerSettings,
     SettingsValidationError, TenantPolicyConfig,
 };
+pub use policy::{StaticTenantPolicyResolver, TenantPolicy, TenantPolicyResolver};
