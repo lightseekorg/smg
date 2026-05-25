@@ -287,9 +287,7 @@ impl TiktokenTokenizer {
     /// Create a tokenizer from a model string (e.g., "gpt-4", "gpt-3.5-turbo")
     pub fn from_model_name(model_name: &str) -> Result<Self> {
         let model = match get_tokenizer(model_name) {
-            Some(Tokenizer::O200kBase) | Some(Tokenizer::O200kHarmony) => {
-                TiktokenModel::O200kBase
-            }
+            Some(Tokenizer::O200kBase) => TiktokenModel::O200kBase,
             Some(Tokenizer::Cl100kBase) => TiktokenModel::Cl100kBase,
             Some(Tokenizer::P50kBase) => TiktokenModel::P50kBase,
             Some(Tokenizer::P50kEdit) => TiktokenModel::P50kEdit,
