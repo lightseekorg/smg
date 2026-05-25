@@ -5,6 +5,7 @@ use std::{collections::HashMap, time::Duration};
 use serde::{Deserialize, Serialize};
 
 use super::Class;
+use crate::tenant::TenantKey;
 
 /// Per-class configuration as it appears in the optional YAML file.
 ///
@@ -117,14 +118,121 @@ pub struct TenantPolicyConfig {
 ///
 /// Both maps are absent-as-empty: an empty document parses to
 /// `PrioritySchedulerYaml::default()`, and downstream
-/// [`super::SchedulerSettings::from_cli_and_yaml`] fills in built-in
-/// defaults for any class that wasn't overridden.
+/// [`SchedulerSettings::from_cli_and_yaml`] fills in built-in defaults
+/// for any class that wasn't overridden.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrioritySchedulerYaml {
     #[serde(default)]
     pub classes: HashMap<Class, ClassConfig>,
     #[serde(default)]
     pub tenant_policies: HashMap<String, TenantPolicyConfig>,
+}
+
+/// Per-field validation failures discovered while assembling
+/// [`SchedulerSettings`]. Capacity-vs-reserved validation lives later
+/// (the scheduler doesn't know the backend capacity until
+/// [`super::scheduler::PriorityScheduler::new`] receives it).
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum SettingsValidationError {
+    #[error("class {class:?}: queue_size_per_slot must be >= 0.0")]
+    NegativeMultiplier { class: Class },
+    #[error("class {class:?}: queue_timeout_secs must be > 0")]
+    ZeroQueueTimeout { class: Class },
+    #[error("class {class:?}: starvation_threshold_secs must be > 0")]
+    ZeroStarvationThreshold { class: Class },
+}
+
+/// Runtime scheduler configuration assembled from CLI flags + the
+/// optional YAML file + built-in defaults. Built once at startup and
+/// then read-only.
+///
+/// Capacity is *not* stored here — it lives on
+/// [`super::scheduler::PriorityScheduler`] as a live `AtomicU16` fed by
+/// [`crate::worker::WorkerCapacity`] (PR 1). The scheduler reacts to
+/// capacity changes via the watch channel; settings stay fixed.
+#[derive(Debug, Clone)]
+pub struct SchedulerSettings {
+    /// Master switch. When `false`, the legacy `concurrency_limit_middleware`
+    /// stays wired in `server.rs` and none of the scheduler types are
+    /// constructed.
+    pub enabled: bool,
+    /// Tenant policy applied when a tenant is not in `tenant_policies`.
+    pub default_max_class: Class,
+    /// Per-class config, indexed by `class as usize`. Always populated
+    /// for all four classes — YAML overrides land on top of
+    /// [`ClassConfig::default_for`].
+    classes: [ClassConfig; 4],
+    /// Per-tenant clamp lookup. Keys come from
+    /// [`crate::tenant::RouteRequestMeta::tenant_key`].
+    pub tenant_policies: HashMap<TenantKey, TenantPolicyConfig>,
+    /// Cap on the number of tenants emitted as labels for
+    /// `scheduler_tenant_*` gauges. Everything past the cap is
+    /// bucketed under `tenant="other"`.
+    pub tenant_metric_top_n: u32,
+}
+
+impl SchedulerSettings {
+    /// Indexed accessor for the per-class config.
+    pub fn class_config(&self, class: Class) -> &ClassConfig {
+        &self.classes[class as usize]
+    }
+
+    /// Assemble settings from CLI flags + optional YAML, validating
+    /// per-field invariants. Capacity-vs-reserved validation is the
+    /// scheduler's job at construction time.
+    ///
+    /// Merge order: built-in defaults → YAML overrides per class. CLI
+    /// flags supply the top-level fields (`enabled`, `default_max_class`,
+    /// `tenant_metric_top_n`) since they aren't representable in the YAML.
+    pub fn from_cli_and_yaml(
+        enabled: bool,
+        default_max_class: Class,
+        tenant_metric_top_n: u32,
+        yaml: Option<&PrioritySchedulerYaml>,
+    ) -> Result<Self, SettingsValidationError> {
+        let mut classes: [ClassConfig; 4] = [
+            ClassConfig::default_for(Class::Bulk),
+            ClassConfig::default_for(Class::Default),
+            ClassConfig::default_for(Class::Interactive),
+            ClassConfig::default_for(Class::System),
+        ];
+
+        if let Some(yaml) = yaml {
+            for (class, override_cfg) in &yaml.classes {
+                classes[*class as usize] = *override_cfg;
+            }
+        }
+
+        for class in Class::ALL {
+            let cfg = &classes[class as usize];
+            if cfg.queue_size_per_slot < 0.0 {
+                return Err(SettingsValidationError::NegativeMultiplier { class });
+            }
+            if cfg.queue_timeout_secs == 0 {
+                return Err(SettingsValidationError::ZeroQueueTimeout { class });
+            }
+            if cfg.starvation_threshold_secs == 0 {
+                return Err(SettingsValidationError::ZeroStarvationThreshold { class });
+            }
+        }
+
+        let tenant_policies = yaml
+            .map(|y| {
+                y.tenant_policies
+                    .iter()
+                    .map(|(k, v)| (TenantKey::new(k), *v))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Self {
+            enabled,
+            default_max_class,
+            classes,
+            tenant_policies,
+            tenant_metric_top_n,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -273,5 +381,117 @@ tenant_policies:
             rendered.contains("bulk:"),
             "class key should serialize as lowercase: {rendered}"
         );
+    }
+
+    // ── SchedulerSettings::from_cli_and_yaml ─────────────────────────
+
+    use crate::tenant::TenantKey;
+
+    #[test]
+    fn test_settings_no_yaml_uses_builtin_defaults() {
+        let s = SchedulerSettings::from_cli_and_yaml(false, Class::Default, 32, None).unwrap();
+        assert!(!s.enabled);
+        assert_eq!(s.default_max_class, Class::Default);
+        assert_eq!(s.tenant_metric_top_n, 32);
+        for class in Class::ALL {
+            assert_eq!(s.class_config(class), &ClassConfig::default_for(class));
+        }
+        assert!(s.tenant_policies.is_empty());
+    }
+
+    #[test]
+    fn test_settings_yaml_partial_override_merges_with_defaults() {
+        let mut classes = HashMap::new();
+        let mut interactive = ClassConfig::default_for(Class::Interactive);
+        interactive.reserved = 64;
+        classes.insert(Class::Interactive, interactive);
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: Default::default(),
+        };
+        let s =
+            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
+        assert_eq!(s.class_config(Class::Interactive).reserved, 64);
+        // Bulk untouched — still equal to built-in default.
+        assert_eq!(
+            s.class_config(Class::Bulk),
+            &ClassConfig::default_for(Class::Bulk)
+        );
+    }
+
+    #[test]
+    fn test_settings_yaml_tenant_policy_propagates() {
+        let mut tenant_policies = HashMap::new();
+        tenant_policies.insert(
+            "auth:acme".to_string(),
+            TenantPolicyConfig {
+                max_class: Class::Interactive,
+            },
+        );
+        let yaml = PrioritySchedulerYaml {
+            classes: Default::default(),
+            tenant_policies,
+        };
+        let s =
+            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
+        assert_eq!(s.tenant_policies.len(), 1);
+        let key = TenantKey::new("auth:acme");
+        assert_eq!(s.tenant_policies[&key].max_class, Class::Interactive);
+    }
+
+    #[test]
+    fn test_settings_rejects_negative_multiplier() {
+        let mut classes = HashMap::new();
+        let mut interactive = ClassConfig::default_for(Class::Interactive);
+        interactive.queue_size_per_slot = -1.0;
+        classes.insert(Class::Interactive, interactive);
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: Default::default(),
+        };
+        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SettingsValidationError::NegativeMultiplier {
+                class: Class::Interactive
+            }
+        ));
+    }
+
+    #[test]
+    fn test_settings_rejects_zero_queue_timeout() {
+        let mut classes = HashMap::new();
+        let mut bulk = ClassConfig::default_for(Class::Bulk);
+        bulk.queue_timeout_secs = 0;
+        classes.insert(Class::Bulk, bulk);
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: Default::default(),
+        };
+        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SettingsValidationError::ZeroQueueTimeout { class: Class::Bulk }
+        ));
+    }
+
+    #[test]
+    fn test_settings_rejects_zero_starvation_threshold() {
+        let mut classes = HashMap::new();
+        let mut bulk = ClassConfig::default_for(Class::Bulk);
+        bulk.starvation_threshold_secs = 0;
+        classes.insert(Class::Bulk, bulk);
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: Default::default(),
+        };
+        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SettingsValidationError::ZeroStarvationThreshold { class: Class::Bulk }
+        ));
     }
 }

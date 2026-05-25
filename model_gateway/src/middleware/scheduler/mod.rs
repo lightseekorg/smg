@@ -8,4 +8,7 @@ pub mod class;
 pub mod config;
 
 pub use class::{Class, PRIORITY_HEADER};
-pub use config::{ClassConfig, ClassRuntimeConfig, PrioritySchedulerYaml, TenantPolicyConfig};
+pub use config::{
+    ClassConfig, ClassRuntimeConfig, PrioritySchedulerYaml, SchedulerSettings,
+    SettingsValidationError, TenantPolicyConfig,
+};
