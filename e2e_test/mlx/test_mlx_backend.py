@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
     reason="MLX backend requires Apple Silicon (macOS arm64)",
 )
 
+
 def collect_streamed_completion(stream):
     """Collect all text and the final choice from a streaming completion response."""
     chunks = list(stream)
@@ -29,6 +30,7 @@ def collect_streamed_completion(stream):
         c.choices[0] for c in reversed(chunks) if c.choices and c.choices[0].finish_reason
     )
     return text, final_choice
+
 
 def assert_stop_text_trimmed(text, stop_text):
     assert stop_text not in text, f"Stop text {stop_text!r} should not appear in output: {text!r}"
@@ -40,10 +42,14 @@ def assert_matched_stop(choice, expected):
 
 
 def assert_api_error(err, expected_status: int, expected_code: str) -> None:
-    assert err.status_code == expected_status, f"Expected HTTP {expected_status}, got {err.status_code}"
+    assert err.status_code == expected_status, (
+        f"Expected HTTP {expected_status}, got {err.status_code}"
+    )
     body = getattr(err, "body", None) or {}
     error_str = str(body) + str(getattr(err, "message", ""))
-    assert expected_code in error_str, f"Expected {expected_code!r} in error body, got: {error_str!r}"
+    assert expected_code in error_str, (
+        f"Expected {expected_code!r} in error body, got: {error_str!r}"
+    )
 
 
 WEATHER_TOOL = {
