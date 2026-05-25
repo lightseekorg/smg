@@ -9,6 +9,7 @@ pub mod concurrency;
 pub mod logging;
 pub mod metrics;
 pub mod request_id;
+pub mod scheduler;
 pub mod storage_context;
 pub mod tenant_resolution;
 pub mod token_bucket;
