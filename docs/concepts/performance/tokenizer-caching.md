@@ -92,8 +92,10 @@ Similar prompt templates with variable parts. High L0 hit rates.
 
 ## Cache Architecture
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/tokenization-cache.svg" alt="Tokenization Cache Architecture">
+<div class="architecture-diagram" markdown>
+
+![Tokenization Cache Architecture](../../assets/images/tokenization-cache.svg)
+
 </div>
 
 <div class="grid" markdown>

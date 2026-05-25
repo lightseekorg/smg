@@ -68,8 +68,10 @@ With graceful shutdown:
 
 ## How It Works
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/graceful-shutdown.svg" alt="Graceful Shutdown Sequence">
+<div class="architecture-diagram" markdown>
+
+![Graceful Shutdown Sequence](../../assets/images/graceful-shutdown.svg)
+
 </div>
 
 ### Shutdown Sequence

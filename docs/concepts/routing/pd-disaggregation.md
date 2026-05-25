@@ -91,8 +91,10 @@ vLLM supports two backends for KV cache transfer:
 
 ### SGLang PD (Parallel Dispatch)
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/pd-sglang.svg" alt="SGLang PD Parallel Dispatch Sequence">
+<div class="architecture-diagram" markdown>
+
+![SGLang PD Parallel Dispatch Sequence](../../assets/images/pd-sglang.svg)
+
 </div>
 
 SGLang uses **parallel dispatch** with bootstrap-based coordination:
@@ -104,8 +106,10 @@ SGLang uses **parallel dispatch** with bootstrap-based coordination:
 
 ### vLLM PD (Sequential Dispatch)
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/pd-vllm.svg" alt="vLLM PD Sequential Dispatch Sequence">
+<div class="architecture-diagram" markdown>
+
+![vLLM PD Sequential Dispatch Sequence](../../assets/images/pd-vllm.svg)
+
 </div>
 
 vLLM uses **sequential dispatch** with NIXL or Mooncake KV transfer:
