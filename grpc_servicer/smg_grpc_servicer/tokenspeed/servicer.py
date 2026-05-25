@@ -2,8 +2,8 @@
 
 Implements ``tokenspeed.grpc.scheduler.TokenSpeedScheduler`` on top of
 :class:`tokenspeed.runtime.engine.async_llm.AsyncLLM`. The proto field set
-is intentionally minimal — generative LLM serving only, no Embed /
-GetTokenizer / SubscribeKvEvents / multimodal / PD-disaggregated / LoRA /
+is intentionally minimal — generative LLM serving plus precomputed multimodal;
+no Embed / GetTokenizer / SubscribeKvEvents / PD-disaggregated / LoRA /
 hidden states / classifier outputs.
 """
 
@@ -21,16 +21,23 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import grpc
+import numpy as np
+import torch
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
 from smg_grpc_proto import tokenspeed_scheduler_pb2_grpc
 from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
+from tokenspeed.runtime.multimodal.inputs import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalInputs,
+)
 
 from smg_grpc_servicer.tokenspeed.health_servicer import TokenSpeedHealthServicer
 
 if TYPE_CHECKING:
-    # Type-only imports — not resolved at module load so the servicer is
-    # importable in test environments that stub AsyncLLM / ServerArgs.
+    # Type-only — keeps these out of the cold-path graph when the servicer is
+    # imported by tooling that stubs the engine surface.
     from tokenspeed.runtime.engine.async_llm import AsyncLLM
     from tokenspeed.runtime.utils.server_args import ServerArgs
 
@@ -358,6 +365,8 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         tokenizer_path = getattr(self.server_args, "tokenizer", None) or getattr(
             self.server_args, "tokenizer_path", ""
         )
+        supports_vision = bool(getattr(model_config, "is_multimodal", False))
+
         return tokenspeed_scheduler_pb2.GetModelInfoResponse(
             model_path=model_path,
             tokenizer_path=tokenizer_path or "",
@@ -372,6 +381,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             pad_token_id=(getattr(hf_config, "pad_token_id", 0) or 0) if hf_config else 0,
             bos_token_id=(getattr(hf_config, "bos_token_id", 0) or 0) if hf_config else 0,
             max_req_input_len=int(max_req_input_len),
+            supports_vision=supports_vision,
         )
 
     # ------------------------------------------------------------------
@@ -570,6 +580,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             reasoning_parser=getattr(self.server_args, "reasoning_parser", None),
         )
 
+        # Decode the precomputed multimodal payload, if the request carries one.
+        precomputed_mm = None
+        if request.HasField("mm_inputs") and request.mm_inputs.HasField("pixel_values"):
+            precomputed_mm = self._mm_inputs_from_proto(
+                request.mm_inputs,
+                model_dtype=getattr(self.async_llm.model_config, "dtype", None),
+            )
+
         GenerateReqInput = _lazy_generate_req_input()
         obj = GenerateReqInput(
             input_ids=input_ids,
@@ -585,6 +603,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             token_ids_logprob=(
                 list(request.token_ids_logprob) if request.token_ids_logprob else None
             ),
+            precomputed_multimodal_inputs=precomputed_mm,
         )
         # ``normalize_batch_and_arguments`` asserts ``rid`` is a list when
         # n>1; expand to deterministic per-choice rids so the assert holds.
@@ -686,6 +705,71 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             out["structural_tag"] = params.structural_tag
 
         return out
+
+    def _mm_inputs_from_proto(
+        self,
+        mm_inputs: tokenspeed_scheduler_pb2.MultimodalInputs,
+        *,
+        model_dtype: torch.dtype | None = None,
+    ):
+        """Reconstruct the engine's ``MultimodalInputs`` from the precomputed proto.
+
+        The gateway already preprocessed, so the engine skips its own preprocessing
+        (``precomputed_multimodal_inputs`` is set); this just boxes the tensors and
+        placeholder offsets into the engine's data class.
+        """
+        feature = self._tensor_from_proto(mm_inputs.pixel_values, cast_to=model_dtype)
+        model_specific_data = {}
+        for name, tensor_data in mm_inputs.model_specific_tensors.items():
+            model_specific_data[name] = self._tensor_from_proto(tensor_data, cast_to=model_dtype)
+
+        if not mm_inputs.mm_placeholders:
+            raise ValueError(
+                "multimodal request carried no placeholders; "
+                "the image token was not located in input_ids"
+            )
+        if any(p.length <= 0 for p in mm_inputs.mm_placeholders):
+            raise ValueError("mm_placeholders.length must be > 0")
+        # Placeholders arrive as (offset, length); the engine wants inclusive (start, end).
+        offsets = [(p.offset, p.offset + p.length - 1) for p in mm_inputs.mm_placeholders]
+
+        mm_item = MultimodalDataItem(
+            modality=Modality.IMAGE,
+            feature=feature,
+            model_specific_data=model_specific_data,
+            offsets=offsets,
+        )
+        # pad_value must exist before the engine splices features into the embedding
+        # stream, otherwise it fails inferring a dtype from None.
+        mm_item.set_pad_value()
+
+        im_token_id = mm_inputs.im_token_id if mm_inputs.HasField("im_token_id") else None
+        return MultimodalInputs(mm_items=[mm_item], im_token_id=im_token_id)
+
+    @staticmethod
+    def _tensor_from_proto(
+        tensor_data: tokenspeed_scheduler_pb2.TensorData,
+        cast_to: torch.dtype | None = None,
+    ):
+        """Reconstruct a torch.Tensor from a proto TensorData.
+
+        Floats are cast to ``cast_to``, fused into the decode; the buffer is
+        copied so it never aliases the transient proto bytes.
+        """
+        shape = list(tensor_data.shape)
+        if tensor_data.dtype == "bfloat16":
+            # numpy has no bfloat16 — read the raw bits as uint16, reinterpret.
+            t = torch.from_numpy(
+                np.frombuffer(tensor_data.data, dtype=np.uint16).reshape(shape)
+            ).view(torch.bfloat16)
+        else:
+            t = torch.from_numpy(
+                np.frombuffer(tensor_data.data, dtype=np.dtype(tensor_data.dtype)).reshape(shape)
+            )
+
+        if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
+            return t.to(cast_to)
+        return t.clone()
 
     def _generated_output_ids(
         self,

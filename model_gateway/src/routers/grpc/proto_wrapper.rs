@@ -32,11 +32,13 @@ use smg_grpc_client::{
 /// - SGLang: pixel_values + model_specific_tensors + patch-only placeholders
 /// - vLLM: pixel_values + model_specific_tensors + structural placeholders + hashes + field keys
 /// - TRT-LLM: raw image bytes only (preprocessing handled server-side)
+/// - TokenSpeed: pixel_values + model_specific_tensors + patch-only placeholders
 #[derive(Debug)]
 pub enum MultimodalData {
     Sglang(SglangMultimodalData),
     Vllm(VllmMultimodalData),
     Trtllm(TrtllmMultimodalData),
+    TokenSpeed(TokenSpeedMultimodalData),
 }
 
 /// SGLang multimodal data: preprocessed tensors with patch-only placeholders.
@@ -71,6 +73,16 @@ pub struct VllmMultimodalData {
 #[derive(Debug)]
 pub struct TrtllmMultimodalData {
     pub image_data: Vec<Vec<u8>>,
+}
+
+/// TokenSpeed multimodal data: preprocessed tensors with patch-only placeholders.
+#[derive(Debug)]
+pub struct TokenSpeedMultimodalData {
+    pub pixel_values: Vec<u8>,
+    pub pixel_values_shape: Vec<u32>,
+    pub model_specific_tensors: HashMap<String, TensorBytes>,
+    pub im_token_id: Option<u32>,
+    pub mm_placeholders: Vec<(u32, u32)>,
 }
 
 /// Raw tensor bytes with shape and dtype metadata.
@@ -171,6 +183,43 @@ impl TrtllmMultimodalData {
     pub fn into_proto(self) -> trtllm::MultimodalInput {
         trtllm::MultimodalInput {
             image_data: self.image_data,
+        }
+    }
+}
+
+impl TokenSpeedMultimodalData {
+    /// Convert to TokenSpeed proto MultimodalInputs.
+    pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
+        let model_specific_tensors = self
+            .model_specific_tensors
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    tokenspeed::TensorData {
+                        data: v.data,
+                        shape: v.shape,
+                        dtype: v.dtype,
+                    },
+                )
+            })
+            .collect();
+
+        let mm_placeholders = self
+            .mm_placeholders
+            .into_iter()
+            .map(|(offset, length)| tokenspeed::PlaceholderRange { offset, length })
+            .collect();
+
+        tokenspeed::MultimodalInputs {
+            pixel_values: Some(tokenspeed::TensorData {
+                data: self.pixel_values,
+                shape: self.pixel_values_shape,
+                dtype: "float32".to_string(),
+            }),
+            model_specific_tensors,
+            im_token_id: self.im_token_id,
+            mm_placeholders,
         }
     }
 }
@@ -451,8 +500,9 @@ impl ProtoGenerateRequest {
         match self {
             Self::Sglang(req) => req.mm_inputs = None,
             Self::Vllm(req) => req.mm_inputs = None,
-            // TRT-LLM, MLX, and TokenSpeed protos have no mm_inputs field
-            Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {}
+            Self::TokenSpeed(req) => req.mm_inputs = None,
+            // TRT-LLM and MLX protos have no mm_inputs field
+            Self::Trtllm(_) | Self::Mlx(_) => {}
         }
     }
 

@@ -6,8 +6,10 @@ import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
 // TokenSpeed scheduler gRPC service. Fully self-contained wire definition.
-// Trimmed to text-generation only (no embed, no multimodal, no
-// PD-disaggregated, no LoRA, no hidden-state forwarding).
+// Trimmed to text+image generation (no embed, no PD-disaggregated, no
+// LoRA, no hidden-state forwarding). Multimodal carries preprocessed
+// tensors only — image fetch + per-model preprocess happen in the
+// gateway (see crates/multimodal).
 service TokenSpeedScheduler {
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
@@ -85,11 +87,44 @@ message GenerateRequest {
 
   // Whether the client wants stream chunks (otherwise: complete-only).
   bool stream = 8;
+
+  // Preprocessed multimodal payload. Absent for text-only requests.
+  MultimodalInputs mm_inputs = 9;
 }
 
 message TokenizedInput {
   repeated uint32 input_ids = 1;
   string original_text = 2; // cosmetic, for worker logs
+}
+
+// A typed tensor: raw little-endian bytes + shape + dtype.
+message TensorData {
+  bytes data = 1;              // Raw little-endian bytes (f32/i64/u32)
+  repeated uint32 shape = 2;   // Dimension sizes
+  string dtype = 3;            // "float32", "int64", "uint32"
+}
+
+// Where a multimodal item's tokens sit inside input_ids.
+message PlaceholderRange {
+  uint32 offset = 1;
+  uint32 length = 2;
+}
+
+// Multimodal inputs for vision/audio models. Tensors are produced by the
+// gateway's per-model preprocessor (crates/multimodal); the servicer
+// only reconstructs them and hands them to the engine — no preprocess.
+message MultimodalInputs {
+  // Preprocessed pixel values tensor.
+  TensorData pixel_values = 1;
+
+  // Model-specific tensors (image_grid_thw, aspect_ratios, etc.).
+  map<string, TensorData> model_specific_tensors = 2;
+
+  // Image token id used for placeholder expansion.
+  optional uint32 im_token_id = 3;
+
+  // Placeholder offsets: where each image's tokens are in input_ids.
+  repeated PlaceholderRange mm_placeholders = 4;
 }
 
 message GenerateResponse {
@@ -191,6 +226,11 @@ message GetModelInfoResponse {
   // ``{"temperature": 0.6, "top_p": 0.9}``). Empty = no overrides. Surfaced
   // to the router via the ``default_sampling_params_json`` worker label.
   string default_sampling_params_json = 13;
+
+  // True when the model can consume image/video inputs. Drives the
+  // router's mm_inputs handling (router rejects mm requests for
+  // non-vision workers before tokenization).
+  bool supports_vision = 14;
 }
 
 message GetServerInfoRequest {}
