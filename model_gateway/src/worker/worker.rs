@@ -210,6 +210,25 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Get worker-specific metadata
     fn metadata(&self) -> &WorkerMetadata;
 
+    /// Worker-reported in-flight capacity, if available.
+    ///
+    /// Reads the `max_running_requests` label populated by the metadata
+    /// discovery pipeline (Step 4 of the worker lifecycle). Returns
+    /// `None` when the worker hasn't reported a value or reports zero
+    /// (zero is meaningless for capacity accounting).
+    ///
+    /// `WorkerCapacity` uses this to derive total fleet capacity when
+    /// every worker reports; falls back to a configured per-worker
+    /// estimate otherwise.
+    fn max_running_requests(&self) -> Option<u16> {
+        self.metadata()
+            .spec
+            .labels
+            .get("max_running_requests")
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|n| *n > 0)
+    }
+
     /// Get the current circuit breaker state for observability/debugging.
     fn circuit_breaker_state(&self) -> super::circuit_breaker::CircuitState;
 
@@ -1260,6 +1279,50 @@ mod tests {
             .build();
 
         assert_eq!(worker.metadata().spec.labels, labels);
+    }
+
+    #[test]
+    fn test_max_running_requests_parses_from_label() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("max_running_requests".to_string(), "256".to_string());
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        assert_eq!(worker.max_running_requests(), Some(256));
+    }
+
+    #[test]
+    fn test_max_running_requests_returns_none_when_label_missing() {
+        use crate::worker::BasicWorkerBuilder;
+        let worker = BasicWorkerBuilder::new("http://w:9000").build();
+        assert_eq!(worker.max_running_requests(), None);
+    }
+
+    #[test]
+    fn test_max_running_requests_returns_none_on_bad_value() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert(
+            "max_running_requests".to_string(),
+            "not-a-number".to_string(),
+        );
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        assert_eq!(worker.max_running_requests(), None);
+    }
+
+    #[test]
+    fn test_max_running_requests_zero_treated_as_none() {
+        use crate::worker::BasicWorkerBuilder;
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("max_running_requests".to_string(), "0".to_string());
+        let worker = BasicWorkerBuilder::new("http://w:9000")
+            .labels(labels)
+            .build();
+        // Zero is meaningless for capacity; treat as "not reported".
+        assert_eq!(worker.max_running_requests(), None);
     }
 
     #[test]
