@@ -74,58 +74,89 @@ impl RateLimitEngine {
     }
 
     /// Merge an insert (value + version) into the entry for `key`.
-    /// Returns `None` if the payload is malformed (decoder rejected it).
-    /// Otherwise returns `Some(changed)` — `true` iff the merged state differs
-    /// from the prior state.
-    fn merge_insert(&self, key: &str, value: &[u8], version: RateLimitVersion) -> Option<bool> {
+    /// Returns `None` if the payload is malformed. Otherwise the outcome
+    /// captures whether state changed plus the prior-live and new-live
+    /// classifications, sampled under the per-key entry lock so callers can
+    /// honour the `NamespaceCrdtEngine::put_local` contract without a racy
+    /// second lookup.
+    fn merge_insert(
+        &self,
+        key: &str,
+        value: &[u8],
+        version: RateLimitVersion,
+    ) -> Option<MergeOutcome> {
         let incoming = ratelimit::state_from_insert_value(value, version)?;
-        let changed = match self.entries.entry(key.to_string()) {
+        let outcome = match self.entries.entry(key.to_string()) {
             MapEntry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
+                let prior_live = entry.state.encode_live();
                 // `RateLimitState::merge` returns `None` only when both operands
                 // carry no live points and no tombstone. Both `entry.state` and
                 // `incoming` always carry content, so this can only happen on a
                 // contract violation - treat as no-op rather than panicking.
                 let Some(merged) = entry.state.clone().merge(incoming) else {
-                    return Some(false);
+                    return Some(MergeOutcome {
+                        changed: false,
+                        prior_live,
+                        new_is_live: matches!(&entry.state, RateLimitState::Live(_)),
+                    });
                 };
-                if merged == entry.state {
-                    false
-                } else {
+                let changed = merged != entry.state;
+                let new_is_live = matches!(&merged, RateLimitState::Live(_));
+                if changed {
                     update_entry(entry, merged);
-                    true
+                }
+                MergeOutcome {
+                    changed,
+                    prior_live,
+                    new_is_live,
                 }
             }
             MapEntry::Vacant(vacant) => {
-                let tombstoned_at =
-                    matches!(&incoming, RateLimitState::Tombstone(_)).then(Instant::now);
+                let new_is_live = matches!(&incoming, RateLimitState::Live(_));
+                let tombstoned_at = (!new_is_live).then(Instant::now);
                 vacant.insert(ShardEntry {
                     state: incoming,
                     tombstoned_at,
                 });
-                true
+                MergeOutcome {
+                    changed: true,
+                    prior_live: None,
+                    new_is_live,
+                }
             }
         };
-        Some(changed)
+        Some(outcome)
     }
 
-    /// Merge a remove (tombstone version) into the entry for `key`. Returns
-    /// `true` iff the merged state differs from the prior state.
-    fn merge_remove(&self, key: &str, version: RateLimitVersion) -> bool {
+    /// Merge a remove (tombstone version) into the entry for `key`. The outcome
+    /// is sampled under the per-key entry lock; `prior_live` is the displaced
+    /// live shard iff the delete transitioned the entry from `Live` to
+    /// `Tombstone`.
+    fn merge_remove(&self, key: &str, version: RateLimitVersion) -> MergeOutcome {
         let incoming = RateLimitState::Tombstone(version);
         match self.entries.entry(key.to_string()) {
             MapEntry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
+                let prior_live = entry.state.encode_live();
                 // See `merge_insert`: `None` requires both operands to be empty,
                 // which is impossible here.
                 let Some(merged) = entry.state.clone().merge(incoming) else {
-                    return false;
+                    return MergeOutcome {
+                        changed: false,
+                        prior_live,
+                        new_is_live: matches!(&entry.state, RateLimitState::Live(_)),
+                    };
                 };
-                if merged == entry.state {
-                    false
-                } else {
+                let changed = merged != entry.state;
+                let new_is_live = matches!(&merged, RateLimitState::Live(_));
+                if changed {
                     update_entry(entry, merged);
-                    true
+                }
+                MergeOutcome {
+                    changed,
+                    prior_live,
+                    new_is_live,
                 }
             }
             MapEntry::Vacant(vacant) => {
@@ -133,10 +164,25 @@ impl RateLimitEngine {
                     state: incoming,
                     tombstoned_at: Some(Instant::now()),
                 });
-                true
+                MergeOutcome {
+                    changed: true,
+                    prior_live: None,
+                    new_is_live: false,
+                }
             }
         }
     }
+}
+
+/// Result of merging an op into one entry, observed under the entry lock.
+struct MergeOutcome {
+    /// `true` iff the post-merge state differs from the prior state.
+    changed: bool,
+    /// Encoded bytes of the prior live shard, if the prior state was `Live`.
+    /// `None` if the prior state was `Tombstone` or the entry was vacant.
+    prior_live: Option<Vec<u8>>,
+    /// `true` iff the post-merge state is `Live(_)`.
+    new_is_live: bool,
 }
 
 /// Apply a merged state to `entry`, adjusting `tombstoned_at` per the
@@ -173,24 +219,35 @@ fn tombstone_version_of(state: &RateLimitState) -> Option<RateLimitVersion> {
 
 impl NamespaceCrdtEngine for RateLimitEngine {
     fn put_local(&self, key: &str, value: Vec<u8>) -> Option<Vec<u8>> {
-        let previous = self.current_encoded(key);
         let timestamp = self.clock.tick();
         let version = RateLimitVersion::new(timestamp, self.replica_id);
 
-        match self.merge_insert(key, &value, version) {
-            Some(changed) => {
-                if changed {
-                    let op = Operation::insert(key.to_string(), value, timestamp, self.replica_id);
-                    self.append_op(op);
-                    self.generation.fetch_add(1, Ordering::Release);
-                    debug!(
-                        "RateLimitEngine insert: key={}, timestamp={}, replica={}",
-                        key, timestamp, self.replica_id
-                    );
-                }
-                previous
-            }
-            None => self.current_encoded(key),
+        let Some(outcome) = self.merge_insert(key, &value, version) else {
+            // Malformed payload: rejected per the trait. Return the current
+            // live bytes so the caller sees what is actually live.
+            return self.current_encoded(key);
+        };
+
+        if outcome.changed {
+            let op = Operation::insert(key.to_string(), value, timestamp, self.replica_id);
+            self.append_op(op);
+            self.generation.fetch_add(1, Ordering::Release);
+            debug!(
+                "RateLimitEngine insert: key={}, timestamp={}, replica={}",
+                key, timestamp, self.replica_id
+            );
+        }
+
+        match (outcome.changed, outcome.new_is_live) {
+            // Rejected (dominated / idempotent): return current live bytes,
+            // which is `prior_live` since state did not change.
+            (false, _) => outcome.prior_live,
+            // Accepted, incoming carried a tombstone bound that killed the
+            // prior live shard. The displaced previous is well-defined.
+            (true, false) => outcome.prior_live,
+            // Accepted, key remains live. Per-point frontier update or
+            // vacant -> live insert: no well-defined previous value.
+            (true, true) => None,
         }
     }
 
@@ -201,12 +258,22 @@ impl NamespaceCrdtEngine for RateLimitEngine {
             "RateLimitEngine remove: key={}, timestamp={}, replica={}",
             key, timestamp, self.replica_id
         );
-        if self.merge_remove(key, version) {
+        let outcome = self.merge_remove(key, version);
+        if outcome.changed {
             let op = Operation::remove(key.to_string(), timestamp, self.replica_id);
             self.append_op(op);
             self.generation.fetch_add(1, Ordering::Release);
         }
-        None
+        // The trait returns prior live bytes only when the delete actually
+        // removed an existing live value. For EpochMaxWins that means the
+        // entry transitioned from `Live` to `Tombstone`; a delete that
+        // leaves live points behind (lower-version tombstone) or arrives at
+        // an already-tombstoned key returns `None`.
+        if outcome.changed && !outcome.new_is_live {
+            outcome.prior_live
+        } else {
+            None
+        }
     }
 
     fn get(&self, key: &str) -> Option<Vec<u8>> {
@@ -271,7 +338,8 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                     replica_id,
                 } => {
                     let version = RateLimitVersion::new(timestamp, replica_id);
-                    self.merge_insert(&key, &value, version).unwrap_or(false)
+                    self.merge_insert(&key, &value, version)
+                        .is_some_and(|outcome| outcome.changed)
                 }
                 Operation::Remove {
                     key,
@@ -279,7 +347,7 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                     replica_id,
                 } => {
                     let version = RateLimitVersion::new(timestamp, replica_id);
-                    self.merge_remove(&key, version)
+                    self.merge_remove(&key, version).changed
                 }
             };
             if changed {
