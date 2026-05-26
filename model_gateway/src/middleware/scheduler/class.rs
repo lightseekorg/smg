@@ -37,12 +37,19 @@ impl Class {
     /// Parse a header value into a class. Case-insensitive, whitespace-tolerant.
     /// Unknown values (including the empty string) map to [`Class::Default`]
     /// — admission shouldn't fail because of a typo in a non-essential header.
+    ///
+    /// Avoids allocating: `eq_ignore_ascii_case` does the comparison in place
+    /// rather than building a lowercased `String` on every request.
     pub fn parse_header(value: &str) -> Class {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "system" => Self::System,
-            "interactive" => Self::Interactive,
-            "bulk" => Self::Bulk,
-            _ => Self::Default,
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("system") {
+            Self::System
+        } else if trimmed.eq_ignore_ascii_case("interactive") {
+            Self::Interactive
+        } else if trimmed.eq_ignore_ascii_case("bulk") {
+            Self::Bulk
+        } else {
+            Self::Default
         }
     }
 
