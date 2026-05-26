@@ -18,8 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// | `u64::MAX`    | Scheduler preempted this request before TTFT (sentinel)   |
 /// | anything else | Millis-since-admit of the first response byte (TTFT)      |
 ///
-/// `try_mark_first_byte` clamps `now_ms` to `u64::MAX - 1` so a TTFT
-/// measurement can never collide with the preempt sentinel.
+/// `try_mark_first_byte` clamps `now_ms` to `[1, u64::MAX - 1]` so a
+/// TTFT measurement can never collide with either the unset state or
+/// the preempt sentinel.
 pub struct InflightHandle {
     first_byte_at: AtomicU64,
 }
