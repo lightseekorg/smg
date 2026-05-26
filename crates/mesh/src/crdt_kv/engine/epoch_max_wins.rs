@@ -79,18 +79,19 @@ pub(crate) struct EpochMaxWinsLegacyEngine {
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>,
     key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     log: Arc<RwLock<OperationLog>>,
-    clock: LamportClock,
+    // Shared per-node Lamport clock — see the same note in `engine::lww`.
+    clock: Arc<LamportClock>,
     replica_id: ReplicaId,
 }
 
 impl EpochMaxWinsLegacyEngine {
-    pub(crate) fn new(replica_id: ReplicaId) -> Self {
+    pub(crate) fn new(replica_id: ReplicaId, clock: Arc<LamportClock>) -> Self {
         Self {
             store: KvStore::new(),
             metadata: Arc::new(DashMap::new()),
             key_locks: Arc::new(DashMap::new()),
             log: Arc::new(RwLock::new(OperationLog::new())),
-            clock: LamportClock::new(),
+            clock,
             replica_id,
         }
     }

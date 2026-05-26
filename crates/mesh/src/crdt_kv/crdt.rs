@@ -23,7 +23,7 @@ use super::{
     engine::{EngineHandle, EpochMaxWinsLegacyEngine, LwwEngine},
     merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
-    replica::ReplicaId,
+    replica::{LamportClock, ReplicaId},
 };
 
 /// Default tombstone grace period for [`CrdtOrMap::gc_tombstones`]. Forwarded
@@ -42,6 +42,11 @@ pub struct CrdtOrMap {
     /// backward compatibility with callers that never register a prefix
     /// (notably the in-crate tests).
     default_engine: EngineHandle,
+    /// Per-node Lamport clock, shared across every engine. Op-id
+    /// `(replica_id, timestamp)` must be unique across this node's operations
+    /// regardless of which engine produced them; otherwise a peer that routes
+    /// two op-id-colliding ops into one engine deduplicates them.
+    clock: Arc<LamportClock>,
     replica_id: ReplicaId,
 }
 
@@ -52,16 +57,15 @@ impl CrdtOrMap {
 
     pub fn with_replica_id(replica_id: ReplicaId) -> Self {
         info!("Creating CRDT OR-Map, Replica ID: {}", replica_id);
+        let clock = Arc::new(LamportClock::new());
         Self {
             engines: Arc::new(RwLock::new(Arc::from(Vec::new()))),
-            default_engine: Arc::new(LwwEngine::new(replica_id)),
+            default_engine: Arc::new(LwwEngine::new(replica_id, Arc::clone(&clock))),
+            clock,
             replica_id,
         }
     }
 
-    /// Register the merge strategy for a key prefix. Each prefix gets its own
-    /// engine instance; re-registering replaces the existing engine for that
-    /// prefix (state is discarded — intended for startup configuration only).
     /// Register the merge strategy for a key prefix. One-shot: each prefix
     /// must be registered exactly once over the lifetime of a `CrdtOrMap`.
     /// `MeshKV::configure_crdt_prefix` enforces this at the public boundary;
@@ -70,8 +74,13 @@ impl CrdtOrMap {
     /// that prefix.
     pub(crate) fn register_merge_strategy(&self, prefix: String, strategy: MergeStrategy) {
         let engine: EngineHandle = match strategy {
-            MergeStrategy::LastWriterWins => Arc::new(LwwEngine::new(self.replica_id)),
-            MergeStrategy::EpochMaxWins => Arc::new(EpochMaxWinsLegacyEngine::new(self.replica_id)),
+            MergeStrategy::LastWriterWins => {
+                Arc::new(LwwEngine::new(self.replica_id, Arc::clone(&self.clock)))
+            }
+            MergeStrategy::EpochMaxWins => Arc::new(EpochMaxWinsLegacyEngine::new(
+                self.replica_id,
+                Arc::clone(&self.clock),
+            )),
         };
         let mut guard = self.engines.write();
         assert!(

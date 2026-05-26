@@ -27,6 +27,12 @@ use crate::crdt_kv::{
     replica::{LamportClock, ReplicaId},
 };
 
+// Shared per-node Lamport clock. Op-id `(replica_id, timestamp)` must be unique
+// across every operation this node emits, regardless of which engine handled
+// the write — otherwise a peer that routes both keys into one engine (e.g. has
+// not yet registered the second prefix) deduplicates two unrelated ops by op-id
+// and silently drops one. See PR #1539 codex P1.
+
 #[derive(Debug, Clone)]
 struct ValueMetadata {
     timestamp: u64,
@@ -82,18 +88,18 @@ pub(crate) struct LwwEngine {
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>,
     key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     log: Arc<RwLock<OperationLog>>,
-    clock: LamportClock,
+    clock: Arc<LamportClock>,
     replica_id: ReplicaId,
 }
 
 impl LwwEngine {
-    pub(crate) fn new(replica_id: ReplicaId) -> Self {
+    pub(crate) fn new(replica_id: ReplicaId, clock: Arc<LamportClock>) -> Self {
         Self {
             store: KvStore::new(),
             metadata: Arc::new(DashMap::new()),
             key_locks: Arc::new(DashMap::new()),
             log: Arc::new(RwLock::new(OperationLog::new())),
-            clock: LamportClock::new(),
+            clock,
             replica_id,
         }
     }
