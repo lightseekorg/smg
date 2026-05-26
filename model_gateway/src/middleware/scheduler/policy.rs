@@ -16,17 +16,17 @@ pub struct TenantPolicy {
     pub max_class: Class,
 }
 
-/// Lookup interface used by the admission middleware. A future async
-/// store-backed impl can land via a sync cache wrapper without changing
-/// the call site.
+/// Tenant policy lookup. Returns the [`TenantPolicy`] for a tenant,
+/// with a default fallback for unknown keys. Trait-shaped so an async
+/// store-backed implementation can swap in behind a sync cache without
+/// changing call sites.
 pub trait TenantPolicyResolver: Send + Sync {
     fn policy(&self, tenant: &TenantKey) -> TenantPolicy;
 }
 
-/// Static in-memory resolver — what gets used at v1.
-///
-/// Built once from [`SchedulerSettings`] at gateway startup; lookups are
-/// pure `HashMap::get` with a default-policy fallback.
+/// Static in-memory resolver: a `HashMap` of explicit per-tenant
+/// overrides plus a single default policy applied to every other tenant.
+/// Built once from [`SchedulerSettings`] at gateway startup.
 pub struct StaticTenantPolicyResolver {
     policies: HashMap<TenantKey, TenantPolicy>,
     default: TenantPolicy,

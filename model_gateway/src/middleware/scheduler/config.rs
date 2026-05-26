@@ -41,9 +41,8 @@ pub struct ClassConfig {
 }
 
 impl ClassConfig {
-    /// Built-in defaults per `02-priority-scheduler-design.md` §3.
-    /// These are what every class gets when no YAML file supplies an
-    /// override.
+    /// Built-in defaults. These are what every class gets when no YAML
+    /// file supplies an override.
     pub fn default_for(class: Class) -> Self {
         match class {
             Class::System => Self {
@@ -129,9 +128,9 @@ pub struct PrioritySchedulerYaml {
 }
 
 /// Per-field validation failures discovered while assembling
-/// [`SchedulerSettings`]. Capacity-vs-reserved validation lives later
-/// (the scheduler doesn't know the backend capacity until
-/// [`super::scheduler::PriorityScheduler::new`] receives it).
+/// [`SchedulerSettings`]. Capacity-vs-reserved validation is not in
+/// scope here — the scheduler performs it at construction time, once
+/// the live backend capacity is known.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SettingsValidationError {
     #[error("class {class:?}: queue_size_per_slot must be >= 0.0")]
@@ -146,15 +145,14 @@ pub enum SettingsValidationError {
 /// optional YAML file + built-in defaults. Built once at startup and
 /// then read-only.
 ///
-/// Capacity is *not* stored here — it lives on
-/// [`super::scheduler::PriorityScheduler`] as a live `AtomicU16` fed by
-/// [`crate::worker::WorkerCapacity`] (PR 1). The scheduler reacts to
-/// capacity changes via the watch channel; settings stay fixed.
+/// Capacity is not stored here; the scheduler reads it live from
+/// [`crate::worker::WorkerCapacity`] and reacts to changes via its
+/// watch channel. Settings stay fixed.
 #[derive(Debug, Clone)]
 pub struct SchedulerSettings {
-    /// Master switch. When `false`, the legacy `concurrency_limit_middleware`
-    /// stays wired in `server.rs` and none of the scheduler types are
-    /// constructed.
+    /// Master switch. When `false`, the priority scheduler is not
+    /// constructed and the gateway falls back to its legacy
+    /// concurrency-limit admission path.
     pub enabled: bool,
     /// Tenant policy applied when a tenant is not in `tenant_policies`.
     pub default_max_class: Class,
