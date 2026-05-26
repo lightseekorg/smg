@@ -1,16 +1,13 @@
 //! Rate-limit engine.
 //!
-//! Holds typed `RateLimitState` per key. Replaces the transitional
-//! `EpochMaxWinsLegacyEngine` (LWW-shaped `Vec<ValueMetadata>` + separate
-//! bytes store + per-key `Mutex` table) with state that matches the
-//! EpochMaxWins CRDT directly: each key is either `Live(shard)` carrying a
-//! live-points frontier plus an optional tombstone boundary, or
-//! `Tombstone(version)` past which dominated inserts are suppressed.
+//! Holds typed `RateLimitState` per key, matching the EpochMaxWins CRDT
+//! directly: each key is either `Live(shard)` carrying a live-points frontier
+//! plus an optional tombstone boundary, or `Tombstone(version)` past which
+//! dominated inserts are suppressed.
 //!
 //! State owned by this engine:
-//! - `entries: DashMap<String, ShardEntry>` — typed per-key state, atomic via
-//!   DashMap's per-shard locks (entry API). No separate `KvStore`, no LWW
-//!   metadata vec, no per-key mutex table.
+//! - `entries: DashMap<String, ShardEntry>` — typed per-key state. Same-key
+//!   writes serialise via DashMap's `entry` API (per-shard lock).
 //! - `log: OperationLog` — gossip-visible operation log
 //! - shared `LamportClock` (per node, cloned from `CrdtOrMap`)
 //! - `generation: AtomicU64` — mutation counter for change-detection callers
@@ -36,10 +33,10 @@ use crate::crdt_kv::{
 
 struct ShardEntry {
     state: RateLimitState,
-    /// Local-clock moment the entry first transitioned to `Tombstone`. `None`
-    /// for live entries. Used by `gc_tombstones`; never refreshed on a
-    /// subsequent tombstone-to-tombstone merge so a late delayed Remove cannot
-    /// restart the grace clock (PR #1469 codex P2).
+    /// Local-clock moment the entry's current tombstone version was first
+    /// observed. `None` for live entries. Used by `gc_tombstones`; on a
+    /// tombstone -> tombstone transition this is refreshed when the version
+    /// advances and preserved when an older dominated remove arrives.
     tombstoned_at: Option<Instant>,
 }
 
@@ -142,19 +139,35 @@ impl RateLimitEngine {
     }
 }
 
-/// Apply a merged state to `entry`, updating `tombstoned_at` per the
-/// transition. Preserves the existing `tombstoned_at` when the entry stays in
-/// `Tombstone` (PR #1469 codex P2: never refresh GC on a same-key delayed
-/// Remove).
+/// Apply a merged state to `entry`, adjusting `tombstoned_at` per the
+/// transition:
+/// - live -> tombstone: start the GC clock now.
+/// - tombstone -> live: clear the GC clock.
+/// - tombstone -> tombstone, version advances: restart the GC clock so the
+///   newer winning remove gets its full grace period.
+/// - tombstone -> tombstone, same version: preserve the existing clock.
+///   An older dominated remove that arrives late must not extend grace on a
+///   tombstone that would otherwise be due for collection.
 fn update_entry(entry: &mut ShardEntry, merged: RateLimitState) {
-    let was_tombstone = matches!(&entry.state, RateLimitState::Tombstone(_));
-    let now_tombstone = matches!(&merged, RateLimitState::Tombstone(_));
+    let was_tombstone_version = tombstone_version_of(&entry.state);
+    let now_tombstone_version = tombstone_version_of(&merged);
     entry.state = merged;
-    match (was_tombstone, now_tombstone) {
-        (false, true) => entry.tombstoned_at = Some(Instant::now()),
-        (true, false) => entry.tombstoned_at = None,
-        // (false, false) or (true, true): keep tombstoned_at as-is.
+    match (was_tombstone_version, now_tombstone_version) {
+        (None, Some(_)) => entry.tombstoned_at = Some(Instant::now()),
+        (Some(_), None) => entry.tombstoned_at = None,
+        (Some(was), Some(now)) if was != now => {
+            entry.tombstoned_at = Some(Instant::now());
+        }
+        // (None, None): still live. (Some(v), Some(v)): idempotent or
+        // dominated remove. Either way leave the clock alone.
         _ => {}
+    }
+}
+
+fn tombstone_version_of(state: &RateLimitState) -> Option<RateLimitVersion> {
+    match state {
+        RateLimitState::Tombstone(version) => Some(*version),
+        RateLimitState::Live(_) => None,
     }
 }
 
@@ -234,11 +247,11 @@ impl NamespaceCrdtEngine for RateLimitEngine {
             return;
         }
 
-        // EpochMaxWins always replays incoming ops because a compacted snapshot
-        // can carry an embedded tombstone_version at the same op-id as a
-        // previously-seen raw payload. `merge_insert` / `merge_remove` return
-        // `changed=false` for byte-identical re-applies so generation only
-        // bumps when state truly changes (PR #1469).
+        // EpochMaxWins always replays incoming ops to state because a
+        // compacted snapshot can carry an embedded tombstone_version at the
+        // same op-id as a previously-seen raw payload. `merge_insert` /
+        // `merge_remove` return `changed=false` for byte-identical re-applies
+        // so generation only bumps when state truly changes.
         ops.sort_by_key(|op| (op.timestamp(), op.replica_id()));
 
         {
