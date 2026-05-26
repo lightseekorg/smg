@@ -2,6 +2,7 @@
 
 pub mod class;
 pub mod config;
+pub mod inflight;
 pub mod policy;
 
 pub use class::{Class, PRIORITY_HEADER};
