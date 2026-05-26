@@ -65,8 +65,20 @@ pub struct PriorityScheduler {
     slot_pool: SlotPool,
     class_queues: [Arc<dyn ClassQueue>; 4],
     inflight_registry: RwLock<HashMap<RequestId, Arc<InflightHandle>>>,
-    pub(super) release_notify: Notify,
+    /// Arc so the dispatcher task can await on it without holding a strong
+    /// reference to the scheduler. On scheduler `Drop` we fire `notify_one`
+    /// so the dispatcher wakes, observes the failed `Weak::upgrade`, and
+    /// exits cleanly.
+    pub(super) release_notify: Arc<Notify>,
     class_config: [ClassRuntimeConfig; 4],
+}
+
+impl Drop for PriorityScheduler {
+    fn drop(&mut self) {
+        // Kick the dispatcher one last time so it can observe the Weak
+        // upgrade failure and exit instead of awaiting forever.
+        self.release_notify.notify_one();
+    }
 }
 
 impl PriorityScheduler {
@@ -99,7 +111,7 @@ impl PriorityScheduler {
             slot_pool: SlotPool::new(capacity, reserved_arr),
             class_queues,
             inflight_registry: RwLock::new(HashMap::new()),
-            release_notify: Notify::new(),
+            release_notify: Arc::new(Notify::new()),
             class_config,
         }))
     }
@@ -181,6 +193,110 @@ impl PriorityScheduler {
         self.inflight_registry.write().remove(handle.request_id());
         self.slot_pool.release(handle.class());
         self.release_notify.notify_one();
+    }
+
+    /// Try to admit one queued waiter. Returns `true` if a waiter was
+    /// successfully admitted (caller should call again to drain), `false`
+    /// if nothing was admittable this pass.
+    ///
+    /// Honors two policies in order:
+    /// 1. **Starvation override** — scans Bulk → Default → Interactive for
+    ///    a head waiter that has aged past its class's
+    ///    `starvation_threshold`. The first such waiter is admitted via
+    ///    `try_acquire_ignoring_reservations`, bypassing the reservation
+    ///    guard so a starved low-class waiter can take a slot that a
+    ///    higher class has reserved-but-not-used.
+    /// 2. **Normal priority** — System → Interactive → Default → Bulk.
+    ///    Each class's queue is drained one waiter at a time so the
+    ///    caller's outer loop can interleave drains across classes.
+    pub fn wake_next_waiter(self: &Arc<Self>) -> bool {
+        // Starvation override — lowest priority first (the ones most at
+        // risk of starving).
+        for class in [Class::Bulk, Class::Default, Class::Interactive] {
+            let idx = class as usize;
+            self.class_queues[idx].drop_cancelled_head();
+            let Some(head_age) = self.class_queues[idx].head_age() else {
+                continue;
+            };
+            if head_age <= self.class_config[idx].starvation_threshold {
+                continue;
+            }
+            if self.slot_pool.try_acquire_ignoring_reservations(class) {
+                if self.send_to_head(class) {
+                    return true;
+                }
+                // Acquired a slot but the head was gone (racy cancel).
+                // Release and fall through to normal priority.
+                self.slot_pool.release(class);
+            }
+        }
+
+        // Normal priority — highest class first.
+        for class in [
+            Class::System,
+            Class::Interactive,
+            Class::Default,
+            Class::Bulk,
+        ] {
+            let idx = class as usize;
+            self.class_queues[idx].drop_cancelled_head();
+            if self.class_queues[idx].depth() == 0 {
+                continue;
+            }
+            if self.slot_pool.try_acquire(class) {
+                if self.send_to_head(class) {
+                    return true;
+                }
+                self.slot_pool.release(class);
+            }
+        }
+
+        false
+    }
+
+    /// Pop the head waiter for `class` and deliver a permit through its
+    /// oneshot. Returns `false` if the queue was empty (race with a
+    /// cancellation that drained the head between the depth check and
+    /// the pop).
+    ///
+    /// The caller must have already acquired a slot under `class`.
+    fn send_to_head(self: &Arc<Self>, class: Class) -> bool {
+        let Some(Waiter {
+            request_id,
+            permit_tx,
+            ..
+        }) = self.class_queues[class as usize].pop_eligible()
+        else {
+            return false;
+        };
+        let permit = self.register_inflight(class, request_id);
+        // If the receiver was dropped, the permit goes out of scope here
+        // and its Drop releases the slot back. The dispatcher's outer
+        // loop will try another waiter on the next iteration.
+        let _ = permit_tx.send(permit);
+        true
+    }
+
+    /// Spawn the dispatcher background task. It awaits `release_notify`,
+    /// then drains as many queued waiters as the slot pool can accept,
+    /// then awaits again. Holds only a `Weak<Self>` so the task does not
+    /// keep the scheduler alive past its last external strong reference.
+    pub fn spawn_dispatcher(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let notify = Arc::clone(&self.release_notify);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "dispatcher loop holds only a Weak<Self> and exits when the scheduler is dropped (Drop fires release_notify)"
+        )]
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+                let Some(scheduler) = weak.upgrade() else {
+                    break;
+                };
+                while scheduler.wake_next_waiter() {}
+            }
+        });
     }
 }
 
@@ -423,6 +539,134 @@ mod tests {
             outcome,
             AdmitOutcome::Rejected(RejectionReason::ClientCancelled)
         ));
+    }
+
+    // ── wake_next_waiter / dispatcher ───────────────────────────────
+
+    fn enqueue_waiter(
+        scheduler: &Arc<PriorityScheduler>,
+        class: Class,
+    ) -> oneshot::Receiver<SchedulerPermit> {
+        let (tx, rx) = oneshot::channel();
+        let waiter = Waiter::new(class, CancellationToken::new(), rid("queued"), tx);
+        scheduler.class_queues[class as usize]
+            .try_enqueue(waiter)
+            .expect("queue had room");
+        rx
+    }
+
+    #[test]
+    fn test_wake_next_waiter_returns_false_when_no_slot_available() {
+        let s = settings_with(Class::Default, 8, 60);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let _held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+        let _rx = enqueue_waiter(&scheduler, Class::Default);
+        assert!(!scheduler.wake_next_waiter(), "no slot to give");
+    }
+
+    #[tokio::test]
+    async fn test_wake_next_waiter_admits_queued_waiter() {
+        let s = settings_with(Class::Default, 8, 60);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+        let mut rx = enqueue_waiter(&scheduler, Class::Default);
+        drop(held);
+        assert!(scheduler.wake_next_waiter());
+        let permit = rx.try_recv().expect("permit delivered");
+        assert_eq!(permit.handle().class(), Class::Default);
+    }
+
+    #[tokio::test]
+    async fn test_wake_next_waiter_honors_priority_order() {
+        // Interactive beats Bulk when both are queued and a slot frees.
+        let s = settings_with(Class::Bulk, 8, 60); // Bulk queue=8 (interactive defaults too)
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+
+        let mut bulk_rx = enqueue_waiter(&scheduler, Class::Bulk);
+        let mut interactive_rx = enqueue_waiter(&scheduler, Class::Interactive);
+
+        drop(held);
+        assert!(scheduler.wake_next_waiter());
+        // Interactive should be served first; bulk still waiting.
+        assert!(interactive_rx.try_recv().is_ok());
+        assert!(bulk_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_starvation_override_promotes_stale_bulk_head() {
+        // Bulk starvation_threshold=0s (anything older than 0 wins), with
+        // capacity entirely reserved by Interactive — without the
+        // override Bulk could never advance.
+        use std::collections::HashMap as StdMap;
+        let mut classes = StdMap::new();
+        for c in Class::ALL {
+            let mut cfg = ClassConfig::default_for(c);
+            cfg.reserved = 0;
+            // Set tiny starvation threshold for Bulk so an immediate
+            // enqueue is "stale" by the time wake fires.
+            if c == Class::Bulk {
+                cfg.starvation_threshold_secs = 1;
+                cfg.queue_size = 4;
+                cfg.queue_size_per_slot = 0.0;
+            }
+            // Interactive holds the full capacity in reservation.
+            if c == Class::Interactive {
+                cfg.reserved = 1;
+            }
+            classes.insert(c, cfg);
+        }
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: StdMap::new(),
+        };
+        let settings =
+            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
+
+        let scheduler = PriorityScheduler::new(&settings, 1).unwrap();
+        let mut bulk_rx = enqueue_waiter(&scheduler, Class::Bulk);
+
+        // Sleep past the starvation threshold so head_age > threshold.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        // No regular path admits Bulk under the Interactive reservation,
+        // but the starvation override should.
+        assert!(scheduler.wake_next_waiter(), "starvation override fires");
+        assert!(bulk_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_dispatcher_admits_queued_waiter_on_release() {
+        let s = settings_with(Class::Default, 8, 60);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        scheduler.spawn_dispatcher();
+
+        let held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+
+        // Kick off an admit that must go to the slow path.
+        let scheduler_for_admit = Arc::clone(&scheduler);
+        let admit_future = async move {
+            scheduler_for_admit
+                .admit(Class::Default, rid("queued"), CancellationToken::new())
+                .await
+        };
+
+        // Race: release the slot, then await admit. The dispatcher
+        // should observe the release and admit the queued waiter.
+        let (admit_outcome, ()) = tokio::join!(admit_future, async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(held);
+        });
+
+        assert!(matches!(admit_outcome, AdmitOutcome::Admitted(_)));
     }
 
     #[tokio::test]
