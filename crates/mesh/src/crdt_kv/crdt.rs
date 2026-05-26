@@ -122,12 +122,17 @@ impl CrdtOrMap {
     }
 
     // ---- Local writes ----
+    //
+    // Crate-private. External callers route through `CrdtNamespace::put` /
+    // `delete`, which assert the key matches the namespace's registered
+    // prefix - making "write before register" structurally unreachable from
+    // outside the crate.
 
-    pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+    pub(crate) fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
         self.engine_for_key(&key).put_local(&key, value)
     }
 
-    pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
+    pub(crate) fn remove(&self, key: &str) -> Option<Vec<u8>> {
         self.engine_for_key(key).delete_local(key)
     }
 
