@@ -275,26 +275,37 @@ impl PriorityScheduler {
     }
 
     /// Pop the head waiter for `class` and deliver a permit through its
-    /// oneshot. Returns `false` if the queue was empty (race with a
-    /// cancellation that drained the head between the depth check and
-    /// the pop).
+    /// oneshot. Drains waiters whose receivers have already been
+    /// dropped (admit timed out / client cancelled between pop and send)
+    /// without performing the wasted `register_inflight` + immediate
+    /// release for each. Returns `false` if the queue is exhausted
+    /// without finding a live waiter.
     ///
     /// The caller must have already acquired a slot under `class`.
     fn send_to_head(self: &Arc<Self>, class: Class) -> bool {
-        let Some(Waiter {
-            request_id,
-            permit_tx,
-            ..
-        }) = self.class_queues[class as usize].pop_eligible()
-        else {
-            return false;
-        };
-        let permit = self.register_inflight(class, request_id);
-        // If the receiver was dropped, the permit goes out of scope here
-        // and its Drop releases the slot back. The dispatcher's outer
-        // loop will try another waiter on the next iteration.
-        let _ = permit_tx.send(permit);
-        true
+        loop {
+            let Some(Waiter {
+                request_id,
+                permit_tx,
+                ..
+            }) = self.class_queues[class as usize].pop_eligible()
+            else {
+                return false;
+            };
+            if permit_tx.is_closed() {
+                // Receiver gone — skip the registry write and the
+                // matched permit-drop release. Try the next waiter
+                // using the same slot we already acquired.
+                continue;
+            }
+            let permit = self.register_inflight(class, request_id);
+            // If the receiver was dropped between is_closed() above and
+            // send below (unlikely race window), the permit goes out of
+            // scope and its Drop releases the slot back; the caller's
+            // outer loop will try again.
+            let _ = permit_tx.send(permit);
+            return true;
+        }
     }
 
     /// Spawn the dispatcher background task. `select!`s over two
@@ -692,6 +703,55 @@ mod tests {
             .try_enqueue(waiter)
             .expect("queue had room");
         rx
+    }
+
+    #[tokio::test]
+    async fn test_send_to_head_skips_waiters_with_closed_receivers() {
+        // Stuff a queue with one waiter whose receiver is dropped (admit
+        // has already timed out / been cancelled) followed by a live
+        // waiter. wake_next_waiter should admit the live waiter without
+        // touching the inflight registry for the dead one.
+        let s = settings_with(Class::Default, 8, 60);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let _held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+
+        // Dead waiter — drop the receiver immediately.
+        let (dead_tx, dead_rx) = oneshot::channel::<SchedulerPermit>();
+        drop(dead_rx);
+        let dead = Waiter::new(
+            Class::Default,
+            CancellationToken::new(),
+            rid("dead"),
+            dead_tx,
+        );
+        scheduler.class_queues[Class::Default as usize]
+            .try_enqueue(dead)
+            .unwrap();
+
+        // Live waiter.
+        let (live_tx, mut live_rx) = oneshot::channel::<SchedulerPermit>();
+        let live = Waiter::new(
+            Class::Default,
+            CancellationToken::new(),
+            rid("live"),
+            live_tx,
+        );
+        scheduler.class_queues[Class::Default as usize]
+            .try_enqueue(live)
+            .unwrap();
+
+        // Release the slot.
+        drop(_held);
+        assert!(scheduler.wake_next_waiter(), "live waiter admitted");
+
+        let permit = live_rx.try_recv().expect("live permit delivered");
+        assert_eq!(permit.handle().request_id().0, "live");
+        // Registry should hold only the live request — never the dead one.
+        let registry = scheduler.inflight_registry.read();
+        assert!(registry.contains_key(&rid("live")));
+        assert!(!registry.contains_key(&rid("dead")));
     }
 
     #[test]
