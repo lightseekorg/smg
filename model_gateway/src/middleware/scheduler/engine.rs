@@ -179,6 +179,14 @@ impl PriorityScheduler {
             return AdmitOutcome::Rejected(RejectionReason::QueueFull);
         }
 
+        // Lost-wakeup guard: a slot may have been released after our
+        // fast-path try_acquire failed but before try_enqueue returned.
+        // That `notify_one` already fired and the dispatcher already
+        // drained — without an extra nudge here, our newly-queued waiter
+        // would sit behind a now-free slot until the next unrelated
+        // release event. Re-kick the dispatcher to re-evaluate.
+        self.release_notify.notify_one();
+
         let timeout = self.class_config[class as usize].queue_timeout;
         let outcome = tokio::select! {
             result = rx => match result {
@@ -306,6 +314,15 @@ impl PriorityScheduler {
     pub fn spawn_dispatcher(self: &Arc<Self>, capacity_watch: watch::Receiver<u16>) {
         let weak = Arc::downgrade(self);
         let notify = Arc::clone(&self.release_notify);
+        // Periodic tick so the starvation override can fire even when no
+        // release events arrive. Set to the smallest per-class
+        // starvation_threshold so a head waiter never ages past its
+        // threshold by more than ~one tick before the dispatcher checks.
+        let tick_period = Class::ALL
+            .iter()
+            .map(|c| self.class_config[*c as usize].starvation_threshold)
+            .min()
+            .unwrap_or(std::time::Duration::from_secs(60));
         #[expect(
             clippy::disallowed_methods,
             reason = "dispatcher loop holds only a Weak<Self> and exits when the scheduler is dropped (Drop fires release_notify)"
@@ -317,10 +334,13 @@ impl PriorityScheduler {
             // poll — the `select!` would otherwise pick that arm forever
             // and burn CPU.
             let mut capacity_watch = Some(capacity_watch);
+            let mut tick = tokio::time::interval(tick_period);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 let new_capacity = match capacity_watch.as_mut() {
                     Some(rx) => tokio::select! {
                         () = notify.notified() => None,
+                        _ = tick.tick() => None,
                         result = rx.changed() => match result {
                             Ok(()) => Some(*rx.borrow()),
                             Err(_) => {
@@ -333,7 +353,10 @@ impl PriorityScheduler {
                         },
                     },
                     None => {
-                        notify.notified().await;
+                        tokio::select! {
+                            () = notify.notified() => {}
+                            _ = tick.tick() => {}
+                        }
                         None
                     }
                 };
@@ -713,6 +736,50 @@ mod tests {
         // Interactive should be served first; bulk still waiting.
         assert!(interactive_rx.try_recv().is_ok());
         assert!(bulk_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_periodic_tick_promotes_stale_waiter_without_release() {
+        // No slot release ever fires. The dispatcher's periodic tick
+        // must wake on its own, observe that the Bulk head has aged
+        // past its starvation_threshold, and admit via the override.
+        use std::collections::HashMap as StdMap;
+        let mut classes = StdMap::new();
+        for c in Class::ALL {
+            let mut cfg = ClassConfig::default_for(c);
+            cfg.reserved = 0;
+            // Tight thresholds so the test runs fast.
+            cfg.starvation_threshold_secs = 1;
+            if c == Class::Bulk {
+                cfg.queue_size = 4;
+                cfg.queue_size_per_slot = 0.0;
+            }
+            // Interactive reserves the entire capacity, locking Bulk out
+            // of the normal-priority admission path.
+            if c == Class::Interactive {
+                cfg.reserved = 1;
+            }
+            classes.insert(c, cfg);
+        }
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: StdMap::new(),
+        };
+        let settings =
+            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
+        let scheduler = PriorityScheduler::new(&settings, 1).unwrap();
+        scheduler.spawn_dispatcher(dummy_capacity_watch(1));
+
+        // Admit a Bulk request. No slot release ever fires; the only way
+        // for it to be admitted is the dispatcher's periodic tick + the
+        // starvation override.
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            scheduler.admit(Class::Bulk, rid("bulk"), CancellationToken::new()),
+        )
+        .await
+        .expect("admit completes within timeout");
+        assert!(matches!(outcome, AdmitOutcome::Admitted(_)));
     }
 
     #[tokio::test]
