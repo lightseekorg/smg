@@ -133,8 +133,8 @@ pub struct PrioritySchedulerYaml {
 /// the live backend capacity is known.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SettingsValidationError {
-    #[error("class {class:?}: queue_size_per_slot must be >= 0.0")]
-    NegativeMultiplier { class: Class },
+    #[error("class {class:?}: queue_size_per_slot must be a finite, non-negative number")]
+    InvalidMultiplier { class: Class },
     #[error("class {class:?}: queue_timeout_secs must be > 0")]
     ZeroQueueTimeout { class: Class },
     #[error("class {class:?}: starvation_threshold_secs must be > 0")]
@@ -203,8 +203,8 @@ impl SchedulerSettings {
 
         for class in Class::ALL {
             let cfg = &classes[class as usize];
-            if cfg.queue_size_per_slot < 0.0 {
-                return Err(SettingsValidationError::NegativeMultiplier { class });
+            if !cfg.queue_size_per_slot.is_finite() || cfg.queue_size_per_slot < 0.0 {
+                return Err(SettingsValidationError::InvalidMultiplier { class });
             }
             if cfg.queue_timeout_secs == 0 {
                 return Err(SettingsValidationError::ZeroQueueTimeout { class });
@@ -451,7 +451,7 @@ tenant_policies:
             .unwrap_err();
         assert!(matches!(
             err,
-            SettingsValidationError::NegativeMultiplier {
+            SettingsValidationError::InvalidMultiplier {
                 class: Class::Interactive
             }
         ));
@@ -472,6 +472,67 @@ tenant_policies:
         assert!(matches!(
             err,
             SettingsValidationError::ZeroQueueTimeout { class: Class::Bulk }
+        ));
+    }
+
+    #[test]
+    fn test_settings_rejects_nan_multiplier_from_yaml() {
+        // serde_yaml parses `.nan` into f32::NAN. Without an explicit
+        // is_finite() check, the comparison `< 0.0` is false for NaN and the
+        // bad value slips through to garbage queue-limit math later.
+        let yaml = r"
+classes:
+  interactive:
+    reserved: 128
+    queue_size: 256
+    queue_size_per_slot: .nan
+    queue_timeout_secs: 30
+    starvation_threshold_secs: 5
+    can_preempt: true
+";
+        let parsed: PrioritySchedulerYaml = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            parsed.classes[&Class::Interactive]
+                .queue_size_per_slot
+                .is_nan(),
+            "serde_yaml deserialized .nan as NaN"
+        );
+        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&parsed))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SettingsValidationError::InvalidMultiplier {
+                class: Class::Interactive
+            }
+        ));
+    }
+
+    #[test]
+    fn test_settings_rejects_infinity_multiplier_from_yaml() {
+        let yaml = r"
+classes:
+  interactive:
+    reserved: 128
+    queue_size: 256
+    queue_size_per_slot: .inf
+    queue_timeout_secs: 30
+    starvation_threshold_secs: 5
+    can_preempt: true
+";
+        let parsed: PrioritySchedulerYaml = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            parsed.classes[&Class::Interactive]
+                .queue_size_per_slot
+                .is_infinite(),
+            "serde_yaml deserialized .inf as +Infinity"
+        );
+        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&parsed))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SettingsValidationError::InvalidMultiplier {
+                class: Class::Interactive
+            }
         ));
     }
 
