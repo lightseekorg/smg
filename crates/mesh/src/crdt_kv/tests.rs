@@ -673,7 +673,10 @@ fn test_epoch_max_wins_newer_tombstone_refreshes_tombstone_age() {
     assert!(replica.get(key).is_none(), "key fully tombstoned");
 
     // Let the first tombstone age past the grace window we will use below.
-    thread::sleep(Duration::from_millis(60));
+    // The grace value below also bounds how much wall-clock can elapse
+    // between the merge of `newer` and the GC check before the assertion
+    // becomes flaky, so keep this sleep / grace gap wide.
+    thread::sleep(Duration::from_millis(250));
 
     // Newer winning Remove arrives at ts=200. The merged tombstone version
     // advances; the GC clock must restart so the new winning tombstone gets
@@ -684,8 +687,11 @@ fn test_epoch_max_wins_newer_tombstone_refreshes_tombstone_age() {
 
     // Grace is longer than the time since the newer tombstone but shorter
     // than the time since the original tombstone. Without the refresh, GC
-    // would collect immediately; with it, GC must keep the entry.
-    let removed = replica.gc_tombstones_with_grace(Duration::from_millis(50));
+    // would collect immediately; with it, GC must keep the entry. 150ms
+    // gives ample headroom against CI scheduler stalls between the merge
+    // and the GC call (which has to land inside grace for the assertion
+    // to be meaningful).
+    let removed = replica.gc_tombstones_with_grace(Duration::from_millis(150));
     assert_eq!(
         removed, 0,
         "newer winning tombstone must refresh the GC clock",
