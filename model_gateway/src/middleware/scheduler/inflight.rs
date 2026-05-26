@@ -25,6 +25,7 @@ use super::Class;
 /// `try_mark_first_byte` clamps `now_ms` to `[1, u64::MAX - 1]` so a
 /// TTFT measurement can never collide with either the unset state or
 /// the preempt sentinel.
+#[derive(Debug)]
 pub struct InflightHandle {
     class: Class,
     request_id: RequestId,

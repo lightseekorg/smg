@@ -1,4 +1,4 @@
-//! Per-class waiter queue used by [`super::scheduler`] to hold admission
+//! Per-class waiter queue used by [`super::engine`] to hold admission
 //! candidates while their class is at capacity.
 
 use std::{
@@ -7,30 +7,45 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use smg_auth::RequestId;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use super::Class;
+use super::{engine::SchedulerPermit, Class};
 
 /// A request waiting for admission in a class queue.
 ///
-/// Carries only what the queue and dispatcher need: which class to admit
-/// under, when the wait started (for starvation tracking), and the
-/// cancellation token the client owns (so we can GC walkaway clients
-/// without admitting them). Additional fields (tenant key, request id,
-/// permit channel) are attached at higher layers as they're needed.
+/// Carries the class lane to admit under, the wait-start instant (used
+/// by the dispatcher's starvation override), the request id (carried
+/// so admit can build the inflight handle after dequeue), the
+/// cancellation token the client owns (lets the queue GC walkaway
+/// clients without admitting them), and the oneshot the dispatcher
+/// uses to hand back the [`SchedulerPermit`] when this waiter is
+/// admitted. Rejections (queue full, queue timeout, client cancelled)
+/// are returned synchronously from `admit` and never go through the
+/// channel, so this carries only the success case.
 #[derive(Debug)]
 pub struct Waiter {
     pub class: Class,
     pub queued_at: Instant,
     pub cancel: CancellationToken,
+    pub request_id: RequestId,
+    pub permit_tx: oneshot::Sender<SchedulerPermit>,
 }
 
 impl Waiter {
-    pub fn new(class: Class, cancel: CancellationToken) -> Self {
+    pub fn new(
+        class: Class,
+        cancel: CancellationToken,
+        request_id: RequestId,
+        permit_tx: oneshot::Sender<SchedulerPermit>,
+    ) -> Self {
         Self {
             class,
             queued_at: Instant::now(),
             cancel,
+            request_id,
+            permit_tx,
         }
     }
 }
@@ -120,7 +135,13 @@ mod tests {
     use crate::middleware::scheduler::Class;
 
     fn waiter(class: Class) -> Waiter {
-        Waiter::new(class, CancellationToken::new())
+        let (tx, _rx) = oneshot::channel();
+        Waiter::new(class, CancellationToken::new(), RequestId("t".into()), tx)
+    }
+
+    fn waiter_with_cancel(class: Class, cancel: CancellationToken) -> Waiter {
+        let (tx, _rx) = oneshot::channel();
+        Waiter::new(class, cancel, RequestId("t".into()), tx)
     }
 
     #[test]
@@ -180,7 +201,7 @@ mod tests {
         let q = FifoClassQueue::new(4);
         let cancelled = CancellationToken::new();
         cancelled.cancel();
-        q.try_enqueue(Waiter::new(Class::Default, cancelled))
+        q.try_enqueue(waiter_with_cancel(Class::Default, cancelled))
             .unwrap();
         q.try_enqueue(waiter(Class::Interactive)).unwrap();
         assert_eq!(q.depth(), 2);
@@ -219,7 +240,7 @@ mod tests {
         for _ in 0..3 {
             let cancelled = CancellationToken::new();
             cancelled.cancel();
-            q.try_enqueue(Waiter::new(Class::Default, cancelled))
+            q.try_enqueue(waiter_with_cancel(Class::Default, cancelled))
                 .unwrap();
         }
         q.try_enqueue(waiter(Class::Interactive)).unwrap();
