@@ -58,9 +58,10 @@ pub trait ClassQueue: Send + Sync {
     /// Current depth, including waiters whose cancel token has fired.
     fn depth(&self) -> usize;
 
-    /// Remove the head waiter if its cancel token has fired (client
-    /// walked away while queued). Single-step; the caller may invoke
-    /// repeatedly to GC a run of cancelled heads.
+    /// Drain any leading run of waiters whose cancel token has fired
+    /// (clients that walked away while queued). One call removes every
+    /// consecutive cancelled head in a single lock acquisition; the
+    /// first non-cancelled or empty position stops the scan.
     fn drop_cancelled_head(&self);
 }
 
@@ -103,7 +104,7 @@ impl ClassQueue for FifoClassQueue {
 
     fn drop_cancelled_head(&self) {
         let mut guard = self.waiters.lock();
-        if guard.front().is_some_and(|w| w.cancel.is_cancelled()) {
+        while guard.front().is_some_and(|w| w.cancel.is_cancelled()) {
             guard.pop_front();
         }
     }
@@ -206,5 +207,34 @@ mod tests {
         let q = FifoClassQueue::new(4);
         q.drop_cancelled_head();
         assert_eq!(q.depth(), 0);
+    }
+
+    #[test]
+    fn test_drop_cancelled_head_drains_run_in_single_call() {
+        // When several clients in a row have walked away, a single call
+        // should clear the whole run rather than requiring the caller to
+        // loop. This keeps the dispatcher's GC pass to one lock cycle
+        // instead of N.
+        let q = FifoClassQueue::new(8);
+        for _ in 0..3 {
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            q.try_enqueue(Waiter::new(Class::Default, cancelled))
+                .unwrap();
+        }
+        q.try_enqueue(waiter(Class::Interactive)).unwrap();
+        assert_eq!(q.depth(), 4);
+
+        q.drop_cancelled_head();
+        assert_eq!(
+            q.depth(),
+            1,
+            "all three cancelled heads dropped in one call"
+        );
+        assert_eq!(
+            q.pop_eligible().unwrap().class,
+            Class::Interactive,
+            "first live waiter is now the head"
+        );
     }
 }
