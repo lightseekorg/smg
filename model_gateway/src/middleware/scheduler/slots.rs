@@ -151,15 +151,24 @@ impl SlotPool {
     /// Release a previously acquired slot. Saturates at zero so a stray
     /// extra release cannot underflow the lane (defensive — production
     /// callers acquire and release in `SchedulerPermit::Drop`).
+    ///
+    /// Returns early without issuing a CAS when the lane is already
+    /// zero. An unchanged-value atomic write would still trigger cache-
+    /// line invalidation across cores via the coherence protocol, so
+    /// the short-circuit matters on hot release paths.
     pub fn release(&self, class: Class) {
         let lane = class as usize;
         let mut cur = self.inflight_packed.load(Ordering::Acquire);
         loop {
-            let mut counts = unpack(cur);
-            counts[lane] = counts[lane].saturating_sub(1);
+            let counts = unpack(cur);
+            if counts[lane] == 0 {
+                return;
+            }
+            let mut new_counts = counts;
+            new_counts[lane] -= 1;
             match self.inflight_packed.compare_exchange_weak(
                 cur,
-                pack(counts),
+                pack(new_counts),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
