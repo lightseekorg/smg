@@ -32,9 +32,15 @@ pub(super) use lww::LwwEngine;
 pub(super) trait NamespaceCrdtEngine: Send + Sync {
     // ---- Local writes ----
 
-    /// Apply a local put. Returns the previous live bytes when the write was
-    /// accepted, or `None` when the write was rejected or did not displace a
-    /// well-defined previous value (e.g. per-point shard updates).
+    /// Apply a local put.
+    /// - Accepted, displaced a previous value: returns `Some(previous_bytes)`.
+    /// - Rejected (e.g. an older `(timestamp, replica_id)` than what is
+    ///   already recorded): returns `Some(current_live_bytes)` — the value
+    ///   that prevented the write, so the caller can see what is actually
+    ///   live without an extra `get`.
+    /// - No well-defined previous value (e.g. EpochMaxWins per-point shard
+    ///   update where the key remains alive with a smaller shard): returns
+    ///   `None`.
     fn put_local(&self, key: &str, value: Vec<u8>) -> Option<Vec<u8>>;
 
     /// Apply a local delete. Returns the previous live bytes when the delete
@@ -64,7 +70,10 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
     /// same-op-id folding), and applies only the post-canonicalisation result
     /// to live state. This is where the "post-compaction-replay footgun" (PR
     /// #1469) gets sealed inside the engine.
-    fn apply_remote_ops(&self, ops: &[Operation]);
+    ///
+    /// Takes ownership so the engine can move the batch into its operation
+    /// log without an extra clone.
+    fn apply_remote_ops(&self, ops: Vec<Operation>);
 
     // ---- Maintenance ----
 

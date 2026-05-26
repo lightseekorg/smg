@@ -303,7 +303,7 @@ impl NamespaceCrdtEngine for LwwEngine {
         self.log.read().operations().to_vec()
     }
 
-    fn apply_remote_ops(&self, ops: &[Operation]) {
+    fn apply_remote_ops(&self, ops: Vec<Operation>) {
         if ops.is_empty() {
             return;
         }
@@ -330,14 +330,14 @@ impl NamespaceCrdtEngine for LwwEngine {
         // hosts LWW keys.
         {
             let mut log = self.log.write();
-            let incoming = OperationLog::from_operations(ops.to_vec());
+            let incoming = OperationLog::from_operations(ops);
             log.merge_with_strategy(&incoming, |_| crate::crdt_kv::MergeStrategy::LastWriterWins);
             log.compact_with_strategy(|_| crate::crdt_kv::MergeStrategy::LastWriterWins);
         }
 
         // Apply unseen ops to live state. Lamport clock observes each remote
         // timestamp so subsequent local ticks beat it.
-        for op in &unseen {
+        for op in unseen {
             self.clock.update(op.timestamp());
             match op {
                 Operation::Insert {
@@ -346,14 +346,14 @@ impl NamespaceCrdtEngine for LwwEngine {
                     timestamp,
                     replica_id,
                 } => {
-                    self.apply_insert(key, value.clone(), *timestamp, *replica_id);
+                    self.apply_insert(&key, value, timestamp, replica_id);
                 }
                 Operation::Remove {
                     key,
                     timestamp,
                     replica_id,
                 } => {
-                    let _ = self.apply_remove_inner(key, *timestamp, *replica_id);
+                    let _ = self.apply_remove_inner(&key, timestamp, replica_id);
                 }
             }
         }

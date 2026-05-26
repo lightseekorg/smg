@@ -62,18 +62,24 @@ impl CrdtOrMap {
     /// Register the merge strategy for a key prefix. Each prefix gets its own
     /// engine instance; re-registering replaces the existing engine for that
     /// prefix (state is discarded — intended for startup configuration only).
+    /// Register the merge strategy for a key prefix. One-shot: each prefix
+    /// must be registered exactly once over the lifetime of a `CrdtOrMap`.
+    /// `MeshKV::configure_crdt_prefix` enforces this at the public boundary;
+    /// this assert backstops in-crate callers so a re-register attempt fails
+    /// loudly instead of silently orphaning the data already routed under
+    /// that prefix.
     pub(crate) fn register_merge_strategy(&self, prefix: String, strategy: MergeStrategy) {
         let engine: EngineHandle = match strategy {
             MergeStrategy::LastWriterWins => Arc::new(LwwEngine::new(self.replica_id)),
             MergeStrategy::EpochMaxWins => Arc::new(EpochMaxWinsLegacyEngine::new(self.replica_id)),
         };
         let mut guard = self.engines.write();
+        assert!(
+            !guard.iter().any(|(p, _)| p == &prefix),
+            "prefix '{prefix}' is already registered; register_merge_strategy is one-shot",
+        );
         let mut next: Vec<(String, EngineHandle)> = guard.iter().cloned().collect();
-        if let Some((_, existing)) = next.iter_mut().find(|(p, _)| p == &prefix) {
-            *existing = engine;
-        } else {
-            next.push((prefix, engine));
-        }
+        next.push((prefix, engine));
         next.sort_by_key(|(prefix, _)| Reverse(prefix.len()));
         *guard = Arc::from(next);
     }
@@ -224,7 +230,7 @@ impl CrdtOrMap {
             } else {
                 Arc::clone(&engines[idx].1)
             };
-            engine.apply_remote_ops(&ops);
+            engine.apply_remote_ops(ops);
         }
     }
 
