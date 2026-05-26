@@ -233,6 +233,17 @@ fn has_custom_tools(tool_types: &[&str]) -> bool {
     !tool_types.iter().all(|t| BUILTIN_TOOLS.contains(t))
 }
 
+fn parse_chat_reasoning_effort(effort: &str) -> ReasoningEffort {
+    match effort.to_ascii_lowercase().as_str() {
+        "high" => ReasoningEffort::High,
+        "medium" => ReasoningEffort::Medium,
+        "low" => ReasoningEffort::Low,
+        // Harmony does not support minimal reasoning effort.
+        "minimal" => ReasoningEffort::Low,
+        _ => ReasoningEffort::Medium,
+    }
+}
+
 /// Harmony request builder
 ///
 /// Converts OpenAI-format requests into Harmony-encoded format with input_ids,
@@ -402,14 +413,7 @@ impl HarmonyBuilder {
         let reasoning_effort = request
             .reasoning_effort
             .as_deref()
-            .map(|effort| match effort {
-                "high" => ReasoningEffort::High,
-                "medium" => ReasoningEffort::Medium,
-                "low" => ReasoningEffort::Low,
-                // Harmony does not support minimal reasoning effort
-                "minimal" => ReasoningEffort::Low,
-                _ => ReasoningEffort::Medium,
-            });
+            .map(parse_chat_reasoning_effort);
 
         let has_tools = request.tools.is_some();
         self.build_system_message(reasoning_effort, has_tools)
@@ -701,13 +705,13 @@ impl HarmonyBuilder {
                 if let Some(output_str) = output {
                     // Tool result - use Tool role with "functions.{name}" as author name
                     // IMPORTANT: Must include recipient="assistant" for parser to recognize it.
-                    // We keep channel=None to minimize what the model might copy.
+                    // Tool results belong to the commentary channel in Harmony.
                     let author_name = format!("functions.{name}");
                     debug!(
                         tool_name = %name,
                         author_name = %author_name,
                         output_preview = %output_str.chars().take(100).collect::<String>(),
-                        "Building tool result message with Tool role (recipient=assistant, no channel)"
+                        "Building tool result message with Tool role (recipient=assistant, channel=commentary)"
                     );
                     Ok(HarmonyMessage {
                         author: Author {
@@ -718,7 +722,7 @@ impl HarmonyBuilder {
                         content: vec![Content::Text(TextContent {
                             text: output_str.clone(),
                         })],
-                        channel: None,
+                        channel: Some("commentary".to_string()),
                         content_type: None,
                     })
                 } else {
@@ -765,7 +769,7 @@ impl HarmonyBuilder {
 
                 // Create Tool message with "functions.{name}" prefix
                 // IMPORTANT: Must include recipient="assistant" for parser to recognize it.
-                // We keep channel=None to minimize what the model might copy.
+                // Tool results belong to the commentary channel in Harmony.
                 Ok(HarmonyMessage {
                     author: Author {
                         role: Role::Tool,
@@ -775,7 +779,7 @@ impl HarmonyBuilder {
                     content: vec![Content::Text(TextContent {
                         text: output.clone(),
                     })],
-                    channel: None,
+                    channel: Some("commentary".to_string()),
                     content_type: None,
                 })
             }
@@ -1060,7 +1064,7 @@ impl HarmonyBuilder {
                         .unwrap_or_else(|| tool_call_id.clone());
 
                     // Tool result - Must include recipient="assistant" for parser to recognize it.
-                    // We keep channel=None to minimize what the model might copy.
+                    // Tool results belong to the commentary channel in Harmony.
                     let harmony_msg = HarmonyMessage {
                         author: Author {
                             role: Role::Tool,
@@ -1070,7 +1074,7 @@ impl HarmonyBuilder {
                         content: vec![Content::Text(TextContent {
                             text: content.to_simple_string(),
                         })],
-                        channel: None,
+                        channel: Some("commentary".to_string()),
                         content_type: None,
                     };
                     harmony_messages.push(harmony_msg);
@@ -1079,7 +1083,7 @@ impl HarmonyBuilder {
                 ChatMessage::Function { content, name } => {
                     // Function messages also use Role::Tool
                     // Tool result - Must include recipient="assistant" for parser to recognize it.
-                    // We keep channel=None to minimize what the model might copy.
+                    // Tool results belong to the commentary channel in Harmony.
                     let harmony_msg = HarmonyMessage {
                         author: Author {
                             role: Role::Tool,
@@ -1089,7 +1093,7 @@ impl HarmonyBuilder {
                         content: vec![Content::Text(TextContent {
                             text: content.clone(),
                         })],
-                        channel: None,
+                        channel: Some("commentary".to_string()),
                         content_type: None,
                     };
                     harmony_messages.push(harmony_msg);
@@ -1163,8 +1167,13 @@ mod tests {
     //!      signature (`type image_generation = (_: …) => any;`) that
     //!      gpt-oss is trained to emit calls against.
 
-    use openai_protocol::responses::{
-        ImageGenerationTool, ResponseInput, ResponseTool, ResponsesRequest,
+    use openai_protocol::{
+        chat::{ChatMessage, MessageContent},
+        common::{FunctionCallResponse, ToolCall},
+        responses::{
+            ImageGenerationTool, ResponseInput, ResponseInputOutputItem, ResponseTool,
+            ResponsesRequest,
+        },
     };
 
     use super::*;
@@ -1379,5 +1388,101 @@ mod tests {
              function-tools namespace; found {occurrences} occurrences. \
              Decoded prompt:\n{decoded}",
         );
+    }
+
+    fn assert_tool_result_metadata(message: &HarmonyMessage, function_name: &str) {
+        assert_eq!(message.author.role, Role::Tool);
+        assert_eq!(message.author.name.as_deref(), Some(function_name));
+        assert_eq!(message.recipient.as_deref(), Some("assistant"));
+        assert_eq!(message.channel.as_deref(), Some("commentary"));
+    }
+
+    fn assert_reasoning_effort(input: &str, expected: ReasoningEffort) {
+        let actual = parse_chat_reasoning_effort(input);
+        match (actual, expected) {
+            (ReasoningEffort::High, ReasoningEffort::High)
+            | (ReasoningEffort::Medium, ReasoningEffort::Medium)
+            | (ReasoningEffort::Low, ReasoningEffort::Low) => {}
+            _ => panic!("unexpected reasoning effort mapping for {input}"),
+        }
+    }
+
+    #[test]
+    fn chat_reasoning_effort_is_case_insensitive() {
+        assert_reasoning_effort("HIGH", ReasoningEffort::High);
+        assert_reasoning_effort("medium", ReasoningEffort::Medium);
+        assert_reasoning_effort("LOW", ReasoningEffort::Low);
+        assert_reasoning_effort("MiNiMaL", ReasoningEffort::Low);
+        assert_reasoning_effort("unknown", ReasoningEffort::Medium);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_tool_results_use_commentary_channel() {
+        let builder = HarmonyBuilder::new();
+        let messages = vec![
+            ChatMessage::Assistant {
+                content: None,
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_lookup".to_string(),
+                    tool_type: "function".to_string(),
+                    function: FunctionCallResponse {
+                        name: "lookup".to_string(),
+                        arguments: Some("{}".to_string()),
+                    },
+                }]),
+                reasoning_content: None,
+            },
+            ChatMessage::Tool {
+                content: MessageContent::Text("{\"ok\":true}".to_string()),
+                tool_call_id: "call_lookup".to_string(),
+            },
+            ChatMessage::Function {
+                content: "{\"ok\":true}".to_string(),
+                name: "legacy_lookup".to_string(),
+            },
+        ];
+
+        let harmony_messages = builder.convert_chat_messages(&messages);
+
+        assert_tool_result_metadata(&harmony_messages[1], "functions.lookup");
+        assert_tool_result_metadata(&harmony_messages[2], "functions.legacy_lookup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn response_tool_results_use_commentary_channel() {
+        let builder = HarmonyBuilder::new();
+        let previous_call = ResponseInputOutputItem::FunctionToolCall {
+            id: "fc_1".to_string(),
+            call_id: "call_lookup".to_string(),
+            name: "lookup".to_string(),
+            arguments: "{}".to_string(),
+            output: None,
+            status: None,
+        };
+        let inline_output = ResponseInputOutputItem::FunctionToolCall {
+            id: "fc_2".to_string(),
+            call_id: "call_inline".to_string(),
+            name: "inline_lookup".to_string(),
+            arguments: "{}".to_string(),
+            output: Some("{\"ok\":true}".to_string()),
+            status: None,
+        };
+        let separate_output = ResponseInputOutputItem::FunctionCallOutput {
+            id: None,
+            call_id: "call_lookup".to_string(),
+            output: "{\"ok\":true}".to_string(),
+            status: None,
+        };
+
+        let inline_message = builder
+            .parse_response_item_to_harmony_message(&inline_output, &[])
+            .expect("inline output should convert");
+        let separate_message = builder
+            .parse_response_item_to_harmony_message(&separate_output, &[&previous_call])
+            .expect("separate output should convert");
+
+        assert_tool_result_metadata(&inline_message, "functions.inline_lookup");
+        assert_tool_result_metadata(&separate_message, "functions.lookup");
     }
 }

@@ -4,6 +4,7 @@
 
 use openai_harmony::{chat::Role, HarmonyEncoding, StreamableParser};
 use openai_protocol::common::{FunctionCallResponse, ToolCall};
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::types::{HarmonyChannelDelta, HarmonyChannelOutput};
@@ -62,6 +63,20 @@ impl HarmonyParserAdapter {
             .join("")
     }
 
+    fn normalize_tool_arguments(arguments: &str, content_type: Option<&str>) -> String {
+        let should_parse_as_json = match content_type {
+            Some(content_type) => content_type.to_ascii_lowercase().contains("json"),
+            None => true,
+        };
+        if !should_parse_as_json {
+            return arguments.to_string();
+        }
+
+        serde_json::from_str::<Value>(arguments)
+            .and_then(|value| serde_json::to_string(&value))
+            .unwrap_or_else(|_| arguments.to_string())
+    }
+
     /// Handle incomplete content from parser state (private helper)
     ///
     /// Checks for any remaining incomplete content in the parser and appends it
@@ -84,10 +99,20 @@ impl HarmonyParserAdapter {
                     Some("analysis") => {
                         *analysis = Some(current_content);
                     }
-                    Some("final") | None => {
+                    Some("final") => {
                         final_text.push_str(&current_content);
                     }
-                    _ => {}
+                    None => {
+                        tracing::warn!(
+                            "Dropping incomplete Harmony content without a channel instead of treating it as final text"
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            channel = ?current_channel,
+                            "Dropping incomplete Harmony content with unknown channel instead of treating it as final text"
+                        );
+                    }
                 }
             }
         }
@@ -118,7 +143,6 @@ impl HarmonyParserAdapter {
                 continue;
             }
 
-            let channel = msg.channel.as_deref().unwrap_or("");
             let recipient = msg.recipient.as_deref();
 
             // IMPORTANT: Check recipient FIRST before channel
@@ -133,12 +157,16 @@ impl HarmonyParserAdapter {
                     for content in &msg.content {
                         if let openai_harmony::chat::Content::Text(tc) = content {
                             let call_id = format!("call_{}", Uuid::now_v7());
+                            let arguments = Self::normalize_tool_arguments(
+                                &tc.text,
+                                msg.content_type.as_deref(),
+                            );
                             let tool_call = ToolCall {
                                 id: call_id,
                                 tool_type: "function".to_string(),
                                 function: FunctionCallResponse {
                                     name: function_name.to_string(),
-                                    arguments: Some(tc.text.clone()),
+                                    arguments: Some(arguments),
                                 },
                             };
 
@@ -174,8 +202,8 @@ impl HarmonyParserAdapter {
             }
 
             // Now process by channel (only if not already handled by recipient)
-            match channel {
-                "analysis" => {
+            match msg.channel.as_deref() {
+                Some("analysis") => {
                     // Process each content item
                     // For Chat API, we join them into a single reasoning_content
                     let text = Self::extract_text_from_content(&msg.content);
@@ -184,7 +212,7 @@ impl HarmonyParserAdapter {
                         analysis = Some(text);
                     }
                 }
-                "commentary" => {
+                Some("commentary") => {
                     // If we reach here, recipient was not "functions.*" or built-in tools
                     // Commentary channel should always have a recipient
                     // This is likely a model bug - log warning and treat as reasoning
@@ -206,15 +234,21 @@ impl HarmonyParserAdapter {
                         }
                     }
                 }
-                "final" => {
+                Some("final") => {
                     // Process final channel content
                     let text = Self::extract_text_from_content(&msg.content);
                     final_text.push_str(&text);
                 }
-                _ => {
-                    // Unknown channel, append to final text as fallback
-                    let text = Self::extract_text_from_content(&msg.content);
-                    final_text.push_str(&text);
+                None => {
+                    tracing::warn!(
+                        "Dropping Harmony message without a channel instead of treating it as final text"
+                    );
+                }
+                Some(channel) => {
+                    tracing::warn!(
+                        channel = channel,
+                        "Dropping Harmony message with unknown channel instead of treating it as final text"
+                    );
                 }
             }
         }
@@ -307,6 +341,7 @@ impl HarmonyParserAdapter {
         if content.is_empty() {
             return None;
         }
+        let arguments = Self::normalize_tool_arguments(&content, None);
 
         // Extract function name from recipient
         let Some(function_name) = recipient.strip_prefix("functions.") else {
@@ -321,7 +356,7 @@ impl HarmonyParserAdapter {
             tool_type: "function".to_string(),
             function: FunctionCallResponse {
                 name: function_name.to_string(),
-                arguments: Some(content),
+                arguments: Some(arguments),
             },
         };
 
@@ -377,10 +412,15 @@ impl HarmonyParserAdapter {
                             .get_or_insert_with(String::new)
                             .push_str(&delta_text);
                     }
-                    Some("final") | None => {
+                    Some("final") => {
                         final_delta
                             .get_or_insert_with(String::new)
                             .push_str(&delta_text);
+                    }
+                    None => {
+                        tracing::debug!(
+                            "Dropping Harmony streaming delta without a channel instead of treating it as final text"
+                        );
                     }
                     Some("commentary") => {
                         // Accumulate delta for commentary
@@ -521,5 +561,85 @@ impl Default for HarmonyParserAdapter {
     )]
     fn default() -> Self {
         Self::new().expect("Failed to create default parser")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openai_harmony::chat::{Author, Content, Message, Role, TextContent};
+
+    use super::HarmonyParserAdapter;
+
+    #[test]
+    fn parse_messages_compacts_json_tool_arguments() {
+        let messages = vec![Message {
+            author: Author {
+                role: Role::Assistant,
+                name: None,
+            },
+            recipient: Some("functions.lookup_account_plan".to_string()),
+            content: vec![Content::Text(TextContent {
+                text: "{\n  \"account_id\": \"acct_123\",\n  \"items\": [\n    {\n      \"sku\": \"premium_addon\",\n      \"quantity\": 1\n    }\n  ],\n  \"amount\": \"12.34\"\n}".to_string(),
+            })],
+            channel: Some("commentary".to_string()),
+            content_type: Some("json".to_string()),
+        }];
+
+        let (_analysis, tool_calls, final_text) = HarmonyParserAdapter::parse_messages(&messages);
+        let tool_calls = tool_calls.expect("expected tool call");
+
+        assert!(final_text.is_empty());
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].function.arguments.as_deref(),
+            Some(
+                "{\"account_id\":\"acct_123\",\"items\":[{\"sku\":\"premium_addon\",\"quantity\":1}],\"amount\":\"12.34\"}"
+            )
+        );
+    }
+
+    #[test]
+    fn parse_messages_preserves_malformed_json_tool_arguments() {
+        let messages = vec![Message {
+            author: Author {
+                role: Role::Assistant,
+                name: None,
+            },
+            recipient: Some("functions.echo".to_string()),
+            content: vec![Content::Text(TextContent {
+                text: "not json".to_string(),
+            })],
+            channel: Some("commentary".to_string()),
+            content_type: Some("json".to_string()),
+        }];
+
+        let (_analysis, tool_calls, _final_text) = HarmonyParserAdapter::parse_messages(&messages);
+        let tool_calls = tool_calls.expect("expected tool call");
+
+        assert_eq!(
+            tool_calls[0].function.arguments.as_deref(),
+            Some("not json")
+        );
+    }
+
+    #[test]
+    fn parse_messages_does_not_surface_channel_less_content_as_final_text() {
+        let messages = vec![Message {
+            author: Author {
+                role: Role::Assistant,
+                name: None,
+            },
+            recipient: None,
+            content: vec![Content::Text(TextContent {
+                text: "This should not become visible final content".to_string(),
+            })],
+            channel: None,
+            content_type: None,
+        }];
+
+        let (_analysis, tool_calls, final_text) = HarmonyParserAdapter::parse_messages(&messages);
+
+        assert!(tool_calls.is_none());
+        assert!(final_text.is_empty());
     }
 }
