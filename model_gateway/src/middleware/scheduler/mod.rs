@@ -2,6 +2,7 @@
 
 pub mod class;
 pub mod config;
+pub mod engine;
 pub mod inflight;
 pub mod policy;
 pub mod queue;
@@ -12,4 +13,5 @@ pub use config::{
     ClassConfig, ClassRuntimeConfig, PrioritySchedulerYaml, SchedulerSettings,
     SettingsValidationError, TenantPolicyConfig,
 };
+pub use engine::{PriorityScheduler, SchedulerInitError, SchedulerPermit};
 pub use policy::{StaticTenantPolicyResolver, TenantPolicy, TenantPolicyResolver};

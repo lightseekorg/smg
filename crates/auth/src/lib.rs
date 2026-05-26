@@ -24,5 +24,5 @@ pub use middleware::{
 /// This type can be added to request extensions to provide request IDs
 /// for audit logging. The middleware will extract this from request
 /// extensions if present.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(pub String);

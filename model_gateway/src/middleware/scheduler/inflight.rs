@@ -2,6 +2,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use smg_auth::RequestId;
+
+use super::Class;
+
 /// Tracks a single admitted request from admission until its response body
 /// finishes draining (or the scheduler preempts it).
 ///
@@ -22,6 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// TTFT measurement can never collide with either the unset state or
 /// the preempt sentinel.
 pub struct InflightHandle {
+    class: Class,
+    request_id: RequestId,
     first_byte_at: AtomicU64,
 }
 
@@ -30,10 +36,26 @@ impl InflightHandle {
     /// this request for preemption.
     const PREEMPTED_SENTINEL: u64 = u64::MAX;
 
-    pub fn new() -> Self {
+    /// Construct a handle for a freshly admitted request. The scheduler
+    /// inserts the resulting `Arc<Self>` into its inflight registry, keyed
+    /// by `request_id`, so per-class iteration (preemption, metrics)
+    /// can find it.
+    pub fn new(class: Class, request_id: RequestId) -> Self {
         Self {
+            class,
+            request_id,
             first_byte_at: AtomicU64::new(0),
         }
+    }
+
+    /// Class this admission consumed a slot under.
+    pub fn class(&self) -> Class {
+        self.class
+    }
+
+    /// Request id this handle tracks (registry key).
+    pub fn request_id(&self) -> &RequestId {
+        &self.request_id
     }
 
     /// Attempt to mark this request as preempted. Returns `true` on the
@@ -79,21 +101,19 @@ impl InflightHandle {
     }
 }
 
-impl Default for InflightHandle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
 
+    fn handle() -> InflightHandle {
+        InflightHandle::new(Class::Default, RequestId("test".to_string()))
+    }
+
     #[test]
     fn test_try_mark_preempted_succeeds_then_fails() {
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert!(
             handle.try_mark_preempted(),
             "first preempt CAS should succeed"
@@ -106,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_try_mark_preempted_stores_sentinel() {
-        let handle = InflightHandle::new();
+        let handle = handle();
         handle.try_mark_preempted();
         assert_eq!(
             handle.first_byte_at_raw(Ordering::Acquire),
@@ -117,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_try_mark_first_byte_succeeds_then_fails() {
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert!(
             handle.try_mark_first_byte(42),
             "first TTFT CAS should succeed"
@@ -130,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_ttft_loses_race_against_preempt() {
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert!(handle.try_mark_preempted());
         assert!(
             !handle.try_mark_first_byte(5),
@@ -140,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_preempt_loses_race_against_ttft() {
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert!(handle.try_mark_first_byte(5));
         assert!(
             !handle.try_mark_preempted(),
@@ -153,14 +173,14 @@ mod tests {
         // u64::MAX is the preempt sentinel; a TTFT measurement that happens
         // to equal that value would falsely appear as "preempted" to any
         // reader. Clamp to u64::MAX - 1.
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert!(handle.try_mark_first_byte(u64::MAX));
         assert_eq!(handle.first_byte_at_raw(Ordering::Acquire), u64::MAX - 1);
     }
 
     #[test]
     fn test_initial_state_is_zero() {
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert_eq!(handle.first_byte_at_raw(Ordering::Acquire), 0);
     }
 
@@ -170,7 +190,7 @@ mod tests {
         // admission) must not write 0 into first_byte_at. If it did, a
         // subsequent try_mark_preempted would see the "unset" sentinel
         // and succeed, breaking mutual exclusion.
-        let handle = InflightHandle::new();
+        let handle = handle();
         assert!(handle.try_mark_first_byte(0), "first call must succeed");
         assert!(
             handle.first_byte_at_raw(Ordering::Acquire) != 0,
