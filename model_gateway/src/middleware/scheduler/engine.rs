@@ -164,9 +164,14 @@ impl PriorityScheduler {
             return AdmitOutcome::Admitted(permit);
         }
 
-        // Slow path: enqueue and wait.
+        // Slow path: enqueue and wait. The waiter holds a child cancel
+        // token of the caller's `cancel` so the queue's
+        // `drop_cancelled_head` GC sees the cancellation regardless of
+        // which select arm fires below — client cancel propagates via
+        // the parent, queue timeout fires the child explicitly.
         let (tx, rx) = oneshot::channel::<SchedulerPermit>();
-        let waiter = Waiter::new(class, cancel.clone(), request_id, tx);
+        let waiter_cancel = cancel.child_token();
+        let waiter = Waiter::new(class, waiter_cancel.clone(), request_id, tx);
         if self.class_queues[class as usize]
             .try_enqueue(waiter)
             .is_err()
@@ -175,7 +180,7 @@ impl PriorityScheduler {
         }
 
         let timeout = self.class_config[class as usize].queue_timeout;
-        tokio::select! {
+        let outcome = tokio::select! {
             result = rx => match result {
                 Ok(permit) => AdmitOutcome::Admitted(permit),
                 // The dispatcher dropped our sender without admitting us.
@@ -185,7 +190,13 @@ impl PriorityScheduler {
             },
             () = tokio::time::sleep(timeout) => AdmitOutcome::Rejected(RejectionReason::QueueTimeout),
             () = cancel.cancelled() => AdmitOutcome::Rejected(RejectionReason::ClientCancelled),
-        }
+        };
+
+        // Mark the waiter cancelled on any exit path so the queue's
+        // `drop_cancelled_head` reaps it. Harmless if the waiter was
+        // already popped (Admitted path) — the token has no other readers.
+        waiter_cancel.cancel();
+        outcome
     }
 
     /// Remove a handle from the registry, release its slot, and notify
@@ -594,6 +605,36 @@ mod tests {
             outcome,
             AdmitOutcome::Rejected(RejectionReason::QueueTimeout)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admit_timeout_marks_waiter_for_gc() {
+        // After QueueTimeout fires, the Waiter still sits in the FIFO
+        // until something reaps it. The cancel token on the Waiter must
+        // be fired so a future drop_cancelled_head call evicts it,
+        // preventing false QueueFull on later admissions.
+        let s = settings_with(Class::Default, 16, 1);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let _held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .expect("admitted directly");
+
+        let outcome = scheduler
+            .admit(Class::Default, rid("w1"), CancellationToken::new())
+            .await;
+        assert!(matches!(
+            outcome,
+            AdmitOutcome::Rejected(RejectionReason::QueueTimeout)
+        ));
+
+        // The waiter is still in the queue (one entry), but cancelled.
+        assert_eq!(scheduler.class_queues[Class::Default as usize].depth(), 1);
+        scheduler.class_queues[Class::Default as usize].drop_cancelled_head();
+        assert_eq!(
+            scheduler.class_queues[Class::Default as usize].depth(),
+            0,
+            "drop_cancelled_head must reap the timed-out waiter"
+        );
     }
 
     #[tokio::test]
