@@ -292,7 +292,7 @@ impl PriorityScheduler {
     /// scheduler alive past its last external strong reference. Drop
     /// on the scheduler fires `release_notify`, which lets the
     /// dispatcher observe the failed upgrade and exit.
-    pub fn spawn_dispatcher(self: &Arc<Self>, mut capacity_watch: watch::Receiver<u16>) {
+    pub fn spawn_dispatcher(self: &Arc<Self>, capacity_watch: watch::Receiver<u16>) {
         let weak = Arc::downgrade(self);
         let notify = Arc::clone(&self.release_notify);
         #[expect(
@@ -300,25 +300,38 @@ impl PriorityScheduler {
             reason = "dispatcher loop holds only a Weak<Self> and exits when the scheduler is dropped (Drop fires release_notify)"
         )]
         tokio::spawn(async move {
+            // `Option<watch::Receiver>` so we can drop the receiver once the
+            // upstream sender is closed. A bare `Receiver` whose sender is
+            // gone makes `changed()` resolve `Err` immediately on every
+            // poll — the `select!` would otherwise pick that arm forever
+            // and burn CPU.
+            let mut capacity_watch = Some(capacity_watch);
             loop {
-                tokio::select! {
-                    () = notify.notified() => {
-                        let Some(scheduler) = weak.upgrade() else { break };
-                        while scheduler.wake_next_waiter() {}
+                let new_capacity = match capacity_watch.as_mut() {
+                    Some(rx) => tokio::select! {
+                        () = notify.notified() => None,
+                        result = rx.changed() => match result {
+                            Ok(()) => Some(*rx.borrow()),
+                            Err(_) => {
+                                // Upstream sender dropped. Stop watching;
+                                // the dispatcher keeps serving release
+                                // events via the other arm.
+                                capacity_watch = None;
+                                continue;
+                            }
+                        },
+                    },
+                    None => {
+                        notify.notified().await;
+                        None
                     }
-                    changed = capacity_watch.changed() => {
-                        if changed.is_err() {
-                            // WorkerCapacity dropped its sender — keep
-                            // serving release events but stop watching
-                            // capacity. The next release_notify await
-                            // will drive us; if that channel is also
-                            // dead we'll exit via the Weak upgrade.
-                            continue;
-                        }
-                        let new_capacity = *capacity_watch.borrow();
-                        let Some(scheduler) = weak.upgrade() else { break };
-                        scheduler.apply_new_capacity(new_capacity);
-                    }
+                };
+                let Some(scheduler) = weak.upgrade() else {
+                    break;
+                };
+                match new_capacity {
+                    Some(new_cap) => scheduler.apply_new_capacity(new_cap),
+                    None => while scheduler.wake_next_waiter() {},
                 }
             }
         });
@@ -787,6 +800,37 @@ mod tests {
         let before = scheduler.slot_pool.reserved(Class::Interactive);
         scheduler.apply_new_capacity(256);
         assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), before);
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_keeps_serving_after_capacity_watch_sender_drops() {
+        // After the WorkerCapacity sender is dropped, the dispatcher must
+        // continue handling release events from release_notify. The earlier
+        // implementation hot-looped on the closed watch arm; this test
+        // exercises the post-drop path end-to-end.
+        let s = settings_with(Class::Default, 8, 60);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let (capacity_tx, capacity_rx) = watch::channel(1u16);
+        scheduler.spawn_dispatcher(capacity_rx);
+
+        drop(capacity_tx); // close the watch — the failing branch trigger.
+                           // Yield so the dispatcher observes the drop and disables that arm.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+        let scheduler_for_admit = Arc::clone(&scheduler);
+        let admit_future = async move {
+            scheduler_for_admit
+                .admit(Class::Default, rid("queued"), CancellationToken::new())
+                .await
+        };
+        let (outcome, ()) = tokio::join!(admit_future, async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(held);
+        });
+        assert!(matches!(outcome, AdmitOutcome::Admitted(_)));
     }
 
     #[tokio::test]
