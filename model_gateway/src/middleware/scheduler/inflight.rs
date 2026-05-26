@@ -57,10 +57,13 @@ impl InflightHandle {
     /// admit. Returns `true` on the first successful CAS; subsequent calls
     /// (or any call after preemption was marked) return `false`.
     ///
-    /// `now_ms` is clamped to `u64::MAX - 1` so a TTFT measurement can
-    /// never collide with the preempt sentinel.
+    /// `now_ms` is clamped to `[1, PREEMPTED_SENTINEL - 1]`. The upper
+    /// bound avoids colliding with the preempt sentinel; the lower bound
+    /// avoids colliding with the "unset" state (`0`), which would let a
+    /// subsequent `try_mark_preempted` succeed even though TTFT has
+    /// already happened.
     pub fn try_mark_first_byte(&self, now_ms: u64) -> bool {
-        let value = now_ms.min(Self::PREEMPTED_SENTINEL - 1);
+        let value = now_ms.clamp(1, Self::PREEMPTED_SENTINEL - 1);
         self.first_byte_at
             .compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
@@ -158,5 +161,23 @@ mod tests {
     fn test_initial_state_is_zero() {
         let handle = InflightHandle::new();
         assert_eq!(handle.first_byte_at_raw(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_ttft_at_zero_ms_does_not_collide_with_unset_sentinel() {
+        // Regression: now_ms == 0 (TTFT in the same millisecond as
+        // admission) must not write 0 into first_byte_at. If it did, a
+        // subsequent try_mark_preempted would see the "unset" sentinel
+        // and succeed, breaking mutual exclusion.
+        let handle = InflightHandle::new();
+        assert!(handle.try_mark_first_byte(0), "first call must succeed");
+        assert!(
+            handle.first_byte_at_raw(Ordering::Acquire) != 0,
+            "stored value must not collide with the unset sentinel"
+        );
+        assert!(
+            !handle.try_mark_preempted(),
+            "preempt must lose because TTFT already won"
+        );
     }
 }
