@@ -73,33 +73,39 @@ impl RateLimitEngine {
             .and_then(|entry| entry.state.encode_live())
     }
 
-    /// Merge an insert (value + version) into the entry for `key`.
-    /// Returns `None` if the payload is malformed. Otherwise the outcome
-    /// captures whether state changed plus the prior-live and new-live
-    /// classifications, sampled under the per-key entry lock so callers can
-    /// honour the `NamespaceCrdtEngine::put_local` contract without a racy
-    /// second lookup.
-    fn merge_insert(
-        &self,
-        key: &str,
-        value: &[u8],
-        version: RateLimitVersion,
-    ) -> Option<MergeOutcome> {
-        let incoming = ratelimit::state_from_insert_value(value, version)?;
-        let outcome = match self.entries.entry(key.to_string()) {
+    /// Merge an insert (value + version) into the entry for `key`. The
+    /// outcome captures whether state changed plus the prior-live and
+    /// new-live classifications, sampled under the per-key entry lock so
+    /// callers can honour the `NamespaceCrdtEngine::put_local` contract
+    /// without a racy second lookup.
+    ///
+    /// Payload decoding (`state_from_insert_value`) happens inside the entry
+    /// guard so a malformed put serialises with concurrent valid writes to
+    /// the same key. A malformed payload is reported as a no-change outcome,
+    /// indistinguishable from a dominated (rejected) insert.
+    fn merge_insert(&self, key: &str, value: &[u8], version: RateLimitVersion) -> MergeOutcome {
+        match self.entries.entry(key.to_string()) {
             MapEntry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let prior_live = entry.state.encode_live();
+                let now_live = matches!(&entry.state, RateLimitState::Live(_));
+                let Some(incoming) = ratelimit::state_from_insert_value(value, version) else {
+                    return MergeOutcome {
+                        changed: false,
+                        prior_live,
+                        new_is_live: now_live,
+                    };
+                };
                 // `RateLimitState::merge` returns `None` only when both operands
                 // carry no live points and no tombstone. Both `entry.state` and
                 // `incoming` always carry content, so this can only happen on a
                 // contract violation - treat as no-op rather than panicking.
                 let Some(merged) = entry.state.clone().merge(incoming) else {
-                    return Some(MergeOutcome {
+                    return MergeOutcome {
                         changed: false,
                         prior_live,
-                        new_is_live: matches!(&entry.state, RateLimitState::Live(_)),
-                    });
+                        new_is_live: now_live,
+                    };
                 };
                 let changed = merged != entry.state;
                 let new_is_live = matches!(&merged, RateLimitState::Live(_));
@@ -113,6 +119,13 @@ impl RateLimitEngine {
                 }
             }
             MapEntry::Vacant(vacant) => {
+                let Some(incoming) = ratelimit::state_from_insert_value(value, version) else {
+                    return MergeOutcome {
+                        changed: false,
+                        prior_live: None,
+                        new_is_live: false,
+                    };
+                };
                 let new_is_live = matches!(&incoming, RateLimitState::Live(_));
                 let tombstoned_at = (!new_is_live).then(Instant::now);
                 vacant.insert(ShardEntry {
@@ -125,8 +138,7 @@ impl RateLimitEngine {
                     new_is_live,
                 }
             }
-        };
-        Some(outcome)
+        }
     }
 
     /// Merge a remove (tombstone version) into the entry for `key`. The outcome
@@ -222,11 +234,7 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         let timestamp = self.clock.tick();
         let version = RateLimitVersion::new(timestamp, self.replica_id);
 
-        let Some(outcome) = self.merge_insert(key, &value, version) else {
-            // Malformed payload: rejected per the trait. Return the current
-            // live bytes so the caller sees what is actually live.
-            return self.current_encoded(key);
-        };
+        let outcome = self.merge_insert(key, &value, version);
 
         if outcome.changed {
             let op = Operation::insert(key.to_string(), value, timestamp, self.replica_id);
@@ -239,8 +247,9 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         }
 
         match (outcome.changed, outcome.new_is_live) {
-            // Rejected (dominated / idempotent): return current live bytes,
-            // which is `prior_live` since state did not change.
+            // Rejected (dominated / idempotent / malformed payload): return
+            // current live bytes (sampled under the entry lock above), which
+            // is `prior_live` since state did not change.
             (false, _) => outcome.prior_live,
             // Accepted, incoming carried a tombstone bound that killed the
             // prior live shard. The displaced previous is well-defined.
@@ -338,8 +347,7 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                     replica_id,
                 } => {
                     let version = RateLimitVersion::new(timestamp, replica_id);
-                    self.merge_insert(&key, &value, version)
-                        .is_some_and(|outcome| outcome.changed)
+                    self.merge_insert(&key, &value, version).changed
                 }
                 Operation::Remove {
                     key,
