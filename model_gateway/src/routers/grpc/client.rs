@@ -447,14 +447,16 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
             Self::TokenSpeed(client) => {
-                if multimodal_inputs.is_some() {
-                    return Err("TokenSpeed backend does not support multimodal inputs".to_string());
-                }
+                let tokenspeed_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::TokenSpeed(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
+                    tokenspeed_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
@@ -533,14 +535,16 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Mlx(Box::new(req)))
             }
             Self::TokenSpeed(client) => {
-                if multimodal_inputs.is_some() {
-                    return Err("TokenSpeed backend does not support multimodal inputs".to_string());
-                }
+                let tokenspeed_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::TokenSpeed(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_messages(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
+                    tokenspeed_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))

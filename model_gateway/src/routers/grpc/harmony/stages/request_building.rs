@@ -287,6 +287,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 token_ids,
+                                None, // Harmony path: multimodal not yet wired
                                 tool_constraints,
                             )
                             .map_err(|e| {

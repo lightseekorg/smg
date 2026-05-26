@@ -29,7 +29,10 @@ use tracing::{debug, warn};
 
 use crate::routers::grpc::{
     client::GrpcClient,
-    proto_wrapper::{SglangMultimodalData, TensorBytes, TrtllmMultimodalData, VllmMultimodalData},
+    proto_wrapper::{
+        SglangMultimodalData, TensorBytes, TokenSpeedMultimodalData, TrtllmMultimodalData,
+        VllmMultimodalData,
+    },
     MultimodalData,
 };
 
@@ -705,11 +708,9 @@ pub(crate) fn assemble_multimodal_data(
         GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
         GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
         GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
+        GrpcClient::TokenSpeed(_) => MultimodalData::TokenSpeed(assemble_tokenspeed(intermediate)),
         GrpcClient::Mlx(_) => unreachable!(
             "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
-        ),
-        GrpcClient::TokenSpeed(_) => unreachable!(
-            "TokenSpeed backend does not support multimodal; preparation stage should reject earlier"
         ),
     }
 }
@@ -776,6 +777,30 @@ fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData
         .map(|f| f.raw_bytes.to_vec())
         .collect();
     TrtllmMultimodalData { image_data }
+}
+
+fn assemble_tokenspeed(intermediate: MultimodalIntermediate) -> TokenSpeedMultimodalData {
+    // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
+    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
+    let mm_placeholders = intermediate
+        .patch_offsets
+        .filter(|offsets| !offsets.is_empty())
+        .unwrap_or_else(|| {
+            intermediate
+                .placeholders
+                .iter()
+                .map(|p| (p.offset as u32, p.length as u32))
+                .collect()
+        });
+
+    TokenSpeedMultimodalData {
+        pixel_values,
+        pixel_values_shape,
+        model_specific_tensors,
+        im_token_id: intermediate.im_token_id,
+        mm_placeholders,
+    }
 }
 
 // ---------------------------------------------------------------------------

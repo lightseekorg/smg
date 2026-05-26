@@ -23,8 +23,10 @@ Unlike generic load balancers, SMG understands LLM patterns: prefix caching, tok
 
 ## Core Components
 
-<div class="architecture-diagram">
-  <img src="../assets/images/concepts-overview.svg" alt="Core Components Architecture">
+<div class="architecture-diagram" markdown>
+
+![Core Components Architecture](../assets/images/concepts-overview.svg)
+
 </div>
 
 | Layer | Purpose |

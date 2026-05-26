@@ -10,8 +10,10 @@ SMG is a high-performance inference gateway that sits between your applications 
 
 ## System Architecture
 
-<div class="architecture-diagram">
-  <img src="../../assets/images/architecture-detailed.svg" alt="SMG Architecture">
+<div class="architecture-diagram" markdown>
+
+![SMG Architecture](../../assets/images/architecture-detailed.svg)
+
 </div>
 
 ---
