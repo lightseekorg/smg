@@ -9,10 +9,163 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import textwrap
 
 import pytest
 
 logger = logging.getLogger(__name__)
+
+
+# System prompt and tool surface used by the gpt-oss post-tool integrity check.
+# Style-constrained guidance plus a multi-tool nested-args schema gives the
+# model enough structure to produce a non-trivial post-tool continuation.
+_GPT_OSS_POST_TOOL_SYSTEM_PROMPT = textwrap.dedent(
+    """\
+    You are an engineering project assistant. Help engineers triage tasks
+    and route work to teammates only when the engineer asks for it.
+
+    ## Style rules
+    - Reply in one short paragraph, at most three sentences.
+    - Do not use markdown. No asterisks, bold, italic, headings, or code blocks.
+    - Do not use bullet lists or tables.
+    - Spell out small integers in words rather than digits.
+
+    ## Action rules
+    - Before calling any action tool, restate the request and ask the engineer
+      to confirm. A clear yes counts as confirmation; a vague restatement does not.
+    - After an action tool returns, acknowledge the result in one short
+      paragraph. Do not produce additional analysis text or narrate reasoning.
+    - Informational questions use search_engineer or lookup_runbook; do not
+      call action tools for informational questions.
+    """
+)
+
+_GPT_OSS_POST_TOOL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_task",
+            "description": (
+                "Assign one or more open engineering tasks to teammates. "
+                "Each assignment names the task id and the assignee."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "assignments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "description": "Identifier of the task.",
+                                },
+                                "assignee": {
+                                    "type": "string",
+                                    "description": "Username of the assignee.",
+                                },
+                            },
+                            "required": ["task_id", "assignee"],
+                        },
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "Priority label, spelled out.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Short note for the assignees.",
+                    },
+                },
+                "required": ["assignments"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_status",
+            "description": "Update the status of an engineering task.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "comment": {"type": "string"},
+                },
+                "required": ["task_id", "status"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "escalate_task",
+            "description": "Escalate a task to a higher priority queue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "target_queue": {"type": "string"},
+                },
+                "required": ["task_id", "target_queue"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_task",
+            "description": "Close an engineering task with a resolution.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "resolution": {"type": "string"},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_engineer",
+            "description": "Find engineers matching a skill or availability.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_runbook",
+            "description": "Look up an engineering runbook by topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {"topic": {"type": "string"}},
+                "required": [],
+            },
+        },
+    },
+]
+
+# Detection patterns for malformed text in the post-tool assistant message:
+# runs of invisible characters, ellipsis loops, long whitespace runs, and
+# leaked English self-analysis. Tuned to flag runs (3+) of invisibles so
+# isolated occurrences in normal text do not produce false positives.
+_INVISIBLE_RUN = re.compile("[​‌‍⁠﻿   ]{3,}")
+_ENGLISH_SELF_ANALYSIS = re.compile(
+    r"\b(The assistant|We need to|We should|We must|"
+    r"According to (?:rules|guidelines|the spec)|Sorry,? (?:we|the))\b"
+)
+_WHITESPACE_RUN = re.compile(r"\s{6,}")
+_ELLIPSIS_LOOP = re.compile(r"(?:\.\.\.\s*){3,}|(?:…\s*){3,}")
 
 
 # =============================================================================
@@ -464,6 +617,139 @@ class TestChatCompletionGptOss(TestChatCompletion):
     @pytest.mark.skip(reason="gpt-oss Harmony pipeline doesn't implement continue_final_message")
     def test_response_prefill(self, model, api_client):
         pass
+
+    def test_post_tool_response_has_no_malformed_residue(self, model, api_client):
+        """Post-tool-result final assistant message must not contain malformed text.
+
+        Drives a multi-turn tool-call flow through the gateway and asserts the
+        post-tool ``choices[].message.content`` is non-empty and contains no
+        runs of invisible characters, long whitespace runs, ellipsis loops, or
+        leaked English self-analysis. These properties are what the gpt-oss
+        Harmony round-trip fix in PR #1547 is meant to guarantee on a
+        successful HTTP 200 response after a tool round trip.
+        """
+        messages: list[dict] = [
+            {"role": "system", "content": _GPT_OSS_POST_TOOL_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "Please assign task ENG dash four two zero one to "
+                    "username alice with priority high and leave a note "
+                    "saying needs review by end of day."
+                ),
+            },
+        ]
+
+        # Turn 1: model should ask for confirmation per the style rules.
+        response1 = api_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=_GPT_OSS_POST_TOOL_TOOLS,
+            tool_choice="auto",
+            reasoning_effort="high",
+            temperature=0,
+            max_tokens=512,
+        )
+        msg1 = response1.choices[0].message
+        assistant_turn: dict = {"role": "assistant", "content": msg1.content or ""}
+        if msg1.tool_calls:
+            assistant_turn["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg1.tool_calls
+            ]
+        messages.append(assistant_turn)
+
+        # If the model went straight to a tool call, skip the confirmation hop.
+        tool_call_msg = msg1
+        if not msg1.tool_calls:
+            messages.append({"role": "user", "content": "yes, please confirm"})
+            response2 = api_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=_GPT_OSS_POST_TOOL_TOOLS,
+                tool_choice="auto",
+                reasoning_effort="high",
+                temperature=0,
+                max_tokens=512,
+            )
+            msg2 = response2.choices[0].message
+            assistant_turn2: dict = {"role": "assistant", "content": msg2.content or ""}
+            if msg2.tool_calls:
+                assistant_turn2["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in msg2.tool_calls
+                ]
+            messages.append(assistant_turn2)
+            tool_call_msg = msg2
+
+        assert tool_call_msg.tool_calls, "expected an action tool call after confirmation"
+
+        # Minimal tool result keeps the post-tool generation honest about
+        # producing its own final paragraph rather than parroting tool output.
+        for tc in tool_call_msg.tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps({"ok": True}),
+                }
+            )
+
+        # Turn 3: final user-facing response - the assertions below run here.
+        response3 = api_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=_GPT_OSS_POST_TOOL_TOOLS,
+            tool_choice="auto",
+            reasoning_effort="high",
+            temperature=0,
+            max_tokens=512,
+        )
+        final_content = response3.choices[0].message.content or ""
+
+        assert final_content.strip(), (
+            "post-tool final response must not be empty; "
+            f"finish_reason={response3.choices[0].finish_reason!r}"
+        )
+
+        invisible_match = _INVISIBLE_RUN.search(final_content)
+        assert not invisible_match, (
+            "post-tool final content must not contain zero-width or "
+            "non-breaking-space characters; first hit at offset "
+            f"{invisible_match.start()}: {final_content!r}"
+        )
+
+        self_analysis = _ENGLISH_SELF_ANALYSIS.search(final_content)
+        assert not self_analysis, (
+            "post-tool final content must not leak English self-analysis "
+            f"(matched {self_analysis.group(0)!r}): {final_content!r}"
+        )
+
+        whitespace_run = _WHITESPACE_RUN.search(final_content)
+        assert not whitespace_run, (
+            "post-tool final content must not contain long whitespace runs; "
+            f"first hit at offset {whitespace_run.start()}: {final_content!r}"
+        )
+
+        ellipsis_loop = _ELLIPSIS_LOOP.search(final_content)
+        assert not ellipsis_loop, (
+            "post-tool final content must not contain ellipsis loops "
+            f"(matched {ellipsis_loop.group(0)!r}): {final_content!r}"
+        )
 
 
 @pytest.mark.engine("sglang", "vllm", "trtllm", "tokenspeed")
