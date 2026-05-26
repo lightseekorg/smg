@@ -56,13 +56,13 @@ struct LivePoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RateLimitShard {
+pub(super) struct RateLimitShard {
     live_points: Vec<LivePoint>,
     tombstone_version: Option<RateLimitVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RateLimitState {
+pub(super) enum RateLimitState {
     Live(RateLimitShard),
     Tombstone(RateLimitVersion),
 }
@@ -72,12 +72,6 @@ pub(super) enum ValueWinner {
     Local,
     Remote,
     Equal,
-}
-
-pub(super) struct LiveMerge {
-    pub value: Vec<u8>,
-    pub live_version: RateLimitVersion,
-    pub changed: bool,
 }
 
 /// Encode `(epoch, count)` to the 16-byte application payload. `rl:` CRDT
@@ -129,10 +123,6 @@ fn decode_shard(bytes: &[u8]) -> Option<RateLimitShard> {
         .deserialize(bytes)
         .ok()?;
     (!shard.live_points.is_empty()).then_some(shard)
-}
-
-fn decode_stored_live(bytes: &[u8]) -> Option<RateLimitShard> {
-    decode_shard(bytes)
 }
 
 fn compare_epoch_count(local: EpochCount, remote: EpochCount) -> ValueWinner {
@@ -236,7 +226,7 @@ impl RateLimitState {
         }
     }
 
-    fn merge(self, other: Self) -> Option<Self> {
+    pub(super) fn merge(self, other: Self) -> Option<Self> {
         let tombstone_version = self.tombstone_version().max(other.tombstone_version());
         let mut live_points = self.live_points_after_tombstone(tombstone_version);
         live_points.extend(other.live_points_after_tombstone(tombstone_version));
@@ -244,6 +234,16 @@ impl RateLimitState {
         match RateLimitShard::merged(live_points, tombstone_version) {
             Some(shard) => Some(Self::Live(shard)),
             None => tombstone_version.map(Self::Tombstone),
+        }
+    }
+
+    /// Encode this state as the bytes a peer would see for a live insert.
+    /// `None` for tombstone-only states (no live bytes to gossip beyond the
+    /// remove op the log already carries).
+    pub(super) fn encode_live(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Live(shard) => encode_shard(shard),
+            Self::Tombstone(_) => None,
         }
     }
 
@@ -267,7 +267,10 @@ impl RateLimitState {
     }
 }
 
-fn state_from_insert_value(value: &[u8], version: RateLimitVersion) -> Option<RateLimitState> {
+pub(super) fn state_from_insert_value(
+    value: &[u8],
+    version: RateLimitVersion,
+) -> Option<RateLimitState> {
     if let Some(shard) = decode_shard(value) {
         return Some(RateLimitState::Live(shard));
     }
@@ -277,92 +280,6 @@ fn state_from_insert_value(value: &[u8], version: RateLimitVersion) -> Option<Ra
             version,
         }))
     })
-}
-
-fn state_from_stored_value(value: &[u8]) -> Option<RateLimitState> {
-    decode_stored_live(value).map(RateLimitState::Live)
-}
-
-pub(super) fn merge_live_value(
-    current_value: Option<&[u8]>,
-    current_tombstone_version: Option<RateLimitVersion>,
-    incoming_value: &[u8],
-    incoming_version: RateLimitVersion,
-) -> Option<LiveMerge> {
-    let incoming = state_from_insert_value(incoming_value, incoming_version)?;
-    let current = current_value.and_then(state_from_stored_value);
-    let current = match (current, current_tombstone_version) {
-        (Some(current), Some(tombstone_version)) => {
-            current.merge(RateLimitState::Tombstone(tombstone_version))
-        }
-        (Some(current), None) => Some(current),
-        (None, Some(tombstone_version)) => Some(RateLimitState::Tombstone(tombstone_version)),
-        (None, None) => None,
-    };
-
-    let merged = match current {
-        Some(current) => current.merge(incoming)?,
-        None => incoming,
-    };
-    let RateLimitState::Live(shard) = merged else {
-        return None;
-    };
-    let value = encode_shard(&shard)?;
-    let changed = current_value != Some(value.as_slice());
-    let live_version = shard.newest_live_version()?;
-    Some(LiveMerge {
-        value,
-        live_version,
-        changed,
-    })
-}
-
-/// Outcome of applying a tombstone to a stored shard. `Surviving` means some
-/// live points outlasted the tombstone and the (filtered) shard stays in the
-/// store; `Empty` means every live point was killed and only the tombstone
-/// remains.
-pub(super) enum TombstoneApply {
-    Surviving {
-        value: Vec<u8>,
-        live_version: RateLimitVersion,
-    },
-    Empty {
-        tombstone_version: RateLimitVersion,
-    },
-}
-
-/// Apply `incoming_tombstone_version` to the current shard, filtering live
-/// points per-point against the merged (existing ∪ incoming) tombstone. Mirrors
-/// what `compact_operations` does so live store and operation log agree.
-pub(super) fn apply_tombstone(
-    current_value: Option<&[u8]>,
-    current_tombstone_version: Option<RateLimitVersion>,
-    incoming_tombstone_version: RateLimitVersion,
-) -> TombstoneApply {
-    let merged_tombstone = current_tombstone_version
-        .map(|existing| existing.max(incoming_tombstone_version))
-        .unwrap_or(incoming_tombstone_version);
-    // `state.merge(Tombstone)` returns None only when both live points and
-    // tombstone are absent; we always supply `merged_tombstone`, so we can
-    // skip the indirect call entirely on the None path.
-    let state = match current_value.and_then(state_from_stored_value) {
-        Some(state) => state
-            .merge(RateLimitState::Tombstone(merged_tombstone))
-            .unwrap_or(RateLimitState::Tombstone(merged_tombstone)),
-        None => RateLimitState::Tombstone(merged_tombstone),
-    };
-    match state {
-        RateLimitState::Live(shard) => match (shard.newest_live_version(), encode_shard(&shard)) {
-            (Some(live_version), Some(value)) => TombstoneApply::Surviving {
-                value,
-                live_version,
-            },
-            _ => TombstoneApply::Empty {
-                tombstone_version: merged_tombstone,
-            },
-        },
-        RateLimitState::Tombstone(tombstone_version) => TombstoneApply::Empty { tombstone_version },
-    }
 }
 
 pub(super) fn compact_operations<'a>(
@@ -401,17 +318,15 @@ pub(super) fn compact_operations<'a>(
     state.and_then(|state| state.into_operation(key?))
 }
 
-/// Merge two stored rate-limit shard payloads. Production merges go
-/// through [`merge_live_value`] (it carries the live-version metadata
-/// the CRDT needs). This byte-only form exists solely for the unit
-/// tests below.
+/// Byte-only shard merge used by the unit tests below. Production merges go
+/// through `RateLimitEngine`, which keeps shards typed end-to-end.
 #[cfg(test)]
 #[must_use]
 fn merge(local: &[u8], remote: &[u8]) -> Vec<u8> {
-    match (decode_stored_live(local), decode_stored_live(remote)) {
-        (Some(local_state), Some(remote_state)) => {
+    match (decode_shard(local), decode_shard(remote)) {
+        (Some(local_shard), Some(remote_shard)) => {
             let Some(RateLimitState::Live(shard)) =
-                RateLimitState::Live(local_state).merge(RateLimitState::Live(remote_state))
+                RateLimitState::Live(local_shard).merge(RateLimitState::Live(remote_shard))
             else {
                 return local.to_vec();
             };
@@ -431,14 +346,10 @@ mod tests {
     }
 
     fn stored(epoch: u64, count: i64, timestamp: u64) -> Vec<u8> {
-        merge_live_value(
-            None,
-            None,
-            &encode(epoch, count),
-            rate_limit_version(timestamp),
-        )
-        .expect("raw epoch/count insert normalizes")
-        .value
+        state_from_insert_value(&encode(epoch, count), rate_limit_version(timestamp))
+            .expect("raw epoch/count insert normalizes")
+            .encode_live()
+            .expect("live state has encoded bytes")
     }
 
     #[test]
@@ -476,11 +387,13 @@ mod tests {
 
     #[test]
     fn normalized_shard_decodes_to_epoch_count() {
-        let merged = merge_live_value(None, None, &encode(7, 42), rate_limit_version(10))
-            .expect("raw epoch/count insert normalizes to shard state");
-        assert_ne!(merged.value.len(), EPOCH_MAX_WINS_ENCODED_LEN);
+        let encoded = state_from_insert_value(&encode(7, 42), rate_limit_version(10))
+            .expect("raw epoch/count insert normalizes to shard state")
+            .encode_live()
+            .expect("live shard encodes");
+        assert_ne!(encoded.len(), EPOCH_MAX_WINS_ENCODED_LEN);
         assert_eq!(
-            decode(&merged.value),
+            decode(&encoded),
             Some(EpochCount {
                 epoch: 7,
                 count: 42

@@ -17,18 +17,18 @@ use std::{sync::Arc, time::Duration};
 
 use super::operation::Operation;
 
-mod epoch_max_wins;
 mod lww;
+mod rate_limit;
 
-pub(super) use epoch_max_wins::EpochMaxWinsLegacyEngine;
 pub(super) use lww::LwwEngine;
+pub(super) use rate_limit::RateLimitEngine;
 
 /// The state machine a single namespace runs.
 ///
 /// All methods are byte-oriented at this boundary. Engines are free to use
-/// typed internal representations (e.g. `RateLimitShard` inside
-/// `EpochMaxWinsLegacyEngine`); the trait deliberately does not expose those
-/// types so the dispatch layer stays strategy-agnostic.
+/// typed internal representations (e.g. `RateLimitState` inside
+/// `RateLimitEngine`); the trait deliberately does not expose those types so
+/// the dispatch layer stays strategy-agnostic.
 pub(super) trait NamespaceCrdtEngine: Send + Sync {
     // ---- Local writes ----
 

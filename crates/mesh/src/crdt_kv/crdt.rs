@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 use tracing::info;
 
 use super::{
-    engine::{EngineHandle, EpochMaxWinsLegacyEngine, LwwEngine},
+    engine::{EngineHandle, LwwEngine, RateLimitEngine},
     merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
     replica::{LamportClock, ReplicaId},
@@ -77,7 +77,7 @@ impl CrdtOrMap {
             MergeStrategy::LastWriterWins => {
                 Arc::new(LwwEngine::new(self.replica_id, Arc::clone(&self.clock)))
             }
-            MergeStrategy::EpochMaxWins => Arc::new(EpochMaxWinsLegacyEngine::new(
+            MergeStrategy::EpochMaxWins => Arc::new(RateLimitEngine::new(
                 self.replica_id,
                 Arc::clone(&self.clock),
             )),
