@@ -399,7 +399,14 @@ impl PriorityScheduler {
             .map(|c| u32::from(self.slot_pool.reserved(*c)))
             .sum();
         if total_reserved > u32::from(new_capacity) && total_reserved > 0 {
-            let scale = f64::from(new_capacity) / f64::from(total_reserved as u16);
+            // total_reserved is u32; converting via `as u16` would
+            // silently truncate any value > u16::MAX. Today the
+            // invariant `Σ reserved ≤ initial_capacity ≤ u16::MAX`
+            // holds (PriorityScheduler::new enforces it and this method
+            // only scales down), but the cast is fragile against future
+            // code paths that might increase a reservation. f64 holds
+            // u32 losslessly (53-bit mantissa > 32 bits).
+            let scale = f64::from(new_capacity) / f64::from(total_reserved);
             for class in Class::ALL {
                 let r = self.slot_pool.reserved(class);
                 let scaled = (f64::from(r) * scale).floor() as u16;
