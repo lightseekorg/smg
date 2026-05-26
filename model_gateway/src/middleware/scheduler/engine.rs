@@ -10,8 +10,9 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::RwLock;
 use smg_auth::RequestId;
 use thiserror::Error;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use super::{
     inflight::InflightHandle,
@@ -277,11 +278,21 @@ impl PriorityScheduler {
         true
     }
 
-    /// Spawn the dispatcher background task. It awaits `release_notify`,
-    /// then drains as many queued waiters as the slot pool can accept,
-    /// then awaits again. Holds only a `Weak<Self>` so the task does not
-    /// keep the scheduler alive past its last external strong reference.
-    pub fn spawn_dispatcher(self: &Arc<Self>) {
+    /// Spawn the dispatcher background task. `select!`s over two
+    /// signals:
+    ///
+    /// - `release_notify` — slot was released (or a waiter enqueued
+    ///   via Drop-fire on scheduler shutdown). Drain queued waiters
+    ///   until none can be admitted.
+    /// - `capacity_watch.changed()` — backend capacity changed. Apply
+    ///   the new value (scaling reservations down if they no longer
+    ///   fit) and kick the drain.
+    ///
+    /// Holds only a `Weak<Self>` so the task does not keep the
+    /// scheduler alive past its last external strong reference. Drop
+    /// on the scheduler fires `release_notify`, which lets the
+    /// dispatcher observe the failed upgrade and exit.
+    pub fn spawn_dispatcher(self: &Arc<Self>, mut capacity_watch: watch::Receiver<u16>) {
         let weak = Arc::downgrade(self);
         let notify = Arc::clone(&self.release_notify);
         #[expect(
@@ -290,13 +301,64 @@ impl PriorityScheduler {
         )]
         tokio::spawn(async move {
             loop {
-                notify.notified().await;
-                let Some(scheduler) = weak.upgrade() else {
-                    break;
-                };
-                while scheduler.wake_next_waiter() {}
+                tokio::select! {
+                    () = notify.notified() => {
+                        let Some(scheduler) = weak.upgrade() else { break };
+                        while scheduler.wake_next_waiter() {}
+                    }
+                    changed = capacity_watch.changed() => {
+                        if changed.is_err() {
+                            // WorkerCapacity dropped its sender — keep
+                            // serving release events but stop watching
+                            // capacity. The next release_notify await
+                            // will drive us; if that channel is also
+                            // dead we'll exit via the Weak upgrade.
+                            continue;
+                        }
+                        let new_capacity = *capacity_watch.borrow();
+                        let Some(scheduler) = weak.upgrade() else { break };
+                        scheduler.apply_new_capacity(new_capacity);
+                    }
+                }
             }
         });
+    }
+
+    /// Apply a new backend capacity from the WorkerCapacity watch.
+    ///
+    /// On shrink past `Σ reserved`, scales reservations down
+    /// proportionally so the new capacity remains usable. On grow,
+    /// fires `release_notify` so the dispatcher re-evaluates queued
+    /// waiters under the larger ceiling.
+    fn apply_new_capacity(&self, new_capacity: u16) {
+        let old = self.slot_pool.set_capacity(new_capacity);
+        if new_capacity == old {
+            return;
+        }
+
+        let total_reserved: u32 = Class::ALL
+            .iter()
+            .map(|c| u32::from(self.slot_pool.reserved(*c)))
+            .sum();
+        if total_reserved > u32::from(new_capacity) && total_reserved > 0 {
+            let scale = f64::from(new_capacity) / f64::from(total_reserved as u16);
+            for class in Class::ALL {
+                let r = self.slot_pool.reserved(class);
+                let scaled = (f64::from(r) * scale).floor() as u16;
+                self.slot_pool.set_reserved(class, scaled);
+            }
+            warn!(
+                old_total_reserved = total_reserved,
+                new_capacity,
+                scale = scale,
+                "scheduler: reserved slots scaled down after capacity shrink"
+            );
+        }
+
+        if new_capacity > old {
+            // Capacity grew — wake the dispatcher to drain.
+            self.release_notify.notify_one();
+        }
     }
 }
 
@@ -641,11 +703,20 @@ mod tests {
         assert!(bulk_rx.try_recv().is_ok());
     }
 
+    fn dummy_capacity_watch(initial: u16) -> watch::Receiver<u16> {
+        // Construct a watch receiver whose sender is intentionally kept
+        // alive for the test's duration. Leaking is fine — these tests
+        // run in isolation.
+        let (tx, rx) = watch::channel(initial);
+        std::mem::forget(tx);
+        rx
+    }
+
     #[tokio::test]
     async fn test_spawn_dispatcher_admits_queued_waiter_on_release() {
         let s = settings_with(Class::Default, 8, 60);
         let scheduler = PriorityScheduler::new(&s, 1).unwrap();
-        scheduler.spawn_dispatcher();
+        scheduler.spawn_dispatcher(dummy_capacity_watch(1));
 
         let held = scheduler
             .acquire_inflight(Class::Default, rid("held"))
@@ -667,6 +738,84 @@ mod tests {
         });
 
         assert!(matches!(admit_outcome, AdmitOutcome::Admitted(_)));
+    }
+
+    // ── apply_new_capacity / capacity watch ─────────────────────────
+
+    #[test]
+    fn test_apply_new_capacity_grow_fires_release_notify() {
+        let s = default_settings();
+        let scheduler = PriorityScheduler::new(&s, 256).unwrap();
+        // Notify already has whatever permits prior tests fired; reset by
+        // taking a fresh notified() before the apply.
+        let notified = scheduler.release_notify.notified();
+        scheduler.apply_new_capacity(512);
+        assert_eq!(scheduler.slot_pool.capacity(), 512);
+        // Grow path must have signaled the dispatcher.
+        tokio::pin!(notified);
+        let polled = futures::FutureExt::now_or_never(notified);
+        assert!(polled.is_some(), "release_notify fires on capacity grow");
+    }
+
+    #[test]
+    fn test_apply_new_capacity_shrink_below_reserved_scales_reservations() {
+        // Built-in defaults: Interactive reserves 128, System reserves 32
+        // = 160 total. Shrink to 80; reservations should scale by 0.5 so
+        // the new sum fits.
+        let s = default_settings();
+        let scheduler = PriorityScheduler::new(&s, 256).unwrap();
+        scheduler.apply_new_capacity(80);
+        assert_eq!(scheduler.slot_pool.capacity(), 80);
+        let new_total: u32 = Class::ALL
+            .iter()
+            .map(|c| u32::from(scheduler.slot_pool.reserved(*c)))
+            .sum();
+        assert!(
+            new_total <= 80,
+            "scaled reservations ({new_total}) must fit under new capacity"
+        );
+        // Each individual class is also scaled down proportionally
+        // (floor rounding).
+        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 64);
+        assert_eq!(scheduler.slot_pool.reserved(Class::System), 16);
+    }
+
+    #[test]
+    fn test_apply_new_capacity_no_op_when_value_unchanged() {
+        let s = default_settings();
+        let scheduler = PriorityScheduler::new(&s, 256).unwrap();
+        let before = scheduler.slot_pool.reserved(Class::Interactive);
+        scheduler.apply_new_capacity(256);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), before);
+    }
+
+    #[tokio::test]
+    async fn test_capacity_watch_grow_drains_queue() {
+        // Capacity 1 (slot held), queue has one waiter. Grow capacity to
+        // 2 via the watch — dispatcher should drain the queued waiter.
+        let s = settings_with(Class::Default, 8, 60);
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        let (tx, rx) = watch::channel(1u16);
+        scheduler.spawn_dispatcher(rx);
+
+        let _held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+
+        let scheduler_for_admit = Arc::clone(&scheduler);
+        let admit_future = async move {
+            scheduler_for_admit
+                .admit(Class::Default, rid("queued"), CancellationToken::new())
+                .await
+        };
+
+        let (outcome, ()) = tokio::join!(admit_future, async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tx.send(2).unwrap();
+        });
+
+        assert!(matches!(outcome, AdmitOutcome::Admitted(_)));
+        assert_eq!(scheduler.slot_pool.capacity(), 2);
     }
 
     #[tokio::test]

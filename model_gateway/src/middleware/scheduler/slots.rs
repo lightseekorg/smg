@@ -84,6 +84,31 @@ impl SlotPool {
         unpack(self.inflight_packed.load(Ordering::Acquire))[class as usize]
     }
 
+    /// Current total backend capacity. Read by `try_acquire` on every
+    /// admission attempt.
+    pub fn capacity(&self) -> u16 {
+        self.capacity.load(Ordering::Acquire)
+    }
+
+    /// Update the total backend capacity. Returns the previous value.
+    /// Called by the scheduler when the WorkerCapacity watch channel
+    /// signals a change.
+    pub fn set_capacity(&self, new_capacity: u16) -> u16 {
+        self.capacity.swap(new_capacity, Ordering::AcqRel)
+    }
+
+    /// Reservation held by `class`.
+    pub fn reserved(&self, class: Class) -> u16 {
+        self.reserved[class as usize].load(Ordering::Acquire)
+    }
+
+    /// Update the reservation held by `class`. Used by the scheduler's
+    /// capacity-shrink path to scale reservations down proportionally
+    /// when `Σ reserved` would otherwise exceed the new capacity.
+    pub fn set_reserved(&self, class: Class, new_reserved: u16) {
+        self.reserved[class as usize].store(new_reserved, Ordering::Release);
+    }
+
     fn snapshot_reserved(&self) -> [u16; 4] {
         [
             self.reserved[0].load(Ordering::Relaxed),
