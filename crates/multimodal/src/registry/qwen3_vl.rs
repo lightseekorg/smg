@@ -28,10 +28,13 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
 
     fn matches(&self, metadata: &ModelMetadata) -> bool {
         let id = metadata.model_id.to_ascii_lowercase();
-        id.contains("qwen3") && id.contains("vl")
-            || metadata
-                .config_model_type()
-                .is_some_and(|mt| mt == "qwen3_vl")
+        let model_type = metadata.config_model_type();
+        let is_qwen3_vl = id.contains("qwen3") && id.contains("vl")
+            || model_type.is_some_and(|mt| mt == "qwen3_vl");
+        let is_qwen3_5 = id.contains("qwen3.5")
+            || id.contains("qwen3.6")
+            || model_type.is_some_and(|mt| mt == "qwen3_5" || mt == "qwen3_5_moe");
+        is_qwen3_vl || is_qwen3_5
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
@@ -176,6 +179,25 @@ mod tests {
         let spec = registry
             .lookup(&metadata)
             .expect("should match qwen3 alias");
+        assert_eq!(spec.name(), "qwen3_vl");
+    }
+
+    #[test]
+    fn qwen3_5_matches_alias_via_model_type() {
+        let tokenizer = TestTokenizer::new(&[("<|image_pad|>", 151655)]);
+        let config = json!({
+            "model_type": "qwen3_5_moe",
+            "image_token_id": 151655,
+        });
+        let metadata = ModelMetadata {
+            model_id: "custom-model",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry
+            .lookup(&metadata)
+            .expect("should match qwen3.5 alias");
         assert_eq!(spec.name(), "qwen3_vl");
     }
 }

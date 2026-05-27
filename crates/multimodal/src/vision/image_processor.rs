@@ -376,6 +376,7 @@ impl ImageProcessorRegistry {
     /// - `qwen2-vl` -> Qwen2VLProcessor
     /// - `qwen2.5-vl` -> Qwen2VLProcessor (same preprocessing as Qwen2-VL)
     /// - `qwen3-vl` -> Qwen3VLProcessor (patch_size=16, [0.5,0.5,0.5] normalization)
+    /// - `qwen3.5` / `qwen3_5` -> Qwen3VLProcessor (Qwen3.5 reuses Qwen3-VL preprocessing)
     /// - `phi-3-vision` -> Phi3VisionProcessor (HD transform with 336x336 tiles)
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
@@ -413,6 +414,24 @@ impl ImageProcessorRegistry {
         );
         registry.register(
             "qwen3_vl",
+            Box::new(super::processors::Qwen3VLProcessor::new()),
+        );
+
+        // Qwen3.5 family (and Qwen3.6: same arch) reuses Qwen3-VL preprocessing.
+        registry.register(
+            "qwen3.5",
+            Box::new(super::processors::Qwen3VLProcessor::new()),
+        );
+        registry.register(
+            "qwen3_5",
+            Box::new(super::processors::Qwen3VLProcessor::new()),
+        );
+        registry.register(
+            "qwen3.6",
+            Box::new(super::processors::Qwen3VLProcessor::new()),
+        );
+        registry.register(
+            "qwen3_6",
             Box::new(super::processors::Qwen3VLProcessor::new()),
         );
 
