@@ -156,16 +156,29 @@ impl OperationLog {
     /// replica_id)`. Strategy-agnostic - the caller's `fold` decides what
     /// "winner" means (LWW: max by version; EpochMaxWins:
     /// `epoch_max_wins::compact_operations`).
+    ///
+    /// Grouping is done by sorting in-place and scanning contiguous runs,
+    /// avoiding the `String` allocation per op that a `HashMap<String, _>`
+    /// grouping would require.
     pub(super) fn compact_by_key<F>(&mut self, fold: F)
     where
         F: Fn(&[Operation]) -> Option<Operation>,
     {
-        let mut by_key: HashMap<String, Vec<Operation>> = HashMap::new();
-        for op in self.operations.drain(..) {
-            by_key.entry(op.key().to_string()).or_default().push(op);
+        self.operations
+            .sort_unstable_by(|a, b| a.key().cmp(b.key()));
+        let mut folded: Vec<Operation> = Vec::with_capacity(self.operations.len());
+        let mut start = 0;
+        while start < self.operations.len() {
+            let key = self.operations[start].key();
+            let mut end = start + 1;
+            while end < self.operations.len() && self.operations[end].key() == key {
+                end += 1;
+            }
+            if let Some(winner) = fold(&self.operations[start..end]) {
+                folded.push(winner);
+            }
+            start = end;
         }
-        let mut folded: Vec<Operation> =
-            by_key.into_values().filter_map(|ops| fold(&ops)).collect();
         folded.sort_by_key(|op| (op.timestamp(), op.replica_id()));
         self.operations = folded;
     }
