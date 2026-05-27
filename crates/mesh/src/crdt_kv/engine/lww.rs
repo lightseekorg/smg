@@ -234,7 +234,7 @@ impl LwwEngine {
         let mut log = self.log.write();
         log.append(op);
         if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
-            Self::compact_log(&mut log);
+            Self::compact_log_and_truncate(&mut log);
         }
     }
 
@@ -247,12 +247,21 @@ impl LwwEngine {
             .cloned()
     }
 
-    /// Compact the log per LWW rules and, as a safety valve, truncate the
-    /// oldest entries if compaction still leaves the log oversized (a
-    /// many-thousand-unique-key pathology). Truncated keys re-sync from
-    /// peers on the next merge.
+    /// Compact the log per LWW rules. Used by `apply_remote_ops` after
+    /// absorbing a remote batch; never drops keys, only collapses duplicates
+    /// per `(timestamp, replica_id)` per key.
     fn compact_log(log: &mut OperationLog) {
         log.compact_by_key(Self::lww_fold);
+    }
+
+    /// Compact and, if the log is still oversized after compaction, truncate
+    /// the oldest entries as a safety valve for the many-thousand-unique-key
+    /// pathology. Used only by `append_op` (local writes) - truncating during
+    /// `apply_remote_ops` would silently drop remotely-learned keys from the
+    /// log even though they are live in state, breaking downstream sync from
+    /// this node.
+    fn compact_log_and_truncate(log: &mut OperationLog) {
+        Self::compact_log(log);
         if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
             let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
             let drain_count = log.len() - keep;
@@ -362,20 +371,13 @@ impl NamespaceCrdtEngine for LwwEngine {
         unseen.sort_by_key(|op| (op.timestamp(), op.replica_id()));
 
         // LWW op-id collision policy is dedup: an op already in the log by
-        // `(replica_id, timestamp)` is a no-op. Append unseen ops, then
-        // compact per LWW rules.
+        // `(replica_id, timestamp)` is a no-op. `unseen` was already filtered
+        // against the local log above; append it directly and compact (no
+        // truncate - this path must not drop remotely-learned keys).
         {
             let mut log = self.log.write();
-            let local_op_ids: std::collections::HashSet<(ReplicaId, u64)> = log
-                .operations()
-                .iter()
-                .map(|op| (op.replica_id(), op.timestamp()))
-                .collect();
-            for op in &ops {
-                let id = (op.replica_id(), op.timestamp());
-                if !local_op_ids.contains(&id) {
-                    log.append(op.clone());
-                }
+            for op in &unseen {
+                log.append(op.clone());
             }
             Self::compact_log(&mut log);
         }

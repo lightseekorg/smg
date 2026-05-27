@@ -65,7 +65,7 @@ impl RateLimitEngine {
         let mut log = self.log.write();
         log.append(op);
         if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
-            Self::compact_log(&mut log);
+            Self::compact_log_and_truncate(&mut log);
         }
     }
 
@@ -77,11 +77,19 @@ impl RateLimitEngine {
         ratelimit::compact_operations(ops.iter())
     }
 
-    /// Compact the log via EpochMaxWins per-key fold, with the same
-    /// truncate-oldest safety valve `LwwEngine` uses if the log is still
-    /// oversized afterward (many-thousand-unique-key pathology).
+    /// Compact the log via EpochMaxWins per-key fold. Used by
+    /// `apply_remote_ops` after absorbing a remote batch; never drops keys.
     fn compact_log(log: &mut OperationLog) {
         log.compact_by_key(Self::epoch_max_wins_fold);
+    }
+
+    /// Compact and, if the log is still oversized, truncate oldest entries as
+    /// a safety valve for the many-thousand-unique-key pathology. Used only
+    /// by `append_op` (local writes) - truncating during `apply_remote_ops`
+    /// would silently drop remotely-learned shards from the log even though
+    /// they are live in state, breaking downstream sync from this node.
+    fn compact_log_and_truncate(log: &mut OperationLog) {
+        Self::compact_log(log);
         if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
             let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
             let drain_count = log.len() - keep;
