@@ -19,12 +19,8 @@ pub struct ClassConfig {
     /// honored by lower-class admissions via the packed-CAS slot
     /// accounting in [`super::scheduler`].
     pub reserved: u16,
-    /// Absolute floor on the per-class queue depth.
+    /// Per-class queue depth limit.
     pub queue_size: u32,
-    /// Optional multiplier: effective limit =
-    /// `max(queue_size, ceil(queue_size_per_slot * capacity))`.
-    /// `0.0` disables the multiplier (use the absolute floor only).
-    pub queue_size_per_slot: f32,
     /// How long a queued waiter waits before the admission middleware
     /// returns 408. Seconds at rest; converted to [`Duration`] in
     /// [`ClassRuntimeConfig`].
@@ -48,7 +44,6 @@ impl ClassConfig {
             Class::System => Self {
                 reserved: 32,
                 queue_size: 64,
-                queue_size_per_slot: 0.0,
                 queue_timeout_secs: 30,
                 starvation_threshold_secs: 5,
                 can_preempt: true,
@@ -56,7 +51,6 @@ impl ClassConfig {
             Class::Interactive => Self {
                 reserved: 128,
                 queue_size: 256,
-                queue_size_per_slot: 0.25,
                 queue_timeout_secs: 30,
                 starvation_threshold_secs: 5,
                 can_preempt: true,
@@ -64,7 +58,6 @@ impl ClassConfig {
             Class::Default => Self {
                 reserved: 0,
                 queue_size: 512,
-                queue_size_per_slot: 0.5,
                 queue_timeout_secs: 60,
                 starvation_threshold_secs: 30,
                 can_preempt: false,
@@ -72,7 +65,6 @@ impl ClassConfig {
             Class::Bulk => Self {
                 reserved: 0,
                 queue_size: 1024,
-                queue_size_per_slot: 1.0,
                 queue_timeout_secs: 300,
                 starvation_threshold_secs: 120,
                 can_preempt: false,
@@ -83,9 +75,8 @@ impl ClassConfig {
 
 /// Runtime view of [`ClassConfig`] — only the fields the dispatcher
 /// reads on its hot path, with seconds pre-converted to [`Duration`].
-/// `reserved`, `queue_size`, and `queue_size_per_slot` live elsewhere
-/// (the packed-CAS array and the per-class queue impl), so they don't
-/// appear here.
+/// `reserved` and `queue_size` live elsewhere (the packed-CAS array
+/// and the per-class queue impl), so they don't appear here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClassRuntimeConfig {
     pub queue_timeout: Duration,
@@ -133,8 +124,6 @@ pub struct PrioritySchedulerYaml {
 /// the live backend capacity is known.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SettingsValidationError {
-    #[error("class {class:?}: queue_size_per_slot must be a finite, non-negative number")]
-    InvalidMultiplier { class: Class },
     #[error("class {class:?}: queue_timeout_secs must be > 0")]
     ZeroQueueTimeout { class: Class },
     #[error("class {class:?}: starvation_threshold_secs must be > 0")]
@@ -203,9 +192,6 @@ impl SchedulerSettings {
 
         for class in Class::ALL {
             let cfg = &classes[class as usize];
-            if !cfg.queue_size_per_slot.is_finite() || cfg.queue_size_per_slot < 0.0 {
-                return Err(SettingsValidationError::InvalidMultiplier { class });
-            }
             if cfg.queue_timeout_secs == 0 {
                 return Err(SettingsValidationError::ZeroQueueTimeout { class });
             }
@@ -245,7 +231,6 @@ mod tests {
         let cfg = ClassConfig::default_for(Class::System);
         assert_eq!(cfg.reserved, 32);
         assert_eq!(cfg.queue_size, 64);
-        assert_eq!(cfg.queue_size_per_slot, 0.0);
         assert_eq!(cfg.queue_timeout_secs, 30);
         assert_eq!(cfg.starvation_threshold_secs, 5);
         assert!(cfg.can_preempt);
@@ -256,7 +241,6 @@ mod tests {
         let cfg = ClassConfig::default_for(Class::Interactive);
         assert_eq!(cfg.reserved, 128);
         assert_eq!(cfg.queue_size, 256);
-        assert_eq!(cfg.queue_size_per_slot, 0.25);
         assert_eq!(cfg.queue_timeout_secs, 30);
         assert_eq!(cfg.starvation_threshold_secs, 5);
         assert!(cfg.can_preempt);
@@ -267,7 +251,6 @@ mod tests {
         let cfg = ClassConfig::default_for(Class::Default);
         assert_eq!(cfg.reserved, 0);
         assert_eq!(cfg.queue_size, 512);
-        assert_eq!(cfg.queue_size_per_slot, 0.5);
         assert_eq!(cfg.queue_timeout_secs, 60);
         assert_eq!(cfg.starvation_threshold_secs, 30);
         assert!(!cfg.can_preempt);
@@ -278,7 +261,6 @@ mod tests {
         let cfg = ClassConfig::default_for(Class::Bulk);
         assert_eq!(cfg.reserved, 0);
         assert_eq!(cfg.queue_size, 1024);
-        assert_eq!(cfg.queue_size_per_slot, 1.0);
         assert_eq!(cfg.queue_timeout_secs, 300);
         assert_eq!(cfg.starvation_threshold_secs, 120);
         assert!(!cfg.can_preempt);
@@ -318,7 +300,6 @@ classes:
   interactive:
     reserved: 200
     queue_size: 256
-    queue_size_per_slot: 0.25
     queue_timeout_secs: 30
     starvation_threshold_secs: 5
     can_preempt: true
@@ -438,26 +419,6 @@ tenant_policies:
     }
 
     #[test]
-    fn test_settings_rejects_negative_multiplier() {
-        let mut classes = HashMap::new();
-        let mut interactive = ClassConfig::default_for(Class::Interactive);
-        interactive.queue_size_per_slot = -1.0;
-        classes.insert(Class::Interactive, interactive);
-        let yaml = PrioritySchedulerYaml {
-            classes,
-            tenant_policies: Default::default(),
-        };
-        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SettingsValidationError::InvalidMultiplier {
-                class: Class::Interactive
-            }
-        ));
-    }
-
-    #[test]
     fn test_settings_rejects_zero_queue_timeout() {
         let mut classes = HashMap::new();
         let mut bulk = ClassConfig::default_for(Class::Bulk);
@@ -472,67 +433,6 @@ tenant_policies:
         assert!(matches!(
             err,
             SettingsValidationError::ZeroQueueTimeout { class: Class::Bulk }
-        ));
-    }
-
-    #[test]
-    fn test_settings_rejects_nan_multiplier_from_yaml() {
-        // serde_yaml parses `.nan` into f32::NAN. Without an explicit
-        // is_finite() check, the comparison `< 0.0` is false for NaN and the
-        // bad value slips through to garbage queue-limit math later.
-        let yaml = r"
-classes:
-  interactive:
-    reserved: 128
-    queue_size: 256
-    queue_size_per_slot: .nan
-    queue_timeout_secs: 30
-    starvation_threshold_secs: 5
-    can_preempt: true
-";
-        let parsed: PrioritySchedulerYaml = serde_yaml::from_str(yaml).unwrap();
-        assert!(
-            parsed.classes[&Class::Interactive]
-                .queue_size_per_slot
-                .is_nan(),
-            "serde_yaml deserialized .nan as NaN"
-        );
-        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&parsed))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SettingsValidationError::InvalidMultiplier {
-                class: Class::Interactive
-            }
-        ));
-    }
-
-    #[test]
-    fn test_settings_rejects_infinity_multiplier_from_yaml() {
-        let yaml = r"
-classes:
-  interactive:
-    reserved: 128
-    queue_size: 256
-    queue_size_per_slot: .inf
-    queue_timeout_secs: 30
-    starvation_threshold_secs: 5
-    can_preempt: true
-";
-        let parsed: PrioritySchedulerYaml = serde_yaml::from_str(yaml).unwrap();
-        assert!(
-            parsed.classes[&Class::Interactive]
-                .queue_size_per_slot
-                .is_infinite(),
-            "serde_yaml deserialized .inf as +Infinity"
-        );
-        let err = SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&parsed))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SettingsValidationError::InvalidMultiplier {
-                class: Class::Interactive
-            }
         ));
     }
 

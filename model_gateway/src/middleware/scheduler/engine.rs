@@ -103,8 +103,7 @@ impl PriorityScheduler {
         }
 
         let reserved_arr = Class::ALL.map(|c| settings.class_config(c).reserved);
-        let class_queues: [Arc<dyn ClassQueue>; 4] =
-            Class::ALL.map(|c| queue_for(settings, c, capacity));
+        let class_queues: [Arc<dyn ClassQueue>; 4] = Class::ALL.map(|c| queue_for(settings, c));
         let class_config: [ClassRuntimeConfig; 4] =
             Class::ALL.map(|c| ClassRuntimeConfig::from_class_config(settings.class_config(c)));
 
@@ -433,13 +432,11 @@ impl PriorityScheduler {
     }
 }
 
-/// Compute the effective per-class queue limit for a given backend
-/// capacity: `max(queue_size, ceil(queue_size_per_slot * capacity))`.
-fn queue_for(settings: &SchedulerSettings, class: Class, capacity: u16) -> Arc<dyn ClassQueue> {
-    let cfg = settings.class_config(class);
-    let multiplier = (cfg.queue_size_per_slot * f32::from(capacity)).ceil() as u32;
-    let limit = cfg.queue_size.max(multiplier) as usize;
-    Arc::new(FifoClassQueue::new(limit))
+/// Build the per-class queue with its configured fixed depth limit.
+fn queue_for(settings: &SchedulerSettings, class: Class) -> Arc<dyn ClassQueue> {
+    Arc::new(FifoClassQueue::new(
+        settings.class_config(class).queue_size as usize,
+    ))
 }
 
 /// RAII handle on one admitted request. Holding a permit keeps the slot
@@ -584,7 +581,6 @@ mod tests {
             cfg.reserved = 0;
             if c == class {
                 cfg.queue_size = queue_size;
-                cfg.queue_size_per_slot = 0.0;
                 cfg.queue_timeout_secs = queue_timeout_secs;
             }
             classes.insert(c, cfg);
@@ -855,7 +851,6 @@ mod tests {
             cfg.starvation_threshold_secs = 1;
             if c == Class::Bulk {
                 cfg.queue_size = 4;
-                cfg.queue_size_per_slot = 0.0;
             }
             // Interactive reserves the entire capacity, locking Bulk out
             // of the normal-priority admission path.
@@ -900,7 +895,6 @@ mod tests {
             if c == Class::Bulk {
                 cfg.starvation_threshold_secs = 1;
                 cfg.queue_size = 4;
-                cfg.queue_size_per_slot = 0.0;
             }
             // Interactive holds the full capacity in reservation.
             if c == Class::Interactive {
