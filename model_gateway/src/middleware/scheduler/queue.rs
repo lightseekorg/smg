@@ -58,10 +58,16 @@ impl Waiter {
 /// and admission, so it uses `parking_lot::Mutex` rather than an async
 /// mutex.
 pub trait ClassQueue: Send + Sync {
-    /// Append a waiter. Returns `Err(waiter)` when the queue is at its
-    /// configured limit so the caller can convert the rejection into a
-    /// 429 response.
-    fn try_enqueue(&self, waiter: Waiter) -> Result<(), Waiter>;
+    /// Append a waiter, refusing if the live depth limit is already
+    /// reached. The limit is supplied per-call rather than stored on the
+    /// queue so the scheduler can recompute it from the current
+    /// `WorkerCapacity` on every admission (capacity changes at runtime
+    /// via the watch channel, so a baked-in limit would freeze at
+    /// startup capacity and not track autoscaling).
+    ///
+    /// Returns `Err(waiter)` when the queue is full so the caller can
+    /// convert the rejection into a 429 response.
+    fn try_enqueue(&self, waiter: Waiter, max: usize) -> Result<(), Waiter>;
 
     /// Pop the next waiter, or `None` when empty.
     fn pop_eligible(&self) -> Option<Waiter>;
@@ -80,25 +86,33 @@ pub trait ClassQueue: Send + Sync {
     fn drop_cancelled_head(&self);
 }
 
-/// First-in, first-out per-class queue with a fixed maximum depth.
+/// First-in, first-out per-class queue. The depth limit is supplied by
+/// the caller on every [`try_enqueue`] (see the trait docs).
 pub struct FifoClassQueue {
     waiters: Mutex<VecDeque<Waiter>>,
-    max: usize,
 }
 
 impl FifoClassQueue {
-    pub fn new(max: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            waiters: Mutex::new(VecDeque::with_capacity(max.min(64))),
-            max,
+            // Modest preallocation: matches the smallest realistic
+            // default queue and avoids early reallocs without wasting
+            // memory when limits are tiny.
+            waiters: Mutex::new(VecDeque::with_capacity(64)),
         }
     }
 }
 
+impl Default for FifoClassQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClassQueue for FifoClassQueue {
-    fn try_enqueue(&self, waiter: Waiter) -> Result<(), Waiter> {
+    fn try_enqueue(&self, waiter: Waiter, max: usize) -> Result<(), Waiter> {
         let mut guard = self.waiters.lock();
-        if guard.len() >= self.max {
+        if guard.len() >= max {
             return Err(waiter);
         }
         guard.push_back(waiter);
@@ -145,13 +159,13 @@ mod tests {
     }
 
     #[test]
-    fn test_try_enqueue_fills_to_capacity_then_rejects() {
-        let q = FifoClassQueue::new(4);
+    fn test_try_enqueue_respects_per_call_max() {
+        let q = FifoClassQueue::new();
         for _ in 0..4 {
-            assert!(q.try_enqueue(waiter(Class::Default)).is_ok());
+            assert!(q.try_enqueue(waiter(Class::Default), 4).is_ok());
         }
         let rejected = q
-            .try_enqueue(waiter(Class::Default))
+            .try_enqueue(waiter(Class::Default), 4)
             .expect_err("queue full");
         assert_eq!(rejected.class, Class::Default);
     }
@@ -159,10 +173,10 @@ mod tests {
     #[test]
     fn test_pop_eligible_is_fifo() {
         // Distinguish waiters by class to verify insertion order is preserved.
-        let q = FifoClassQueue::new(4);
-        q.try_enqueue(waiter(Class::Bulk)).unwrap();
-        q.try_enqueue(waiter(Class::Default)).unwrap();
-        q.try_enqueue(waiter(Class::Interactive)).unwrap();
+        let q = FifoClassQueue::new();
+        q.try_enqueue(waiter(Class::Bulk), 4).unwrap();
+        q.try_enqueue(waiter(Class::Default), 4).unwrap();
+        q.try_enqueue(waiter(Class::Interactive), 4).unwrap();
         assert_eq!(q.pop_eligible().unwrap().class, Class::Bulk);
         assert_eq!(q.pop_eligible().unwrap().class, Class::Default);
         assert_eq!(q.pop_eligible().unwrap().class, Class::Interactive);
@@ -171,15 +185,15 @@ mod tests {
 
     #[test]
     fn test_pop_eligible_returns_none_when_empty() {
-        let q = FifoClassQueue::new(4);
+        let q = FifoClassQueue::new();
         assert!(q.pop_eligible().is_none());
     }
 
     #[test]
     fn test_head_age_is_some_after_enqueue() {
-        let q = FifoClassQueue::new(4);
+        let q = FifoClassQueue::new();
         assert!(q.head_age().is_none());
-        q.try_enqueue(waiter(Class::Default)).unwrap();
+        q.try_enqueue(waiter(Class::Default), 4).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let age = q.head_age().expect("head present");
         assert!(age >= Duration::from_millis(5));
@@ -187,10 +201,10 @@ mod tests {
 
     #[test]
     fn test_depth_reflects_enqueue_and_pop() {
-        let q = FifoClassQueue::new(4);
+        let q = FifoClassQueue::new();
         assert_eq!(q.depth(), 0);
-        q.try_enqueue(waiter(Class::Default)).unwrap();
-        q.try_enqueue(waiter(Class::Default)).unwrap();
+        q.try_enqueue(waiter(Class::Default), 4).unwrap();
+        q.try_enqueue(waiter(Class::Default), 4).unwrap();
         assert_eq!(q.depth(), 2);
         q.pop_eligible();
         assert_eq!(q.depth(), 1);
@@ -198,12 +212,12 @@ mod tests {
 
     #[test]
     fn test_drop_cancelled_head_removes_cancelled_head_only() {
-        let q = FifoClassQueue::new(4);
+        let q = FifoClassQueue::new();
         let cancelled = CancellationToken::new();
         cancelled.cancel();
-        q.try_enqueue(waiter_with_cancel(Class::Default, cancelled))
+        q.try_enqueue(waiter_with_cancel(Class::Default, cancelled), 4)
             .unwrap();
-        q.try_enqueue(waiter(Class::Interactive)).unwrap();
+        q.try_enqueue(waiter(Class::Interactive), 4).unwrap();
         assert_eq!(q.depth(), 2);
 
         q.drop_cancelled_head();
@@ -217,15 +231,15 @@ mod tests {
 
     #[test]
     fn test_drop_cancelled_head_leaves_live_head_alone() {
-        let q = FifoClassQueue::new(4);
-        q.try_enqueue(waiter(Class::Default)).unwrap();
+        let q = FifoClassQueue::new();
+        q.try_enqueue(waiter(Class::Default), 4).unwrap();
         q.drop_cancelled_head();
         assert_eq!(q.depth(), 1, "non-cancelled head retained");
     }
 
     #[test]
     fn test_drop_cancelled_head_noop_on_empty_queue() {
-        let q = FifoClassQueue::new(4);
+        let q = FifoClassQueue::new();
         q.drop_cancelled_head();
         assert_eq!(q.depth(), 0);
     }
@@ -236,14 +250,14 @@ mod tests {
         // should clear the whole run rather than requiring the caller to
         // loop. This keeps the dispatcher's GC pass to one lock cycle
         // instead of N.
-        let q = FifoClassQueue::new(8);
+        let q = FifoClassQueue::new();
         for _ in 0..3 {
             let cancelled = CancellationToken::new();
             cancelled.cancel();
-            q.try_enqueue(waiter_with_cancel(Class::Default, cancelled))
+            q.try_enqueue(waiter_with_cancel(Class::Default, cancelled), 8)
                 .unwrap();
         }
-        q.try_enqueue(waiter(Class::Interactive)).unwrap();
+        q.try_enqueue(waiter(Class::Interactive), 8).unwrap();
         assert_eq!(q.depth(), 4);
 
         q.drop_cancelled_head();

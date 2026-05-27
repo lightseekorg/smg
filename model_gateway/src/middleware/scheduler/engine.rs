@@ -72,6 +72,12 @@ pub struct PriorityScheduler {
     /// exits cleanly.
     pub(super) release_notify: Arc<Notify>,
     class_config: [ClassRuntimeConfig; 4],
+    /// `(queue_size, queue_size_per_slot)` for each class, indexed by
+    /// `class as usize`. Read on every admit to recompute the queue
+    /// depth limit against the *current* slot pool capacity so the
+    /// `queue_size_per_slot` multiplier actually tracks live capacity
+    /// changes (it'd be frozen at startup otherwise).
+    class_queue_limit_inputs: [(u32, f32); 4],
 }
 
 impl Drop for PriorityScheduler {
@@ -103,10 +109,18 @@ impl PriorityScheduler {
         }
 
         let reserved_arr = Class::ALL.map(|c| settings.class_config(c).reserved);
+        // Per-class queues are built with no baked-in depth limit; admit
+        // supplies the live limit (derived from current backend capacity
+        // and the class's queue_size / queue_size_per_slot settings) on
+        // every try_enqueue call.
         let class_queues: [Arc<dyn ClassQueue>; 4] =
-            Class::ALL.map(|c| queue_for(settings, c, capacity));
+            Class::ALL.map(|_| Arc::new(FifoClassQueue::new()) as Arc<dyn ClassQueue>);
         let class_config: [ClassRuntimeConfig; 4] =
             Class::ALL.map(|c| ClassRuntimeConfig::from_class_config(settings.class_config(c)));
+        let class_queue_limit_inputs: [(u32, f32); 4] = Class::ALL.map(|c| {
+            let cfg = settings.class_config(c);
+            (cfg.queue_size, cfg.queue_size_per_slot)
+        });
 
         Ok(Arc::new(Self {
             slot_pool: SlotPool::new(capacity, reserved_arr),
@@ -114,6 +128,7 @@ impl PriorityScheduler {
             inflight_registry: RwLock::new(HashMap::new()),
             release_notify: Arc::new(Notify::new()),
             class_config,
+            class_queue_limit_inputs,
         }))
     }
 
@@ -172,8 +187,14 @@ impl PriorityScheduler {
         let (tx, rx) = oneshot::channel::<SchedulerPermit>();
         let waiter_cancel = cancel.child_token();
         let waiter = Waiter::new(class, waiter_cancel.clone(), request_id, tx);
+        // Recompute the queue depth limit against the *current* backend
+        // capacity (which can shrink/grow via the WorkerCapacity watch)
+        // so the queue_size_per_slot multiplier actually tracks the fleet.
+        let (queue_size, per_slot) = self.class_queue_limit_inputs[class as usize];
+        let multiplier = (per_slot * f32::from(self.slot_pool.capacity())).ceil() as u32;
+        let limit = queue_size.max(multiplier) as usize;
         if self.class_queues[class as usize]
-            .try_enqueue(waiter)
+            .try_enqueue(waiter, limit)
             .is_err()
         {
             return AdmitOutcome::Rejected(RejectionReason::QueueFull);
@@ -433,15 +454,6 @@ impl PriorityScheduler {
     }
 }
 
-/// Compute the effective per-class queue limit for a given backend
-/// capacity: `max(queue_size, ceil(queue_size_per_slot * capacity))`.
-fn queue_for(settings: &SchedulerSettings, class: Class, capacity: u16) -> Arc<dyn ClassQueue> {
-    let cfg = settings.class_config(class);
-    let multiplier = (cfg.queue_size_per_slot * f32::from(capacity)).ceil() as u32;
-    let limit = cfg.queue_size.max(multiplier) as usize;
-    Arc::new(FifoClassQueue::new(limit))
-}
-
 /// RAII handle on one admitted request. Holding a permit keeps the slot
 /// reserved; dropping it returns the slot, removes the handle from the
 /// inflight registry, and notifies the dispatcher.
@@ -625,7 +637,7 @@ mod tests {
             queued_tx,
         );
         scheduler.class_queues[Class::Default as usize]
-            .try_enqueue(queued)
+            .try_enqueue(queued, 1)
             .expect("queue had room for one");
 
         let outcome = scheduler
@@ -743,7 +755,7 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let waiter = Waiter::new(class, CancellationToken::new(), rid("queued"), tx);
         scheduler.class_queues[class as usize]
-            .try_enqueue(waiter)
+            .try_enqueue(waiter, 8)
             .expect("queue had room");
         rx
     }
@@ -770,7 +782,7 @@ mod tests {
             dead_tx,
         );
         scheduler.class_queues[Class::Default as usize]
-            .try_enqueue(dead)
+            .try_enqueue(dead, 8)
             .unwrap();
 
         // Live waiter.
@@ -782,7 +794,7 @@ mod tests {
             live_tx,
         );
         scheduler.class_queues[Class::Default as usize]
-            .try_enqueue(live)
+            .try_enqueue(live, 8)
             .unwrap();
 
         // Release the slot.
@@ -1071,6 +1083,80 @@ mod tests {
 
         assert!(matches!(outcome, AdmitOutcome::Admitted(_)));
         assert_eq!(scheduler.slot_pool.capacity(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_queue_limit_recomputes_against_live_capacity() {
+        // Capacity 10, Default queue_size=4, queue_size_per_slot=1.0.
+        // → effective limit at startup = max(4, ceil(1.0 * 10)) = 10.
+        // Pre-fill the queue with 10 dead waiters (held slot is full).
+        // After capacity grows to 20 via the watch, the effective limit
+        // for a new admit is max(4, ceil(1.0 * 20)) = 20. The 11th
+        // enqueue (which would have hit QueueFull at startup capacity)
+        // now succeeds because admit reads the live capacity per call.
+        use std::collections::HashMap as StdMap;
+
+        let mut classes = StdMap::new();
+        for c in Class::ALL {
+            let mut cfg = ClassConfig::default_for(c);
+            cfg.reserved = 0;
+            if c == Class::Default {
+                cfg.queue_size = 4;
+                cfg.queue_size_per_slot = 1.0;
+                cfg.queue_timeout_secs = 60;
+            }
+            classes.insert(c, cfg);
+        }
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: StdMap::new(),
+        };
+        let settings =
+            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
+
+        let scheduler = PriorityScheduler::new(&settings, 10).unwrap();
+        let _held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+
+        // Fill queue to its startup limit of 10.
+        let mut tail_receivers = Vec::new();
+        for i in 0..10 {
+            let (tx, rx) = oneshot::channel();
+            let waiter = Waiter::new(
+                Class::Default,
+                CancellationToken::new(),
+                rid(&format!("q-{i}")),
+                tx,
+            );
+            scheduler.class_queues[Class::Default as usize]
+                .try_enqueue(waiter, 10)
+                .expect("under startup limit");
+            tail_receivers.push(rx);
+        }
+
+        // Grow capacity to 20 — would raise effective limit to 20.
+        scheduler.slot_pool.set_capacity(20);
+
+        // Without the live recompute, admit's enqueue would still cap
+        // at 10 (the startup-derived value). With the recompute, it
+        // honors the new live capacity → 11th waiter fits.
+        let (queue_size, per_slot) = scheduler.class_queue_limit_inputs[Class::Default as usize];
+        let multiplier = (per_slot * f32::from(scheduler.slot_pool.capacity())).ceil() as u32;
+        let limit = queue_size.max(multiplier) as usize;
+        assert_eq!(limit, 20, "live limit after capacity grow");
+
+        let (tx, _rx) = oneshot::channel();
+        let waiter = Waiter::new(
+            Class::Default,
+            CancellationToken::new(),
+            rid("eleventh"),
+            tx,
+        );
+        scheduler.class_queues[Class::Default as usize]
+            .try_enqueue(waiter, limit)
+            .expect("11th waiter fits under the new live limit");
+        assert_eq!(scheduler.class_queues[Class::Default as usize].depth(), 11);
     }
 
     #[tokio::test]
