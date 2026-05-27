@@ -231,9 +231,39 @@ impl LwwEngine {
     }
 
     fn append_op(&self, op: Operation) {
-        self.log
-            .write()
-            .append_with_strategy(op, |_| crate::crdt_kv::MergeStrategy::LastWriterWins);
+        let mut log = self.log.write();
+        log.append(op);
+        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+            Self::compact_log(&mut log);
+        }
+    }
+
+    /// LWW per-key fold: the winning op is the one with the maximum
+    /// `(timestamp, replica_id)` tuple. Tombstones and inserts share the
+    /// ordering - the newer wins regardless of kind.
+    fn lww_fold(ops: &[Operation]) -> Option<Operation> {
+        ops.iter()
+            .max_by_key(|op| (op.timestamp(), op.replica_id()))
+            .cloned()
+    }
+
+    /// Compact the log per LWW rules and, as a safety valve, truncate the
+    /// oldest entries if compaction still leaves the log oversized (a
+    /// many-thousand-unique-key pathology). Truncated keys re-sync from
+    /// peers on the next merge.
+    fn compact_log(log: &mut OperationLog) {
+        log.compact_by_key(Self::lww_fold);
+        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+            let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
+            let drain_count = log.len() - keep;
+            tracing::warn!(
+                total = log.len(),
+                draining = drain_count,
+                keeping = keep,
+                "LwwEngine log still over threshold after compaction, truncating oldest entries"
+            );
+            log.operations_mut().drain(..drain_count);
+        }
     }
 }
 
@@ -331,14 +361,23 @@ impl NamespaceCrdtEngine for LwwEngine {
             .collect();
         unseen.sort_by_key(|op| (op.timestamp(), op.replica_id()));
 
-        // Merge into the log first so subsequent compaction sees the full
-        // set, then compact. Strategy callback is LWW since this engine only
-        // hosts LWW keys.
+        // LWW op-id collision policy is dedup: an op already in the log by
+        // `(replica_id, timestamp)` is a no-op. Append unseen ops, then
+        // compact per LWW rules.
         {
             let mut log = self.log.write();
-            let incoming = OperationLog::from_operations(ops);
-            log.merge_with_strategy(&incoming, |_| crate::crdt_kv::MergeStrategy::LastWriterWins);
-            log.compact_with_strategy(|_| crate::crdt_kv::MergeStrategy::LastWriterWins);
+            let local_op_ids: std::collections::HashSet<(ReplicaId, u64)> = log
+                .operations()
+                .iter()
+                .map(|op| (op.replica_id(), op.timestamp()))
+                .collect();
+            for op in &ops {
+                let id = (op.replica_id(), op.timestamp());
+                if !local_op_ids.contains(&id) {
+                    log.append(op.clone());
+                }
+            }
+            Self::compact_log(&mut log);
         }
 
         // Apply unseen ops to live state. Lamport clock observes each remote

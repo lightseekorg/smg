@@ -7,7 +7,7 @@ use tracing_subscriber::{
 
 use super::{
     crdt::CrdtOrMap,
-    epoch_max_wins::{decode, encode, EpochCount},
+    epoch_max_wins::{self, decode, encode, EpochCount},
     merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
     replica::ReplicaId,
@@ -849,23 +849,30 @@ fn test_operation_log_binary_serialization() {
 }
 
 #[test]
-fn test_operation_log_merge_deduplicates() {
+fn test_lww_apply_remote_ops_is_idempotent() {
+    // LWW dedups by op-id on remote apply: a log already absorbed once must
+    // not grow the local log when re-applied. Previously tested via
+    // `OperationLog::merge_with_strategy`; now that merge policy lives in
+    // `LwwEngine::apply_remote_ops`, exercise it through `CrdtOrMap`.
     init_test_logging();
-    let map = CrdtOrMap::new();
+    let source = CrdtOrMap::new();
+    source.insert("key1".to_string(), b"value1".to_vec());
+    source.insert("key2".to_string(), b"value2".to_vec());
+    source.remove("key1");
 
-    map.insert("key1".to_string(), b"value1".to_vec());
-    map.insert("key2".to_string(), b"value2".to_vec());
-    map.remove("key1");
+    let log = source.get_operation_log();
+    let receiver = CrdtOrMap::new();
 
-    let log = map.get_operation_log();
+    receiver.merge(&log);
+    let after_first = receiver.get_operation_log().len();
 
-    let mut merged_log = OperationLog::new();
-    merged_log.merge_with_strategy(&log, |_| MergeStrategy::LastWriterWins);
-    let merged_once_len = merged_log.len();
+    receiver.merge(&log);
+    let after_second = receiver.get_operation_log().len();
 
-    // Re-merging the same log should be a no-op for log length.
-    merged_log.merge_with_strategy(&log, |_| MergeStrategy::LastWriterWins);
-    assert_eq!(merged_log.len(), merged_once_len);
+    assert_eq!(
+        after_first, after_second,
+        "re-applying the same log must be a no-op for log length",
+    );
 }
 
 #[test]
@@ -884,20 +891,18 @@ fn test_operation_log_snapshot_uses_merge_strategy() {
     log.append(stale_newer_timestamp);
     log.append(epoch_winner_older_timestamp);
 
-    let snapshot = log.snapshot_and_truncate(|key| {
-        if key.starts_with("rl:") {
-            MergeStrategy::EpochMaxWins
-        } else {
-            MergeStrategy::LastWriterWins
-        }
-    });
+    log.compact_by_key(|ops| epoch_max_wins::compact_operations(ops.iter()));
+    let winner = log
+        .operations()
+        .iter()
+        .find(|op| op.key() == key)
+        .expect("compaction keeps rl shard");
 
-    let Operation::Insert { value, .. } = snapshot.get(key).expect("snapshot keeps rl shard")
-    else {
-        panic!("snapshot should keep an insert");
+    let Operation::Insert { value, .. } = winner else {
+        panic!("compaction should keep an insert");
     };
     assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
-    assert!(log.is_empty(), "snapshot truncates the source log");
+    assert_eq!(log.len(), 1, "compaction folds duplicates per key");
 }
 
 #[test]
@@ -951,16 +956,10 @@ fn test_operation_log_epoch_max_wins_tombstone_selection_is_order_independent() 
             log.append(operation);
         }
 
-        let snapshot = log.snapshot_and_truncate(|key| {
-            if key.starts_with("rl:") {
-                MergeStrategy::EpochMaxWins
-            } else {
-                MergeStrategy::LastWriterWins
-            }
-        });
-
-        let Some(Operation::Remove { timestamp, .. }) = snapshot.get(key) else {
-            panic!("tombstone should win consistently for order {snapshot:?}");
+        log.compact_by_key(|ops| epoch_max_wins::compact_operations(ops.iter()));
+        let winner = log.operations().iter().find(|op| op.key() == key);
+        let Some(Operation::Remove { timestamp, .. }) = winner else {
+            panic!("tombstone should win consistently; got {winner:?}");
         };
         assert_eq!(*timestamp, 95);
     }
@@ -1017,19 +1016,13 @@ fn test_operation_log_epoch_max_wins_post_tombstone_insert_revives_key() {
             log.append(operation);
         }
 
-        let snapshot = log.snapshot_and_truncate(|key| {
-            if key.starts_with("rl:") {
-                MergeStrategy::EpochMaxWins
-            } else {
-                MergeStrategy::LastWriterWins
-            }
-        });
-
+        log.compact_by_key(|ops| epoch_max_wins::compact_operations(ops.iter()));
+        let winner = log.operations().iter().find(|op| op.key() == key);
         let Some(Operation::Insert {
             value, timestamp, ..
-        }) = snapshot.get(key)
+        }) = winner
         else {
-            panic!("post-tombstone insert should revive key for order {snapshot:?}");
+            panic!("post-tombstone insert should revive key; got {winner:?}");
         };
         assert_eq!(*timestamp, 100);
         assert_eq!(decode(value), Some(EpochCount { epoch: 6, count: 0 }));
@@ -1054,17 +1047,11 @@ fn test_operation_log_epoch_max_wins_post_tombstone_insert_wins_over_pre_tombsto
     log.append(tombstone_between);
     log.append(newer_insert);
 
-    let snapshot = log.snapshot_and_truncate(|key| {
-        if key.starts_with("rl:") {
-            MergeStrategy::EpochMaxWins
-        } else {
-            MergeStrategy::LastWriterWins
-        }
-    });
-
+    log.compact_by_key(|ops| epoch_max_wins::compact_operations(ops.iter()));
+    let winner = log.operations().iter().find(|op| op.key() == key);
     let Some(Operation::Insert {
         value, timestamp, ..
-    }) = snapshot.get(key)
+    }) = winner
     else {
         panic!("newer equal-value insert should win over intermediate tombstone");
     };

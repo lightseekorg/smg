@@ -62,9 +62,37 @@ impl RateLimitEngine {
     }
 
     fn append_op(&self, op: Operation) {
-        self.log
-            .write()
-            .append_with_strategy(op, |_| crate::crdt_kv::MergeStrategy::EpochMaxWins);
+        let mut log = self.log.write();
+        log.append(op);
+        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+            Self::compact_log(&mut log);
+        }
+    }
+
+    /// EpochMaxWins per-key fold: defer to `epoch_max_wins::compact_operations`,
+    /// which folds every op for the key through `RateLimitState::merge`,
+    /// respecting tombstone boundaries and embedding the merged
+    /// `tombstone_version` into the compacted snapshot.
+    fn epoch_max_wins_fold(ops: &[Operation]) -> Option<Operation> {
+        ratelimit::compact_operations(ops.iter())
+    }
+
+    /// Compact the log via EpochMaxWins per-key fold, with the same
+    /// truncate-oldest safety valve `LwwEngine` uses if the log is still
+    /// oversized afterward (many-thousand-unique-key pathology).
+    fn compact_log(log: &mut OperationLog) {
+        log.compact_by_key(Self::epoch_max_wins_fold);
+        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+            let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
+            let drain_count = log.len() - keep;
+            tracing::warn!(
+                total = log.len(),
+                draining = drain_count,
+                keeping = keep,
+                "RateLimitEngine log still over threshold after compaction, truncating oldest entries"
+            );
+            log.operations_mut().drain(..drain_count);
+        }
     }
 
     fn current_encoded(&self, key: &str) -> Option<Vec<u8>> {
@@ -330,11 +358,36 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         // so generation only bumps when state truly changes.
         ops.sort_by_key(|op| (op.timestamp(), op.replica_id()));
 
+        // EpochMaxWins op-id collision policy: fold the existing log op and
+        // the incoming op via `compact_operations` so a compacted snapshot
+        // replaces a previously-seen raw payload at the same op-id (the bug
+        // class addressed in #1469). Unseen incoming ops are appended.
+        // Compaction then runs across the full log per the same fold rule.
         {
             let mut log = self.log.write();
-            let incoming = OperationLog::from_operations(ops.clone());
-            log.merge_with_strategy(&incoming, |_| crate::crdt_kv::MergeStrategy::EpochMaxWins);
-            log.compact_with_strategy(|_| crate::crdt_kv::MergeStrategy::EpochMaxWins);
+            let mut local_index: std::collections::HashMap<(ReplicaId, u64), usize> = log
+                .operations()
+                .iter()
+                .enumerate()
+                .map(|(idx, op)| ((op.replica_id(), op.timestamp()), idx))
+                .collect();
+            for op in &ops {
+                let id = (op.replica_id(), op.timestamp());
+                match local_index.get(&id).copied() {
+                    Some(local_idx) => {
+                        let folded =
+                            ratelimit::compact_operations([&log.operations()[local_idx], op]);
+                        if let Some(folded) = folded {
+                            log.operations_mut()[local_idx] = folded;
+                        }
+                    }
+                    None => {
+                        local_index.insert(id, log.operations().len());
+                        log.append(op.clone());
+                    }
+                }
+            }
+            Self::compact_log(&mut log);
         }
 
         for op in ops {
