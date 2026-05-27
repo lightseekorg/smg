@@ -787,6 +787,8 @@ pub enum ThinkingConfig {
     Enabled {
         /// Budget in tokens for thinking (minimum 1024)
         budget_tokens: u32,
+        /// How thinking content is returned in the response.
+        display: Option<ThinkingDisplay>,
     },
     /// Disable extended thinking
     Disabled,
@@ -2242,12 +2244,41 @@ mod tests {
         assert!(matches!(
             cfg,
             ThinkingConfig::Enabled {
-                budget_tokens: 1024
+                budget_tokens: 1024,
+                display: None
             }
         ));
 
         let cfg: ThinkingConfig = serde_json::from_str(r#"{"type":"disabled"}"#).unwrap();
         assert!(matches!(cfg, ThinkingConfig::Disabled));
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_with_display() {
+        let cfg: ThinkingConfig = serde_json::from_str(
+            r#"{"type":"enabled","budget_tokens":2048,"display":"summarized"}"#,
+        )
+        .unwrap();
+        match cfg {
+            ThinkingConfig::Enabled {
+                budget_tokens,
+                display,
+            } => {
+                assert_eq!(budget_tokens, 2048);
+                assert_eq!(display, Some(ThinkingDisplay::Summarized));
+            }
+            other => panic!("expected Enabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_round_trip_omits_null_display() {
+        let cfg = ThinkingConfig::Enabled {
+            budget_tokens: 1024,
+            display: None,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(json, r#"{"type":"enabled","budget_tokens":1024}"#);
     }
 
     #[test]
