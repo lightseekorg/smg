@@ -204,6 +204,12 @@ impl PriorityScheduler {
         // `drop_cancelled_head` reaps it. Harmless if the waiter was
         // already popped (Admitted path) — the token has no other readers.
         waiter_cancel.cancel();
+        // Kick the dispatcher so head GC runs promptly. Without this,
+        // a `queue_size = 1` queue could reject the *next* admit as
+        // QueueFull for up to one full periodic tick (5s on defaults)
+        // even though the head waiter has already timed out / been
+        // cancelled.
+        self.release_notify.notify_one();
         outcome
     }
 
@@ -646,6 +652,36 @@ mod tests {
             outcome,
             AdmitOutcome::Rejected(RejectionReason::QueueTimeout)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_admit_timeout_kicks_dispatcher_to_reap_stale_head() {
+        // After admit timeout marks the queued waiter cancelled, the
+        // dispatcher must be nudged so drop_cancelled_head runs
+        // promptly — otherwise a queue_size=1 queue would reject the
+        // next admit as QueueFull until the next periodic tick.
+        let s = settings_with(Class::Default, 1, 1); // queue_size=1, timeout=1s
+        let scheduler = PriorityScheduler::new(&s, 1).unwrap();
+        scheduler.spawn_dispatcher(dummy_capacity_watch(1));
+        let _held = scheduler
+            .acquire_inflight(Class::Default, rid("held"))
+            .unwrap();
+
+        let outcome = scheduler
+            .admit(Class::Default, rid("w1"), CancellationToken::new())
+            .await;
+        assert!(matches!(
+            outcome,
+            AdmitOutcome::Rejected(RejectionReason::QueueTimeout)
+        ));
+
+        // Let the dispatcher's notify_one wakeup run drop_cancelled_head.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            scheduler.class_queues[Class::Default as usize].depth(),
+            0,
+            "dispatcher should reap the cancelled head promptly"
+        );
     }
 
     #[tokio::test(start_paused = true)]
