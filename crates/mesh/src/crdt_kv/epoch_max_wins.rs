@@ -328,7 +328,7 @@ fn merge(local: &[u8], remote: &[u8]) -> Vec<u8> {
             let Some(RateLimitState::Live(shard)) =
                 RateLimitState::Live(local_shard).merge(RateLimitState::Live(remote_shard))
             else {
-                return local.to_vec();
+                panic!("test helper expected a live shard result");
             };
             encode_shard(&shard).unwrap_or_else(|| local.to_vec())
         }
