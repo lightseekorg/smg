@@ -76,8 +76,9 @@ pub fn process_messages(
 
     // Pass both `enable_thinking` (Qwen3) and `thinking` (Kimi-K2.5) since
     // different model templates use different kwarg names for the same concept.
+    // Adaptive mode is treated as "thinking on"; the model decides whether to actually emit it.
     match &request.thinking {
-        Some(ThinkingConfig::Enabled { .. }) => {
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. }) => {
             combined_template_kwargs.insert("enable_thinking".to_string(), json!(true));
             combined_template_kwargs.insert("thinking".to_string(), json!(true));
         }

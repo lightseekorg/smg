@@ -516,7 +516,10 @@ impl ResponseProcessor {
         // as thinking content, breaking tool use and producing incorrect content blocks.
         let separate_reasoning = matches!(
             &messages_request.thinking,
-            Some(messages::ThinkingConfig::Enabled { .. })
+            Some(
+                messages::ThinkingConfig::Enabled { .. }
+                    | messages::ThinkingConfig::Adaptive { .. }
+            )
         );
         let reasoning_parser_available = separate_reasoning
             && utils::check_reasoning_parser_availability(
@@ -597,7 +600,10 @@ impl ResponseProcessor {
             // If thinking is effectively ON and template has a toggle, start in reasoning mode.
             {
                 let user_thinking = match &messages_request.thinking {
-                    Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
+                    Some(
+                        messages::ThinkingConfig::Enabled { .. }
+                        | messages::ThinkingConfig::Adaptive { .. },
+                    ) => Some(true),
                     Some(messages::ThinkingConfig::Disabled) => Some(false),
                     None => None,
                 };

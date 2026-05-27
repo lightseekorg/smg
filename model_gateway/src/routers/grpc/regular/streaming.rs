@@ -1606,7 +1606,10 @@ impl StreamingProcessor {
         // Only run reasoning parser when the user explicitly enabled thinking.
         let separate_reasoning = matches!(
             &original_request.thinking,
-            Some(messages::ThinkingConfig::Enabled { .. })
+            Some(
+                messages::ThinkingConfig::Enabled { .. }
+                    | messages::ThinkingConfig::Adaptive { .. }
+            )
         );
         let reasoning_parser_available = separate_reasoning
             && utils::check_reasoning_parser_availability(
@@ -1617,7 +1620,10 @@ impl StreamingProcessor {
 
         // Determine if thinking is effectively ON (for mark_reasoning_started).
         let user_thinking = match &original_request.thinking {
-            Some(messages::ThinkingConfig::Enabled { .. }) => Some(true),
+            Some(
+                messages::ThinkingConfig::Enabled { .. }
+                | messages::ThinkingConfig::Adaptive { .. },
+            ) => Some(true),
             Some(messages::ThinkingConfig::Disabled) => Some(false),
             None => None,
         };
