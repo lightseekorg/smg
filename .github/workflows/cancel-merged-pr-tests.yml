@@ -17,7 +17,8 @@ jobs:
       group: gateway-tests-pr-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
-      - run: echo "Cancelling in-progress PR Test (SMG) runs for merged PR #${{ github.event.pull_request.number }}."
+      - run: |
+          echo "Cancelling in-progress PR Test (SMG) runs for merged PR #${{ github.event.pull_request.number }}."
 
   mlx-tests:
     name: Cancel PR Test (MLX)
@@ -27,4 +28,5 @@ jobs:
       group: mlx-tests-pr-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
-      - run: echo "Cancelling in-progress PR Test (MLX) runs for merged PR #${{ github.event.pull_request.number }}."
+      - run: |
+          echo "Cancelling in-progress PR Test (MLX) runs for merged PR #${{ github.event.pull_request.number }}."
