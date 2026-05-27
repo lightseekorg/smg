@@ -234,7 +234,24 @@ impl LwwEngine {
         let mut log = self.log.write();
         log.append(op);
         if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
-            Self::compact_log_and_truncate(&mut log);
+            Self::compact_log(&mut log);
+            // Safety valve for the many-thousand-unique-key pathology: if
+            // compaction couldn't bring the log below the threshold, drop
+            // the oldest entries. Only safe on this local-write path -
+            // truncating in `apply_remote_ops` would silently drop
+            // remotely-learned keys from the log even though they are live
+            // in state, breaking downstream sync from this node.
+            if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+                let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
+                let drain_count = log.len() - keep;
+                tracing::warn!(
+                    total = log.len(),
+                    draining = drain_count,
+                    keeping = keep,
+                    "LwwEngine log still over threshold after compaction, truncating oldest entries"
+                );
+                log.operations_mut().drain(..drain_count);
+            }
         }
     }
 
@@ -247,32 +264,12 @@ impl LwwEngine {
             .cloned()
     }
 
-    /// Compact the log per LWW rules. Used by `apply_remote_ops` after
-    /// absorbing a remote batch; never drops keys, only collapses duplicates
-    /// per `(timestamp, replica_id)` per key.
+    /// Compact the log per LWW rules: collapse all ops for a key down to the
+    /// one with maximum `(timestamp, replica_id)`. Never drops keys outright -
+    /// the truncate-oldest safety valve lives only on the `append_op`
+    /// local-write path.
     fn compact_log(log: &mut OperationLog) {
         log.compact_by_key(Self::lww_fold);
-    }
-
-    /// Compact and, if the log is still oversized after compaction, truncate
-    /// the oldest entries as a safety valve for the many-thousand-unique-key
-    /// pathology. Used only by `append_op` (local writes) - truncating during
-    /// `apply_remote_ops` would silently drop remotely-learned keys from the
-    /// log even though they are live in state, breaking downstream sync from
-    /// this node.
-    fn compact_log_and_truncate(log: &mut OperationLog) {
-        Self::compact_log(log);
-        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
-            let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
-            let drain_count = log.len() - keep;
-            tracing::warn!(
-                total = log.len(),
-                draining = drain_count,
-                keeping = keep,
-                "LwwEngine log still over threshold after compaction, truncating oldest entries"
-            );
-            log.operations_mut().drain(..drain_count);
-        }
     }
 }
 
