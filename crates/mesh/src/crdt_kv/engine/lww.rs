@@ -360,12 +360,19 @@ impl NamespaceCrdtEngine for LwwEngine {
             .map(|op| (op.replica_id(), op.timestamp()))
             .collect();
 
+        // Consume `ops` here so the filter moves each surviving Operation
+        // (including its `Vec<u8>` payload) into `unseen` without cloning.
         let mut unseen: Vec<Operation> = ops
-            .iter()
+            .into_iter()
             .filter(|op| !seen.contains(&(op.replica_id(), op.timestamp())))
-            .cloned()
             .collect();
         unseen.sort_by_key(|op| (op.timestamp(), op.replica_id()));
+
+        // Nothing new to apply: skip the write lock, compaction, and the
+        // clock/state replay loop entirely.
+        if unseen.is_empty() {
+            return;
+        }
 
         // LWW op-id collision policy is dedup: an op already in the log by
         // `(replica_id, timestamp)` is a no-op. `unseen` was already filtered
