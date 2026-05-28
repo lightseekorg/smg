@@ -27,8 +27,9 @@ def collect_streamed_completion(stream):
     chunks = list(stream)
     text = "".join(c.choices[0].text for c in chunks if c.choices and c.choices[0].text)
     final_choice = next(
-        c.choices[0] for c in reversed(chunks) if c.choices and c.choices[0].finish_reason
+        (c.choices[0] for c in reversed(chunks) if c.choices and c.choices[0].finish_reason), None
     )
+    assert final_choice is not None, "No chunk with finish_reason found in stream"
     return text, final_choice
 
 
