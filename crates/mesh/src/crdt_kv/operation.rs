@@ -125,6 +125,30 @@ impl OperationLog {
         &mut self.operations
     }
 
+    /// Memory backstop: if the log is still over `AUTO_COMPACT_THRESHOLD`
+    /// after the caller has compacted it, drop the oldest entries down to 75%
+    /// of the threshold. Returns the number of entries dropped (0 if under
+    /// threshold) so the caller can log with its own context.
+    ///
+    /// This only fires when distinct live keys exceed the threshold - far
+    /// beyond the design's expected key count. It trades convergence for the
+    /// dropped keys against unbounded log growth; that trade is only
+    /// acceptable because reaching it signals an out-of-spec key count in the
+    /// first place.
+    ///
+    /// Callers MUST invoke this only on the local-write path. Dropping on a
+    /// remote-merge path would shed remotely-learned keys that are live in
+    /// state, breaking downstream sync from this node.
+    pub(super) fn truncate_oldest_over_threshold(&mut self) -> usize {
+        if self.operations.len() <= Self::AUTO_COMPACT_THRESHOLD {
+            return 0;
+        }
+        let keep = Self::AUTO_COMPACT_THRESHOLD * 3 / 4;
+        let drain_count = self.operations.len() - keep;
+        self.operations.drain(..drain_count);
+        drain_count
+    }
+
     /// Serialize to bincode bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
         bincode::serialize(self)

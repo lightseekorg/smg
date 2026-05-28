@@ -235,22 +235,16 @@ impl LwwEngine {
         log.append(op);
         if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
             Self::compact_log(&mut log);
-            // Safety valve for the many-thousand-unique-key pathology: if
-            // compaction couldn't bring the log below the threshold, drop
-            // the oldest entries. Only safe on this local-write path -
-            // truncating in `apply_remote_ops` would silently drop
-            // remotely-learned keys from the log even though they are live
-            // in state, breaking downstream sync from this node.
-            if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
-                let keep = OperationLog::AUTO_COMPACT_THRESHOLD * 3 / 4;
-                let drain_count = log.len() - keep;
+            // Local-write path only: dropping oldest on the remote-merge path
+            // would shed remotely-learned keys (see the helper's docs).
+            let dropped = log.truncate_oldest_over_threshold();
+            if dropped > 0 {
                 tracing::warn!(
+                    dropped,
                     total = log.len(),
-                    draining = drain_count,
-                    keeping = keep,
-                    "LwwEngine log still over threshold after compaction, truncating oldest entries"
+                    "LwwEngine log over threshold after compaction; dropped oldest \
+                     entries (out-of-spec distinct-key count)"
                 );
-                log.operations_mut().drain(..drain_count);
             }
         }
     }
