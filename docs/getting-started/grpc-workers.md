@@ -157,7 +157,7 @@ Auto-detected from the model name. Override with `--reasoning-parser` if needed.
 | `qwen3` | Qwen3 |
 | `qwen3_thinking` | Qwen3-Thinking |
 | `kimi` | Kimi |
-| `glm45` | GLM-4.5, GLM-4.7 |
+| `glm` | GLM-4.5, GLM-4.7, GLM-5, GLM-5.1 |
 | `step3` | Step-3 |
 | `minimax` | MiniMax, MiniMax-M2 |
 | `cohere_cmd` | Command-R, Command-A, C4AI |
