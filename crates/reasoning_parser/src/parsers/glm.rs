@@ -1,4 +1,4 @@
-// GLM45 specific reasoning parser.
+// GLM reasoning parser.
 // Uses the same format as Qwen3 but has its own implementation for debugging.
 
 use crate::{
@@ -6,16 +6,17 @@ use crate::{
     traits::{ParseError, ParserConfig, ParserResult, ReasoningParser, DEFAULT_MAX_BUFFER_SIZE},
 };
 
-/// GLM45 reasoning parser.
+/// GLM reasoning parser.
 ///
-/// This parser uses the same format as Qwen3 (<think>...</think>) but has
-/// its own implementation for better debugging and potential future customization.
-pub struct Glm45Parser {
+/// GLM series (4.5, 4.7, 5, 5.1, etc.) all use the same format as Qwen3
+/// (<think>...</think>) but has its own implementation for better debugging
+/// and potential future customization.
+pub struct GlmParser {
     base: BaseReasoningParser,
 }
 
-impl Glm45Parser {
-    /// Create a new GLM45 parser.
+impl GlmParser {
+    /// Create a new GLM parser.
     pub fn new() -> Self {
         let config = ParserConfig {
             think_start_token: "<think>".to_string(),
@@ -26,18 +27,18 @@ impl Glm45Parser {
         };
 
         Self {
-            base: BaseReasoningParser::new(config).with_model_type("glm45".to_string()),
+            base: BaseReasoningParser::new(config).with_model_type("glm".to_string()),
         }
     }
 }
 
-impl Default for Glm45Parser {
+impl Default for GlmParser {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ReasoningParser for Glm45Parser {
+impl ReasoningParser for GlmParser {
     fn detect_and_parse_reasoning(&mut self, text: &str) -> Result<ParserResult, ParseError> {
         self.base.detect_and_parse_reasoning(text)
     }
@@ -75,8 +76,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_glm45_initial_state() {
-        let mut parser = Glm45Parser::new();
+    fn test_glm_initial_state() {
+        let mut parser = GlmParser::new();
 
         // Should NOT treat text as reasoning without start token
         let result = parser
@@ -87,8 +88,8 @@ mod tests {
     }
 
     #[test]
-    fn test_glm45_with_tokens() {
-        let mut parser = Glm45Parser::new();
+    fn test_glm_with_tokens() {
+        let mut parser = GlmParser::new();
 
         // Should extract reasoning with proper tokens
         let result = parser
@@ -99,8 +100,8 @@ mod tests {
     }
 
     #[test]
-    fn test_glm45_streaming() {
-        let mut parser = Glm45Parser::new();
+    fn test_glm_streaming() {
+        let mut parser = GlmParser::new();
 
         // First chunk - normal text
         let result1 = parser
@@ -126,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_model_type() {
-        let parser = Glm45Parser::new();
-        assert_eq!(parser.model_type(), "glm45");
+        let parser = GlmParser::new();
+        assert_eq!(parser.model_type(), "glm");
     }
 }

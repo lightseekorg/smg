@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     parsers::{
-        BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
+        BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, GlmParser, KimiParser,
         MiniMaxParser, NanoV3Parser, PassthroughParser, Qwen3Parser, QwenThinkingParser,
         Step3Parser,
     },
@@ -192,8 +192,8 @@ impl ParserFactory {
         // Register Kimi parser with Unicode tokens (starts with in_reasoning=false)
         registry.register_parser("kimi", || Box::new(KimiParser::new()));
 
-        // Register GLM45 parser (same format as Qwen3 but separate for debugging)
-        registry.register_parser("glm45", || Box::new(Glm45Parser::new()));
+        // Register GLM parser (same format as Qwen3 but separate for debugging)
+        registry.register_parser("glm", || Box::new(GlmParser::new()));
 
         // Register Step3 parser (same format as DeepSeek-R1 but separate for debugging)
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
@@ -251,8 +251,7 @@ impl ParserFactory {
         registry.register_pattern("qwen-thinking", "qwen3_thinking");
         registry.register_pattern("qwen3", "qwen3");
         registry.register_pattern("qwen", "qwen3");
-        registry.register_pattern("glm45", "glm45");
-        registry.register_pattern("glm47", "glm45"); // glm47 uses same reasoning format as glm45
+        registry.register_pattern("glm", "glm");
         registry.register_pattern("kimi-k2-thinking", "kimi_thinking");
         registry.register_pattern("kimi-k2.5", "kimi_k25");
         registry.register_pattern("kimi", "kimi"); // legacy: Kimi-K2-Instruct with unicode tokens
@@ -392,10 +391,10 @@ mod tests {
     }
 
     #[test]
-    fn test_glm45_model() {
+    fn test_glm_model() {
         let factory = ParserFactory::new();
-        let glm45 = factory.create("glm45-v2");
-        assert_eq!(glm45.model_type(), "glm45");
+        let glm = factory.create("glm45-v2");
+        assert_eq!(glm.model_type(), "glm");
     }
 
     #[test]
