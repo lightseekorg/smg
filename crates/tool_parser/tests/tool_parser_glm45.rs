@@ -1,12 +1,12 @@
-//! GLM-4 MoE Parser Integration Tests
+//! GLM Tool Call Parser Integration Tests
 mod common;
 
 use common::create_test_tools;
-use tool_parser::{Glm4MoeParser, ToolParser};
+use tool_parser::{GlmParser, ToolParser};
 
 #[tokio::test]
-async fn test_glm4_complete_parsing() {
-    let parser = Glm4MoeParser::glm45();
+async fn test_glm_complete_parsing() {
+    let parser = GlmParser::glm45();
 
     let input = r"Let me search for that.
 <tool_call>get_weather
@@ -28,8 +28,8 @@ The weather will be...";
 }
 
 #[tokio::test]
-async fn test_glm4_multiple_tools() {
-    let parser = Glm4MoeParser::glm45();
+async fn test_glm_multiple_tools() {
+    let parser = GlmParser::glm45();
 
     let input = r"<tool_call>search
 <arg_key>query</arg_key>
@@ -50,8 +50,8 @@ async fn test_glm4_multiple_tools() {
 }
 
 #[tokio::test]
-async fn test_glm4_type_conversion() {
-    let parser = Glm4MoeParser::glm45();
+async fn test_glm_type_conversion() {
+    let parser = GlmParser::glm45();
 
     let input = r"<tool_call>process
 <arg_key>count</arg_key>
@@ -79,8 +79,8 @@ async fn test_glm4_type_conversion() {
 }
 
 #[tokio::test]
-async fn test_glm4_streaming() {
-    let mut parser = Glm4MoeParser::glm45();
+async fn test_glm_streaming() {
+    let mut parser = GlmParser::glm45();
 
     let tools = create_test_tools();
 
@@ -112,10 +112,10 @@ async fn test_glm4_streaming() {
 }
 
 #[test]
-fn test_glm4_format_detection() {
-    let parser = Glm4MoeParser::glm45();
+fn test_glm_format_detection() {
+    let parser = GlmParser::glm45();
 
-    // Should detect GLM-4 format
+    // Should detect GLM format
     assert!(parser.has_tool_markers("<tool_call>"));
     assert!(parser.has_tool_markers("text with <tool_call> marker"));
 
@@ -127,7 +127,7 @@ fn test_glm4_format_detection() {
 
 #[tokio::test]
 async fn test_python_literals() {
-    let parser = Glm4MoeParser::glm45();
+    let parser = GlmParser::glm45();
 
     let input = r"<tool_call>test_func
 <arg_key>bool_true</arg_key>
@@ -149,8 +149,8 @@ async fn test_python_literals() {
 }
 
 #[tokio::test]
-async fn test_glm4_nested_json_in_arg_values() {
-    let parser = Glm4MoeParser::glm45();
+async fn test_glm_nested_json_in_arg_values() {
+    let parser = GlmParser::glm45();
 
     let input = r#"<tool_call>process
 <arg_key>data</arg_key>
@@ -165,4 +165,19 @@ async fn test_glm4_nested_json_in_arg_values() {
     let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
     assert!(args["data"].is_object());
     assert!(args["list"].is_array());
+}
+
+#[tokio::test]
+async fn test_glm_default_parses_glm47_format() {
+    let parser = GlmParser::default();
+
+    let input =
+        r"<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>";
+
+    let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].function.name, "get_weather");
+
+    let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
+    assert_eq!(args["city"], "Tokyo");
 }

@@ -273,8 +273,8 @@ Qwen3-Coder / Qwen3.5+ XML format with parameter tags.
 | `pythonic` | `llama-4*`, `deepseek-*` | Python-style function syntax |
 | `llama` | `llama-3.2*` | Python tag with JSON |
 | `deepseek` | `deepseek-v3*` | XML with function syntax |
-| `glm45_moe` | `glm-4.5*`, `glm-4.6*` | GLM 4.5/4.6 MoE format |
-| `glm47_moe` | `glm-4.7*` | GLM 4.7 MoE format |
+| `glm` | `glm-*` | GLM 4.7+ format (4.5/4.6 fall back to `glm45`) |
+| `glm45` | `glm-4.5*`, `glm-4.6*` | GLM 4.5/4.6 format (newline-based) |
 | `step3` | `step3*`, `Step-3*` | Step-3 model format |
 | `kimik2` | `kimi-k2*`, `Kimi-K2*` | Kimi K2 model format |
 | `minimax_m2` | `minimax*`, `MiniMax*` | MiniMax M2 model format |

@@ -10,17 +10,14 @@ use crate::{
     types::{FunctionCall, StreamingParseResult, ToolCall, ToolCallItem},
 };
 
-/// GLM-4 MoE format parser for tool calls
+/// GLM tool call format parser.
 ///
-/// Handles both GLM-4 MoE and GLM-4.7 MoE formats:
-/// - GLM-4: `<tool_call>{name}\n<arg_key>{key}</arg_key>\n<arg_value>{value}</arg_value>\n</tool_call>`
-/// - GLM-4.7: `<tool_call>{name}<arg_key>{key}</arg_key><arg_value>{value}</arg_value></tool_call>`
+/// Handles the XML-style `<tool_call>` format used by GLM-4.5 through GLM-5.1:
+/// - GLM-4.5/4.6: `<tool_call>{name}\n<arg_key>{key}</arg_key>\n<arg_value>{value}</arg_value>\n</tool_call>`
+/// - GLM-4.7/5/5.1: `<tool_call>{name}<arg_key>{key}</arg_key><arg_value>{value}</arg_value></tool_call>`
 ///
-/// Features:
-/// - XML-style tags for tool calls
-/// - Key-value pairs for arguments
-/// - Support for multiple sequential tool calls
-pub struct Glm4MoeParser {
+/// The default constructor uses the 4.7+ format (no newline between function name and args).
+pub struct GlmParser {
     /// Regex for extracting complete tool calls
     tool_call_extractor: Regex,
     /// Regex for extracting function details
@@ -45,19 +42,13 @@ pub struct Glm4MoeParser {
     eot_token: &'static str,
 }
 
-impl Glm4MoeParser {
-    /// Create a new generic GLM MoE parser with a custom func_detail_extractor pattern
-    ///
-    /// # Arguments
-    /// - `func_detail_pattern`: Regex pattern for extracting function name and arguments
-    ///   - For GLM-4: `r"(?s)<tool_call>([^\n]*)\n(.*)</tool_call>"`
-    ///   - For GLM-4.7: `r"(?s)<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>"`
+impl GlmParser {
+    /// Create a new GLM parser with a custom func_detail_extractor pattern.
     #[expect(
         clippy::expect_used,
         reason = "regex patterns are compile-time string literals"
     )]
     pub(crate) fn new(func_detail_pattern: &str) -> Self {
-        // Use (?s) flag for DOTALL mode to handle newlines
         let tool_call_pattern = r"(?s)<tool_call>.*?</tool_call>";
         let tool_call_extractor = Regex::new(tool_call_pattern).expect("Valid regex pattern");
 
@@ -79,13 +70,14 @@ impl Glm4MoeParser {
         }
     }
 
-    /// Create a new GLM-4.5/4.6 MoE parser (with newline-based format)
+    /// Create a GLM-4.5/4.6 parser (newline between function name and args).
     pub fn glm45() -> Self {
         Self::new(r"(?s)<tool_call>([^\n]*)\n(.*)</tool_call>")
     }
 
-    /// Create a new GLM-4.7 MoE parser (with whitespace-based format)
-    pub fn glm47() -> Self {
+    /// Create a GLM-4.7+ parser (no newline required between function name and args).
+    /// Compatible with GLM-4.7, GLM-5, GLM-5.1.
+    pub(crate) fn glm47() -> Self {
         Self::new(r"(?s)<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>")
     }
 
@@ -172,16 +164,16 @@ impl Glm4MoeParser {
     }
 }
 
-impl Default for Glm4MoeParser {
+impl Default for GlmParser {
     fn default() -> Self {
-        Self::glm45()
+        Self::glm47()
     }
 }
 
 #[async_trait]
-impl ToolParser for Glm4MoeParser {
+impl ToolParser for GlmParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-        // Check if text contains GLM-4 MoE format
+        // Check if text contains GLM format
         if !self.has_tool_markers(text) {
             return Ok((text.to_string(), vec![]));
         }
@@ -276,7 +268,7 @@ impl ToolParser for Glm4MoeParser {
                     tracing::debug!("Invalid tool name '{}' - skipping", tool_call.function.name);
                     helpers::reset_current_tool_state(
                         &mut self.buffer,
-                        &mut false, // glm45_moe/glm47_moe doesn't track name_sent per tool
+                        &mut false,
                         &mut self.streamed_args_for_tool,
                         &self.prev_tool_call_arr,
                     );

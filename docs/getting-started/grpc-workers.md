@@ -196,8 +196,8 @@ Auto-detected from the model name. Override with `--tool-call-parser` if needed.
 | `mistral` | Mistral, Mixtral |
 | `qwen` | Qwen |
 | `qwen_xml` | Qwen3-Coder, Qwen3.5+ |
-| `glm45_moe` | GLM-4.5, GLM-4.6 |
-| `glm47_moe` | GLM-4.7 |
+| `glm` | GLM-4.7, GLM-5, GLM-5.1 |
+| `glm45` | GLM-4.5, GLM-4.6 |
 | `step3` | Step-3 |
 | `kimik2` | Kimi-K2 |
 | `minimax_m2` | MiniMax |

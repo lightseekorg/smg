@@ -291,8 +291,8 @@ fn bench_complete_parsing(c: &mut Criterion) {
         ("pythonic_multi", "pythonic", PYTHONIC_MULTI),
         ("deepseek", "deepseek", DEEPSEEK_FORMAT),
         ("kimik2", "kimik2", KIMIK2_FORMAT),
-        ("glm45", "glm45_moe", GLM45_FORMAT),
-        ("glm47", "glm47_moe", GLM47_FORMAT),
+        ("glm45", "glm45", GLM45_FORMAT),
+        ("glm47", "glm", GLM47_FORMAT),
         ("step3", "step3", STEP3_FORMAT),
         ("gpt_oss", "gpt_oss", GPT_OSS_FORMAT),
     ];

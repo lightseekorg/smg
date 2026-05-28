@@ -13,7 +13,7 @@ Parser library for extracting tool/function calls from LLM model outputs. Suppor
 | `LlamaParser` | Llama 3.2 | `<\|python_tag\|>{...}` |
 | `PythonicParser` | Llama 4, DeepSeek R1 | `[func_name(arg="val")]` |
 | `DeepSeekParser` | DeepSeek V3 | `<\|tool▁calls▁begin\|>...<\|tool▁calls▁end\|>` |
-| `Glm4MoeParser` | GLM-4.5/4.6/4.7 | `<\|observation\|>...<\|/observation\|>` |
+| `GlmParser` | GLM-4.5 through GLM-5.1 | `<tool_call>...<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>` |
 | `Step3Parser` | Step-3 | `<steptml:function_call>...</steptml:function_call>` |
 | `KimiK2Parser` | Kimi K2 | `<\|tool_call_begin\|>...<\|tool_call_end\|>` |
 | `MinimaxM2Parser` | MiniMax M2 | `<FUNCTION_CALL>{...}</FUNCTION_CALL>` |
