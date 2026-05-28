@@ -393,8 +393,18 @@ mod tests {
     #[test]
     fn test_glm_model() {
         let factory = ParserFactory::new();
-        let glm = factory.create("glm45-v2");
-        assert_eq!(glm.model_type(), "glm");
+
+        // Direct parser name
+        assert_eq!(factory.create("glm").model_type(), "glm");
+
+        // Substring matching for existing and future GLM versions
+        assert_eq!(factory.create("glm45-v2").model_type(), "glm");
+        assert_eq!(factory.create("glm47-chat").model_type(), "glm");
+        assert_eq!(factory.create("glm5-chat").model_type(), "glm");
+        assert_eq!(factory.create("glm51-chat").model_type(), "glm");
+
+        // has_parser exact match (used by --reasoning-parser validation)
+        assert!(factory.registry().has_parser("glm"));
     }
 
     #[test]
