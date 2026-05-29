@@ -349,11 +349,10 @@ impl NamespaceCrdtEngine for LwwEngine {
         // is sized to the incoming BATCH, not the whole log: seed it with the
         // batch op-ids, then strike the ids the log already holds in a single
         // log pass. What remains is exactly the op-ids the log has not seen.
-        let mut unseen_ids: std::collections::HashSet<(ReplicaId, u64)> =
-            std::collections::HashSet::with_capacity(ops.len());
-        for op in &ops {
-            unseen_ids.insert((op.replica_id(), op.timestamp()));
-        }
+        let mut unseen_ids: std::collections::HashSet<(ReplicaId, u64)> = ops
+            .iter()
+            .map(|op| (op.replica_id(), op.timestamp()))
+            .collect();
         {
             let log = self.log.read();
             for op in log.operations() {

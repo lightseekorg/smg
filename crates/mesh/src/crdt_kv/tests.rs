@@ -613,6 +613,13 @@ fn test_epoch_max_wins_same_op_id_folds_within_single_batch() {
     ));
     batch.append(snapshot_op);
     receiver.merge(&batch);
+    // The two same-op-id ops must append-then-compact to a single exported op,
+    // not survive as two entries masked by the state merge.
+    assert_eq!(
+        receiver.get_operation_log().operations().len(),
+        1,
+        "same-op-id batch must fold to a single exported op",
+    );
     assert_eq!(
         decode(&receiver.get(key).expect("post-tombstone shard remains")),
         Some(EpochCount { epoch: 6, count: 1 }),
@@ -983,6 +990,44 @@ fn test_lww_apply_remote_ops_keeps_within_batch_duplicate_op_ids() {
         receiver.get_operation_log().len(),
         1,
         "duplicate op-ids fold to a single log entry",
+    );
+
+    // The store value and the folded log are identical whether the duplicate
+    // is kept or dropped, so they cannot distinguish `contains` from `remove`.
+    // The observable effect of keeping the duplicate is that the apply loop
+    // calls the non-idempotent `LamportClock::update` once per copy. Compare a
+    // two-copy merge against a one-copy merge: the extra `update` must make the
+    // next local write land at a strictly higher timestamp. A regression back
+    // to within-batch dedup collapses both paths and fails this assertion.
+    let single = CrdtOrMap::new();
+    let mut single_batch = OperationLog::new();
+    single_batch.append(Operation::insert(
+        "k".to_string(),
+        b"v".to_vec(),
+        5,
+        replica,
+    ));
+    single.merge(&single_batch);
+
+    receiver.insert("after_dup".to_string(), b"x".to_vec());
+    single.insert("after_single".to_string(), b"x".to_vec());
+
+    let local_write_ts = |map: &CrdtOrMap, key: &str| {
+        map.get_operation_log()
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                Operation::Insert {
+                    key: k, timestamp, ..
+                } if k == key => Some(*timestamp),
+                _ => None,
+            })
+            .expect("local write should be in the log")
+    };
+    assert!(
+        local_write_ts(&receiver, "after_dup") > local_write_ts(&single, "after_single"),
+        "two same-op-id remote copies must advance the Lamport clock one step \
+         more than a single copy",
     );
 }
 
