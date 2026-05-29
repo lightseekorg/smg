@@ -225,6 +225,28 @@ impl RouterConfigBuilder {
         self
     }
 
+    // ==================== Priority Scheduler ====================
+
+    pub fn priority_scheduler_enabled(mut self, enabled: bool) -> Self {
+        self.config.priority_scheduler_enabled = enabled;
+        self
+    }
+
+    pub fn priority_scheduler_default_max_class(mut self, class: impl Into<String>) -> Self {
+        self.config.priority_scheduler_default_max_class = class.into();
+        self
+    }
+
+    pub fn priority_scheduler_config(mut self, path: Option<String>) -> Self {
+        self.config.priority_scheduler_config = path;
+        self
+    }
+
+    pub fn priority_scheduler_tenant_metric_top_n(mut self, n: u32) -> Self {
+        self.config.priority_scheduler_tenant_metric_top_n = n;
+        self
+    }
+
     // ==================== Security & CORS ====================
 
     pub fn api_key<S: Into<String>>(mut self, key: S) -> Self {

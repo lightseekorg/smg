@@ -351,6 +351,25 @@ struct CliArgs {
     #[arg(long, default_value_t = 60, help_heading = "Rate Limiting")]
     queue_timeout_secs: u64,
 
+    // ==================== Priority Scheduler ====================
+    /// Enable the priority-aware admission scheduler. When unset (default),
+    /// the legacy concurrency-limit middleware stays wired.
+    #[arg(long, help_heading = "Priority Scheduler")]
+    priority_scheduler_enabled: bool,
+
+    /// Max priority class for tenants not listed in the scheduler YAML
+    /// (system | interactive | default | bulk).
+    #[arg(long, default_value = "default", help_heading = "Priority Scheduler")]
+    priority_scheduler_default_max_class: String,
+
+    /// Optional path to the priority-scheduler YAML config.
+    #[arg(long, help_heading = "Priority Scheduler")]
+    priority_scheduler_config: Option<String>,
+
+    /// Cap on per-tenant scheduler metric label cardinality (top-N + "other").
+    #[arg(long, default_value_t = 32, help_heading = "Priority Scheduler")]
+    priority_scheduler_tenant_metric_top_n: u32,
+
     /// Token bucket refill rate (tokens per second)
     #[arg(long, help_heading = "Rate Limiting")]
     rate_limit_tokens_per_second: Option<i32>,
@@ -1210,6 +1229,10 @@ impl CliArgs {
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
+            .priority_scheduler_enabled(self.priority_scheduler_enabled)
+            .priority_scheduler_default_max_class(self.priority_scheduler_default_max_class.clone())
+            .priority_scheduler_config(self.priority_scheduler_config.clone())
+            .priority_scheduler_tenant_metric_top_n(self.priority_scheduler_tenant_metric_top_n)
             .cors_allowed_origins(self.cors_allowed_origins.clone())
             .retry_config(RetryConfig {
                 max_retries: self.retry_max_retries,

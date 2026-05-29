@@ -116,6 +116,23 @@ pub struct RouterConfig {
     pub queue_timeout_secs: u64,
     /// If not set, defaults to max_concurrent_requests
     pub rate_limit_tokens_per_second: Option<i32>,
+    /// Enable the priority-aware admission scheduler. When false (default),
+    /// the legacy concurrency-limit middleware stays wired — zero behavior
+    /// change for existing deployments.
+    #[serde(default)]
+    pub priority_scheduler_enabled: bool,
+    /// Max priority class applied to tenants not listed in the scheduler
+    /// YAML (`system` | `interactive` | `default` | `bulk`).
+    #[serde(default = "default_priority_scheduler_max_class")]
+    pub priority_scheduler_default_max_class: String,
+    /// Optional path to the priority-scheduler YAML (per-class + per-tenant
+    /// overrides). Absent → built-in defaults, empty tenant policy map.
+    #[serde(default)]
+    pub priority_scheduler_config: Option<String>,
+    /// Cap on per-tenant scheduler metric label cardinality (top-N tenants
+    /// by inflight; the remainder bucket under `tenant="other"`).
+    #[serde(default = "default_priority_scheduler_tenant_metric_top_n")]
+    pub priority_scheduler_tenant_metric_top_n: u32,
     pub cors_allowed_origins: Vec<String>,
     pub retry: RetryConfig,
     pub circuit_breaker: CircuitBreakerConfig,
@@ -256,6 +273,14 @@ impl Default for TokenizerCacheConfig {
             l1_max_memory: default_l1_max_memory(),
         }
     }
+}
+
+fn default_priority_scheduler_max_class() -> String {
+    "default".to_string()
+}
+
+fn default_priority_scheduler_tenant_metric_top_n() -> u32 {
+    32
 }
 
 fn default_history_backend() -> HistoryBackend {
@@ -662,6 +687,11 @@ impl Default for RouterConfig {
             queue_size: 100,
             queue_timeout_secs: 60,
             rate_limit_tokens_per_second: None,
+            priority_scheduler_enabled: false,
+            priority_scheduler_default_max_class: default_priority_scheduler_max_class(),
+            priority_scheduler_config: None,
+            priority_scheduler_tenant_metric_top_n: default_priority_scheduler_tenant_metric_top_n(
+            ),
             cors_allowed_origins: vec![],
             retry: RetryConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
