@@ -956,11 +956,23 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
             let step_duration = step_start.elapsed();
 
-            self.state_store
-                .update(instance_id, |s| {
-                    s.context = context.clone();
-                })
-                .await?;
+            // Persist the step's context mutations — but NOT when the step opted
+            // out via `StepResult::Skip`. Sibling steps that become ready at the
+            // same time run in parallel, and each takes its own `get_context`
+            // snapshot above; the write-back below replaces the *entire* shared
+            // context (last-writer-wins). A skipped step did no work, so its
+            // snapshot is stale relative to a concurrent sibling's write, and
+            // persisting it silently clobbers that sibling's mutations. This was
+            // the worker-registration race: one branch's no-op `Skip` steps wiped
+            // the other branch's `actual_workers`, surfacing downstream as
+            // `register_workers: Context value not found: workers`.
+            if !matches!(result, Ok(Ok(StepResult::Skip))) {
+                self.state_store
+                    .update(instance_id, |s| {
+                        s.context = context.clone();
+                    })
+                    .await?;
+            }
 
             match result {
                 Ok(Ok(StepResult::Success)) => {
@@ -1252,5 +1264,130 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> std::fmt::Debug for WorkflowEn
         f.debug_struct("WorkflowEngine")
             .field("definitions_count", &self.definitions.read().len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod skip_clobber_tests {
+    use std::{sync::Arc, time::Duration};
+
+    use async_trait::async_trait;
+    use serde::{Deserialize, Serialize};
+    use tokio::sync::Notify;
+
+    use crate::{
+        StepDefinition, StepExecutor, StepResult, WorkflowContext, WorkflowData,
+        WorkflowDefinition, WorkflowEngine, WorkflowResult, WorkflowStatus,
+    };
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    struct Data {
+        value: String,
+    }
+
+    impl WorkflowData for Data {
+        fn workflow_type() -> &'static str {
+            "skip_clobber_test"
+        }
+    }
+
+    /// Writes `value = "written"`, but only after the skipper has taken its
+    /// snapshot — so the write is guaranteed to land after that snapshot.
+    struct Writer {
+        skipper_started: Arc<Notify>,
+        writer_done: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl StepExecutor<Data> for Writer {
+        async fn execute(&self, ctx: &mut WorkflowContext<Data>) -> WorkflowResult<StepResult> {
+            self.skipper_started.notified().await;
+            ctx.data.value = "written".to_string();
+            self.writer_done.notify_one();
+            Ok(StepResult::Success)
+        }
+    }
+
+    /// Returns `Skip` without mutating, but only after the writer has written and
+    /// its write-back has landed. A buggy unconditional write-back of this step's
+    /// stale snapshot would then clobber the writer's value.
+    struct SlowSkipper {
+        skipper_started: Arc<Notify>,
+        writer_done: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl StepExecutor<Data> for SlowSkipper {
+        async fn execute(&self, _ctx: &mut WorkflowContext<Data>) -> WorkflowResult<StepResult> {
+            // Reaching here implies the engine already snapshotted our context.
+            self.skipper_started.notify_one();
+            self.writer_done.notified().await;
+            // Cushion so the writer's async write-back is fully applied first.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(StepResult::Skip)
+        }
+    }
+
+    /// A `Skip` step must not persist its (stale) context snapshot, otherwise it
+    /// clobbers a concurrently-running sibling step's writes. Regression test for
+    /// the worker-registration race (`register_workers: Context value not found:
+    /// workers`).
+    #[tokio::test]
+    async fn skipped_step_does_not_clobber_sibling_context() {
+        let skipper_started = Arc::new(Notify::new());
+        let writer_done = Arc::new(Notify::new());
+
+        // Both steps have no dependencies, so the engine launches them in
+        // parallel — reproducing the sibling-branch race.
+        let def = WorkflowDefinition::<Data>::new("clobber", "Clobber Repro")
+            .add_step(StepDefinition::new(
+                "writer",
+                "Writer",
+                Arc::new(Writer {
+                    skipper_started: skipper_started.clone(),
+                    writer_done: writer_done.clone(),
+                }),
+            ))
+            .add_step(StepDefinition::new(
+                "skipper",
+                "Skipper",
+                Arc::new(SlowSkipper {
+                    skipper_started: skipper_started.clone(),
+                    writer_done: writer_done.clone(),
+                }),
+            ));
+
+        let engine = WorkflowEngine::<Data>::new();
+        let def_id = def.id.clone();
+        engine.register_workflow(def).expect("register workflow");
+
+        let instance = engine
+            .start_workflow(def_id, Data::default())
+            .await
+            .expect("start workflow");
+
+        // Poll for terminal status (wait_for_completion cleans up the state we
+        // need to inspect).
+        let mut state = engine.get_status(instance).await.expect("status");
+        for _ in 0..200 {
+            if matches!(
+                state.status,
+                WorkflowStatus::Completed | WorkflowStatus::Failed
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            state = engine.get_status(instance).await.expect("status");
+        }
+
+        assert_eq!(
+            state.status,
+            WorkflowStatus::Completed,
+            "workflow should complete"
+        );
+        assert_eq!(
+            state.context.data.value, "written",
+            "skipped sibling clobbered the writer's context mutation"
+        );
     }
 }
