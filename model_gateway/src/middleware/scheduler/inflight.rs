@@ -1,8 +1,12 @@
 //! In-flight request bookkeeping for the priority scheduler.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 use smg_auth::RequestId;
+use tokio_util::sync::CancellationToken;
 
 use super::Class;
 
@@ -29,7 +33,18 @@ use super::Class;
 pub struct InflightHandle {
     class: Class,
     request_id: RequestId,
+    /// When this request was admitted. Used as the preemption victim
+    /// tiebreaker (prefer the most-recently-admitted within a class, to
+    /// waste the least upstream work) and as the epoch for TTFT.
+    admitted_at: Instant,
     first_byte_at: AtomicU64,
+    /// Scheduler-owned cancellation token, fired by `try_mark_preempted`'s
+    /// caller when this request is chosen as a preemption victim. Handed
+    /// to the handler via [`super::SchedulerPermit::cancel_token`] (which
+    /// the admission middleware inserts into request extensions) so the
+    /// handler can `select!` against it and unwind. Distinct from the
+    /// client-disconnect token `admit` waits on during queueing.
+    cancel: CancellationToken,
 }
 
 impl InflightHandle {
@@ -45,7 +60,9 @@ impl InflightHandle {
         Self {
             class,
             request_id,
+            admitted_at: Instant::now(),
             first_byte_at: AtomicU64::new(0),
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -57,6 +74,30 @@ impl InflightHandle {
     /// Request id this handle tracks (registry key).
     pub fn request_id(&self) -> &RequestId {
         &self.request_id
+    }
+
+    /// When this request was admitted (preemption tiebreaker + TTFT epoch).
+    pub fn admitted_at(&self) -> Instant {
+        self.admitted_at
+    }
+
+    /// Clone of the scheduler-owned cancel token for this request.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Fire the scheduler-owned cancel token. Called only after a
+    /// successful [`try_mark_preempted`], so a handler is never asked to
+    /// unwind a request that has already started streaming output.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Whether this request is still a valid preemption victim: it has
+    /// neither emitted its first byte nor already been preempted (both
+    /// move `first_byte_at` off `0`). A single `Acquire` load.
+    pub fn is_preemptible(&self) -> bool {
+        self.first_byte_at.load(Ordering::Acquire) == 0
     }
 
     /// Attempt to mark this request as preempted. Returns `true` on the
