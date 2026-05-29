@@ -2,10 +2,10 @@
 //!
 //! Mirrors [`sync_stream`](crate::transport::sync_stream) for the CRDT data
 //! path:
-//! - Outbound: [`build_crdt_batch`] converts an [`Operation`] slice (the local
-//!   op-log snapshot carried in [`RoundBatch`](crate::kv::RoundBatch)) into a
-//!   wire [`CrdtBatch`]; [`wrap_crdt_batch`] builds the `StreamMessage`
-//!   envelope.
+//! - Outbound: [`build_crdt_batches`] converts an [`Operation`] slice (the
+//!   local op-log snapshot carried in [`RoundBatch`](crate::kv::RoundBatch))
+//!   into one or more wire [`CrdtBatch`]es, each bounded below the gRPC
+//!   message cap; [`wrap_crdt_batch`] builds the `StreamMessage` envelope.
 //! - Inbound: [`dispatch_crdt_batch`] decodes a received `CrdtBatch` back into
 //!   `Operation`s and merges them into the local CRDT store via `MeshKV`.
 //!
@@ -65,15 +65,42 @@ fn proto_to_op(op: CrdtOp) -> Option<Operation> {
     })
 }
 
-/// Build a [`CrdtBatch`] from an op-log snapshot. Returns `None` for an empty
-/// snapshot so the caller can skip sending an empty message.
-pub fn build_crdt_batch(ops: &[Operation]) -> Option<CrdtBatch> {
-    if ops.is_empty() {
-        return None;
+/// Conservative estimate of a `CrdtOp`'s encoded size: the variable-length
+/// fields plus a constant covering proto field tags, length varints, the
+/// timestamp/tombstone fields, and the repeated-field wrapper in `CrdtBatch`.
+fn estimated_op_size(op: &CrdtOp) -> usize {
+    op.key.len() + op.value.len() + op.replica_id.len() + 24
+}
+
+/// Split an op-log snapshot into one or more [`CrdtBatch`]es, each estimated to
+/// stay under `max_bytes` so the wrapped `StreamMessage` does not exceed the
+/// gRPC message cap. Returns an empty `Vec` for an empty snapshot. Without this
+/// bound, a large op-log (broadcast in full each round until per-peer watermark
+/// filtering lands) could produce a single frame above `MAX_MESSAGE_SIZE`,
+/// which tonic rejects on encode/decode and which would tear down the
+/// sync_stream. A single op larger than `max_bytes` is emitted alone (best
+/// effort); `worker:`/`rl:`/`config:` values are far below the cap, so in
+/// practice this only bounds the op count per frame.
+pub fn build_crdt_batches(ops: &[Operation], max_bytes: usize) -> Vec<CrdtBatch> {
+    let mut out = Vec::new();
+    let mut current: Vec<CrdtOp> = Vec::new();
+    let mut current_bytes = 0usize;
+    for op in ops {
+        let proto = op_to_proto(op);
+        let size = estimated_op_size(&proto);
+        if !current.is_empty() && current_bytes + size > max_bytes {
+            out.push(CrdtBatch {
+                ops: std::mem::take(&mut current),
+            });
+            current_bytes = 0;
+        }
+        current_bytes += size;
+        current.push(proto);
     }
-    Some(CrdtBatch {
-        ops: ops.iter().map(op_to_proto).collect(),
-    })
+    if !current.is_empty() {
+        out.push(CrdtBatch { ops: current });
+    }
+    out
 }
 
 /// Wrap a [`CrdtBatch`] in a `StreamMessage` envelope.
@@ -87,9 +114,10 @@ pub fn wrap_crdt_batch(batch: CrdtBatch, sequence: u64, self_name: &str) -> Stre
 }
 
 /// Receiver-side dispatch for a `CrdtBatch`: decode each op and merge the batch
-/// into the local CRDT store. Ops with an unparsable `replica_id` are skipped.
-/// Merge is idempotent by op-id, so a batch the node has already absorbed is a
-/// no-op. (Subscriber notification on remote merge is a follow-up — d-3a-2.)
+/// into the local CRDT store, firing subscribers for keys whose value changed
+/// (via `MeshKV::merge_crdt_ops`). Ops with an unparsable `replica_id` are
+/// skipped. Merge is idempotent by op-id, so a batch the node has already
+/// absorbed is a no-op and fires no subscriber event.
 pub fn dispatch_crdt_batch(mesh_kv: &MeshKV, batch: CrdtBatch) {
     let ops: Vec<Operation> = batch.ops.into_iter().filter_map(proto_to_op).collect();
     if ops.is_empty() {
@@ -115,8 +143,8 @@ mod tests {
     }
 
     #[test]
-    fn build_crdt_batch_skips_empty() {
-        assert!(build_crdt_batch(&[]).is_none());
+    fn build_crdt_batches_empty_and_single() {
+        assert!(build_crdt_batches(&[], 1024).is_empty());
         let replica = ReplicaId::new();
         let ops = vec![Operation::insert(
             "rl:c".to_string(),
@@ -124,10 +152,35 @@ mod tests {
             1,
             replica,
         )];
-        let batch = build_crdt_batch(&ops).expect("non-empty op-log yields a batch");
-        assert_eq!(batch.ops.len(), 1);
-        assert_eq!(batch.ops[0].key, "rl:c");
-        assert!(!batch.ops[0].tombstone);
+        let batches = build_crdt_batches(&ops, 1024);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].ops.len(), 1);
+        assert_eq!(batches[0].ops[0].key, "rl:c");
+        assert!(!batches[0].ops[0].tombstone);
+    }
+
+    #[test]
+    fn build_crdt_batches_splits_over_budget() {
+        let replica = ReplicaId::new();
+        let ops: Vec<Operation> = (0..50)
+            .map(|i| Operation::insert(format!("worker:{i}"), vec![0u8; 100], i, replica))
+            .collect();
+        // Each op is ~100 bytes of value + overhead; a 300-byte budget forces
+        // several batches.
+        let batches = build_crdt_batches(&ops, 300);
+        assert!(
+            batches.len() > 1,
+            "large op-log must split into many batches"
+        );
+        // Every op is preserved exactly once across all batches.
+        let total: usize = batches.iter().map(|b| b.ops.len()).sum();
+        assert_eq!(total, ops.len());
+        // No batch exceeds the budget (except a lone oversized op, which none
+        // of these are).
+        for batch in &batches {
+            let bytes: usize = batch.ops.iter().map(estimated_op_size).sum();
+            assert!(bytes <= 300 || batch.ops.len() == 1);
+        }
     }
 
     #[test]

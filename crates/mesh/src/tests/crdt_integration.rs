@@ -16,15 +16,18 @@ use tokio::sync::mpsc::error::TryRecvError;
 use crate::{
     crdt_kv::{decode as decode_epoch_count, encode as encode_epoch_count, EpochCount},
     kv::MeshKV,
-    transport::crdt_batch::{build_crdt_batch, dispatch_crdt_batch},
+    transport::{
+        crdt_batch::{build_crdt_batches, dispatch_crdt_batch},
+        limits::MAX_STREAM_CHUNK_BYTES,
+    },
     MergeStrategy,
 };
 
 /// Simulate one gossip round of CRDT delivery: snapshot the sender's op-log,
-/// encode it, and dispatch it into the receiver.
+/// encode it into size-bounded batches, and dispatch each into the receiver.
 fn deliver_crdt(sender: &MeshKV, receiver: &MeshKV) {
     let ops = sender.collect_round_batch().crdt_ops;
-    if let Some(batch) = build_crdt_batch(&ops) {
+    for batch in build_crdt_batches(&ops, MAX_STREAM_CHUNK_BYTES) {
         dispatch_crdt_batch(receiver, batch);
     }
 }

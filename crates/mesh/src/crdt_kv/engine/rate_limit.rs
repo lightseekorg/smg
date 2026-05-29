@@ -386,9 +386,11 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         let mut before: std::collections::HashMap<String, Option<Vec<u8>>> =
             std::collections::HashMap::new();
         for op in &ops {
-            before
-                .entry(op.key().to_string())
-                .or_insert_with(|| self.current_encoded(op.key()));
+            // `contains_key` with a borrowed key avoids allocating a `String`
+            // for keys already snapshotted (a batch may repeat a key).
+            if !before.contains_key(op.key()) {
+                before.insert(op.key().to_string(), self.current_encoded(op.key()));
+            }
         }
 
         for op in ops {

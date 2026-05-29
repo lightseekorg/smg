@@ -56,8 +56,8 @@ use super::{
         try_ping, ClusterState,
     },
     transport::{
-        crdt_batch::{build_crdt_batch, dispatch_crdt_batch, wrap_crdt_batch},
-        limits::{MAX_MESSAGE_SIZE, STREAM_IDLE_TIMEOUT},
+        crdt_batch::{build_crdt_batches, dispatch_crdt_batch, wrap_crdt_batch},
+        limits::{MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT},
         sync_stream::{
             build_heartbeat, build_peer_stream_batches, dispatch_stream_batch, wrap_stream_batch,
         },
@@ -323,15 +323,19 @@ impl Gossip for GossipService {
                         }
                     }
 
-                    // CRDT op-log: broadcast the full snapshot this round
-                    // (idempotent merge on the peer).
-                    if let Some(crdt_batch) = build_crdt_batch(&stream_batch.crdt_ops) {
+                    // CRDT op-log: broadcast the full snapshot this round,
+                    // split to stay under the gRPC message cap (idempotent
+                    // merge on the peer).
+                    for crdt_batch in
+                        build_crdt_batches(&stream_batch.crdt_ops, MAX_STREAM_CHUNK_BYTES)
+                    {
                         sequence_counter += 1;
                         let msg = wrap_crdt_batch(crdt_batch, sequence_counter, &self_name_sender);
                         match tx_sender.try_send(Ok(msg)) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
                                 log::debug!("server-side crdt batch dropped on backpressure");
+                                break;
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return,
                         }

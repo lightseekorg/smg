@@ -403,9 +403,11 @@ impl NamespaceCrdtEngine for LwwEngine {
         let mut before: std::collections::HashMap<String, Option<Vec<u8>>> =
             std::collections::HashMap::new();
         for op in &unseen {
-            before
-                .entry(op.key().to_string())
-                .or_insert_with(|| self.store.get(op.key()));
+            // `contains_key` with a borrowed key avoids allocating a `String`
+            // for keys already snapshotted (a batch may repeat a key).
+            if !before.contains_key(op.key()) {
+                before.insert(op.key().to_string(), self.store.get(op.key()));
+            }
         }
 
         // Apply unseen ops to live state. Lamport clock observes each remote
