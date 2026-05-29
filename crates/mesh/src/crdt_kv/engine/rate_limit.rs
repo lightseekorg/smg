@@ -358,34 +358,21 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         // so generation only bumps when state truly changes.
         ops.sort_by_key(|op| (op.timestamp(), op.replica_id()));
 
-        // EpochMaxWins op-id collision policy: fold the existing log op and
-        // the incoming op via `compact_operations` so a compacted snapshot
-        // replaces a previously-seen raw payload at the same op-id (the bug
-        // class addressed in #1469). Unseen incoming ops are appended.
-        // Compaction then runs across the full log per the same fold rule.
+        // Merge incoming ops into the log by appending them all and letting
+        // compaction fold per key. `compact_by_key` groups by key and folds
+        // each group via `compact_operations`; because ops sharing an op-id
+        // share a key (op-id is unique per logical op), a compacted snapshot
+        // and a previously-seen raw payload at the same op-id land in the same
+        // group and fold together - preserving the embedded `tombstone_version`
+        // (the bug class addressed in #1469) with no separate op-id index.
+        // `RateLimitState::merge` is associative, so folding the whole group at
+        // once matches the prior incremental per-op-id fold; identical ops fold
+        // idempotently, so no duplicate survives. compact_log does not truncate,
+        // so remotely-learned keys are never dropped.
         {
             let mut log = self.log.write();
-            let mut local_index: std::collections::HashMap<(ReplicaId, u64), usize> = log
-                .operations()
-                .iter()
-                .enumerate()
-                .map(|(idx, op)| ((op.replica_id(), op.timestamp()), idx))
-                .collect();
             for op in &ops {
-                let id = (op.replica_id(), op.timestamp());
-                match local_index.get(&id).copied() {
-                    Some(local_idx) => {
-                        let folded =
-                            ratelimit::compact_operations([&log.operations()[local_idx], op]);
-                        if let Some(folded) = folded {
-                            log.operations_mut()[local_idx] = folded;
-                        }
-                    }
-                    None => {
-                        local_index.insert(id, log.operations().len());
-                        log.append(op.clone());
-                    }
-                }
+                log.append(op.clone());
             }
             Self::compact_log(&mut log);
         }

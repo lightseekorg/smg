@@ -80,7 +80,7 @@ impl Operation {
 /// Each engine owns one `OperationLog` instance holding only its own
 /// namespace's operations; the log itself carries no merge-strategy knowledge.
 /// Engines drive merge (op-id collision policy) and compaction (per-key fold
-/// rule) themselves via [`Self::operations`], [`Self::operations_mut`], and
+/// rule) themselves via [`Self::operations`], [`Self::append`], and
 /// [`Self::compact_by_key`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationLog {
@@ -116,13 +116,6 @@ impl OperationLog {
     /// Get all operations
     pub fn operations(&self) -> &[Operation] {
         &self.operations
-    }
-
-    /// Mutable access to the underlying op vector. Engines need this to merge
-    /// in-place with their own op-id collision policy (LWW dedups; EpochMaxWins
-    /// folds via `epoch_max_wins::compact_operations`).
-    pub(super) fn operations_mut(&mut self) -> &mut Vec<Operation> {
-        &mut self.operations
     }
 
     /// Memory backstop: if the log is still over `AUTO_COMPACT_THRESHOLD`

@@ -345,28 +345,44 @@ impl NamespaceCrdtEngine for LwwEngine {
         }
 
         // Determine which incoming ops the local log has not yet seen. LWW
-        // dedups by op-id; an op already in the log is a no-op.
-        let seen: std::collections::HashSet<(ReplicaId, u64)> = self
-            .log
-            .read()
-            .operations()
-            .iter()
-            .map(|op| (op.replica_id(), op.timestamp()))
-            .collect();
-
-        // Consume `ops` here so the filter moves each surviving Operation
-        // (including its `Vec<u8>` payload) into `unseen` without cloning.
-        let mut unseen: Vec<Operation> = ops
-            .into_iter()
-            .filter(|op| !seen.contains(&(op.replica_id(), op.timestamp())))
-            .collect();
-        unseen.sort_by_key(|op| (op.timestamp(), op.replica_id()));
+        // dedups by op-id; an op already in the log is a no-op. The lookup set
+        // is sized to the incoming BATCH, not the whole log: seed it with the
+        // batch op-ids, then strike the ids the log already holds in a single
+        // log pass. What remains is exactly the op-ids the log has not seen.
+        let mut unseen_ids: std::collections::HashSet<(ReplicaId, u64)> =
+            std::collections::HashSet::with_capacity(ops.len());
+        for op in &ops {
+            unseen_ids.insert((op.replica_id(), op.timestamp()));
+        }
+        {
+            let log = self.log.read();
+            for op in log.operations() {
+                if unseen_ids.is_empty() {
+                    break;
+                }
+                unseen_ids.remove(&(op.replica_id(), op.timestamp()));
+            }
+        }
 
         // Nothing new to apply: skip the write lock, compaction, and the
-        // clock/state replay loop entirely.
-        if unseen.is_empty() {
+        // clock/state replay loop entirely. Critical fast path when gossip
+        // resends a fully-redundant log.
+        if unseen_ids.is_empty() {
             return;
         }
+
+        // Keep every batch op whose id the log has not seen. Use `contains`
+        // (not `remove`) so within-batch duplicate op-ids are all retained,
+        // matching the prior log-sized-set filter - the apply loop below calls
+        // `clock.update` once per retained op, and `LamportClock::update` is
+        // not idempotent, so dropping a within-batch duplicate would diverge
+        // the shared clock. `ops` is consumed so survivors move without
+        // cloning their payloads.
+        let mut unseen: Vec<Operation> = ops
+            .into_iter()
+            .filter(|op| unseen_ids.contains(&(op.replica_id(), op.timestamp())))
+            .collect();
+        unseen.sort_by_key(|op| (op.timestamp(), op.replica_id()));
 
         // LWW op-id collision policy is dedup: an op already in the log by
         // `(replica_id, timestamp)` is a no-op. `unseen` was already filtered

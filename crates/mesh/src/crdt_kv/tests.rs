@@ -563,6 +563,82 @@ fn test_epoch_max_wins_compacted_snapshot_applies_when_op_id_already_seen() {
 }
 
 #[test]
+fn test_epoch_max_wins_same_op_id_folds_within_single_batch() {
+    // The raw post-tombstone insert and the compacted snapshot that reuses its
+    // op-id (and embeds tombstone_version=65) arrive in the SAME batch.
+    // apply_remote_ops appends both and lets per-key compaction fold them, so
+    // the snapshot's tombstone_version must survive without a separate op-id
+    // index - otherwise a later delayed pre-tombstone insert resurrects the
+    // deleted high-epoch shard.
+    init_test_logging();
+    let key = "rl:global:node-a";
+
+    let pre_tombstone_replica = ReplicaId::new();
+    let tombstone_replica = ReplicaId::new();
+    let post_tombstone_replica = ReplicaId::new();
+
+    // Produce the compacted snapshot op: a single Insert at op-id
+    // (70, post_tombstone_replica) embedding tombstone_version=65.
+    let source = CrdtOrMap::new();
+    source.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    let mut source_log = OperationLog::new();
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        pre_tombstone_replica,
+    ));
+    source_log.append(Operation::remove(key.to_string(), 65, tombstone_replica));
+    source_log.append(Operation::insert(
+        key.to_string(),
+        encode(6, 1).to_vec(),
+        70,
+        post_tombstone_replica,
+    ));
+    source.merge(&source_log);
+    let compacted = source.get_operation_log();
+    assert_eq!(compacted.operations().len(), 1);
+    let snapshot_op = compacted.operations()[0].clone();
+
+    // Receiver gets BOTH the raw post-tombstone insert and the compacted
+    // snapshot (same op-id) in one batch.
+    let receiver = CrdtOrMap::new();
+    receiver.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+    let mut batch = OperationLog::new();
+    batch.append(Operation::insert(
+        key.to_string(),
+        encode(6, 1).to_vec(),
+        70,
+        post_tombstone_replica,
+    ));
+    batch.append(snapshot_op);
+    receiver.merge(&batch);
+    assert_eq!(
+        decode(&receiver.get(key).expect("post-tombstone shard remains")),
+        Some(EpochCount { epoch: 6, count: 1 }),
+    );
+
+    // Delayed pre-tombstone insert must be suppressed by the folded-in tombstone.
+    let mut delayed = OperationLog::new();
+    delayed.append(Operation::insert(
+        key.to_string(),
+        encode(7, 99).to_vec(),
+        60,
+        ReplicaId::new(),
+    ));
+    receiver.merge(&delayed);
+    assert_eq!(
+        decode(
+            &receiver
+                .get(key)
+                .expect("post-tombstone live point still survives")
+        ),
+        Some(EpochCount { epoch: 6, count: 1 }),
+        "same-op-id snapshot folded within one batch must preserve the tombstone",
+    );
+}
+
+#[test]
 fn test_epoch_max_wins_remove_for_never_seen_key_blocks_delayed_pre_tombstone_insert() {
     // Replica receives a tombstone for a key it has never seen, then later
     // receives a delayed pre-tombstone insert for the same key. The tombstone
@@ -872,6 +948,41 @@ fn test_lww_apply_remote_ops_is_idempotent() {
     assert_eq!(
         after_first, after_second,
         "re-applying the same log must be a no-op for log length",
+    );
+}
+
+#[test]
+fn test_lww_apply_remote_ops_keeps_within_batch_duplicate_op_ids() {
+    // A single batch may carry duplicate op-ids (e.g. a concatenated gossip
+    // log). The batch-sized dedup filters only against the local log (via
+    // `contains`), so it keeps every batch op - duplicates included - exactly
+    // as the prior log-sized-set filter did. Compaction folds the duplicates
+    // to one winner, and the clock advances once per applied op (matching the
+    // non-idempotent `LamportClock::update`).
+    init_test_logging();
+    let receiver = CrdtOrMap::new();
+    let replica = ReplicaId::new();
+
+    let mut batch = OperationLog::new();
+    batch.append(Operation::insert(
+        "k".to_string(),
+        b"v".to_vec(),
+        5,
+        replica,
+    ));
+    batch.append(Operation::insert(
+        "k".to_string(),
+        b"v".to_vec(),
+        5,
+        replica,
+    ));
+    receiver.merge(&batch);
+
+    assert_eq!(receiver.get("k"), Some(b"v".to_vec()));
+    assert_eq!(
+        receiver.get_operation_log().len(),
+        1,
+        "duplicate op-ids fold to a single log entry",
     );
 }
 
