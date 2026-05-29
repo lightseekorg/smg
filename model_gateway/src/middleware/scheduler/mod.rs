@@ -4,6 +4,7 @@ pub mod body;
 pub mod class;
 pub mod config;
 pub mod engine;
+pub mod error;
 pub mod inflight;
 pub mod policy;
 pub mod queue;
@@ -18,4 +19,5 @@ pub use config::{
 pub use engine::{
     AdmitOutcome, PriorityScheduler, RejectionReason, SchedulerInitError, SchedulerPermit,
 };
+pub use error::{SchedulerError, HEADER_X_SMG_PREEMPTED};
 pub use policy::{StaticTenantPolicyResolver, TenantPolicy, TenantPolicyResolver};
