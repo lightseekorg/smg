@@ -468,26 +468,31 @@ jobs:
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
     # Absorbs the previously-2-GPU chat tests (gpt-oss-20b and
-    # Qwen2.5-14B at tp=1). Timeouts and test_timeout bumped accordingly.
+    # Qwen2.5-14B at tp=1). Timeouts sized from observed durations (see
+    # run 26650721978) with ~50% buffer on the pytest step (test_timeout)
+    # to absorb a rerun, and job timeout covering setup + step.
     strategy:
       fail-fast: false
       matrix:
         include:
+          # step ~13.7m / job ~17m
           - engine: sglang
-            timeout: 60
-            test_timeout: 45
+            timeout: 28
+            test_timeout: 20
+          # step ~12.1m / job ~14.6m
           - engine: vllm
-            timeout: 45
-            test_timeout: 35
+            timeout: 24
+            test_timeout: 18
+          # step ~11m, but trtllm image pull/setup is slow & variable (~10m)
           - engine: trtllm
-            timeout: 120
-            test_timeout: 90
-          # TokenSpeed builds kernel (CUDA) + scheduler (C++/CMake) from
-          # source, so first run takes ~30 min; cached runs are faster. The
-          # build happens in setup, so the pytest step's test_timeout stays modest.
+            timeout: 32
+            test_timeout: 18
+          # step ~8.8m. TokenSpeed builds kernel (CUDA) + scheduler
+          # (C++/CMake) from source — first run ~30m, cached faster — so the
+          # job timeout stays generous even though the pytest step is short.
           - engine: tokenspeed
-            timeout: 60
-            test_timeout: 45
+            timeout: 50
+            test_timeout: 15
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -603,12 +608,15 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
+    # Sized from observed durations (run 26650721978): pytest step ~12.8m,
+    # full job ~17.3m (includes Oracle + Brave MCP agentic setup).
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
       gpu_tier: "1"
       runner: 1-gpu-h100
-      timeout: 30
+      timeout: 28
+      test_timeout: 20
       test_dirs: e2e_test/responses
       setup_agentic_deps: true
     secrets: inherit
