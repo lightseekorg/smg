@@ -467,29 +467,23 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.chat-completions == 'true')))
-    # Absorbs the previously-2-GPU chat tests (gpt-oss-20b and
-    # Qwen2.5-14B at tp=1). Timeouts sized from observed durations (see
-    # run 26650721978) with ~50% buffer on the pytest step (test_timeout)
-    # to absorb a rerun, and job timeout covering setup + step.
+    # Now also runs the previously-2-GPU chat tests (gpt-oss-20b,
+    # Qwen2.5-14B) since they're tp=1.
     strategy:
       fail-fast: false
       matrix:
         include:
-          # step ~13.7m / job ~17m
           - engine: sglang
             timeout: 28
             test_timeout: 20
-          # step ~12.1m / job ~14.6m
           - engine: vllm
             timeout: 24
             test_timeout: 18
-          # step ~11m, but trtllm image pull/setup is slow & variable (~10m)
           - engine: trtllm
             timeout: 32
             test_timeout: 18
-          # step ~8.8m. TokenSpeed builds kernel (CUDA) + scheduler
-          # (C++/CMake) from source — first run ~30m, cached faster — so the
-          # job timeout stays generous even though the pytest step is short.
+          # tokenspeed builds from source (~30m cold), so keep the job
+          # timeout generous even though the test step is short.
           - engine: tokenspeed
             timeout: 50
             test_timeout: 15
@@ -591,12 +585,8 @@ jobs:
 
   # === 2 GPU ===
 
-  # Note: the previous e2e-2gpu-chat job was retired alongside the tp=1
-  # drop on Qwen2.5-14B-Instruct / gpt-oss-20b — every chat_completions
-  # class that used those models fits on a single H100 now, so all
-  # chat_completions tests (including the tokenspeed engine) run under
-  # e2e-1gpu-chat above. There are no remaining ``gpu(2)`` tests in
-  # e2e_test/chat_completions.
+  # e2e-2gpu-chat was retired: all chat_completions tests are tp=1 now
+  # and run under e2e-1gpu-chat above.
 
   e2e-1gpu-responses:
     needs: [build-wheel, detect-changes]
@@ -608,8 +598,6 @@ jobs:
           || (needs.detect-changes.result == 'success'
               && (needs.detect-changes.outputs.common == 'true'
                   || needs.detect-changes.outputs.agentic == 'true')))
-    # Sized from observed durations (run 26650721978): pytest step ~12.8m,
-    # full job ~17.3m (includes Oracle + Brave MCP agentic setup).
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
