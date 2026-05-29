@@ -56,6 +56,7 @@ use super::{
         try_ping, ClusterState,
     },
     transport::{
+        crdt_batch::{build_crdt_batch, dispatch_crdt_batch, wrap_crdt_batch},
         limits::{MAX_MESSAGE_SIZE, STREAM_IDLE_TIMEOUT},
         sync_stream::{
             build_heartbeat, build_peer_stream_batches, dispatch_stream_batch, wrap_stream_batch,
@@ -321,6 +322,20 @@ impl Gossip for GossipService {
                             Err(mpsc::error::TrySendError::Closed(_)) => return,
                         }
                     }
+
+                    // CRDT op-log: broadcast the full snapshot this round
+                    // (idempotent merge on the peer).
+                    if let Some(crdt_batch) = build_crdt_batch(&stream_batch.crdt_ops) {
+                        sequence_counter += 1;
+                        let msg = wrap_crdt_batch(crdt_batch, sequence_counter, &self_name_sender);
+                        match tx_sender.try_send(Ok(msg)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                log::debug!("server-side crdt batch dropped on backpressure");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => return,
+                        }
+                    }
                 }
             }))
         } else {
@@ -398,6 +413,15 @@ impl Gossip for GossipService {
                         ) = (&mesh_kv, msg.payload)
                         {
                             dispatch_stream_batch(mesh_kv, &msg.peer_id, batch.entries);
+                        }
+                    }
+                    StreamMessageType::CrdtBatch => {
+                        if let (
+                            Some(mesh_kv),
+                            Some(gossip::stream_message::Payload::CrdtBatch(batch)),
+                        ) = (&mesh_kv, msg.payload)
+                        {
+                            dispatch_crdt_batch(mesh_kv, batch);
                         }
                     }
                     StreamMessageType::IncrementalUpdate
@@ -489,6 +513,7 @@ mod sender_tick_tests {
                 .into_iter()
                 .map(|(t, k, v)| (t.to_string(), k.to_string(), Bytes::copy_from_slice(v)))
                 .collect(),
+            crdt_ops: Vec::new(),
         })
     }
 

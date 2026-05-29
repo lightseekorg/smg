@@ -15,7 +15,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use super::operation::Operation;
+use super::operation::{CrdtChange, Operation};
 
 mod lww;
 mod rate_limit;
@@ -73,7 +73,13 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
     ///
     /// Takes ownership so the engine can move the batch into its operation
     /// log without an extra clone.
-    fn apply_remote_ops(&self, ops: Vec<Operation>);
+    ///
+    /// Returns one [`CrdtChange`] per key whose live value actually changed,
+    /// each carrying the canonical post-merge value (matching [`Self::get`]).
+    /// The router concatenates these so the gossip receive path can fire
+    /// subscribers with the same value shape `get` returns. Keys touched by
+    /// dominated/idempotent ops (no observable change) are not reported.
+    fn apply_remote_ops(&self, ops: Vec<Operation>) -> Vec<CrdtChange>;
 
     // ---- Maintenance ----
 

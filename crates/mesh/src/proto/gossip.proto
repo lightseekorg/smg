@@ -64,6 +64,7 @@ enum StreamMessageType {
   NACK = 5;
   HEARTBEAT = 6;
   STREAM_BATCH = 7;
+  CRDT_BATCH = 8;
 }
 
 message StreamMessage {
@@ -74,9 +75,28 @@ message StreamMessage {
     SnapshotChunk snapshot_chunk = 4;
     StreamAck ack = 5;
     StreamBatch stream_batch = 8;
+    CrdtBatch crdt_batch = 9;
   }
   uint64 sequence = 6; // Sequence number for ordering
   string peer_id = 7;   // Sender peer ID
+}
+
+// One CRDT operation, mirroring the in-crate Operation enum. `tombstone`
+// distinguishes a Remove (true, `value` empty) from an Insert (false). The
+// (timestamp, replica_id) pair is the Lamport op-id used for dedup/merge.
+message CrdtOp {
+  string key = 1;
+  bytes value = 2;
+  bool tombstone = 3;
+  uint64 timestamp = 4;
+  string replica_id = 5; // ReplicaId UUID, text form (ReplicaId::from_string)
+}
+
+// A batch of CRDT operations delivered in a single gossip round. The receiver
+// reconstructs an OperationLog and merges it into its CrdtOrMap; merge is
+// idempotent by op-id, so re-sending already-seen ops is a no-op.
+message CrdtBatch {
+  repeated CrdtOp ops = 1;
 }
 
 // Incremental state update (steady-state)

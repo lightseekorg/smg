@@ -145,6 +145,115 @@ fn test_merge_two_replicas() {
 }
 
 #[test]
+fn test_merge_emits_change_for_new_value() {
+    init_test_logging();
+    let map = CrdtOrMap::new();
+    let mut log = OperationLog::new();
+    log.append(Operation::insert(
+        "worker:a".to_string(),
+        b"v".to_vec(),
+        5,
+        ReplicaId::new(),
+    ));
+
+    let changes = map.merge(&log);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].key, "worker:a");
+    assert_eq!(changes[0].value, Some(b"v".to_vec()));
+}
+
+#[test]
+fn test_merge_no_change_on_byte_identical_newer_insert() {
+    // A newer-version insert that rewrites byte-identical bytes is accepted by
+    // LWW (advances the winner's version) but does not change the observable
+    // `get` value, so `merge` must report no CrdtChange.
+    init_test_logging();
+    let map = CrdtOrMap::new();
+
+    let mut first = OperationLog::new();
+    first.append(Operation::insert(
+        "worker:a".to_string(),
+        b"v".to_vec(),
+        5,
+        ReplicaId::new(),
+    ));
+    assert_eq!(map.merge(&first).len(), 1, "first insert is a change");
+
+    let mut identical_newer = OperationLog::new();
+    identical_newer.append(Operation::insert(
+        "worker:a".to_string(),
+        b"v".to_vec(),
+        10,
+        ReplicaId::new(),
+    ));
+    assert!(
+        map.merge(&identical_newer).is_empty(),
+        "byte-identical newer-version rewrite must fire no CrdtChange"
+    );
+}
+
+#[test]
+fn test_merge_no_change_on_tombstone_for_never_seen_key() {
+    // A remove for a key that was never live leaves `get` at None before and
+    // after, so it must fire no CrdtChange (both LWW and EpochMaxWins).
+    init_test_logging();
+    let map = CrdtOrMap::new();
+    map.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    let mut log = OperationLog::new();
+    log.append(Operation::remove(
+        "rl:global:node-a".to_string(),
+        50,
+        ReplicaId::new(),
+    ));
+    assert!(
+        map.merge(&log).is_empty(),
+        "tombstone for a never-seen key must fire no CrdtChange"
+    );
+
+    let mut worker_tombstone = OperationLog::new();
+    worker_tombstone.append(Operation::remove(
+        "worker:ghost".to_string(),
+        50,
+        ReplicaId::new(),
+    ));
+    assert!(
+        map.merge(&worker_tombstone).is_empty(),
+        "LWW tombstone for a never-seen key must fire no CrdtChange"
+    );
+}
+
+#[test]
+fn test_merge_emits_none_when_tombstone_kills_live_key() {
+    init_test_logging();
+    let map = CrdtOrMap::new();
+    let replica = ReplicaId::new();
+
+    let mut insert = OperationLog::new();
+    insert.append(Operation::insert(
+        "worker:a".to_string(),
+        b"v".to_vec(),
+        5,
+        replica,
+    ));
+    map.merge(&insert);
+
+    let mut tombstone = OperationLog::new();
+    tombstone.append(Operation::remove(
+        "worker:a".to_string(),
+        10,
+        ReplicaId::new(),
+    ));
+    let changes = map.merge(&tombstone);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].key, "worker:a");
+    assert_eq!(
+        changes[0].value, None,
+        "killing a live key emits value None"
+    );
+}
+
+#[test]
 fn test_concurrent_insert_same_key() {
     init_test_logging();
     let replica1 = CrdtOrMap::new();

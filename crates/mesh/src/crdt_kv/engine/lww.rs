@@ -23,7 +23,7 @@ use tracing::debug;
 use super::NamespaceCrdtEngine;
 use crate::crdt_kv::{
     kv_store::KvStore,
-    operation::{Operation, OperationLog},
+    operation::{CrdtChange, Operation, OperationLog},
     replica::{LamportClock, ReplicaId},
 };
 
@@ -339,9 +339,9 @@ impl NamespaceCrdtEngine for LwwEngine {
         self.log.read().operations().to_vec()
     }
 
-    fn apply_remote_ops(&self, ops: Vec<Operation>) {
+    fn apply_remote_ops(&self, ops: Vec<Operation>) -> Vec<CrdtChange> {
         if ops.is_empty() {
-            return;
+            return Vec::new();
         }
 
         // Determine which incoming ops the local log has not yet seen. LWW
@@ -367,7 +367,7 @@ impl NamespaceCrdtEngine for LwwEngine {
         // clock/state replay loop entirely. Critical fast path when gossip
         // resends a fully-redundant log.
         if unseen_ids.is_empty() {
-            return;
+            return Vec::new();
         }
 
         // Keep every batch op whose id the log has not seen. Use `contains`
@@ -395,6 +395,19 @@ impl NamespaceCrdtEngine for LwwEngine {
             Self::compact_log(&mut log);
         }
 
+        // Snapshot the observable value of every key this batch touches before
+        // applying, so we emit a `CrdtChange` only when `get` actually changes.
+        // Keying off observable value (not op acceptance) suppresses spurious
+        // events from a newer-version op that rewrites byte-identical bytes or
+        // from a dominated op.
+        let mut before: std::collections::HashMap<String, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
+        for op in &unseen {
+            before
+                .entry(op.key().to_string())
+                .or_insert_with(|| self.store.get(op.key()));
+        }
+
         // Apply unseen ops to live state. Lamport clock observes each remote
         // timestamp so subsequent local ticks beat it.
         for op in unseen {
@@ -417,6 +430,16 @@ impl NamespaceCrdtEngine for LwwEngine {
                 }
             }
         }
+
+        // Emit one CrdtChange per key whose observable value changed, carrying
+        // the canonical post-merge value (matching `get`).
+        before
+            .into_iter()
+            .filter_map(|(key, prior)| {
+                let value = self.store.get(&key);
+                (value != prior).then_some(CrdtChange { key, value })
+            })
+            .collect()
     }
 
     fn gc_tombstones(&self, grace: Duration) -> usize {

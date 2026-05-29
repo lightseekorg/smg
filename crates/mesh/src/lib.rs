@@ -22,7 +22,7 @@ mod tests;
 
 // Re-export commonly used types
 pub use crdt_kv::{
-    decode as decode_epoch_count, encode as encode_epoch_count, CrdtOrMap, EpochCount,
+    decode as decode_epoch_count, encode as encode_epoch_count, CrdtChange, CrdtOrMap, EpochCount,
     MergeStrategy, OperationLog, EPOCH_MAX_WINS_ENCODED_LEN,
 };
 pub use kv::{

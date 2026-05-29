@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 use crate::{
-    crdt_kv::{CrdtOrMap, MergeStrategy},
+    crdt_kv::{CrdtOrMap, MergeStrategy, Operation, OperationLog},
     transport::chunk_assembler::ChunkAssembler,
 };
 
@@ -261,9 +261,14 @@ impl CrdtNamespace {
             "key '{key}' does not match prefix '{}'",
             self.prefix
         );
-        self.store.insert(key.to_string(), value.clone());
+        self.store.insert(key.to_string(), value);
+        // Notify with the canonical post-insert value (matching `get`), not the
+        // raw caller payload: for normalizing engines (e.g. `rl:`) the stored
+        // shard differs from the input, so this keeps the local-write and
+        // remote-merge notification shapes identical.
+        let canonical = self.store.get(key);
         self.subscriber_registry
-            .notify(key, Some(vec![Bytes::from(value)]));
+            .notify(key, canonical.map(|v| vec![Bytes::from(v)]));
     }
 
     /// Get the current value for a key, or None if not present or tombstoned.
@@ -429,6 +434,10 @@ pub struct RoundBatch {
     /// Values are `Bytes` so per-peer senders clone by Arc-refcount bump when
     /// fanning out, not by a full heap copy per peer.
     pub drain_entries: Vec<(String, Bytes)>,
+    /// Snapshot of the CRDT operation log for this round. Broadcast in full to
+    /// every peer; merge is idempotent by op-id so re-sending seen ops is a
+    /// no-op. Per-peer watermark filtering is a follow-up.
+    pub crdt_ops: Vec<Operation>,
 }
 
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
@@ -631,9 +640,32 @@ impl MeshKV {
         // Broadcast traffic (td:*) flows through this path.
         let drain_entries = self.drain_registry.drain_all();
 
+        // Snapshot the CRDT op-log so the per-peer senders can broadcast it
+        // alongside the stream traffic this round.
+        let crdt_ops = self.store.get_operation_log().operations().to_vec();
+
         RoundBatch {
             targeted_entries,
             drain_entries,
+            crdt_ops,
+        }
+    }
+
+    /// Merge a batch of CRDT operations received from a peer into the local
+    /// store and fire subscribers for keys whose live value changed. Used by
+    /// the gossip receive path (`dispatch_crdt_batch`). Merge is idempotent by
+    /// op-id, so re-applying an already-seen batch is a no-op and fires no
+    /// subscriber events. Notifications carry the canonical post-merge value
+    /// (matching `get`), so remote-merge subscribers see the same value shape
+    /// as local writes.
+    pub(crate) fn merge_crdt_ops(&self, ops: Vec<Operation>) {
+        let mut log = OperationLog::new();
+        for op in ops {
+            log.append(op);
+        }
+        for change in self.store.merge(&log) {
+            self.subscriber_registry
+                .notify(&change.key, change.value.map(|v| vec![Bytes::from(v)]));
         }
     }
 

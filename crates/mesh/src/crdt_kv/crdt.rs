@@ -22,7 +22,7 @@ use tracing::info;
 use super::{
     engine::{EngineHandle, LwwEngine, RateLimitEngine},
     merge_strategy::MergeStrategy,
-    operation::{Operation, OperationLog},
+    operation::{CrdtChange, Operation, OperationLog},
     replica::{LamportClock, ReplicaId},
 };
 
@@ -214,7 +214,7 @@ impl CrdtOrMap {
     /// (longest-prefix-match) and hands each engine its slice. Engines
     /// canonicalise (merge → compact → apply) internally, so dominated ops
     /// in the incoming batch never reach live state.
-    pub fn merge(&self, log: &OperationLog) {
+    pub fn merge(&self, log: &OperationLog) -> Vec<CrdtChange> {
         info!(
             "Merging {} operations into replica {}",
             log.len(),
@@ -235,6 +235,9 @@ impl CrdtOrMap {
             buckets[idx].push(op.clone());
         }
 
+        // Concatenate each engine's changed-key deltas so the caller can fire
+        // subscribers once for the whole merge.
+        let mut changes = Vec::new();
         for (idx, ops) in buckets.into_iter().enumerate() {
             if ops.is_empty() {
                 continue;
@@ -244,8 +247,9 @@ impl CrdtOrMap {
             } else {
                 Arc::clone(&engines[idx].1)
             };
-            engine.apply_remote_ops(ops);
+            changes.extend(engine.apply_remote_ops(ops));
         }
+        changes
     }
 
     /// Convenience: merge another replica's full log.

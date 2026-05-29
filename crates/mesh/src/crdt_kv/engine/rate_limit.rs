@@ -27,7 +27,7 @@ use tracing::debug;
 use super::NamespaceCrdtEngine;
 use crate::crdt_kv::{
     epoch_max_wins::{self as ratelimit, RateLimitState, RateLimitVersion},
-    operation::{Operation, OperationLog},
+    operation::{CrdtChange, Operation, OperationLog},
     replica::{LamportClock, ReplicaId},
 };
 
@@ -346,9 +346,9 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         self.log.read().operations().to_vec()
     }
 
-    fn apply_remote_ops(&self, mut ops: Vec<Operation>) {
+    fn apply_remote_ops(&self, mut ops: Vec<Operation>) -> Vec<CrdtChange> {
         if ops.is_empty() {
-            return;
+            return Vec::new();
         }
 
         // EpochMaxWins always replays incoming ops to state because a
@@ -377,6 +377,20 @@ impl NamespaceCrdtEngine for RateLimitEngine {
             Self::compact_log(&mut log);
         }
 
+        // Snapshot the observable (encoded-live) value of every key this batch
+        // touches before applying, so we emit a `CrdtChange` only when `get`
+        // actually changes. Tombstone-version bumps and frontier reshuffles
+        // that leave `encode_live` unchanged (e.g. Tombstone -> newer
+        // Tombstone, both encoding to `None`) bump generation/state but fire no
+        // subscriber event.
+        let mut before: std::collections::HashMap<String, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
+        for op in &ops {
+            before
+                .entry(op.key().to_string())
+                .or_insert_with(|| self.current_encoded(op.key()));
+        }
+
         for op in ops {
             self.clock.update(op.timestamp());
             let changed = match op {
@@ -402,6 +416,17 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                 self.generation.fetch_add(1, Ordering::Release);
             }
         }
+
+        // Emit one CrdtChange per key whose observable value changed, carrying
+        // the canonical post-merge value (the encoded live shard, matching
+        // `get`).
+        before
+            .into_iter()
+            .filter_map(|(key, prior)| {
+                let value = self.current_encoded(&key);
+                (value != prior).then_some(CrdtChange { key, value })
+            })
+            .collect()
     }
 
     fn gc_tombstones(&self, grace: Duration) -> usize {

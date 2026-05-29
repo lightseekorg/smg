@@ -4,4 +4,6 @@
 
 #[cfg(test)]
 mod chunking_integration;
+#[cfg(test)]
+mod crdt_integration;
 pub(crate) mod test_utils;

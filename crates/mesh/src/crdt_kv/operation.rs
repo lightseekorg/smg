@@ -71,6 +71,18 @@ impl Operation {
     }
 }
 
+/// An observable change to a key's live value produced by a remote merge.
+/// `value` is the canonical post-merge value (matching `get(key)`): `Some` for
+/// a key that is live after the merge, `None` for a key that is now tombstoned.
+/// Engines emit one `CrdtChange` per key whose live value actually changed, so
+/// the merge caller can fire subscribers with the same value shape `get`
+/// returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrdtChange {
+    pub key: String,
+    pub value: Option<Vec<u8>>,
+}
+
 // ============================================================================
 // Operation Log - State Operation Pipeline
 // ============================================================================
