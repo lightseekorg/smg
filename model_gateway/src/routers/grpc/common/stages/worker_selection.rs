@@ -20,6 +20,14 @@ use crate::{
 /// Result type for PD worker pair selection: (prefill, decode, runtime_type)
 type PdWorkerPair = (Arc<dyn Worker>, Arc<dyn Worker>, RuntimeType);
 
+/// Result type for EPD worker triple selection: (encode, prefill, decode, runtime_type)
+type EpdWorkerTriple = (
+    Arc<dyn Worker>,
+    Arc<dyn Worker>,
+    Arc<dyn Worker>,
+    RuntimeType,
+);
+
 /// Worker selection stage: Select appropriate worker(s) based on routing mode
 pub(crate) struct WorkerSelectionStage {
     worker_registry: Arc<WorkerRegistry>,
@@ -32,6 +40,8 @@ pub(crate) enum WorkerSelectionMode {
     Regular,
     /// PD mode: select prefill + decode workers
     PrefillDecode,
+    /// EPD mode: select encode + prefill + decode workers
+    EncodePrefillDecode,
 }
 
 impl WorkerSelectionStage {
@@ -99,6 +109,25 @@ impl PipelineStage for WorkerSelectionStage {
                             mode = "PrefillDecode",
                             model_id = %model_id,
                             "No available PD worker pairs for model"
+                        );
+                        return Err(error::model_not_found(model_id));
+                    }
+                }
+            }
+            WorkerSelectionMode::EncodePrefillDecode => {
+                match self.select_epd_triple(model_id, text, tokens, headers) {
+                    Some((encode, prefill, decode, runtime_type)) => WorkerSelection::Triple {
+                        encode,
+                        prefill,
+                        decode,
+                        runtime_type,
+                    },
+                    None => {
+                        error!(
+                            function = "WorkerSelectionStage::execute",
+                            mode = "EncodePrefillDecode",
+                            model_id = %model_id,
+                            "No available EPD worker triples for model"
                         );
                         return Err(error::model_not_found(model_id));
                     }
@@ -297,6 +326,146 @@ impl WorkerSelectionStage {
         );
 
         Some((
+            available_prefill[prefill_idx].clone(),
+            available_decode[decode_idx].clone(),
+            target_runtime,
+        ))
+    }
+
+    /// Select an encode + prefill + decode triple for EPD routing.
+    ///
+    /// Mirrors `select_pd_pair` but folds a third (encode) pool. The encode
+    /// worker runs the vision tower and ships embeddings to prefill over
+    /// Mooncake; prefill+decode then run as a normal PD pair. All three pools
+    /// are filtered to a single runtime (the prefill pool's first runtime), so
+    /// EPD is only viable when encode/prefill/decode share a runtime.
+    fn select_epd_triple(
+        &self,
+        model_id: &str,
+        text: Option<&str>,
+        tokens: Option<&[u32]>,
+        headers: Option<&http::HeaderMap>,
+    ) -> Option<EpdWorkerTriple> {
+        // Treat "unknown" model as wildcard (match any worker)
+        let model_filter = if model_id == UNKNOWN_MODEL_ID {
+            None
+        } else {
+            Some(model_id)
+        };
+
+        let all_workers = self.worker_registry.get_workers_filtered(
+            model_filter,
+            None,
+            Some(ConnectionMode::Grpc), // Match any gRPC worker
+            None,                       // any runtime type
+            false,
+        );
+
+        let (all_encode, all_prefill, all_decode): (Vec<_>, Vec<_>, Vec<_>) = all_workers
+            .into_iter()
+            .fold((Vec::new(), Vec::new(), Vec::new()), |mut acc, w| {
+                if w.is_available() {
+                    match w.metadata().spec.worker_type {
+                        WorkerType::Encode => acc.0.push(w),
+                        WorkerType::Prefill => acc.1.push(w),
+                        WorkerType::Decode => acc.2.push(w),
+                        WorkerType::Regular => {}
+                    }
+                }
+                acc
+            });
+
+        if all_encode.is_empty() {
+            warn!("No available encode workers");
+            return None;
+        }
+        if all_prefill.is_empty() {
+            warn!("No available prefill workers");
+            return None;
+        }
+        if all_decode.is_empty() {
+            warn!("No available decode workers");
+            return None;
+        }
+
+        // Determine the runtime type from prefill workers; all workers in an
+        // EPD triple must share a runtime (embeddings cross encode->prefill).
+        let target_runtime = all_prefill.first()?.metadata().spec.runtime_type;
+
+        let mixed = all_encode
+            .iter()
+            .chain(all_prefill.iter().skip(1))
+            .chain(all_decode.iter())
+            .any(|w| w.metadata().spec.runtime_type != target_runtime);
+        if mixed {
+            warn!(
+                "Mixed runtime types in EPD workers. Using {:?}.",
+                target_runtime
+            );
+        }
+
+        // Filter all three pools to the target runtime
+        let available_encode: Vec<_> = all_encode
+            .into_iter()
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
+            .collect();
+        let available_prefill: Vec<_> = all_prefill
+            .into_iter()
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
+            .collect();
+        let available_decode: Vec<_> = all_decode
+            .into_iter()
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
+            .collect();
+
+        if available_encode.is_empty()
+            || available_prefill.is_empty()
+            || available_decode.is_empty()
+        {
+            warn!("No available EPD triple for runtime {:?}", target_runtime);
+            return None;
+        }
+
+        // Select using policies
+        let policy = self.policy_registry.get_policy_or_default(model_id);
+
+        // Get cached hash ring for consistent hashing (O(log n) lookup)
+        let hash_ring = self.worker_registry.get_hash_ring(model_id);
+
+        let info = SelectWorkerInfo {
+            request_text: text,
+            tokens,
+            headers,
+            hash_ring,
+        };
+        let encode_idx = policy.select_worker(&available_encode, &info)?;
+        let prefill_idx = policy.select_worker(&available_prefill, &info)?;
+        let decode_idx = policy.select_worker(&available_decode, &info)?;
+
+        let policy_name = policy.name();
+
+        // Record worker selection metrics for encode, prefill and decode
+        Metrics::record_worker_selection(
+            metrics_labels::WORKER_ENCODE,
+            metrics_labels::CONNECTION_GRPC,
+            model_id,
+            policy_name,
+        );
+        Metrics::record_worker_selection(
+            metrics_labels::WORKER_PREFILL,
+            metrics_labels::CONNECTION_GRPC,
+            model_id,
+            policy_name,
+        );
+        Metrics::record_worker_selection(
+            metrics_labels::WORKER_DECODE,
+            metrics_labels::CONNECTION_GRPC,
+            model_id,
+            policy_name,
+        );
+
+        Some((
+            available_encode[encode_idx].clone(),
             available_prefill[prefill_idx].clone(),
             available_decode[decode_idx].clone(),
             target_runtime,
