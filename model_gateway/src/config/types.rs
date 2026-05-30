@@ -240,6 +240,21 @@ pub enum RoutingMode {
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
     },
+    #[serde(rename = "encode_prefill_decode")]
+    EncodePrefillDecode {
+        /// Encode worker urls (run the vision tower); optional Mooncake
+        /// bootstrap ports.
+        encode_urls: Vec<(String, Option<u16>)>,
+        /// Prefill worker urls with optional bootstrap ports.
+        prefill_urls: Vec<(String, Option<u16>)>,
+        decode_urls: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encode_policy: Option<PolicyConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prefill_policy: Option<PolicyConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decode_policy: Option<PolicyConfig>,
+    },
     #[serde(rename = "openai")]
     OpenAI { worker_urls: Vec<String> },
     #[serde(rename = "anthropic")]
@@ -253,6 +268,10 @@ impl RoutingMode {
         matches!(self, RoutingMode::PrefillDecode { .. })
     }
 
+    pub fn is_epd_mode(&self) -> bool {
+        matches!(self, RoutingMode::EncodePrefillDecode { .. })
+    }
+
     pub fn worker_count(&self) -> usize {
         match self {
             RoutingMode::Regular { worker_urls } => worker_urls.len(),
@@ -261,6 +280,12 @@ impl RoutingMode {
                 decode_urls,
                 ..
             } => prefill_urls.len() + decode_urls.len(),
+            RoutingMode::EncodePrefillDecode {
+                encode_urls,
+                prefill_urls,
+                decode_urls,
+                ..
+            } => encode_urls.len() + prefill_urls.len() + decode_urls.len(),
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
             RoutingMode::Gemini { worker_urls } => worker_urls.len(),
@@ -271,7 +296,8 @@ impl RoutingMode {
     /// Falls back to the main policy if no specific prefill policy is set
     pub fn get_prefill_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
-            RoutingMode::PrefillDecode { prefill_policy, .. } => {
+            RoutingMode::PrefillDecode { prefill_policy, .. }
+            | RoutingMode::EncodePrefillDecode { prefill_policy, .. } => {
                 prefill_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
@@ -282,8 +308,20 @@ impl RoutingMode {
     /// Falls back to the main policy if no specific decode policy is set
     pub fn get_decode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
         match self {
-            RoutingMode::PrefillDecode { decode_policy, .. } => {
+            RoutingMode::PrefillDecode { decode_policy, .. }
+            | RoutingMode::EncodePrefillDecode { decode_policy, .. } => {
                 decode_policy.as_ref().unwrap_or(main_policy)
+            }
+            _ => main_policy,
+        }
+    }
+
+    /// Get the effective encode policy for EPD mode. Falls back to the main
+    /// policy if no specific encode policy is set.
+    pub fn get_encode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
+        match self {
+            RoutingMode::EncodePrefillDecode { encode_policy, .. } => {
+                encode_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
         }
@@ -739,6 +777,7 @@ impl RouterConfig {
         match self.mode {
             RoutingMode::Regular { .. } => "regular",
             RoutingMode::PrefillDecode { .. } => "prefill_decode",
+            RoutingMode::EncodePrefillDecode { .. } => "encode_prefill_decode",
             RoutingMode::OpenAI { .. } => "openai",
             RoutingMode::Anthropic { .. } => "anthropic",
             RoutingMode::Gemini { .. } => "gemini",

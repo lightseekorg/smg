@@ -1232,6 +1232,17 @@ impl CliArgs {
                 }
                 all_urls.extend(decode_urls.clone());
             }
+            RoutingMode::EncodePrefillDecode {
+                encode_urls,
+                prefill_urls,
+                decode_urls,
+                ..
+            } => {
+                for (url, _) in encode_urls.iter().chain(prefill_urls.iter()) {
+                    all_urls.push(url.clone());
+                }
+                all_urls.extend(decode_urls.clone());
+            }
             RoutingMode::OpenAI { worker_urls } => {
                 all_urls.extend(worker_urls.clone());
             }

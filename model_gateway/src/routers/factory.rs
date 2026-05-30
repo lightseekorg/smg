@@ -41,6 +41,7 @@ pub mod router_ids {
     pub const HTTP_GEMINI: RouterId = RouterId::new("http-gemini");
     pub const GRPC_REGULAR: RouterId = RouterId::new("grpc-regular");
     pub const GRPC_PD: RouterId = RouterId::new("grpc-pd");
+    pub const GRPC_EPD: RouterId = RouterId::new("grpc-epd");
 }
 
 /// Factory for creating router instances based on configuration
@@ -62,6 +63,10 @@ impl RouterFactory {
                     &ctx.router_config.policy,
                     ctx,
                 ),
+                RoutingMode::EncodePrefillDecode { .. } => {
+                    // TODO(epd): wire GrpcEPDRouter (lands with the encode pipeline).
+                    Err("EPD (encode_prefill_decode) router not yet wired".to_string())
+                }
                 RoutingMode::OpenAI { .. } => {
                     Err("OpenAI mode requires HTTP connection_mode".to_string())
                 }
@@ -86,6 +91,9 @@ impl RouterFactory {
                         ctx,
                     )
                     .await
+                }
+                RoutingMode::EncodePrefillDecode { .. } => {
+                    Err("EPD mode requires gRPC connection_mode and TokenSpeed".to_string())
                 }
                 RoutingMode::OpenAI { .. } => Self::create_openai_router(ctx).await,
                 RoutingMode::Anthropic { .. } => Self::create_anthropic_router(ctx).await,

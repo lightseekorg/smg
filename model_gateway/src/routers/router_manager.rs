@@ -151,6 +151,9 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
             (ConnectionMode::Grpc, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
+            // EPD only runs on gRPC; the HTTP arm never reaches a real router
+            // (the factory errors), but the match must stay exhaustive.
+            (_, RoutingMode::EncodePrefillDecode { .. }) => router_ids::GRPC_EPD,
             (ConnectionMode::Http, RoutingMode::Gemini { .. }) => router_ids::HTTP_GEMINI,
             (ConnectionMode::Grpc, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::Anthropic { .. }) => router_ids::GRPC_REGULAR,
