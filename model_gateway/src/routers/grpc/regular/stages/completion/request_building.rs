@@ -58,7 +58,9 @@ impl PipelineStage for CompletionRequestBuildingStage {
 
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Dual { prefill, .. } | ClientSelection::Triple { prefill, .. } => {
+                prefill
+            }
         };
 
         let request_id = format!("cmpl_{}", Uuid::now_v7());

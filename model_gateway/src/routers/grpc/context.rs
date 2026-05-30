@@ -211,6 +211,15 @@ pub(crate) enum WorkerSelection {
         decode: Arc<dyn Worker>,
         runtime_type: RuntimeType,
     },
+    /// EPD: encode + prefill + decode. The encode worker runs the vision tower
+    /// and ships embeddings to prefill over Mooncake; prefill+decode then run
+    /// as a normal PD pair.
+    Triple {
+        encode: Arc<dyn Worker>,
+        prefill: Arc<dyn Worker>,
+        decode: Arc<dyn Worker>,
+        runtime_type: RuntimeType,
+    },
 }
 
 /// Client selection (Step 3)
@@ -219,6 +228,13 @@ pub(crate) enum ClientSelection {
         client: GrpcClient,
     },
     Dual {
+        prefill: GrpcClient,
+        decode: GrpcClient,
+    },
+    /// EPD: only the prefill+decode scheduler clients are held here; the encode
+    /// worker is driven by a separate TokenSpeedEncoderClient that the encode
+    /// stage connects from `WorkerSelection::Triple::encode`.
+    Triple {
         prefill: GrpcClient,
         decode: GrpcClient,
     },
@@ -243,6 +259,11 @@ pub(crate) enum LoadGuards {
         _prefill: WorkerLoadGuard,
         _decode: WorkerLoadGuard,
     },
+    Triple {
+        _encode: WorkerLoadGuard,
+        _prefill: WorkerLoadGuard,
+        _decode: WorkerLoadGuard,
+    },
 }
 
 impl LoadGuards {
@@ -254,6 +275,16 @@ impl LoadGuards {
             WorkerSelection::Dual {
                 prefill, decode, ..
             } => LoadGuards::Dual {
+                _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
+                _decode: WorkerLoadGuard::new(decode.clone(), headers),
+            },
+            WorkerSelection::Triple {
+                encode,
+                prefill,
+                decode,
+                ..
+            } => LoadGuards::Triple {
+                _encode: WorkerLoadGuard::new(encode.clone(), headers),
                 _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
                 _decode: WorkerLoadGuard::new(decode.clone(), headers),
             },
@@ -564,7 +595,15 @@ impl WorkerSelection {
     pub fn single(&self) -> Option<&Arc<dyn Worker>> {
         match self {
             Self::Single { worker } => Some(worker),
-            Self::Dual { .. } => None,
+            Self::Dual { .. } | Self::Triple { .. } => None,
+        }
+    }
+
+    /// The encode worker, present only in EPD (Triple) mode.
+    pub fn encode_worker(&self) -> Option<&Arc<dyn Worker>> {
+        match self {
+            Self::Triple { encode, .. } => Some(encode),
+            Self::Single { .. } | Self::Dual { .. } => None,
         }
     }
 
@@ -575,6 +614,16 @@ impl WorkerSelection {
             Self::Dual {
                 prefill, decode, ..
             } => {
+                prefill.record_outcome(status_code);
+                decode.record_outcome(status_code);
+            }
+            Self::Triple {
+                encode,
+                prefill,
+                decode,
+                ..
+            } => {
+                encode.record_outcome(status_code);
                 prefill.record_outcome(status_code);
                 decode.record_outcome(status_code);
             }
@@ -595,7 +644,9 @@ impl WorkerSelection {
     /// Record circuit breaker outcome for prefill worker only (sequential PD)
     pub fn record_outcome_prefill(&self, status_code: u16) {
         match self {
-            Self::Dual { prefill, .. } => prefill.record_outcome(status_code),
+            Self::Dual { prefill, .. } | Self::Triple { prefill, .. } => {
+                prefill.record_outcome(status_code)
+            }
             Self::Single { .. } => {
                 debug!("record_outcome_prefill called on Single worker selection, ignoring");
             }
@@ -605,7 +656,9 @@ impl WorkerSelection {
     /// Record circuit breaker outcome for decode worker only (sequential PD)
     pub fn record_outcome_decode(&self, status_code: u16) {
         match self {
-            Self::Dual { decode, .. } => decode.record_outcome(status_code),
+            Self::Dual { decode, .. } | Self::Triple { decode, .. } => {
+                decode.record_outcome(status_code)
+            }
             Self::Single { .. } => {
                 debug!("record_outcome_decode called on Single worker selection, ignoring");
             }
@@ -617,6 +670,9 @@ impl WorkerSelection {
         match self {
             Self::Dual {
                 prefill, decode, ..
+            }
+            | Self::Triple {
+                prefill, decode, ..
             } => Some((prefill, decode)),
             Self::Single { .. } => None,
         }
@@ -624,14 +680,14 @@ impl WorkerSelection {
 
     pub fn prefill_worker(&self) -> Option<&Arc<dyn Worker>> {
         match self {
-            Self::Dual { prefill, .. } => Some(prefill),
+            Self::Dual { prefill, .. } | Self::Triple { prefill, .. } => Some(prefill),
             Self::Single { .. } => None,
         }
     }
 
     pub fn decode_worker(&self) -> Option<&Arc<dyn Worker>> {
         match self {
-            Self::Dual { decode, .. } => Some(decode),
+            Self::Dual { decode, .. } | Self::Triple { decode, .. } => Some(decode),
             Self::Single { .. } => None,
         }
     }
@@ -639,7 +695,9 @@ impl WorkerSelection {
     /// Get the runtime type for PD mode (from dual workers)
     pub fn pd_runtime_type(&self) -> Option<&RuntimeType> {
         match self {
-            Self::Dual { runtime_type, .. } => Some(runtime_type),
+            Self::Dual { runtime_type, .. } | Self::Triple { runtime_type, .. } => {
+                Some(runtime_type)
+            }
             Self::Single { .. } => None,
         }
     }
@@ -651,48 +709,50 @@ impl ClientSelection {
     pub fn single(&self) -> Option<&GrpcClient> {
         match self {
             Self::Single { client } => Some(client),
-            Self::Dual { .. } => None,
+            Self::Dual { .. } | Self::Triple { .. } => None,
         }
     }
 
     pub fn single_mut(&mut self) -> Option<&mut GrpcClient> {
         match self {
             Self::Single { client } => Some(client),
-            Self::Dual { .. } => None,
+            Self::Dual { .. } | Self::Triple { .. } => None,
         }
     }
 
     pub fn dual_mut(&mut self) -> Option<(&mut GrpcClient, &mut GrpcClient)> {
         match self {
-            Self::Dual { prefill, decode } => Some((prefill, decode)),
+            Self::Dual { prefill, decode } | Self::Triple { prefill, decode } => {
+                Some((prefill, decode))
+            }
             Self::Single { .. } => None,
         }
     }
 
     pub fn prefill_client(&self) -> Option<&GrpcClient> {
         match self {
-            Self::Dual { prefill, .. } => Some(prefill),
+            Self::Dual { prefill, .. } | Self::Triple { prefill, .. } => Some(prefill),
             Self::Single { .. } => None,
         }
     }
 
     pub fn prefill_client_mut(&mut self) -> Option<&mut GrpcClient> {
         match self {
-            Self::Dual { prefill, .. } => Some(prefill),
+            Self::Dual { prefill, .. } | Self::Triple { prefill, .. } => Some(prefill),
             Self::Single { .. } => None,
         }
     }
 
     pub fn decode_client(&self) -> Option<&GrpcClient> {
         match self {
-            Self::Dual { decode, .. } => Some(decode),
+            Self::Dual { decode, .. } | Self::Triple { decode, .. } => Some(decode),
             Self::Single { .. } => None,
         }
     }
 
     pub fn decode_client_mut(&mut self) -> Option<&mut GrpcClient> {
         match self {
-            Self::Dual { decode, .. } => Some(decode),
+            Self::Dual { decode, .. } | Self::Triple { decode, .. } => Some(decode),
             Self::Single { .. } => None,
         }
     }

@@ -51,6 +51,20 @@ impl PipelineStage for ClientAcquisitionStage {
                     decode: decode_client,
                 }
             }
+            WorkerSelection::Triple {
+                prefill, decode, ..
+            } => {
+                // The encode worker is driven by a separate TokenSpeedEncoderClient
+                // in the encode stage; here we only acquire the prefill+decode
+                // scheduler clients for the P->D leg.
+                let prefill_client = get_grpc_client_from_worker(prefill).await?;
+                let decode_client = get_grpc_client_from_worker(decode).await?;
+
+                ClientSelection::Triple {
+                    prefill: prefill_client,
+                    decode: decode_client,
+                }
+            }
         };
 
         ctx.state.clients = Some(clients);

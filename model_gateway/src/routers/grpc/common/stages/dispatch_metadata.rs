@@ -41,16 +41,17 @@ impl PipelineStage for DispatchMetadataStage {
             RequestType::Messages(req) => req.model.clone(),
         };
 
-        let weight_version = ctx
-            .state
-            .workers
-            .as_ref()
-            .map(|w| match w {
-                WorkerSelection::Single { worker } => worker,
-                WorkerSelection::Dual { decode, .. } => decode,
-            })
-            .and_then(|w| w.metadata().spec.labels.get("weight_version").cloned())
-            .unwrap_or_else(|| "default".to_string());
+        let weight_version =
+            ctx.state
+                .workers
+                .as_ref()
+                .map(|w| match w {
+                    WorkerSelection::Single { worker } => worker,
+                    WorkerSelection::Dual { decode, .. }
+                    | WorkerSelection::Triple { decode, .. } => decode,
+                })
+                .and_then(|w| w.metadata().spec.labels.get("weight_version").cloned())
+                .unwrap_or_else(|| "default".to_string());
 
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)

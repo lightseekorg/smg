@@ -89,7 +89,7 @@ pub(crate) fn sampling_defaults_for_request(
 ) -> Option<SamplingDefaults> {
     let worker = match workers? {
         WorkerSelection::Single { worker } => worker,
-        WorkerSelection::Dual { decode, .. } => decode,
+        WorkerSelection::Dual { decode, .. } | WorkerSelection::Triple { decode, .. } => decode,
     };
     let json = worker
         .metadata()

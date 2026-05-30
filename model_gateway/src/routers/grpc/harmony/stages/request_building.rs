@@ -70,7 +70,9 @@ impl PipelineStage for HarmonyRequestBuildingStage {
         })?;
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Dual { prefill, .. } | ClientSelection::Triple { prefill, .. } => {
+                prefill
+            }
         };
 
         // Generate request_id based on request type

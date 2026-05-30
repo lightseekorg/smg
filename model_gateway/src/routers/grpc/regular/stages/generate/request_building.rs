@@ -54,7 +54,9 @@ impl PipelineStage for GenerateRequestBuildingStage {
         // Get client for building request (use prefill client if PD mode)
         let builder_client = match clients {
             ClientSelection::Single { client } => client,
-            ClientSelection::Dual { prefill, .. } => prefill,
+            ClientSelection::Dual { prefill, .. } | ClientSelection::Triple { prefill, .. } => {
+                prefill
+            }
         };
 
         // Build generate request. PD retries re-run this stage, and a NIXL-tagged

@@ -92,7 +92,8 @@ impl ClassifyResponseProcessingStage {
         // Get the selected worker
         let worker = match ctx.state.workers.as_ref() {
             Some(WorkerSelection::Single { worker }) => worker,
-            Some(WorkerSelection::Dual { prefill, .. }) => prefill, // Use prefill worker for model info
+            Some(WorkerSelection::Dual { prefill, .. })
+            | Some(WorkerSelection::Triple { prefill, .. }) => prefill, // Use prefill worker for model info
             None => return HashMap::new(),
         };
 
