@@ -233,6 +233,8 @@ impl TokenSpeedSchedulerClient {
             token_ids_logprob: body.token_ids_logprob.clone().unwrap_or_default(),
             stream: body.stream,
             mm_inputs: None,
+            // EPD handshake injected later by the EPD pipeline, if applicable.
+            encode: None,
         })
     }
 

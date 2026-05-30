@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package tokenspeed.grpc.encoder;
+
+import "tokenspeed_scheduler.proto";
+
+// TokenSpeed EPD encode-stage gRPC service. The gateway ships preprocessed
+// multimodal tensors to a vision-tower-only encode worker; the worker runs the
+// tower and pushes the resulting image embeddings to a prefill worker over
+// Mooncake, discovered via (bootstrap_host, bootstrap_port) and keyed by
+// bootstrap_room. The gateway never sees the embeddings — it only triggers the
+// encode and tells the worker which prefill to ship to.
+service TokenSpeedEncoder {
+  rpc Encode(EncodeRequest) returns (EncodeResponse);
+}
+
+message EncodeRequest {
+  string request_id = 1;
+
+  // Preprocessed multimodal payload — the same tensors the scheduler Generate
+  // path carries. The encode worker runs the vision tower on these; it does
+  // not fetch or preprocess (that already happened in the gateway).
+  tokenspeed.grpc.scheduler.MultimodalInputs mm_inputs = 2;
+
+  // Mooncake pairing. The worker ships the embedding to the prefill worker at
+  // (bootstrap_host, bootstrap_port), keyed by bootstrap_room — the same room
+  // the gateway injects into that prefill's GenerateRequest.encode.
+  int32 bootstrap_room = 3;
+  int32 bootstrap_port = 4;
+  string bootstrap_host = 5;
+}
+
+message EncodeResponse {
+  // Set once the encode request is accepted (enqueued). The embedding transfer
+  // then proceeds asynchronously over Mooncake, independent of this response.
+  bool accepted = 1;
+}
