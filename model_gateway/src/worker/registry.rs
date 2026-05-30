@@ -520,6 +520,8 @@ impl WorkerRegistry {
                 WorkerType::Regular => regular_count += 1,
                 WorkerType::Prefill => prefill_count += 1,
                 WorkerType::Decode => decode_count += 1,
+                // TODO(epd): encode workers not yet broken out in registry stats.
+                WorkerType::Encode => {}
             }
 
             match worker.connection_mode() {

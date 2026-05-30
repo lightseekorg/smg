@@ -207,6 +207,9 @@ impl WorkerSelectionStage {
                             WorkerType::Prefill => acc.0.push(w),
                             WorkerType::Decode => acc.1.push(w),
                             WorkerType::Regular => {}
+                            // EPD triple selection is handled in select_epd_triple;
+                            // the PD pair fold ignores encode workers.
+                            WorkerType::Encode => {}
                         }
                     }
                     acc

@@ -253,6 +253,9 @@ impl RouterManager {
                 (WorkerType::Decode, ConnectionMode::Http) => http_decode += 1,
                 (WorkerType::Regular, ConnectionMode::Grpc) => grpc_regular += 1,
                 (WorkerType::Regular, ConnectionMode::Http) => http_regular += 1,
+                // TODO(epd): encode workers route via the EPD router; not part
+                // of the regular/PD weight selection here.
+                (WorkerType::Encode, _) => {}
             }
         }
 
