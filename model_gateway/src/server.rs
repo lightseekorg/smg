@@ -764,6 +764,34 @@ pub struct ServerConfig {
     pub webrtc_stun_server: Option<String>,
 }
 
+/// Apply the request-admission layer to a protected route group.
+///
+/// `AdmissionMode::Priority` installs the priority scheduler middleware
+/// (carrying its own `Arc<SchedulerState>`); `AdmissionMode::Legacy` installs
+/// the original `concurrency_limit_middleware`. Either runs innermost of the
+/// protective layers (closest to the handler), after tenant resolution has
+/// populated `RouteRequestMeta`.
+fn with_admission_layer(
+    router: Router<Arc<AppState>>,
+    admission_mode: &middleware::scheduler::AdmissionMode,
+    app_state: Arc<AppState>,
+) -> Router<Arc<AppState>> {
+    match admission_mode {
+        middleware::scheduler::AdmissionMode::Priority(scheduler_state) => {
+            router.route_layer(axum::middleware::from_fn_with_state(
+                scheduler_state.clone(),
+                middleware::scheduler::priority_admission_middleware,
+            ))
+        }
+        middleware::scheduler::AdmissionMode::Legacy => {
+            router.route_layer(axum::middleware::from_fn_with_state(
+                app_state,
+                middleware::concurrency_limit_middleware,
+            ))
+        }
+    }
+}
+
 pub fn build_app(
     app_state: Arc<AppState>,
     auth_config: AuthConfig,
@@ -790,114 +818,121 @@ pub fn build_app(
                     .and_then(|skill_service| skill_service.tenant_alias_store()),
             );
 
-    let protected_routes = Router::new()
-        .route("/v1/responses", post(v1_responses))
-        .route("/v1/responses/{response_id}", get(v1_responses_get))
-        .route(
-            "/v1/responses/{response_id}/cancel",
-            post(v1_responses_cancel),
-        )
-        .route("/v1/responses/{response_id}", delete(v1_responses_delete))
-        .route(
-            "/v1/responses/{response_id}/input_items",
-            get(v1_responses_list_input_items),
-        )
-        .route("/v1/conversations", post(v1_conversations_create))
-        .route(
-            "/v1/conversations/{conversation_id}",
-            get(v1_conversations_get)
-                .post(v1_conversations_update)
-                .delete(v1_conversations_delete),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            get(v1_conversations_list_items).post(v1_conversations_create_items),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items/{item_id}",
-            get(v1_conversations_get_item).delete(v1_conversations_delete_item),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::storage_context_middleware,
-        ))
-        .route("/generate", post(generate))
-        .route("/v1/chat/completions", post(v1_chat_completions))
-        .route("/v1/completions", post(v1_completions))
-        .route("/rerank", post(rerank))
-        .route("/v1/rerank", post(v1_rerank))
-        .route("/v1/embeddings", post(v1_embeddings))
-        .route("/v1/messages", post(v1_messages))
-        .route("/v1/interactions", post(v1_interactions))
-        .route("/v1/classify", post(v1_classify))
-        // Tokenize / Detokenize endpoints
-        .route("/v1/tokenize", post(v1_tokenize))
-        .route("/v1/detokenize", post(v1_detokenize))
-        // Realtime REST endpoints (same middleware as other protected routes)
-        .route("/v1/realtime/sessions", post(v1_realtime_session))
-        .route(
-            "/v1/realtime/client_secrets",
-            post(v1_realtime_client_secret),
-        )
-        .route(
-            "/v1/realtime/transcription_sessions",
-            post(v1_realtime_transcription_session),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::concurrency_limit_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            tenant_resolution_state.clone(),
-            middleware::route_request_meta_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_config.clone(),
-            middleware::auth_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::wasm_middleware,
-        ));
+    // Choose the admission path once at startup: priority scheduler when
+    // enabled (and it starts cleanly), otherwise the legacy concurrency limit.
+    let admission_mode = middleware::scheduler::AdmissionMode::from_config(
+        &app_state.context.router_config,
+        app_state.context.worker_registry.clone(),
+        app_state.context.rate_limiter.clone(),
+    );
+
+    let protected_routes = with_admission_layer(
+        Router::new()
+            .route("/v1/responses", post(v1_responses))
+            .route("/v1/responses/{response_id}", get(v1_responses_get))
+            .route(
+                "/v1/responses/{response_id}/cancel",
+                post(v1_responses_cancel),
+            )
+            .route("/v1/responses/{response_id}", delete(v1_responses_delete))
+            .route(
+                "/v1/responses/{response_id}/input_items",
+                get(v1_responses_list_input_items),
+            )
+            .route("/v1/conversations", post(v1_conversations_create))
+            .route(
+                "/v1/conversations/{conversation_id}",
+                get(v1_conversations_get)
+                    .post(v1_conversations_update)
+                    .delete(v1_conversations_delete),
+            )
+            .route(
+                "/v1/conversations/{conversation_id}/items",
+                get(v1_conversations_list_items).post(v1_conversations_create_items),
+            )
+            .route(
+                "/v1/conversations/{conversation_id}/items/{item_id}",
+                get(v1_conversations_get_item).delete(v1_conversations_delete_item),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
+                middleware::storage_context_middleware,
+            ))
+            .route("/generate", post(generate))
+            .route("/v1/chat/completions", post(v1_chat_completions))
+            .route("/v1/completions", post(v1_completions))
+            .route("/rerank", post(rerank))
+            .route("/v1/rerank", post(v1_rerank))
+            .route("/v1/embeddings", post(v1_embeddings))
+            .route("/v1/messages", post(v1_messages))
+            .route("/v1/interactions", post(v1_interactions))
+            .route("/v1/classify", post(v1_classify))
+            // Tokenize / Detokenize endpoints
+            .route("/v1/tokenize", post(v1_tokenize))
+            .route("/v1/detokenize", post(v1_detokenize))
+            // Realtime REST endpoints (same middleware as other protected routes)
+            .route("/v1/realtime/sessions", post(v1_realtime_session))
+            .route(
+                "/v1/realtime/client_secrets",
+                post(v1_realtime_client_secret),
+            )
+            .route(
+                "/v1/realtime/transcription_sessions",
+                post(v1_realtime_transcription_session),
+            ),
+        &admission_mode,
+        app_state.clone(),
+    )
+    .route_layer(axum::middleware::from_fn_with_state(
+        tenant_resolution_state.clone(),
+        middleware::route_request_meta_middleware,
+    ))
+    .route_layer(axum::middleware::from_fn_with_state(
+        auth_config.clone(),
+        middleware::auth_middleware,
+    ))
+    .route_layer(axum::middleware::from_fn_with_state(
+        app_state.clone(),
+        middleware::wasm_middleware,
+    ));
 
     // WebSocket and WebRTC routes: auth + concurrency but NO WASM middleware.
     // WASM OnResponse reconstructs the response from status/headers/body,
     // dropping the response extensions that carry the WebSocket upgrade future.
-    let realtime_routes = Router::new()
-        .route("/v1/realtime", get(v1_realtime_ws))
-        .route("/v1/realtime/calls", post(v1_realtime_webrtc))
-        .route_layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::concurrency_limit_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            tenant_resolution_state.clone(),
-            middleware::route_request_meta_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_config.clone(),
-            middleware::auth_middleware,
-        ));
+    let realtime_routes = with_admission_layer(
+        Router::new()
+            .route("/v1/realtime", get(v1_realtime_ws))
+            .route("/v1/realtime/calls", post(v1_realtime_webrtc)),
+        &admission_mode,
+        app_state.clone(),
+    )
+    .route_layer(axum::middleware::from_fn_with_state(
+        tenant_resolution_state.clone(),
+        middleware::route_request_meta_middleware,
+    ))
+    .route_layer(axum::middleware::from_fn_with_state(
+        auth_config.clone(),
+        middleware::auth_middleware,
+    ));
 
     // Multipart upload routes: auth + concurrency but NO WASM middleware.
     // The WASM OnRequest phase buffers the full body into a `Vec<u8>` subject
     // to the WASM manager's `max_body_size` (10MB default). Audio uploads
     // routinely exceed that, so WASM middleware would reject them with 400
     // before reaching the handler.
-    let multipart_upload_routes = Router::new()
-        .route("/v1/audio/transcriptions", post(v1_audio_transcriptions))
-        .route_layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            middleware::concurrency_limit_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            tenant_resolution_state,
-            middleware::route_request_meta_middleware,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_config.clone(),
-            middleware::auth_middleware,
-        ));
+    let multipart_upload_routes = with_admission_layer(
+        Router::new().route("/v1/audio/transcriptions", post(v1_audio_transcriptions)),
+        &admission_mode,
+        app_state.clone(),
+    )
+    .route_layer(axum::middleware::from_fn_with_state(
+        tenant_resolution_state,
+        middleware::route_request_meta_middleware,
+    ))
+    .route_layer(axum::middleware::from_fn_with_state(
+        auth_config.clone(),
+        middleware::auth_middleware,
+    ));
 
     let public_routes = Router::new()
         .route("/liveness", get(liveness))
