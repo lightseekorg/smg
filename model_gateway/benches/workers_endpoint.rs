@@ -43,10 +43,16 @@ fn make_labels() -> HashMap<String, String> {
         ("runtime_version", "0.0.0"),
         ("arch_family", "example_arch"),
         ("served_model_name", "example-org/example-model-v1"),
-        ("model_path", "storage://example-bucket/models/example-model-v1"),
+        (
+            "model_path",
+            "storage://example-bucket/models/example-model-v1",
+        ),
         ("deploy_zone", "zone-a"),
     ];
-    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 fn make_model() -> ModelCard {
@@ -65,12 +71,13 @@ fn make_worker(i: usize) -> Arc<dyn Worker> {
         1 => WorkerType::Decode,
         _ => WorkerType::Regular,
     };
-    let worker = BasicWorkerBuilder::new(format!("http://worker-{i}.example.svc.cluster.local:30000"))
-        .worker_type(worker_type)
-        .status(WorkerStatus::Ready)
-        .labels(make_labels())
-        .model(make_model())
-        .build();
+    let worker =
+        BasicWorkerBuilder::new(format!("http://worker-{i}.example.svc.cluster.local:30000"))
+            .worker_type(worker_type)
+            .status(WorkerStatus::Ready)
+            .labels(make_labels())
+            .model(make_model())
+            .build();
     Arc::new(worker)
 }
 
@@ -99,7 +106,11 @@ struct Stats {
     decode_count: usize,
     regular_count: usize,
 }
-const STATS: Stats = Stats { prefill_count: 0, decode_count: 0, regular_count: 0 };
+const STATS: Stats = Stats {
+    prefill_count: 0,
+    decode_count: 0,
+    regular_count: 0,
+};
 
 #[derive(Serialize)]
 struct Body<'a> {
@@ -118,7 +129,12 @@ fn serialize_value(infos: &[WorkerInfo]) -> Vec<u8> {
 }
 
 fn serialize_direct(infos: &[WorkerInfo]) -> Vec<u8> {
-    serde_json::to_vec(&Body { workers: infos, total: infos.len(), stats: STATS }).unwrap_or_default()
+    serde_json::to_vec(&Body {
+        workers: infos,
+        total: infos.len(),
+        stats: STATS,
+    })
+    .unwrap_or_default()
 }
 
 // Stage 1: deep clone + serde_json::Value.
