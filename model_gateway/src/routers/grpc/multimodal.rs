@@ -1334,6 +1334,28 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
     hasher.finalize().as_bytes().to_vec()
 }
 
+/// Assemble a TokenSpeed multimodal payload from a single per-image
+/// `PreprocessedImages` produced by [`split_preprocessed_per_item`], for the EPD
+/// encode leg (one image per Encode RPC).
+///
+/// `mm_placeholders` is intentionally empty: the encode worker only runs the
+/// vision tower (it needs pixel_values + grid_thw), it never slots tokens into
+/// `input_ids`, so placeholder ranges (a prefill concern) are not shipped.
+pub(crate) fn assemble_tokenspeed_from_split(
+    preprocessed: PreprocessedImages,
+    im_token_id: Option<u32>,
+) -> TokenSpeedMultimodalData {
+    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&preprocessed);
+    let model_specific_tensors = serialize_model_specific(preprocessed.model_specific);
+    TokenSpeedMultimodalData {
+        pixel_values,
+        pixel_values_shape,
+        model_specific_tensors,
+        im_token_id,
+        mm_placeholders: Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Serialization helpers
 // ---------------------------------------------------------------------------

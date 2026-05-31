@@ -257,20 +257,38 @@ impl TrtllmMultimodalData {
 }
 
 impl TokenSpeedMultimodalData {
-    /// Convert to TokenSpeed proto MultimodalInputs.
+    /// Convert to TokenSpeed proto MultimodalInputs (carrying encoder_input).
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
+        self.into_proto_inner(true)
+    }
+
+    /// Convert to a metadata-only proto MultimodalInputs: keeps each item's
+    /// modality, content_hash, model_specific_tensors, placeholders and
+    /// placeholder_token_id but omits encoder_input. Used for the EPD prefill
+    /// leg, which receives image embeddings over Mooncake and skips the vision
+    /// tower, so it never needs the raw encoder input (and avoids
+    /// serializing/shipping it twice).
+    pub fn into_proto_metadata_only(self) -> tokenspeed::MultimodalInputs {
+        self.into_proto_inner(false)
+    }
+
+    fn into_proto_inner(self, include_encoder_input: bool) -> tokenspeed::MultimodalInputs {
         let shm_enabled = self.shm_enabled;
         let items = self
             .items
             .into_iter()
-            .map(|item| item.into_proto(shm_enabled))
+            .map(|item| item.into_proto(shm_enabled, include_encoder_input))
             .collect();
         tokenspeed::MultimodalInputs { items }
     }
 }
 
 impl TokenSpeedMultimodalItem {
-    fn into_proto(self, shm_enabled: bool) -> tokenspeed::MultimodalItem {
+    fn into_proto(
+        self,
+        shm_enabled: bool,
+        include_encoder_input: bool,
+    ) -> tokenspeed::MultimodalItem {
         let placeholders = self
             .mm_placeholders
             .into_iter()
@@ -283,6 +301,11 @@ impl TokenSpeedMultimodalItem {
             .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v, shm_enabled)))
             .collect::<HashMap<_, _>>();
 
+        // EPD prefill leg receives the embedding over Mooncake and skips the
+        // vision tower, so it omits encoder_input (avoids shipping it twice).
+        let encoder_input = include_encoder_input
+            .then(|| tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled));
+
         tokenspeed::MultimodalItem {
             modality: match self.modality {
                 TokenSpeedModality::Image => tokenspeed::Modality::Image as i32,
@@ -290,7 +313,7 @@ impl TokenSpeedMultimodalItem {
                 TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
             },
             content_hash: self.content_hash,
-            encoder_input: Some(tokenspeed_tensor_to_proto(self.encoder_input, shm_enabled)),
+            encoder_input,
             model_specific_tensors,
             placeholders,
             placeholder_token_id: self.placeholder_token_id,
@@ -1041,6 +1064,23 @@ impl ProtoGenerateRequest {
             Self::Vllm(req) => req.kv_transfer_params_json = Some(json),
             Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
                 tracing::warn!("set_kv_transfer_params_json called on non-vLLM request, ignoring");
+            }
+        }
+    }
+
+    /// Set the EPD encode->prefill handshakes (TokenSpeed only).
+    ///
+    /// The prefill worker uses these per-item handshakes to receive image
+    /// embeddings from encode workers over Mooncake instead of running the
+    /// vision tower; each item carries its own bootstrap_room and the encode
+    /// worker's Mooncake endpoint.
+    pub fn set_encode(&mut self, items: Vec<tokenspeed::EncodeItemHandshake>) {
+        match self {
+            Self::TokenSpeed(req) => {
+                req.encode = Some(tokenspeed::EncodeHandshake { items });
+            }
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+                tracing::warn!("set_encode called on non-TokenSpeed request, ignoring");
             }
         }
     }
