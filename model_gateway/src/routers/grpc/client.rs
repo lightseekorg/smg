@@ -6,6 +6,7 @@ use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
+use serde_json::Value;
 use smg_grpc_client::{
     tokenizer_bundle, tokenizer_bundle::StreamBundle, MlxEngineClient, SglangSchedulerClient,
     TokenSpeedSchedulerClient, TrtllmServiceClient, VllmEngineClient,
@@ -727,6 +728,161 @@ impl ServerInfo {
             }
         }
     }
+
+    /// Convert to JSON. For the potentially very large `server_args` protobuf
+    /// `Struct`: filter it down to the curated `*_GRPC_KEYS` subset
+    pub fn to_public_json(&self) -> Value {
+        fn prost_number_to_json(number: f64) -> Value {
+            const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
+            const MIN_SAFE_INTEGER_F64: f64 = -9_007_199_254_740_991.0;
+
+            if number.is_finite()
+                && number.fract() == 0.0
+                && (MIN_SAFE_INTEGER_F64..=MAX_SAFE_INTEGER_F64).contains(&number)
+            {
+                return Value::from(number as i64);
+            }
+
+            serde_json::Number::from_f64(number)
+                .map(Value::Number)
+                .unwrap_or(Value::Null)
+        }
+
+        fn prost_value_to_json(value: &prost_types::Value) -> Value {
+            match value.kind.as_ref() {
+                Some(prost_types::value::Kind::NullValue(_)) | None => Value::Null,
+                Some(prost_types::value::Kind::NumberValue(number)) => prost_number_to_json(*number),
+                Some(prost_types::value::Kind::StringValue(text)) => Value::String(text.clone()),
+                Some(prost_types::value::Kind::BoolValue(flag)) => Value::Bool(*flag),
+                Some(prost_types::value::Kind::StructValue(struct_value)) => {
+                    Value::Object(struct_to_json_map(struct_value))
+                }
+                Some(prost_types::value::Kind::ListValue(list_value)) => Value::Array(
+                    list_value
+                        .values
+                        .iter()
+                        .map(prost_value_to_json)
+                        .collect::<Vec<_>>(),
+                ),
+            }
+        }
+
+        fn struct_to_json_map(struct_value: &prost_types::Struct) -> serde_json::Map<String, Value> {
+            struct_value
+                .fields
+                .iter()
+                .map(|(key, value)| (key.clone(), prost_value_to_json(value)))
+                .collect()
+        }
+
+        fn filter_struct_json(
+            struct_value: Option<&prost_types::Struct>,
+            keys: &[&str],
+        ) -> Value {
+            let Some(struct_value) = struct_value else {
+                return Value::Null;
+            };
+
+            let mut map = serde_json::Map::new();
+            for key in keys {
+                if let Some(value) = struct_value.fields.get(*key) {
+                    map.insert((*key).to_string(), prost_value_to_json(value));
+                }
+            }
+            Value::Object(map)
+        }
+
+        fn optional_struct_json(struct_value: Option<&prost_types::Struct>) -> Value {
+            struct_value
+                .map(|struct_value| Value::Object(struct_to_json_map(struct_value)))
+                .unwrap_or(Value::Null)
+        }
+
+        fn optional_timestamp_json(timestamp: Option<&prost_types::Timestamp>) -> Value {
+            timestamp
+                .map(|timestamp| {
+                    serde_json::json!({
+                        "seconds": timestamp.seconds,
+                        "nanos": timestamp.nanos,
+                    })
+                })
+                .unwrap_or(Value::Null)
+        }
+
+        match self {
+            ServerInfo::Sglang(info) => {
+                let mut payload = serde_json::Map::new();
+                payload.insert(
+                    "server_args".to_string(),
+                    filter_struct_json(info.server_args.as_ref(), SGLANG_GRPC_KEYS),
+                );
+                payload.insert(
+                    "scheduler_info".to_string(),
+                    optional_struct_json(info.scheduler_info.as_ref()),
+                );
+                payload.insert("active_requests".to_string(), Value::from(info.active_requests));
+                payload.insert("is_paused".to_string(), Value::Bool(info.is_paused));
+                if let Some(number) = serde_json::Number::from_f64(info.last_receive_timestamp) {
+                    payload.insert("last_receive_timestamp".to_string(), Value::Number(number));
+                }
+                if let Some(number) = serde_json::Number::from_f64(info.uptime_seconds) {
+                    payload.insert("uptime_seconds".to_string(), Value::Number(number));
+                }
+                payload.insert(
+                    "max_total_num_tokens".to_string(),
+                    Value::from(info.max_total_num_tokens),
+                );
+                payload.insert(
+                    "sglang_version".to_string(),
+                    Value::String(info.sglang_version.clone()),
+                );
+                payload.insert(
+                    "server_type".to_string(),
+                    Value::String(info.server_type.clone()),
+                );
+                payload.insert(
+                    "start_time".to_string(),
+                    optional_timestamp_json(info.start_time.as_ref()),
+                );
+                Value::Object(payload)
+            }
+            ServerInfo::Vllm(info) => serde_json::to_value(info)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            ServerInfo::Trtllm(info) => serde_json::to_value(info)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            ServerInfo::Mlx(info) => serde_json::to_value(info)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            ServerInfo::TokenSpeed(info) => {
+                let mut payload = serde_json::Map::new();
+                payload.insert(
+                    "server_args".to_string(),
+                    filter_struct_json(info.server_args.as_ref(), TOKENSPEED_GRPC_KEYS),
+                );
+                payload.insert(
+                    "scheduler_info".to_string(),
+                    optional_struct_json(info.scheduler_info.as_ref()),
+                );
+                payload.insert("active_requests".to_string(), Value::from(info.active_requests));
+                payload.insert("is_paused".to_string(), Value::Bool(info.is_paused));
+                if let Some(number) = serde_json::Number::from_f64(info.uptime_seconds) {
+                    payload.insert("uptime_seconds".to_string(), Value::Number(number));
+                }
+                payload.insert(
+                    "max_total_num_tokens".to_string(),
+                    Value::from(info.max_total_num_tokens),
+                );
+                payload.insert(
+                    "tokenspeed_version".to_string(),
+                    Value::String(info.tokenspeed_version.clone()),
+                );
+                payload.insert(
+                    "start_time".to_string(),
+                    optional_timestamp_json(info.start_time.as_ref()),
+                );
+                Value::Object(payload)
+            }
+        }
+    }
 }
 
 /// Keys worth extracting from SGLang gRPC `server_args` (which contains the full config).
@@ -775,13 +931,13 @@ const TOKENSPEED_GRPC_KEYS: &[&str] = &[
 /// (e.g. `is_generation == "false"` for embedding detection) work correctly.
 pub(crate) fn flat_labels<T: serde::Serialize>(value: &T) -> HashMap<String, String> {
     let mut labels = HashMap::new();
-    if let Ok(serde_json::Value::Object(obj)) = serde_json::to_value(value) {
+    if let Ok(Value::Object(obj)) = serde_json::to_value(value) {
         for (key, val) in obj {
             match val {
-                serde_json::Value::String(s) if !s.is_empty() && s != "null" => {
+                Value::String(s) if !s.is_empty() && s != "null" => {
                     labels.insert(key, s);
                 }
-                serde_json::Value::Number(n) if n.as_f64().is_some_and(|v| v != 0.0) => {
+                Value::Number(n) if n.as_f64().is_some_and(|v| v != 0.0) => {
                     // Format integers without decimal point
                     let formatted = n
                         .as_i64()
@@ -789,10 +945,10 @@ pub(crate) fn flat_labels<T: serde::Serialize>(value: &T) -> HashMap<String, Str
                         .unwrap_or_else(|| n.to_string());
                     labels.insert(key, formatted);
                 }
-                serde_json::Value::Bool(b) => {
+                Value::Bool(b) => {
                     labels.insert(key, b.to_string());
                 }
-                serde_json::Value::Array(arr) if !arr.is_empty() => {
+                Value::Array(arr) if !arr.is_empty() => {
                     if let Ok(s) = serde_json::to_string(&arr) {
                         labels.insert(key, s);
                     }
@@ -828,5 +984,118 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use smg_grpc_client::{sglang_proto, tokenspeed_proto};
+
+    use super::ServerInfo;
+
+    fn string_value(value: &str) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(value.to_string())),
+        }
+    }
+
+    fn number_value(value: f64) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(value)),
+        }
+    }
+
+    #[test]
+    fn to_public_json_sglang_keeps_pb_shape_and_filters_server_args() {
+        let server_info = ServerInfo::Sglang(Box::new(sglang_proto::GetServerInfoResponse {
+            server_args: Some(prost_types::Struct {
+                fields: BTreeMap::from([
+                    ("model_path".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("tp_size".to_string(), number_value(2.0)),
+                    ("host".to_string(), string_value("127.0.0.1")),
+                ]),
+            }),
+            scheduler_info: Some(prost_types::Struct {
+                fields: BTreeMap::from([
+                    ("max_total_num_tokens".to_string(), number_value(16384.0)),
+                    ("policy".to_string(), string_value("lpm")),
+                ]),
+            }),
+            active_requests: 3,
+            is_paused: true,
+            last_receive_timestamp: 12.5,
+            uptime_seconds: 7.25,
+            sglang_version: "0.4.0".to_string(),
+            server_type: "grpc".to_string(),
+            start_time: Some(prost_types::Timestamp {
+                seconds: 100,
+                nanos: 5,
+            }),
+            max_total_num_tokens: 8192,
+            ..Default::default()
+        }));
+
+        let json = server_info.to_public_json();
+
+        assert_eq!(json["server_args"]["model_path"], "Qwen/Qwen3-8B");
+        assert_eq!(json["server_args"]["tp_size"], 2);
+        assert!(json["server_args"].get("host").is_none());
+        assert_eq!(json["scheduler_info"]["policy"], "lpm");
+        assert_eq!(json["scheduler_info"]["max_total_num_tokens"], 16384);
+        assert_eq!(json["active_requests"], 3);
+        assert_eq!(json["is_paused"], true);
+        assert_eq!(json["last_receive_timestamp"], 12.5);
+        assert_eq!(json["uptime_seconds"], 7.25);
+        assert_eq!(json["sglang_version"], "0.4.0");
+        assert_eq!(json["server_type"], "grpc");
+        assert_eq!(json["start_time"]["seconds"], 100);
+        assert_eq!(json["max_total_num_tokens"], 8192);
+    }
+
+    #[test]
+    fn to_public_json_tokenspeed_keeps_pb_shape_and_filters_server_args() {
+        let server_info =
+            ServerInfo::TokenSpeed(Box::new(tokenspeed_proto::GetServerInfoResponse {
+                server_args: Some(prost_types::Struct {
+                    fields: BTreeMap::from([
+                        ("model".to_string(), string_value("Qwen/Qwen3-8B")),
+                        ("tokenizer".to_string(), string_value("tok-path")),
+                        ("dp_size".to_string(), number_value(4.0)),
+                        ("host".to_string(), string_value("127.0.0.1")),
+                    ]),
+                }),
+                scheduler_info: Some(prost_types::Struct {
+                    fields: BTreeMap::from([(
+                        "max_total_num_tokens".to_string(),
+                        number_value(32768.0),
+                    )]),
+                }),
+                active_requests: 1,
+                is_paused: false,
+                uptime_seconds: 4.5,
+                max_total_num_tokens: 4096,
+                tokenspeed_version: "0.1.0".to_string(),
+                start_time: Some(prost_types::Timestamp {
+                    seconds: 200,
+                    nanos: 9,
+                }),
+                ..Default::default()
+            }));
+
+        let json = server_info.to_public_json();
+
+        assert_eq!(json["server_args"]["model"], "Qwen/Qwen3-8B");
+        assert_eq!(json["server_args"]["tokenizer"], "tok-path");
+        assert_eq!(json["server_args"]["dp_size"], 4);
+        assert!(json["server_args"].get("host").is_none());
+        assert_eq!(json["scheduler_info"]["max_total_num_tokens"], 32768);
+        assert_eq!(json["active_requests"], 1);
+        assert_eq!(json["is_paused"], false);
+        assert_eq!(json["uptime_seconds"], 4.5);
+        assert_eq!(json["tokenspeed_version"], "0.1.0");
+        assert_eq!(json["start_time"]["seconds"], 200);
+        assert_eq!(json["max_total_num_tokens"], 4096);
     }
 }

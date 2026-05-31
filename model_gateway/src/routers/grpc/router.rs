@@ -2,15 +2,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
+    body::Body,
+    extract::Request,
     http::HeaderMap,
     response::{IntoResponse, Response},
+    Json,
 };
 use openai_protocol::{
     chat::ChatCompletionRequest, classify::ClassifyRequest, completion::CompletionRequest,
     embedding::EmbeddingRequest, generate::GenerateRequest, messages::CreateMessageRequest,
     responses::ResponsesRequest,
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 use super::{
     common::responses::{
@@ -29,9 +32,11 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
+        error,
+        grpc::utils::tonic_ext::TonicStatusExt,
         RouterTrait,
     },
-    worker::WorkerRegistry,
+    worker::{ConnectionMode, Worker, WorkerRegistry, WorkerType},
 };
 
 /// gRPC router implementation for SGLang
@@ -172,6 +177,69 @@ impl GrpcRouter {
             harmony_responses_context,
             retry_config: ctx.router_config.effective_retry_config(),
         })
+    }
+
+    fn select_first_worker(&self) -> Option<Arc<dyn Worker>> {
+        self.worker_registry
+            .get_workers_filtered(
+                None,
+                Some(WorkerType::Regular),
+                Some(ConnectionMode::Grpc),
+                None,
+                true,
+            )
+            .into_iter()
+            .next()
+    }
+
+    async fn get_server_info_impl(&self) -> Response {
+        let Some(worker) = self.select_first_worker() else {
+            return error::service_unavailable("no_workers", "No workers are available");
+        };
+
+        let client = match worker.get_grpc_client().await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                error!(
+                    function = "GrpcRouter::get_server_info_impl",
+                    worker = %worker.url(),
+                    "Selected worker is not configured for gRPC",
+                );
+                return error::internal_error(
+                    "worker_not_configured_for_grpc",
+                    "Selected worker is not configured for gRPC",
+                );
+            }
+            Err(err) => {
+                error!(
+                    function = "GrpcRouter::get_server_info_impl",
+                    worker = %worker.url(),
+                    error = %err,
+                    "Failed to acquire gRPC client for worker",
+                );
+                return error::internal_error(
+                    "get_grpc_client_failed",
+                    format!("Failed to get gRPC client: {err}"),
+                );
+            }
+        };
+
+        match client.get_server_info().await {
+            Ok(server_info) => Json(server_info.to_public_json()).into_response(),
+            Err(err) => {
+                error!(
+                    function = "GrpcRouter::get_server_info_impl",
+                    worker = %worker.url(),
+                    grpc_code = ?err.code(),
+                    error = %err,
+                    "Failed to fetch server info from worker",
+                );
+                err.to_http_error(
+                    "get_server_info_failed",
+                    format!("Failed to get server info: {}", err.message()),
+                )
+            }
+        }
     }
 
     /// Main route_chat implementation
@@ -354,7 +422,7 @@ impl GrpcRouter {
             } else {
                 match serve_harmony_responses(&harmony_ctx, body.clone(), tenant_meta.clone()).await
                 {
-                    Ok(response) => axum::Json(response).into_response(),
+                    Ok(response) => Json(response).into_response(),
                     Err(error_response) => error_response,
                 }
             }
@@ -542,6 +610,10 @@ impl std::fmt::Debug for GrpcRouter {
 impl RouterTrait for GrpcRouter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn get_server_info(&self, _req: Request<Body>) -> Response {
+        self.get_server_info_impl().await
     }
 
     async fn route_generate(

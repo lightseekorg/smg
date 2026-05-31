@@ -1,12 +1,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::{http::HeaderMap, response::Response};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::HeaderMap,
+    response::{IntoResponse, Response},
+    Json,
+};
 use openai_protocol::{
     chat::ChatCompletionRequest, completion::CompletionRequest, generate::GenerateRequest,
     messages::CreateMessageRequest,
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 use super::{
     context::SharedComponents, multimodal::MultimodalComponents, pipeline::RequestPipeline,
@@ -18,9 +24,11 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::retry::{is_retryable_status, RetryExecutor},
+        error,
+        grpc::utils::tonic_ext::TonicStatusExt,
         RouterTrait,
     },
-    worker::{ConnectionMode, WorkerRegistry, WorkerType},
+    worker::{ConnectionMode, Worker, WorkerRegistry, WorkerType},
 };
 
 /// gRPC PD (Prefill-Decode) router implementation for SGLang
@@ -105,6 +113,72 @@ impl GrpcPDRouter {
             shared_components,
             retry_config: ctx.router_config.effective_retry_config(),
         })
+    }
+
+    fn select_first_prefill_worker(&self) -> Option<Arc<dyn Worker>> {
+        self.worker_registry
+            .get_workers_filtered(
+                None,
+                Some(WorkerType::Prefill),
+                Some(ConnectionMode::Grpc),
+                None,
+                true,
+            )
+            .into_iter()
+            .next()
+    }
+
+    async fn get_server_info_from_first_prefill_worker(&self) -> Response {
+        let Some(worker) = self.select_first_prefill_worker() else {
+            return error::service_unavailable(
+                "no_prefill_servers",
+                "No prefill servers available",
+            );
+        };
+
+        let client = match worker.get_grpc_client().await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                error!(
+                    function = "GrpcPDRouter::get_server_info_from_first_prefill_worker",
+                    worker = %worker.url(),
+                    "Selected prefill worker is not configured for gRPC",
+                );
+                return error::internal_error(
+                    "worker_not_configured_for_grpc",
+                    "Selected worker is not configured for gRPC",
+                );
+            }
+            Err(err) => {
+                error!(
+                    function = "GrpcPDRouter::get_server_info_from_first_prefill_worker",
+                    worker = %worker.url(),
+                    error = %err,
+                    "Failed to acquire gRPC client for prefill worker",
+                );
+                return error::internal_error(
+                    "get_grpc_client_failed",
+                    format!("Failed to get gRPC client: {err}"),
+                );
+            }
+        };
+
+        match client.get_server_info().await {
+            Ok(server_info) => Json(server_info.to_public_json()).into_response(),
+            Err(err) => {
+                error!(
+                    function = "GrpcPDRouter::get_server_info_from_first_prefill_worker",
+                    worker = %worker.url(),
+                    grpc_code = ?err.code(),
+                    error = %err,
+                    "Failed to fetch server info from prefill worker",
+                );
+                err.to_http_error(
+                    "get_server_info_failed",
+                    format!("Failed to get server info: {}", err.message()),
+                )
+            }
+        }
     }
 
     /// Main route_generate implementation with PD dual dispatch
@@ -402,6 +476,10 @@ impl std::fmt::Debug for GrpcPDRouter {
 impl RouterTrait for GrpcPDRouter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn get_server_info(&self, _req: Request<Body>) -> Response {
+        self.get_server_info_from_first_prefill_worker().await
     }
 
     async fn route_generate(

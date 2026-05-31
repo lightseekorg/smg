@@ -382,14 +382,38 @@ Returns detailed model information (proxied to workers).
 GET /get_server_info
 ```
 
-Returns server information (proxied to workers).
+Returns server information proxied from a backend worker.
+
+The response shape is backend-specific:
+
+- HTTP workers return the worker's native JSON response.
+- gRPC-backed structured runtimes such as SGLang and TokenSpeed return the top-level fields from the backend `GetServerInfoResponse` protobuf.
+- For those gRPC structured runtimes, `server_args` is intentionally filtered to a curated subset of high-signal fields, while `scheduler_info` is returned as-is.
 
 **Response:** `200 OK`
+
 ```json
 {
-  "version": "0.1.0",
-  "backend": "vllm",
-  "gpu_count": 8
+  "server_args": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "tokenizer": "meta-llama/Llama-3.1-8B-Instruct",
+    "served_model_name": "meta-llama/Llama-3.1-8B-Instruct",
+    "tp_size": 1,
+    "dp_size": 1
+  },
+  "scheduler_info": {
+    "max_total_num_tokens": 131072,
+    "max_req_input_len": 32768
+  },
+  "active_requests": 0,
+  "is_paused": false,
+  "uptime_seconds": 12.34,
+  "tokenspeed_version": "0.1.0",
+  "start_time": {
+    "seconds": 1748660000,
+    "nanos": 0
+  },
+  "max_total_num_tokens": 131072
 }
 ```
 
