@@ -18,6 +18,7 @@ use openai_protocol::{
     responses::ResponsesRequest,
 };
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use smg_grpc_client::tokenspeed_proto;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
@@ -116,6 +117,11 @@ pub(crate) struct ProcessingState {
 
     // Stage 3: Client acquisition outputs
     pub clients: Option<ClientSelection>,
+
+    // EPD only: per-item encode->prefill handshakes minted by the encode stage,
+    // injected into the prefill GenerateRequest by request building. None for
+    // non-EPD pipelines (no encode stage runs).
+    pub encode_handshake: Option<Vec<tokenspeed_proto::EncodeItemHandshake>>,
 
     // Stage 4: Request building outputs
     pub proto_request: Option<ProtoRequest>,

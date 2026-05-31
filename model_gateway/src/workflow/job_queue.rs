@@ -550,6 +550,7 @@ impl JobQueue {
                     let proto_worker_type = match worker_type {
                         "prefill" => WorkerType::Prefill,
                         "decode" => WorkerType::Decode,
+                        "encode" => WorkerType::Encode,
                         _ => WorkerType::Regular,
                     };
                     let mut spec = WorkerSpec::new(url);
