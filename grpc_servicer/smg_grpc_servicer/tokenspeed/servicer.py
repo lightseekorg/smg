@@ -808,12 +808,30 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         )
 
         # Decode the precomputed multimodal payload, if the request carries one.
+        # EPD requests carry mm metadata WITHOUT pixel_values (the image
+        # embeddings arrive from encode workers over Mooncake), so build the mm
+        # whenever mm_inputs is present, not only when pixel_values is.
         precomputed_mm = None
         if request.HasField("mm_inputs"):
             precomputed_mm = self._mm_inputs_from_proto(
                 request.mm_inputs,
                 model_dtype=getattr(self.async_llm.model_config, "dtype", None),
             )
+
+        # EPD: per-item encode->prefill handshakes. Each entry tells the prefill
+        # which Mooncake room to receive that image's embedding on, and the
+        # encode worker's bootstrap endpoint to discover it. Absent for non-EPD.
+        encode_handshake = None
+        if request.HasField("encode"):
+            encode_handshake = [
+                {
+                    "item_index": h.item_index,
+                    "bootstrap_room": h.bootstrap_room,
+                    "bootstrap_host": h.bootstrap_host,
+                    "bootstrap_port": h.bootstrap_port,
+                }
+                for h in request.encode.items
+            ]
 
         GenerateReqInput = _lazy_generate_req_input()
         obj = GenerateReqInput(
@@ -831,6 +849,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 list(request.token_ids_logprob) if request.token_ids_logprob else None
             ),
             precomputed_multimodal_inputs=precomputed_mm,
+            encode_handshake=encode_handshake,
         )
         # ``normalize_batch_and_arguments`` asserts ``rid`` is a list when
         # n>1; expand to deterministic per-choice rids so the assert holds.
@@ -961,33 +980,37 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         for item_proto in mm_inputs.items:
             item_started = time.perf_counter() if LOG_MM_TIMING else None
             modality = self._modality_from_proto(item_proto.modality)
-            if not item_proto.HasField("encoder_input"):
-                raise ValueError("MultimodalItem must include encoder_input")
-
-            feature_started = time.perf_counter() if LOG_MM_TIMING else None
-            feature = self._feature_from_proto(item_proto.encoder_input, cast_to=model_dtype)
-            feature_elapsed_ms = (
-                (time.perf_counter() - feature_started) * 1000
-                if feature_started is not None
-                else None
-            )
-            if LOG_MM_TENSOR_DATA:
-                encoder_input = item_proto.encoder_input
-                payload = encoder_input.WhichOneof("payload")
-                inline_nbytes = len(encoder_input.inline) if payload == "inline" else None
-                logger.info(
-                    "Multimodal encoder_input received: modality=%s proto_dtype=%s "
-                    "shape=%s payload=%s inline_nbytes=%s feature_type=%s "
-                    "torch_dtype=%s cast_to=%s",
-                    modality,
-                    encoder_input.dtype,
-                    list(encoder_input.shape),
-                    payload,
-                    inline_nbytes,
-                    type(feature).__name__,
-                    feature.dtype,
-                    model_dtype,
+            # EPD prefill items omit encoder_input: the per-item embedding
+            # arrives over Mooncake and is written into item.encoded. Keep the
+            # metadata (model_specific/grid_thw, placeholders, token id) so the
+            # prefill can slot it; content_hash supplies the pad-value hash.
+            feature = None
+            feature_elapsed_ms = None
+            if item_proto.HasField("encoder_input"):
+                feature_started = time.perf_counter() if LOG_MM_TIMING else None
+                feature = self._feature_from_proto(item_proto.encoder_input, cast_to=model_dtype)
+                feature_elapsed_ms = (
+                    (time.perf_counter() - feature_started) * 1000
+                    if feature_started is not None
+                    else None
                 )
+                if LOG_MM_TENSOR_DATA:
+                    encoder_input = item_proto.encoder_input
+                    payload = encoder_input.WhichOneof("payload")
+                    inline_nbytes = len(encoder_input.inline) if payload == "inline" else None
+                    logger.info(
+                        "Multimodal encoder_input received: modality=%s proto_dtype=%s "
+                        "shape=%s payload=%s inline_nbytes=%s feature_type=%s "
+                        "torch_dtype=%s cast_to=%s",
+                        modality,
+                        encoder_input.dtype,
+                        list(encoder_input.shape),
+                        payload,
+                        inline_nbytes,
+                        type(feature).__name__,
+                        feature.dtype,
+                        model_dtype,
+                    )
             model_started = time.perf_counter() if LOG_MM_TIMING else None
             model_specific_data = {
                 name: self._tensor_from_proto(tensor_data, cast_to=model_dtype)
