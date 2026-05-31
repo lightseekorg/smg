@@ -127,6 +127,10 @@ pub(crate) enum ExecutionMode {
     Single,
     /// PD mode: dual dispatch to prefill + decode workers
     DualDispatch,
+    /// EPD mode: encode was already dispatched by the encode stage; this runs
+    /// the prefill+decode leg as a parallel dual dispatch, bypassing the
+    /// runtime-type PD gate (TokenSpeed EPD is its only user).
+    Epd,
 }
 
 impl RequestExecutionStage {
@@ -234,6 +238,14 @@ impl PipelineStage for RequestExecutionStage {
                                 ))
                             }
                         }
+                    }
+                    ExecutionMode::Epd => {
+                        // Encode was already dispatched by the EncodeStage; run the
+                        // prefill+decode leg as a parallel dual dispatch (prefill
+                        // carries the encode handshake + metadata-only mm). This
+                        // bypasses the runtime-type PD gate above; TokenSpeed EPD
+                        // uses the same Mooncake-bootstrap dual dispatch as SGLang.
+                        self.execute_dual_dispatch(req, clients, workers).await
                     }
                 },
                 ProtoRequest::Embed(req) => self.execute_single_embed(req, clients, workers).await,
