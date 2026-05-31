@@ -180,11 +180,15 @@ async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     Json(body): Json<GenerateRequest>,
 ) -> Response {
-    state
-        .router
-        .route_generate(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_generate(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -192,11 +196,15 @@ async fn v1_chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
-    state
-        .router
-        .route_chat(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_chat(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -204,11 +212,15 @@ async fn v1_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
-    state
-        .router
-        .route_completion(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_completion(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -216,11 +228,15 @@ async fn rerank(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<RerankRequest>,
 ) -> Response {
-    state
-        .router
-        .route_rerank(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_rerank(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -228,17 +244,17 @@ async fn v1_rerank(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     Json(body): Json<V1RerankReqInput>,
 ) -> Response {
     let rerank_body: RerankRequest = body.into();
-    state
-        .router
-        .route_rerank(
+    cancel
+        .guard(state.router.route_rerank(
             Some(&headers),
             &tenant_meta,
             &rerank_body,
             &rerank_body.model,
-        )
+        ))
         .await
 }
 
@@ -246,11 +262,15 @@ async fn v1_responses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
-    state
-        .router
-        .route_responses(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_responses(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -258,12 +278,16 @@ async fn v1_interactions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<InteractionsRequest>,
 ) -> Response {
     let model_id = body.model.as_deref().or(body.agent.as_deref());
-    state
-        .router
-        .route_interactions(Some(&headers), &tenant_meta, &body, model_id)
+    cancel
+        .guard(
+            state
+                .router
+                .route_interactions(Some(&headers), &tenant_meta, &body, model_id),
+        )
         .await
 }
 
@@ -271,11 +295,15 @@ async fn v1_embeddings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     Json(body): Json<EmbeddingRequest>,
 ) -> Response {
-    state
-        .router
-        .route_embeddings(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_embeddings(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -283,11 +311,15 @@ async fn v1_messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<CreateMessageRequest>,
 ) -> Response {
-    state
-        .router
-        .route_messages(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_messages(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -295,11 +327,15 @@ async fn v1_classify(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     Json(body): Json<ClassifyRequest>,
 ) -> Response {
-    state
-        .router
-        .route_classify(Some(&headers), &tenant_meta, &body, &body.model)
+    cancel
+        .guard(
+            state
+                .router
+                .route_classify(Some(&headers), &tenant_meta, &body, &body.model),
+        )
         .await
 }
 
@@ -307,17 +343,17 @@ async fn v1_audio_transcriptions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
     AudioTranscriptionMultipart { request, audio }: AudioTranscriptionMultipart,
 ) -> Response {
-    state
-        .router
-        .route_audio_transcriptions(
+    cancel
+        .guard(state.router.route_audio_transcriptions(
             Some(&headers),
             &tenant_meta,
             &request,
             audio,
             &request.model,
-        )
+        ))
         .await
 }
 
