@@ -105,13 +105,13 @@ async def serve_grpc(server_args: ServerArgs) -> None:
             TokenSpeedEncoderServicer,
         )
 
-        encoder = TokenSpeedEncoderServicer(
+        servicer = TokenSpeedEncoderServicer(
             async_llm=async_llm,
             server_args=server_args,
             scheduler_info=scheduler_info,
             health_servicer=health_servicer,
         )
-        tokenspeed_encoder_pb2_grpc.add_TokenSpeedEncoderServicer_to_server(encoder, server)
+        tokenspeed_encoder_pb2_grpc.add_TokenSpeedEncoderServicer_to_server(servicer, server)
         primary_service = tokenspeed_encoder_pb2.DESCRIPTOR.services_by_name[
             "TokenSpeedEncoder"
         ].full_name

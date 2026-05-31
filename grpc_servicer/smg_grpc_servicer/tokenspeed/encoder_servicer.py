@@ -135,3 +135,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         )
         self.async_llm.submit_encode(encode_request)
         return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
+
+    async def shutdown(self) -> None:
+        """No persistent per-request state to drain (encode is fire-and-forget)."""
+        return None
