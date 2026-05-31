@@ -443,7 +443,11 @@ impl CacheAwarePolicy {
                 // returns the prior shared prefix (~50-200 chars).
                 let matched_prefix = if self.should_populate_hash_index() {
                     let result = tree.match_prefix_with_counts(text);
-                    Some(text.chars().take(result.matched_char_count).collect::<String>())
+                    Some(
+                        text.chars()
+                            .take(result.matched_char_count)
+                            .collect::<String>(),
+                    )
                 } else {
                     None
                 };
