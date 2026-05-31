@@ -20,9 +20,11 @@ use crate::{
 /// Result type for PD worker pair selection: (prefill, decode, runtime_type)
 type PdWorkerPair = (Arc<dyn Worker>, Arc<dyn Worker>, RuntimeType);
 
-/// Result type for EPD worker triple selection: (encode, prefill, decode, runtime_type)
-type EpdWorkerTriple = (
-    Arc<dyn Worker>,
+/// Result type for EPD worker selection: (encode_pool, prefill, decode, runtime_type).
+/// The encode side is a candidate pool (per-item assignment happens in the encode
+/// stage); prefill and decode are a single PD pair.
+type EpdWorkerSelection = (
+    Vec<Arc<dyn Worker>>,
     Arc<dyn Worker>,
     Arc<dyn Worker>,
     RuntimeType,
@@ -116,8 +118,8 @@ impl PipelineStage for WorkerSelectionStage {
             }
             WorkerSelectionMode::EncodePrefillDecode => {
                 match self.select_epd_triple(model_id, text, tokens, headers) {
-                    Some((encode, prefill, decode, runtime_type)) => WorkerSelection::Triple {
-                        encode,
+                    Some((encode_pool, prefill, decode, runtime_type)) => WorkerSelection::Triple {
+                        encode_pool,
                         prefill,
                         decode,
                         runtime_type,
@@ -332,11 +334,13 @@ impl WorkerSelectionStage {
         ))
     }
 
-    /// Select an encode + prefill + decode triple for EPD routing.
+    /// Select the encode pool + a prefill/decode pair for EPD routing.
     ///
-    /// Mirrors `select_pd_pair` but folds a third (encode) pool. The encode
-    /// worker runs the vision tower and ships embeddings to prefill over
-    /// Mooncake; prefill+decode then run as a normal PD pair. All three pools
+    /// Mirrors `select_pd_pair` but also folds an encode pool. Under Option A
+    /// each multimodal item is encoded independently and may land on a different
+    /// encode worker, so this returns the whole available encode pool (the
+    /// per-item assignment happens later in the encode stage) rather than
+    /// picking one. prefill+decode are selected as a normal PD pair. All pools
     /// are filtered to a single runtime (the prefill pool's first runtime), so
     /// EPD is only viable when encode/prefill/decode share a runtime.
     fn select_epd_triple(
@@ -345,7 +349,7 @@ impl WorkerSelectionStage {
         text: Option<&str>,
         tokens: Option<&[u32]>,
         headers: Option<&http::HeaderMap>,
-    ) -> Option<EpdWorkerTriple> {
+    ) -> Option<EpdWorkerSelection> {
         // Treat "unknown" model as wildcard (match any worker)
         let model_filter = if model_id == UNKNOWN_MODEL_ID {
             None
@@ -438,19 +442,15 @@ impl WorkerSelectionStage {
             headers,
             hash_ring,
         };
-        let encode_idx = policy.select_worker(&available_encode, &info)?;
+        // The encode pool is returned whole; the encode stage assigns items
+        // across it per request. Only the prefill/decode pair is picked here.
         let prefill_idx = policy.select_worker(&available_prefill, &info)?;
         let decode_idx = policy.select_worker(&available_decode, &info)?;
 
         let policy_name = policy.name();
 
-        // Record worker selection metrics for encode, prefill and decode
-        Metrics::record_worker_selection(
-            metrics_labels::WORKER_ENCODE,
-            metrics_labels::CONNECTION_GRPC,
-            model_id,
-            policy_name,
-        );
+        // Record worker selection metrics for prefill and decode (encode is a
+        // pool selected per item later, recorded by the encode stage).
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_GRPC,
@@ -465,7 +465,7 @@ impl WorkerSelectionStage {
         );
 
         Some((
-            available_encode[encode_idx].clone(),
+            available_encode,
             available_prefill[prefill_idx].clone(),
             available_decode[decode_idx].clone(),
             target_runtime,

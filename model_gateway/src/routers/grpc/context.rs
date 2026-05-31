@@ -211,11 +211,13 @@ pub(crate) enum WorkerSelection {
         decode: Arc<dyn Worker>,
         runtime_type: RuntimeType,
     },
-    /// EPD: encode + prefill + decode. The encode worker runs the vision tower
-    /// and ships embeddings to prefill over Mooncake; prefill+decode then run
-    /// as a normal PD pair.
+    /// EPD: encode pool + prefill + decode. Under Option A each multimodal item
+    /// is encoded independently and may land on a different encode worker, so
+    /// `encode_pool` carries all available encode candidates; the encode stage
+    /// assigns items across them per request. prefill+decode run as a normal PD
+    /// pair once the embeddings arrive over Mooncake.
     Triple {
-        encode: Arc<dyn Worker>,
+        encode_pool: Vec<Arc<dyn Worker>>,
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
         runtime_type: RuntimeType,
@@ -259,8 +261,10 @@ pub(crate) enum LoadGuards {
         _prefill: WorkerLoadGuard,
         _decode: WorkerLoadGuard,
     },
+    /// EPD guards the prefill+decode pair. Encode workers are assigned per item
+    /// in the encode stage (not known at selection time), so their load guards
+    /// are managed there, not here.
     Triple {
-        _encode: WorkerLoadGuard,
         _prefill: WorkerLoadGuard,
         _decode: WorkerLoadGuard,
     },
@@ -279,12 +283,8 @@ impl LoadGuards {
                 _decode: WorkerLoadGuard::new(decode.clone(), headers),
             },
             WorkerSelection::Triple {
-                encode,
-                prefill,
-                decode,
-                ..
+                prefill, decode, ..
             } => LoadGuards::Triple {
-                _encode: WorkerLoadGuard::new(encode.clone(), headers),
                 _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
                 _decode: WorkerLoadGuard::new(decode.clone(), headers),
             },
@@ -599,10 +599,11 @@ impl WorkerSelection {
         }
     }
 
-    /// The encode worker, present only in EPD (Triple) mode.
-    pub fn encode_worker(&self) -> Option<&Arc<dyn Worker>> {
+    /// The encode candidate pool, present only in EPD (Triple) mode. The encode
+    /// stage assigns each multimodal item to one of these per request.
+    pub fn encode_pool(&self) -> Option<&[Arc<dyn Worker>]> {
         match self {
-            Self::Triple { encode, .. } => Some(encode),
+            Self::Triple { encode_pool, .. } => Some(encode_pool),
             Self::Single { .. } | Self::Dual { .. } => None,
         }
     }
@@ -618,12 +619,10 @@ impl WorkerSelection {
                 decode.record_outcome(status_code);
             }
             Self::Triple {
-                encode,
-                prefill,
-                decode,
-                ..
+                prefill, decode, ..
             } => {
-                encode.record_outcome(status_code);
+                // Encode workers are assigned per item in the encode stage, which
+                // records their outcomes; the pool here is only candidates.
                 prefill.record_outcome(status_code);
                 decode.record_outcome(status_code);
             }
