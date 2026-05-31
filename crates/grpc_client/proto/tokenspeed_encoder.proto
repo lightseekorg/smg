@@ -7,9 +7,15 @@ import "tokenspeed_scheduler.proto";
 // TokenSpeed EPD encode-stage gRPC service. The gateway ships preprocessed
 // multimodal tensors to a vision-tower-only encode worker; the worker runs the
 // tower and pushes the resulting image embeddings to a prefill worker over
-// Mooncake, discovered via (bootstrap_host, bootstrap_port) and keyed by
-// bootstrap_room. The gateway never sees the embeddings — it only triggers the
-// encode and tells the worker which prefill to ship to.
+// Mooncake, keyed per item by bootstrap_room. The gateway never sees the
+// embeddings — it only triggers the encode and assigns each item its room.
+//
+// Option A (per-item fan-out): a single request's items may be split across
+// several encode workers for parallelism. The gateway groups items by chosen
+// worker and sends one EncodeRequest per worker, carrying that worker's subset
+// of items each tagged with its bootstrap_room. The prefill that holds the
+// matching EncodeHandshake discovers this worker (the data source hosts the
+// bootstrap server), so the worker needs no prefill address here.
 service TokenSpeedEncoder {
   rpc Encode(EncodeRequest) returns (EncodeResponse);
 }
@@ -17,17 +23,27 @@ service TokenSpeedEncoder {
 message EncodeRequest {
   string request_id = 1;
 
-  // Preprocessed multimodal payload — the same tensors the scheduler Generate
-  // path carries. The encode worker runs the vision tower on these; it does
-  // not fetch or preprocess (that already happened in the gateway).
+  // This worker's assigned subset of the request's multimodal items — the same
+  // tensors the scheduler Generate path carries. The encode worker runs the
+  // vision tower on these in order; it does not fetch or preprocess (that
+  // already happened in the gateway).
   tokenspeed.grpc.scheduler.MultimodalInputs mm_inputs = 2;
 
-  // Mooncake pairing. The worker ships the embedding to the prefill worker at
-  // (bootstrap_host, bootstrap_port), keyed by bootstrap_room — the same room
-  // the gateway injects into that prefill's GenerateRequest.encode.
-  int32 bootstrap_room = 3;
-  int32 bootstrap_port = 4;
-  string bootstrap_host = 5;
+  // Per-item Mooncake pairing, one entry per item in mm_inputs.items (same
+  // order). The worker ships item[i]'s embedding under items[i].bootstrap_room
+  // to the prefill that holds the matching EncodeItemHandshake.
+  repeated EncodeItemAssignment items = 3;
+}
+
+// One item's room assignment for this encode worker. bootstrap_room is the
+// rendezvous id shared with the prefill's EncodeItemHandshake. The prefill owns
+// the receive buffer and comes to this worker to register it, so the worker
+// needs only the room here, not any prefill address.
+message EncodeItemAssignment {
+  // Index into mm_inputs.items carried by THIS request (local order). Explicit
+  // to guard against any reordering between the gateway and the worker.
+  uint32 item_index = 1;
+  int32 bootstrap_room = 2;
 }
 
 message EncodeResponse {

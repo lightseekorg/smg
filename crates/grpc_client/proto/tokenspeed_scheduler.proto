@@ -115,13 +115,28 @@ message GenerateRequest {
   optional EncodeHandshake encode = 10;
 }
 
-// EPD encode->prefill pairing handed to a prefill worker. The matching encode
-// worker is told the same `bootstrap_room` and ships the embedding to this
-// prefill at (`bootstrap_host`, `bootstrap_port`) over Mooncake.
+// EPD encode->prefill pairing handed to a prefill worker. Each multimodal item
+// is encoded independently and may live on a different encode worker, so the
+// handshake carries one entry per item. The prefill sets up one Mooncake
+// receiver per item (keyed by that item's `bootstrap_room`) and discovers the
+// item's encode worker at (`bootstrap_host`, `bootstrap_port`) -- the encode
+// worker is the data source that hosts the bootstrap server.
 message EncodeHandshake {
-  int32 bootstrap_room = 1;
-  int32 bootstrap_port = 2;
-  string bootstrap_host = 3;
+  repeated EncodeItemHandshake items = 1;
+}
+
+// One multimodal item's encode->prefill rendezvous. The matching encode worker
+// is told the same `bootstrap_room` for this item and ships its embedding to
+// this prefill over Mooncake; the prefill discovers that worker's bootstrap
+// server at (`bootstrap_host`, `bootstrap_port`).
+message EncodeItemHandshake {
+  // Index of the item within this request's mm_inputs.items, so the prefill
+  // writes the received embedding onto the right item.
+  uint32 item_index = 1;
+  int32 bootstrap_room = 2;
+  // The encode worker's bootstrap server (data-source side), not the prefill's.
+  int32 bootstrap_port = 3;
+  string bootstrap_host = 4;
 }
 
 message TokenizedInput {
