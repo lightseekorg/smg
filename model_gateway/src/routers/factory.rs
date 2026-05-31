@@ -63,10 +63,16 @@ impl RouterFactory {
                     &ctx.router_config.policy,
                     ctx,
                 ),
-                RoutingMode::EncodePrefillDecode { .. } => {
-                    // TODO(epd): wire GrpcEPDRouter (lands with the encode pipeline).
-                    Err("EPD (encode_prefill_decode) router not yet wired".to_string())
-                }
+                RoutingMode::EncodePrefillDecode {
+                    prefill_policy,
+                    decode_policy,
+                    ..
+                } => Self::create_grpc_epd_router(
+                    prefill_policy.as_ref(),
+                    decode_policy.as_ref(),
+                    &ctx.router_config.policy,
+                    ctx,
+                ),
                 RoutingMode::OpenAI { .. } => {
                     Err("OpenAI mode requires HTTP connection_mode".to_string())
                 }
@@ -163,6 +169,30 @@ impl RouterFactory {
         ctx.policy_registry.set_prefill_policy(prefill_policy);
         ctx.policy_registry.set_decode_policy(decode_policy);
         let router = GrpcPDRouter::new(ctx)?;
+
+        Ok(Box::new(router))
+    }
+
+    /// Create a gRPC EPD (encode-prefill-decode) router with injected policy.
+    ///
+    /// Mirrors [`Self::create_grpc_pd_router`]: prefill/decode policies are set
+    /// the same way; the encode pool is assigned round-robin per image in the
+    /// encode stage (no separate encode policy yet). Routing goes through the
+    /// EPD pipelines via [`GrpcPDRouter::new_epd`].
+    pub fn create_grpc_epd_router(
+        prefill_policy_config: Option<&PolicyConfig>,
+        decode_policy_config: Option<&PolicyConfig>,
+        main_policy_config: &PolicyConfig,
+        ctx: &Arc<AppContext>,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        let prefill_policy =
+            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+        let decode_policy =
+            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+
+        ctx.policy_registry.set_prefill_policy(prefill_policy);
+        ctx.policy_registry.set_decode_policy(decode_policy);
+        let router = GrpcPDRouter::new_epd(ctx)?;
 
         Ok(Box::new(router))
     }

@@ -165,7 +165,7 @@ impl PipelineStage for EncodeStage {
 /// Connect to one encode worker and dispatch its `Encode` RPC. Returns a
 /// human-readable error string on connect/RPC failure or worker rejection.
 async fn send_encode_rpc(endpoint: String, request: enc::EncodeRequest) -> Result<(), String> {
-    let mut client = TokenSpeedEncoderClient::connect(&endpoint)
+    let client = TokenSpeedEncoderClient::connect(&endpoint)
         .await
         .map_err(|e| format!("connect to encode worker {endpoint} failed: {e}"))?;
     let response = client

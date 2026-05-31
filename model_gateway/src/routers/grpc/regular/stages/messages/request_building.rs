@@ -140,6 +140,14 @@ impl PipelineStage for MessageRequestBuildingStage {
             }
         }
 
+        // EPD: inject the encode-stage handshakes and drop the prefill pixels
+        // (mirrors the chat path). Present only in the EPD pipeline, so non-EPD
+        // requests are untouched.
+        if let Some(handshake) = ctx.state.encode_handshake.take() {
+            proto_request.set_encode(handshake);
+            proto_request.clear_mm_pixel_values();
+        }
+
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }
