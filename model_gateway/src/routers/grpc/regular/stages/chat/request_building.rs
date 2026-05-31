@@ -138,6 +138,18 @@ impl PipelineStage for ChatRequestBuildingStage {
             }
         }
 
+        // EPD: the encode stage already dispatched this request's images and
+        // recorded the per-item handshakes. Inject them so the prefill receives
+        // embeddings over Mooncake, and drop the prefill's pixel_values (it skips
+        // the vision tower). Present only in the EPD pipeline (the encode stage is
+        // the only writer), so non-EPD requests are untouched. Build-then-strip;
+        // a metadata-only assemble that skips serializing the prefill pixels
+        // entirely is a follow-up optimization.
+        if let Some(handshake) = ctx.state.encode_handshake.take() {
+            proto_request.set_encode(handshake);
+            proto_request.clear_mm_pixel_values();
+        }
+
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }

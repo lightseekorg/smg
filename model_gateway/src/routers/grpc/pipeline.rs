@@ -262,6 +262,62 @@ impl RequestPipeline {
         }
     }
 
+    /// Create an EPD (encode-prefill-decode) pipeline.
+    ///
+    /// Mirrors `new_pd` but inserts the `EncodeStage` (which fans image
+    /// embeddings out to encode workers over Mooncake and records the prefill
+    /// handshakes) between client acquisition and request building, and runs the
+    /// prefill+decode leg via `ExecutionMode::Epd`. Request building injects the
+    /// encode handshakes and drops the prefill pixels when present;
+    /// `inject_pd_metadata` stays false because TokenSpeed EPD uses the encode
+    /// handshake rather than SGLang bootstrap metadata.
+    pub fn new_epd(
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<PolicyRegistry>,
+        tool_parser_factory: ToolParserFactory,
+        reasoning_parser_factory: ReasoningParserFactory,
+        configured_tool_parser: Option<String>,
+        configured_reasoning_parser: Option<String>,
+    ) -> Self {
+        let processor = processor::ResponseProcessor::new(
+            tool_parser_factory.clone(),
+            reasoning_parser_factory.clone(),
+            configured_tool_parser.clone(),
+            configured_reasoning_parser.clone(),
+        );
+
+        let streaming_processor = Arc::new(streaming::StreamingProcessor::new(
+            tool_parser_factory,
+            reasoning_parser_factory,
+            configured_tool_parser,
+            configured_reasoning_parser,
+            metrics_labels::BACKEND_PD,
+        ));
+
+        let stages: Vec<Box<dyn PipelineStage>> = vec![
+            Box::new(ChatGeneratePreparationStage::new()),
+            Box::new(WorkerSelectionStage::new(
+                worker_registry,
+                policy_registry,
+                WorkerSelectionMode::EncodePrefillDecode,
+            )),
+            Box::new(ClientAcquisitionStage),
+            Box::new(EncodeStage),
+            Box::new(ChatGenerateRequestBuildingStage::new(false)), // No SGLang PD metadata
+            Box::new(DispatchMetadataStage),
+            Box::new(RequestExecutionStage::new(ExecutionMode::Epd)),
+            Box::new(ChatGenerateResponseProcessingStage::new(
+                processor,
+                streaming_processor,
+            )),
+        ];
+
+        Self {
+            stages: Arc::new(stages),
+            backend_type: metrics_labels::BACKEND_PD,
+        }
+    }
+
     /// Create an embeddings pipeline
     pub fn new_embeddings(
         worker_registry: Arc<WorkerRegistry>,

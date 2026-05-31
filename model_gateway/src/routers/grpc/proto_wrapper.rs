@@ -1008,6 +1008,21 @@ impl ProtoGenerateRequest {
         }
     }
 
+    /// Drop only the pixel tensors from multimodal inputs, keeping the metadata
+    /// (model_specific_tensors/grid_thw, placeholders, im_token_id).
+    ///
+    /// Used for the EPD prefill leg: it receives image embeddings from encode
+    /// workers over Mooncake and skips the vision tower, so it needs the
+    /// placeholders to slot the embedding but not the raw pixels. TokenSpeed
+    /// only (EPD is a TokenSpeed feature); other backends no-op.
+    pub fn clear_mm_pixel_values(&mut self) {
+        if let Self::TokenSpeed(req) = self {
+            if let Some(mm) = req.mm_inputs.as_mut() {
+                mm.pixel_values = None;
+            }
+        }
+    }
+
     /// Get request ID
     pub fn request_id(&self) -> &str {
         match self {
