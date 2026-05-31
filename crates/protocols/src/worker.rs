@@ -5,6 +5,7 @@
 //! request/response boundaries and internal runtime state.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(feature = "axum")]
 use axum::{
@@ -702,8 +703,11 @@ pub struct WorkerInfo {
     pub model_id: Option<String>,
 
     /// Worker identity and configuration.
+    ///
+    /// Stored behind an `Arc` so building a `WorkerInfo` for a response (e.g.
+    /// `GET /workers`) shares the spec instead of deep-cloning it per worker.
     #[serde(flatten)]
-    pub spec: WorkerSpec,
+    pub spec: Arc<WorkerSpec>,
 
     /// Whether the worker is healthy.
     pub is_healthy: bool,
@@ -726,7 +730,7 @@ impl WorkerInfo {
         Self {
             id: worker_id.to_string(),
             model_id: None,
-            spec: WorkerSpec::new(url),
+            spec: Arc::new(WorkerSpec::new(url)),
             is_healthy: false,
             status: Some(WorkerStatus::Pending),
             load: 0,

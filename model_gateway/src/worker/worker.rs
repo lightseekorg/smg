@@ -428,7 +428,11 @@ impl WorkerTypeExt for WorkerType {
 #[derive(Debug, Clone)]
 pub struct WorkerMetadata {
     /// Protocol-level worker identity and configuration.
-    pub spec: WorkerSpec,
+    ///
+    /// Behind an `Arc` so it can be shared into response `WorkerInfo`s (e.g.
+    /// `GET /workers`) without a per-worker deep clone. Set once at construction
+    /// and not mutated afterwards.
+    pub spec: Arc<WorkerSpec>,
     /// Resolved health check config (router defaults + per-worker overrides).
     /// This is the concrete config used at runtime; `spec.health` only stores
     /// the partial overrides from the API layer.
@@ -1909,7 +1913,7 @@ mod tests {
     #[test]
     fn test_worker_metadata_empty_models_accepts_all() {
         let metadata = WorkerMetadata {
-            spec: WorkerSpec::new("http://test:8080"),
+            spec: Arc::new(WorkerSpec::new("http://test:8080")),
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
         };
@@ -1932,7 +1936,7 @@ mod tests {
         let mut spec = WorkerSpec::new("http://test:8080");
         spec.models = WorkerModels::from(vec![model1, model2]);
         let metadata = WorkerMetadata {
-            spec,
+            spec: Arc::new(spec),
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
         };

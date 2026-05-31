@@ -70,7 +70,7 @@ impl GrpcWorker {
         spec.runtime_type = RuntimeType::Sglang;
 
         let metadata = WorkerMetadata {
-            spec,
+            spec: Arc::new(spec),
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
         };

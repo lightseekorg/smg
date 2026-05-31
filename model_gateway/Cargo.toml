@@ -200,5 +200,10 @@ name = "sync_alloc_bench"
 harness = false
 path = "benches/sync_alloc_bench.rs"
 
+[[bench]]
+name = "workers_endpoint"
+harness = false
+path = "benches/workers_endpoint.rs"
+
 [lints]
 workspace = true

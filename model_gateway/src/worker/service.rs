@@ -161,7 +161,7 @@ impl IntoResponse for UpdateWorkerResult {
     }
 }
 
-/// Result of listing workers
+/// Result of listing workers.
 #[derive(Debug)]
 pub struct ListWorkersResult {
     pub workers: Vec<WorkerInfo>,
@@ -173,16 +173,31 @@ pub struct ListWorkersResult {
 
 impl IntoResponse for ListWorkersResult {
     fn into_response(self) -> Response {
-        let response = json!({
-            "workers": self.workers,
-            "total": self.total,
-            "stats": {
-                "prefill_count": self.prefill_count,
-                "decode_count": self.decode_count,
-                "regular_count": self.regular_count,
-            }
-        });
-        Json(response).into_response()
+        // Serialize the typed response directly with `Json` (a single
+        // `serde_json::to_vec` pass) instead of building an intermediate
+        // `serde_json::Value` via `json!`.
+        #[derive(serde::Serialize)]
+        struct Body {
+            workers: Vec<WorkerInfo>,
+            total: usize,
+            stats: Stats,
+        }
+        #[derive(serde::Serialize)]
+        struct Stats {
+            prefill_count: usize,
+            decode_count: usize,
+            regular_count: usize,
+        }
+        Json(Body {
+            workers: self.workers,
+            total: self.total,
+            stats: Stats {
+                prefill_count: self.prefill_count,
+                decode_count: self.decode_count,
+                regular_count: self.regular_count,
+            },
+        })
+        .into_response()
     }
 }
 
@@ -322,7 +337,9 @@ impl WorkerService {
         Ok(UpdateWorkerResult { worker_id, url })
     }
 
-    /// List all workers with their info
+    /// List all workers with their info. Building each `WorkerInfo` is cheap:
+    /// `WorkerSpec` is shared via `Arc`, so there is no per-worker spec deep
+    /// clone on this path.
     pub fn list_workers(&self) -> ListWorkersResult {
         let workers = self.worker_registry.get_all_with_ids();
         let worker_infos: Vec<WorkerInfo> = workers

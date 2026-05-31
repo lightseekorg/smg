@@ -241,7 +241,7 @@ impl BasicWorkerBuilder {
             .unwrap_or_else(|| self.spec.health.apply_to(&HealthCheckConfig::default()));
 
         let metadata = WorkerMetadata {
-            spec: self.spec,
+            spec: Arc::new(self.spec),
             health_config,
             health_endpoint: self.health_endpoint,
         };
