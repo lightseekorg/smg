@@ -526,6 +526,84 @@ impl PriorityScheduler {
         });
     }
 
+    /// Spawn the metrics sampler: every `interval`, refresh the point-in-time
+    /// capacity / autoscaling gauges from the slot pool and queues. Keeping
+    /// these off the admission path means the hot path only does cheap
+    /// counter increments. Holds only a `Weak<Self>`; exits within one
+    /// interval of the scheduler being dropped.
+    pub fn spawn_sampler(self: &Arc<Self>, interval: Duration) {
+        let weak = Arc::downgrade(self);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sampler holds only a Weak<Self> and exits when the scheduler is dropped"
+        )]
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(scheduler) = weak.upgrade() else {
+                    break;
+                };
+                scheduler.sample_metrics();
+            }
+        });
+    }
+
+    /// Refresh the capacity / autoscaling gauges. Reads the slot pool and
+    /// queues under their own locks; never touches the inflight registry.
+    fn sample_metrics(&self) {
+        let capacity = self.slot_pool.capacity();
+        let mut total_inflight: u32 = 0;
+        for class in Class::ALL {
+            let inflight = self.slot_pool.inflight(class);
+            total_inflight += u32::from(inflight);
+            let depth = self.class_queues[class as usize].depth();
+            let limit = self.class_queues[class as usize].capacity();
+            super::metrics::set_inflight(class, inflight);
+            super::metrics::set_queue_depth(class, depth);
+            super::metrics::set_queue_size_limit(class, limit);
+            super::metrics::set_class_capacity_pressure(
+                class,
+                self.class_pressure(class, inflight, depth, limit, capacity),
+            );
+        }
+        let utilization = if capacity == 0 {
+            0.0
+        } else {
+            f64::from(total_inflight) / f64::from(capacity)
+        };
+        super::metrics::set_utilization(utilization);
+    }
+
+    /// Normalized 0.0–1.0 pressure for `class`: the worse of queue pressure
+    /// (`depth / limit`) and slot pressure (`max(0, inflight − reserved)`
+    /// over the capacity not reserved by higher classes).
+    fn class_pressure(
+        &self,
+        class: Class,
+        inflight: u16,
+        depth: usize,
+        limit: usize,
+        capacity: u16,
+    ) -> f64 {
+        let queue_pressure = if limit == 0 {
+            0.0
+        } else {
+            depth as f64 / limit as f64
+        };
+        let higher_reserved: u32 = Class::ALL
+            .iter()
+            .filter(|&&c| c > class)
+            .map(|&c| u32::from(self.slot_pool.reserved(c)))
+            .sum();
+        let headroom = u32::from(capacity).saturating_sub(higher_reserved).max(1);
+        let overflow =
+            u32::from(inflight).saturating_sub(u32::from(self.slot_pool.reserved(class)));
+        let slot_pressure = f64::from(overflow) / f64::from(headroom);
+        queue_pressure.max(slot_pressure).min(1.0)
+    }
+
     /// Apply a new backend capacity from the WorkerCapacity watch.
     ///
     /// On shrink past `Σ reserved`, scales reservations down
@@ -1382,6 +1460,21 @@ mod tests {
             "victim must not be preempted"
         );
         assert_eq!(sched.inflight_for_test(Class::Bulk), 1);
+    }
+
+    #[test]
+    fn test_class_pressure_takes_worse_of_queue_and_slot() {
+        // preempt_settings reserves 0 for every class, so higher_reserved=0
+        // and slot pressure is inflight/capacity.
+        let sched = PriorityScheduler::new(&preempt_settings(), 100).unwrap();
+        // Queue pressure (8/10) dominates slot pressure (10/100).
+        assert!((sched.class_pressure(Class::Default, 10, 8, 10, 100) - 0.8).abs() < 1e-9);
+        // Slot pressure (50/100) dominates queue pressure (1/10).
+        assert!((sched.class_pressure(Class::Default, 50, 1, 10, 100) - 0.5).abs() < 1e-9);
+        // Clamped to 1.0 when oversubscribed.
+        assert!((sched.class_pressure(Class::Default, 200, 100, 10, 100) - 1.0).abs() < 1e-9);
+        // No queue limit and no inflight → zero, no div-by-zero.
+        assert_eq!(sched.class_pressure(Class::Bulk, 0, 0, 0, 100), 0.0);
     }
 
     #[tokio::test(start_paused = true)]

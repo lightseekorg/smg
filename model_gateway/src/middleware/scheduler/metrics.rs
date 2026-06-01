@@ -1,10 +1,11 @@
 //! Prometheus metrics for the priority scheduler.
 //!
 //! Split to match design §9: this module holds the **operational** counters
-//! and the queue-wait histogram (recorded on the admission / queue paths).
-//! The point-in-time **capacity / autoscaling** gauges (inflight, queue
-//! depth, utilization, per-tenant, …) are computed by the sampler task so
-//! the hot admission path only does cheap counter increments.
+//! and the queue-wait histogram (recorded on the admission / queue paths),
+//! plus the **capacity / autoscaling** gauge setters. The gauges are
+//! point-in-time state (inflight, queue depth, utilization, capacity
+//! pressure) refreshed by the scheduler's sampler task, so the hot
+//! admission path only does cheap counter increments.
 //!
 //! All names carry the `smg_` prefix to match the rest of the gateway's
 //! metrics. Class/outcome labels are `&'static str` (no per-request
@@ -12,7 +13,7 @@
 
 use std::time::Duration;
 
-use metrics::{counter, describe_counter, describe_histogram, histogram};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 
 use super::Class;
 use crate::observability::metrics::intern_string;
@@ -23,6 +24,13 @@ const PREEMPTION_TOTAL: &str = "smg_scheduler_preemption_total";
 const CLAMP_TOTAL: &str = "smg_scheduler_clamp_total";
 const UNKNOWN_PRIORITY_TOTAL: &str = "smg_scheduler_unknown_priority_value_total";
 const STARVATION_PROMOTION_TOTAL: &str = "smg_scheduler_starvation_promotion_total";
+
+// Capacity / autoscaling gauges, refreshed by the sampler task.
+const INFLIGHT: &str = "smg_scheduler_inflight";
+const QUEUE_DEPTH: &str = "smg_scheduler_queue_depth";
+const UTILIZATION: &str = "smg_scheduler_utilization";
+const QUEUE_SIZE_LIMIT: &str = "smg_scheduler_queue_size_limit";
+const CLASS_CAPACITY_PRESSURE: &str = "smg_scheduler_class_capacity_pressure";
 
 /// `outcome` label values for [`record_admit`].
 pub mod outcome {
@@ -63,6 +71,17 @@ pub fn describe() {
     describe_counter!(
         STARVATION_PROMOTION_TOTAL,
         "Queued waiters admitted via the starvation override path"
+    );
+    describe_gauge!(INFLIGHT, "Current in-flight request count per class");
+    describe_gauge!(QUEUE_DEPTH, "Current queued waiter count per class");
+    describe_gauge!(
+        UTILIZATION,
+        "Total in-flight requests divided by backend capacity (0.0-1.0+)"
+    );
+    describe_gauge!(QUEUE_SIZE_LIMIT, "Configured queue limit per class");
+    describe_gauge!(
+        CLASS_CAPACITY_PRESSURE,
+        "Normalized 0.0-1.0 per-class pressure (max of queue and slot pressure)"
     );
 }
 
@@ -109,4 +128,29 @@ pub fn record_unknown_priority(tenant: &str) {
 /// Record a starvation-override promotion.
 pub fn record_starvation_promotion(class: Class) {
     counter!(STARVATION_PROMOTION_TOTAL, "class" => class.as_str()).increment(1);
+}
+
+/// Set the in-flight gauge for a class (sampler).
+pub fn set_inflight(class: Class, count: u16) {
+    gauge!(INFLIGHT, "class" => class.as_str()).set(f64::from(count));
+}
+
+/// Set the queue-depth gauge for a class (sampler).
+pub fn set_queue_depth(class: Class, depth: usize) {
+    gauge!(QUEUE_DEPTH, "class" => class.as_str()).set(depth as f64);
+}
+
+/// Set the overall utilization gauge: total in-flight / capacity (sampler).
+pub fn set_utilization(utilization: f64) {
+    gauge!(UTILIZATION).set(utilization);
+}
+
+/// Set the queue-size-limit gauge for a class (sampler).
+pub fn set_queue_size_limit(class: Class, limit: usize) {
+    gauge!(QUEUE_SIZE_LIMIT, "class" => class.as_str()).set(limit as f64);
+}
+
+/// Set the normalized capacity-pressure gauge for a class (sampler).
+pub fn set_class_capacity_pressure(class: Class, pressure: f64) {
+    gauge!(CLASS_CAPACITY_PRESSURE, "class" => class.as_str()).set(pressure);
 }

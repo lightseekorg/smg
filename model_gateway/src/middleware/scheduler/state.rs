@@ -1,7 +1,7 @@
 //! Startup wiring for the priority scheduler: builds the admission mode
 //! the route layer branches on.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tracing::{error, info};
 
@@ -13,6 +13,9 @@ use crate::{
     middleware::token_bucket::TokenBucket,
     worker::{CapacityTrackerSettings, WorkerCapacity, WorkerRegistry},
 };
+
+/// How often the metrics sampler refreshes the capacity / autoscaling gauges.
+const SAMPLER_INTERVAL: Duration = Duration::from_secs(5);
 
 /// State handed to `priority_admission_middleware` via `from_fn_with_state`.
 /// Cheap to clone (all `Arc`).
@@ -101,6 +104,7 @@ impl AdmissionMode {
         let scheduler = PriorityScheduler::new(&settings, worker_capacity.current())
             .map_err(|e| e.to_string())?;
         scheduler.spawn_dispatcher(worker_capacity.watch());
+        scheduler.spawn_sampler(SAMPLER_INTERVAL);
 
         let resolver: Arc<dyn TenantPolicyResolver> =
             Arc::new(StaticTenantPolicyResolver::from_settings(&settings));

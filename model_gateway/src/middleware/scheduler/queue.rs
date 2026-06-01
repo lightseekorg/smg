@@ -73,6 +73,9 @@ pub trait ClassQueue: Send + Sync {
     /// Current depth, including waiters whose cancel token has fired.
     fn depth(&self) -> usize;
 
+    /// Configured maximum depth (the queue-size limit), for metrics.
+    fn capacity(&self) -> usize;
+
     /// Drain any leading run of waiters whose cancel token has fired
     /// (clients that walked away while queued). One call removes every
     /// consecutive cancelled head in a single lock acquisition; the
@@ -115,6 +118,10 @@ impl ClassQueue for FifoClassQueue {
 
     fn depth(&self) -> usize {
         self.waiters.lock().len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.max
     }
 
     fn drop_cancelled_head(&self) {
