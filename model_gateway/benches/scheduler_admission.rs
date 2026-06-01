@@ -42,7 +42,7 @@ use smg::middleware::{
     TokenBucket,
 };
 use smg_auth::RequestId;
-use tokio::runtime::Runtime;
+use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
 /// Build settings with `reserved = 0` on every class (so admission is
@@ -99,7 +99,7 @@ fn bench_fast_path_admit(c: &mut Criterion) {
     // (b) Real entry point, async, driven through a current-thread runtime.
     // Difference vs (a) is the cost of entering the future + the fast-path
     // branch checks in `admit`.
-    let rt = Runtime::new().unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
     group.bench_function("admit_async", |b| {
         b.iter(|| {
             rt.block_on(async {
@@ -145,7 +145,7 @@ fn bench_admit_at_capacity(c: &mut Criterion) {
         );
     }
 
-    let rt = Runtime::new().unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
     let request_id = rid("bench-at-capacity");
     group.bench_function("queue_full_reject", |b| {
         b.iter(|| {
@@ -193,7 +193,7 @@ fn bench_preemption_victim_search(c: &mut Criterion) {
             held.push(permit);
         }
 
-        let rt = Runtime::new().unwrap();
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
         let request_id = rid("preemptor");
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
@@ -244,7 +244,7 @@ fn bench_baseline_token_bucket(c: &mut Criterion) {
     // block_on-wrapped: same work under the same per-iteration runtime
     // overhead as `fast_path_admit/admit_async`, for an apples-to-apples
     // delta.
-    let rt = Runtime::new().unwrap();
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
     group.bench_function("try_acquire_return_block_on", |b| {
         b.iter(|| {
             rt.block_on(async {

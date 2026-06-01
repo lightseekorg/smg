@@ -154,10 +154,15 @@ async fn run_load(
 
                 match outcome {
                     AdmitOutcome::Admitted(permit) => {
-                        st.admitted += 1;
-                        st.lat[class as usize].push(lat);
+                        // `admitted` and `preempted` are kept mutually exclusive: a
+                        // request bumped during its pre-TTFT window counts ONLY as
+                        // preempted (and its latency is not recorded as a successful
+                        // admit), so the outcome totals and per-class latencies stay
+                        // accurate under saturation.
                         if service.is_zero() {
-                            // pure-contention mode: release immediately.
+                            // pure-contention mode: no preemption window.
+                            st.admitted += 1;
+                            st.lat[class as usize].push(lat);
                             drop(permit);
                         } else {
                             // Pre-TTFT window: preemptible. Race reaching the
@@ -165,10 +170,17 @@ async fn run_load(
                             let cancel = permit.cancel_token();
                             tokio::select! {
                                 () = tokio::time::sleep(ttft) => {
-                                    let _ = permit.try_mark_first_byte(); // now protected
-                                    let rest = service.saturating_sub(ttft);
-                                    if !rest.is_zero() {
-                                        tokio::time::sleep(rest).await;
+                                    if permit.try_mark_first_byte() {
+                                        // Reached first byte → protected; runs to completion.
+                                        st.admitted += 1;
+                                        st.lat[class as usize].push(lat);
+                                        let rest = service.saturating_sub(ttft);
+                                        if !rest.is_zero() {
+                                            tokio::time::sleep(rest).await;
+                                        }
+                                    } else {
+                                        // Scheduler won the preemption race right at the wire.
+                                        st.preempted += 1;
                                     }
                                 }
                                 () = cancel.cancelled() => {
