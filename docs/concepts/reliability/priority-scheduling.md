@@ -67,9 +67,10 @@ When no slot is immediately available, a request does not fail right away — it
 
 - If the queue is already at its configured depth, the request is rejected immediately (**429**).
 - If the request waits longer than the class's timeout, it is rejected (**408**).
-- If the client disconnects while waiting, the wait is abandoned (**499**).
 
-Higher classes have shorter queues and shorter timeouts (fail fast, the latency matters); lower classes have deeper queues and longer timeouts (wait patiently, throughput matters). The dispatcher drains queues in priority order — `system` → `interactive` → `default` → `bulk` — admitting one waiter per class per pass so a flood in one class cannot fully starve the drain of another.
+A client that disconnects *while queued* is not currently detected — its place is held until that timeout fires, because the cancel signal isn't yet wired to client disconnect at this stage. (The **499** code exists for this case but isn't emitted today.)
+
+Higher classes have shorter queues and shorter timeouts (fail fast, the latency matters); lower classes have deeper queues and longer timeouts (wait patiently, throughput matters). The dispatcher drains queues in **strict priority order** — `system` first, then `interactive`, `default`, and `bulk`, fully draining a higher tier before serving a lower one. A sustained higher-priority flood *will* hold off a lower tier; the [starvation guard](#starvation-promotion) below is what keeps that from lasting forever.
 
 ---
 
@@ -88,7 +89,7 @@ The TTFT boundary is the rule that makes this safe:
 A preempted request receives **503** with `Retry-After: 1` and an `X-SMG-Preempted: true` header, so clients and proxies can tell a preemption apart from an ordinary overload and retry promptly. If the victim's slot does not free within a short budget, the preemptor simply falls through to the queue — the cancel has already fired, so the slot frees shortly regardless.
 
 !!! warning "Preemption requires cancel-aware handlers"
-    A victim only actually unwinds if its request handler honors the scheduler's cancel signal. Until every long-running handler is wired to that signal, `can_preempt` is expected to stay off in practice even though the machinery is in place — a marked-but-unwound victim has its first data frame truncated rather than its upstream work stopped.
+    A victim only actually unwinds if its request handler honors the scheduler's cancel signal. Until every long-running handler is wired to that signal, `can_preempt` is expected to stay off in practice even though the machinery is in place — a marked-but-not-unwound victim has its first data frame truncated rather than its upstream work stopped.
 
 ---
 

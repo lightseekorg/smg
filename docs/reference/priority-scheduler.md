@@ -73,7 +73,7 @@ smg \
 | `--priority-scheduler-enabled` | `false` | Master switch. When unset, the legacy concurrency-limit middleware stays wired and no scheduler is constructed. |
 | `--priority-scheduler-default-max-class` | `default` | Maximum class for tenants not listed in the YAML (`system` \| `interactive` \| `default` \| `bulk`). Parsed with the same rules as the header — an unknown value falls back to `default`. |
 | `--priority-scheduler-config` | unset | Path to the optional priority-scheduler YAML (per-class overrides + per-tenant policy). Absent → built-in defaults and an empty tenant policy map. |
-| `--priority-scheduler-tenant-metric-top-n` | `32` | Cap on per-tenant scheduler metric label cardinality. Tenants past the top N are bucketed under `tenant="other"`. |
+| `--priority-scheduler-tenant-metric-top-n` | `32` | Intended cap on per-tenant metric label cardinality. **Not yet enforced** — the value is stored but no top-N bucketing is applied today; per-tenant counters currently intern the raw tenant. |
 
 !!! warning "Fail-safe startup"
     If the scheduler is enabled but cannot start — unparseable YAML, or class reservations that sum to more than the live backend capacity — the gateway logs at `ERROR` and **falls back to legacy admission** instead of aborting. It does not take the data plane down.
