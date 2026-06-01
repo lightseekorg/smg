@@ -76,7 +76,7 @@ smg \
 | `--priority-scheduler-tenant-metric-top-n` | `32` | Intended cap on per-tenant metric label cardinality. **Not yet enforced** — the value is stored but no top-N bucketing is applied today; per-tenant counters currently intern the raw tenant. |
 
 !!! warning "Fail-safe startup"
-    If the scheduler is enabled but cannot start — unparseable YAML, or class reservations that sum to more than the live backend capacity — the gateway logs at `ERROR` and **falls back to legacy admission** instead of aborting. It does not take the data plane down.
+    If the scheduler is enabled but cannot start — unparsable YAML, or class reservation floors + shares that sum to more than the live backend capacity — the gateway logs at `ERROR` and **falls back to legacy admission** instead of aborting. It does not take the data plane down.
 
 ---
 
@@ -88,13 +88,14 @@ The file referenced by `--priority-scheduler-config` has two top-level maps, bot
 # Per-class tuning. Any class you omit keeps its built-in default.
 classes:
   interactive:
-    reserved: 128
+    reserved_floor: 128       # always at least 128 slots
+    reserved_per_slot: 0.25   # ...and 25% of capacity once the fleet is large
     queue_size: 256
     queue_timeout_secs: 30
     starvation_threshold_secs: 5
     can_preempt: true
   bulk:
-    reserved: 0
+    reserved_floor: 0
     queue_size: 1024
     queue_timeout_secs: 300
     starvation_threshold_secs: 120
@@ -117,7 +118,8 @@ Each entry under `classes` accepts the following fields. All are per-class.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `reserved` | integer (slots) | Slots reserved for this class. A higher class's *unused* reservation is held back from lower classes; a class's own reservation never reduces its own headroom. The sum across all classes must fit under live capacity. |
+| `reserved_floor` | integer (slots) | Minimum slots reserved for this class — the value the effective reservation never drops below. A higher class's *unused* reservation is held back from lower classes; a class's own reservation never reduces its own headroom. |
+| `reserved_per_slot` | float (0.0–1.0+) | Share of live capacity reserved for this class, on top of the floor: `effective = max(reserved_floor, ceil(reserved_per_slot × capacity))`, recomputed as capacity changes so the reservation tracks the fleet. `0.0` (the default) means purely absolute (just the floor). Must be finite and ≥ 0. At startup, if the floors + shares exceed capacity the scheduler fails safe to legacy admission; at runtime a capacity dip is absorbed by clamping the lowest classes first. |
 | `queue_size` | integer | Per-class queue depth limit. A request that arrives when the queue is full is rejected with **429**. |
 | `queue_timeout_secs` | integer (seconds) | How long a queued request waits before it is rejected with **408**. Must be `> 0`. |
 | `starvation_threshold_secs` | integer (seconds) | Head-of-queue age past which the dispatcher promotes a waiter out of normal priority order (and lets it use a reserved-but-unused slot) to avoid starvation. Must be `> 0`. |
@@ -127,14 +129,14 @@ Each entry under `classes` accepts the following fields. All are per-class.
 
 These apply to any class with no YAML override.
 
-| Class | `reserved` | `queue_size` | `queue_timeout_secs` | `starvation_threshold_secs` | `can_preempt` |
-|-------|-----------:|-------------:|---------------------:|----------------------------:|:-------------:|
-| `system` | 32 | 64 | 30 | 5 | `true` |
-| `interactive` | 128 | 256 | 30 | 5 | `true` |
-| `default` | 0 | 512 | 60 | 30 | `false` |
-| `bulk` | 0 | 1024 | 300 | 120 | `false` |
+| Class | `reserved_floor` | `reserved_per_slot` | `queue_size` | `queue_timeout_secs` | `starvation_threshold_secs` | `can_preempt` |
+|-------|-----------------:|--------------------:|-------------:|---------------------:|----------------------------:|:-------------:|
+| `system` | 32 | 0.0 | 64 | 30 | 5 | `true` |
+| `interactive` | 128 | 0.25 | 256 | 30 | 5 | `true` |
+| `default` | 0 | 0.10 | 512 | 60 | 30 | `false` |
+| `bulk` | 0 | 0.0 | 1024 | 300 | 120 | `false` |
 
-Higher classes fail fast (short queues, short timeouts) and reserve capacity; lower classes wait patiently (deep queues, long timeouts) and reserve nothing.
+Higher classes fail fast (short queues, short timeouts) and reserve capacity — `interactive` and `default` reserve a share that grows with the fleet, while `system` keeps a fixed floor (control-plane traffic is low-volume regardless of fleet size). Lower classes wait patiently (deep queues, long timeouts) and reserve nothing.
 
 ### Validation
 
