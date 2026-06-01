@@ -145,6 +145,16 @@ fn scheduler_controls_for(port: u16) -> SchedulerControls {
         .unwrap_or_default()
 }
 
+/// Remove a port's scheduler controls. Called on [`MockWorker`] teardown so a
+/// later worker that reuses the same port (portpicker recycles freed ports)
+/// doesn't inherit stale `max_running_requests` / `hold_gate`. Tolerant of a
+/// poisoned mutex since it runs from `Drop`.
+fn clear_scheduler_controls(port: u16) {
+    if let Ok(mut table) = scheduler_controls_table().lock() {
+        table.remove(&port);
+    }
+}
+
 /// Configuration for mock worker behavior
 #[derive(Clone)]
 pub struct MockWorkerConfig {
@@ -174,6 +184,9 @@ pub struct MockWorker {
     config: Arc<RwLock<MockWorkerConfig>>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Resolved bind port, cached so sync `Drop` can prune this worker's entry
+    /// from the global scheduler-controls table.
+    bound_port: Option<u16>,
 }
 
 impl MockWorker {
@@ -182,6 +195,7 @@ impl MockWorker {
             config: Arc::new(RwLock::new(config)),
             shutdown_handle: None,
             shutdown_tx: None,
+            bound_port: None,
         }
     }
 
@@ -205,6 +219,7 @@ impl MockWorker {
         } else {
             port
         };
+        self.bound_port = Some(port);
 
         let app = Router::new()
             .route("/health", get(health_handler))
@@ -277,6 +292,11 @@ impl Drop for MockWorker {
         // Clean shutdown when dropped
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
+        }
+        // Prune our scheduler controls so a later worker reusing this port
+        // doesn't inherit stale state.
+        if let Some(port) = self.bound_port {
+            clear_scheduler_controls(port);
         }
     }
 }
