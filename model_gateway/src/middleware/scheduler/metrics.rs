@@ -15,6 +15,7 @@ use std::time::Duration;
 use metrics::{counter, describe_counter, describe_histogram, histogram};
 
 use super::Class;
+use crate::observability::metrics::intern_string;
 
 const ADMIT_TOTAL: &str = "smg_scheduler_admit_total";
 const QUEUE_WAIT_SECONDS: &str = "smg_scheduler_queue_wait_seconds";
@@ -86,19 +87,23 @@ pub fn record_preemption(victim_class: Class, by_class: Class) {
 }
 
 /// Record a priority clamp (only when the effective class is below the
-/// requested class).
-pub fn record_clamp(requested: Class, effective: Class) {
+/// requested class). `tenant` is interned — clamps are rare, so its
+/// cardinality is bounded by the set of tenants that actually over-ask.
+pub fn record_clamp(requested: Class, effective: Class, tenant: &str) {
     counter!(
         CLAMP_TOTAL,
+        "tenant" => intern_string(tenant),
         "requested_class" => requested.as_str(),
         "effective_class" => effective.as_str()
     )
     .increment(1);
 }
 
-/// Record an unrecognized priority header value.
-pub fn record_unknown_priority() {
-    counter!(UNKNOWN_PRIORITY_TOTAL).increment(1);
+/// Record an unrecognized priority header value. `tenant` is interned (bad
+/// header values are rare), and is the actionable dimension — it tells ops
+/// which tenant is mis-setting the priority header.
+pub fn record_unknown_priority(tenant: &str) {
+    counter!(UNKNOWN_PRIORITY_TOTAL, "tenant" => intern_string(tenant)).increment(1);
 }
 
 /// Record a starvation-override promotion.

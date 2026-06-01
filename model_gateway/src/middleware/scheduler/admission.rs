@@ -106,10 +106,10 @@ pub async fn priority_admission_middleware(
     let class = resolved.effective;
 
     if resolved.unknown {
-        sched_metrics::record_unknown_priority();
+        sched_metrics::record_unknown_priority(tenant.as_str());
     }
     if class < resolved.requested {
-        sched_metrics::record_clamp(resolved.requested, class);
+        sched_metrics::record_clamp(resolved.requested, class, tenant.as_str());
     }
 
     // RPS sibling check (only set when an explicit per-second limit is
@@ -137,8 +137,14 @@ pub async fn priority_admission_middleware(
             // Hand the handler the cancel token (for preemption select!).
             req.extensions_mut().insert(permit.cancel_token());
             let response = next.run(req).await;
-            // The handler's PreemptionGuard tags a preempted response; treat
-            // that as the `preempted` outcome rather than plain admitted.
+            // Best-effort: the handler's PreemptionGuard tags a *pre-response*
+            // preemption (a 503 carrying this header), which we count as
+            // `preempted`. A preemption that fires after the handler produced
+            // its 200 headers but before the first body byte is truncated by
+            // SchedulerGuardBody and shows here as `admitted` — the response
+            // headers are already flushed, so the marker cannot be added. The
+            // authoritative preemption count is `smg_scheduler_preemption_total`
+            // (recorded at the preemptor side), not this bucket.
             let outcome = if response.headers().contains_key(HEADER_X_SMG_PREEMPTED) {
                 sched_metrics::outcome::PREEMPTED
             } else {
