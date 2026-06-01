@@ -622,40 +622,61 @@ impl PriorityScheduler {
     /// already-scaled live values) makes this idempotent and lets a capacity
     /// recovery fully restore the reservations — scaling in place would lose
     /// the originals and erode them permanently across a shrink/grow cycle.
+    ///
+    /// The capacity and the per-class reservations are separate atomics, so
+    /// they cannot be published together. We order the two writes so a
+    /// concurrent fast-path `try_acquire` never sees the larger capacity
+    /// paired with the old, understated reservations (which would let a
+    /// low-priority admission slip into space a higher class is about to
+    /// reserve, and that request would hold the slot past the restore). The
+    /// rule: publish the more-restrictive value first. The transient is then
+    /// always conservative — `slots_available_to` saturates, so a brief
+    /// `Σ reserved > capacity` only under-admits, never over-admits.
     fn apply_new_capacity(&self, new_capacity: u16) {
-        let old = self.slot_pool.set_capacity(new_capacity);
+        let old = self.slot_pool.capacity();
         if new_capacity == old {
             return;
         }
 
+        // Effective reservation per class, a pure function of (configured
+        // baseline, new capacity): scale down when the configured sum exceeds
+        // the new capacity, otherwise use the configured value as-is.
         let configured_total: u32 = self.configured_reserved.iter().map(|&r| u32::from(r)).sum();
-        if configured_total > u32::from(new_capacity) && configured_total > 0 {
-            // f64 holds u32 losslessly (53-bit mantissa > 32 bits), so the
-            // scale ratio is exact for any reservation sum.
-            let scale = f64::from(new_capacity) / f64::from(configured_total);
-            for class in Class::ALL {
-                let base = self.configured_reserved[class as usize];
-                let scaled = (f64::from(base) * scale).floor() as u16;
-                self.slot_pool.set_reserved(class, scaled);
+        let scale = (configured_total > u32::from(new_capacity) && configured_total > 0)
+            // f64 holds u32 losslessly (53-bit mantissa > 32 bits).
+            .then(|| f64::from(new_capacity) / f64::from(configured_total));
+        let new_reserved = Class::ALL.map(|class| {
+            let base = self.configured_reserved[class as usize];
+            match scale {
+                Some(s) => (f64::from(base) * s).floor() as u16,
+                None => base,
             }
+        });
+        if let Some(s) = scale {
             warn!(
                 configured_total_reserved = configured_total,
                 new_capacity,
-                scale = scale,
+                scale = s,
                 "scheduler: reserved slots scaled down after capacity shrink"
             );
-        } else {
-            // Configured reservations fit — restore them. Idempotent, and the
-            // grow-side restore the scale-in-place version was missing.
-            for class in Class::ALL {
-                self.slot_pool
-                    .set_reserved(class, self.configured_reserved[class as usize]);
-            }
         }
 
         if new_capacity > old {
-            // Capacity grew — wake the dispatcher to drain.
+            // Grow: raise the reservations before exposing the larger
+            // capacity, then wake the dispatcher to drain under the new ceiling.
+            for class in Class::ALL {
+                self.slot_pool
+                    .set_reserved(class, new_reserved[class as usize]);
+            }
+            self.slot_pool.set_capacity(new_capacity);
             self.release_notify.notify_one();
+        } else {
+            // Shrink: drop the capacity before lowering the reservations.
+            self.slot_pool.set_capacity(new_capacity);
+            for class in Class::ALL {
+                self.slot_pool
+                    .set_reserved(class, new_reserved[class as usize]);
+            }
         }
     }
 }
