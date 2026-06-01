@@ -205,5 +205,15 @@ name = "workers_endpoint"
 harness = false
 path = "benches/workers_endpoint.rs"
 
+[[bench]]
+name = "scheduler_admission"
+harness = false
+path = "benches/scheduler_admission.rs"
+
+[[bench]]
+name = "scheduler_load"
+harness = false
+path = "benches/scheduler_load.rs"
+
 [lints]
 workspace = true
