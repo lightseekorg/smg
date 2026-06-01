@@ -642,22 +642,24 @@ impl PriorityScheduler {
         // baseline, new capacity): scale down when the configured sum exceeds
         // the new capacity, otherwise use the configured value as-is.
         let configured_total: u32 = self.configured_reserved.iter().map(|&r| u32::from(r)).sum();
-        let scale = (configured_total > u32::from(new_capacity) && configured_total > 0)
-            // f64 holds u32 losslessly (53-bit mantissa > 32 bits).
-            .then(|| f64::from(new_capacity) / f64::from(configured_total));
+        let scale_down = configured_total > u32::from(new_capacity) && configured_total > 0;
         let new_reserved = Class::ALL.map(|class| {
             let base = self.configured_reserved[class as usize];
-            match scale {
-                Some(s) => (f64::from(base) * s).floor() as u16,
-                None => base,
+            if scale_down {
+                // Exact integer proportional scaling: floor(base * new_capacity
+                // / configured_total). Integer math (u64 temporaries to avoid
+                // overflow) avoids the f64 product/division rounding that could
+                // under-scale a higher class's reservation by one slot and
+                // weaken the reservation guard.
+                ((u64::from(base) * u64::from(new_capacity)) / u64::from(configured_total)) as u16
+            } else {
+                base
             }
         });
-        if let Some(s) = scale {
+        if scale_down {
             warn!(
                 configured_total_reserved = configured_total,
-                new_capacity,
-                scale = s,
-                "scheduler: reserved slots scaled down after capacity shrink"
+                new_capacity, "scheduler: reserved slots scaled down after capacity shrink"
             );
         }
 
@@ -1290,6 +1292,35 @@ mod tests {
         scheduler.apply_new_capacity(120);
         assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 96);
         assert_eq!(scheduler.slot_pool.reserved(Class::System), 24);
+    }
+
+    #[test]
+    fn test_apply_new_capacity_scales_reservations_with_integer_math() {
+        // Exact integer proportional scaling must not under-scale a higher
+        // class's reservation by f64 rounding. One class reserving 22 with
+        // capacity 22 -> 15: exact floor is (22*15)/22 = 15, but the f64 path
+        // (22.0 * (15.0/22.0)).floor() rounds to 14, weakening the guard.
+        use std::collections::HashMap as StdMap;
+        let mut classes = StdMap::new();
+        for c in Class::ALL {
+            let mut cfg = ClassConfig::default_for(c);
+            cfg.reserved = if c == Class::Interactive { 22 } else { 0 };
+            classes.insert(c, cfg);
+        }
+        let yaml = PrioritySchedulerYaml {
+            classes,
+            tenant_policies: StdMap::new(),
+        };
+        let s =
+            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
+        let scheduler = PriorityScheduler::new(&s, 22).unwrap();
+
+        scheduler.apply_new_capacity(15);
+        assert_eq!(
+            scheduler.slot_pool.reserved(Class::Interactive),
+            15,
+            "floor(22*15/22) = 15, not the f64-rounded 14"
+        );
     }
 
     #[test]
