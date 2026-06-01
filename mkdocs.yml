@@ -178,6 +178,7 @@ nav:
       - Reliability:
           - Circuit Breakers: concepts/reliability/circuit-breakers.md
           - Rate Limiting: concepts/reliability/rate-limiting.md
+          - Priority Scheduling: concepts/reliability/priority-scheduling.md
           - Retries: concepts/reliability/retries.md
           - Health Checks: concepts/reliability/health-checks.md
           - Graceful Shutdown: concepts/reliability/graceful-shutdown.md
@@ -194,6 +195,7 @@ nav:
           - Admin API: reference/api/admin.md
           - Gateway Extensions: reference/api/extensions.md
       - Configuration: reference/configuration.md
+      - Priority Scheduler: reference/priority-scheduler.md
       - Metrics: reference/metrics.md
       - Internal MCP Servers: reference/mcp-internal-servers.md
   - Contributing:
