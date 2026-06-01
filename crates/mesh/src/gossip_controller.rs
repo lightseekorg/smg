@@ -54,9 +54,13 @@ use super::{
     },
 };
 use crate::{
+    crdt_kv::CrdtWatermark,
     metrics,
     transport::{
-        crdt_batch::{build_crdt_batches, dispatch_crdt_batch, wrap_crdt_batch},
+        crdt_batch::{
+            build_crdt_batches, crdt_ack_to_watermark, dispatch_crdt_batch, wrap_crdt_ack,
+            wrap_crdt_batch,
+        },
         limits::{MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT},
         sync_stream::{
             build_heartbeat, build_peer_stream_batches, dispatch_stream_batch, wrap_stream_batch,
@@ -448,6 +452,12 @@ impl GossipController {
 
                 let sequence = Arc::new(AtomicU64::new(0));
 
+                // Per-peer CRDT send watermark (per-key acked versions). The
+                // incremental sender filters by it; the inbound loop advances it
+                // on CrdtAck and emits acks for received batches.
+                let acked: Arc<RwLock<CrdtWatermark>> =
+                    Arc::new(RwLock::new(CrdtWatermark::new()));
+
                 // Send initial heartbeat
                 let heartbeat =
                     build_heartbeat(sequence.fetch_add(1, Ordering::Relaxed), &self_name);
@@ -463,6 +473,7 @@ impl GossipController {
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
                     let stream_batch_handle = current_stream_batch.clone();
+                    let acked_incremental = acked.clone();
 
                     #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
@@ -516,36 +527,43 @@ impl GossipController {
                                         }
                                     }
                                 }
+                            }
 
-                                // CRDT op-log: broadcast the full snapshot for
-                                // this round, split into frames that stay under
-                                // the gRPC message cap. Merge is idempotent by
-                                // op-id so re-sending seen ops is a no-op.
-                                for crdt_batch in build_crdt_batches(
-                                    &stream_batch.crdt_ops,
-                                    MAX_STREAM_CHUNK_BYTES,
-                                ) {
-                                    let msg = wrap_crdt_batch(
-                                        crdt_batch,
-                                        shared_sequence.fetch_add(1, Ordering::Relaxed),
-                                        &self_name_incremental,
-                                    );
-                                    match tx_incremental.try_send(msg) {
-                                        Ok(()) => {}
-                                        Err(mpsc::error::TrySendError::Full(_)) => {
-                                            log::debug!(
-                                                peer = %peer_name_incremental,
-                                                "crdt batch dropped on backpressure"
-                                            );
-                                            break;
-                                        }
-                                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                                            log::warn!(
-                                                peer = %peer_name_incremental,
-                                                "crdt sender: channel closed, stopping"
-                                            );
-                                            return;
-                                        }
+                            // CRDT op-log: evaluated every tick (acks shrink the
+                            // delta even when the stream batch is unchanged).
+                            // Send only ops this peer has not acked; the
+                            // watermark advances solely on CrdtAck, so unacked
+                            // keys retry next round.
+                            let crdt_ops: Vec<_> = {
+                                let acked = acked_incremental.read();
+                                stream_batch
+                                    .crdt_ops
+                                    .iter()
+                                    .filter(|op| acked.allows(op))
+                                    .cloned()
+                                    .collect()
+                            };
+                            for crdt_batch in build_crdt_batches(&crdt_ops, MAX_STREAM_CHUNK_BYTES) {
+                                let msg = wrap_crdt_batch(
+                                    crdt_batch,
+                                    shared_sequence.fetch_add(1, Ordering::Relaxed),
+                                    &self_name_incremental,
+                                );
+                                match tx_incremental.try_send(msg) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        log::debug!(
+                                            peer = %peer_name_incremental,
+                                            "crdt batch dropped on backpressure"
+                                        );
+                                        break;
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        log::warn!(
+                                            peer = %peer_name_incremental,
+                                            "crdt sender: channel closed, stopping"
+                                        );
+                                        return;
                                     }
                                 }
                             }
@@ -624,8 +642,26 @@ impl GossipController {
                                 StreamMessageType::CrdtBatch => {
                                     if let Some(mesh_kv) = &mesh_kv {
                                         if let Some(StreamPayload::CrdtBatch(batch)) = msg.payload {
-                                            dispatch_crdt_batch(mesh_kv, batch);
+                                            // Merge, then ack the per-key
+                                            // versions so the peer can advance
+                                            // its send watermark. Ack loss is
+                                            // fine (peer resends), so drop on a
+                                            // full channel rather than block.
+                                            let ack = dispatch_crdt_batch(mesh_kv, batch);
+                                            if !ack.is_empty() {
+                                                let _ = tx.try_send(wrap_crdt_ack(
+                                                    &ack,
+                                                    sequence.fetch_add(1, Ordering::Relaxed),
+                                                    &self_name,
+                                                ));
+                                            }
                                         }
+                                    }
+                                }
+                                // CRDT delivery ack: advance this peer's send watermark.
+                                StreamMessageType::CrdtAck => {
+                                    if let Some(StreamPayload::CrdtAck(ack)) = msg.payload {
+                                        acked.write().merge_max(&crdt_ack_to_watermark(ack));
                                     }
                                 }
                             }

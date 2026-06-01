@@ -65,6 +65,7 @@ enum StreamMessageType {
   HEARTBEAT = 6;
   STREAM_BATCH = 7;
   CRDT_BATCH = 8;
+  CRDT_ACK = 9;
 }
 
 message StreamMessage {
@@ -76,6 +77,7 @@ message StreamMessage {
     StreamAck ack = 5;
     StreamBatch stream_batch = 8;
     CrdtBatch crdt_batch = 9;
+    CrdtAck crdt_ack = 10;
   }
   uint64 sequence = 6; // Sequence number for ordering
   string peer_id = 7;   // Sender peer ID
@@ -97,6 +99,21 @@ message CrdtOp {
 // idempotent by op-id, so re-sending already-seen ops is a no-op.
 message CrdtBatch {
   repeated CrdtOp ops = 1;
+}
+
+// One key's acknowledged version on a peer. The receiver of a CrdtBatch sends
+// these back so the sender can advance its per-(peer, key) send watermark and
+// stop re-broadcasting keys the peer already has.
+message CrdtKeyVersion {
+  string key = 1;
+  uint64 version = 2; // highest Lamport timestamp the receiver holds for this key
+}
+
+// Acknowledgement for a received CrdtBatch: the receiver's current version for
+// each key in that batch. Advances the sender's per-key send watermark; keys
+// the ack omits stay un-acked and are resent next round.
+message CrdtAck {
+  repeated CrdtKeyVersion entries = 1;
 }
 
 // Incremental state update (steady-state)

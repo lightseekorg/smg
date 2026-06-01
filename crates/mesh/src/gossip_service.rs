@@ -43,6 +43,7 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
+    crdt_kv::CrdtWatermark,
     metrics::{record_ack, record_nack, record_peer_reconnect, update_peer_connections},
     mtls::MTLSManager,
     partition::PartitionDetector,
@@ -56,7 +57,10 @@ use super::{
         try_ping, ClusterState,
     },
     transport::{
-        crdt_batch::{build_crdt_batches, dispatch_crdt_batch, wrap_crdt_batch},
+        crdt_batch::{
+            build_crdt_batches, crdt_ack_to_watermark, dispatch_crdt_batch, wrap_crdt_ack,
+            wrap_crdt_batch,
+        },
         limits::{MAX_MESSAGE_SIZE, MAX_STREAM_CHUNK_BYTES, STREAM_IDLE_TIMEOUT},
         sync_stream::{
             build_heartbeat, build_peer_stream_batches, dispatch_stream_batch, wrap_stream_batch,
@@ -261,6 +265,13 @@ impl Gossip for GossipService {
         let learned_peer: Arc<parking_lot::RwLock<Option<String>>> =
             Arc::new(parking_lot::RwLock::new(None));
 
+        // Per-peer CRDT send watermark: the highest version this peer has acked
+        // for each key. The sender filters the op-log by it; the inbound handler
+        // advances it on CrdtAck. Keyed by key so a dropped/late op only delays
+        // that one key (resent next round), never strands it.
+        let acked: Arc<parking_lot::RwLock<CrdtWatermark>> =
+            Arc::new(parking_lot::RwLock::new(CrdtWatermark::new()));
+
         // Server-side stream sender: periodically emit fresh stream batches
         // (broadcast drain_entries + targeted entries addressed to the
         // learned peer). Skipped when no current_stream_batch is attached.
@@ -268,6 +279,7 @@ impl Gossip for GossipService {
             let tx_sender = tx.clone();
             let self_name_sender = self_name.clone();
             let learned_peer_sender = learned_peer.clone();
+            let acked_sender = acked.clone();
             #[expect(
                 clippy::disallowed_methods,
                 reason = "server-side sender bound to sync_stream lifetime; terminates when channel closes or handle is aborted on disconnect"
@@ -290,45 +302,48 @@ impl Gossip for GossipService {
                     }
 
                     let stream_batch = stream_batch_handle.read().clone();
-                    let batches = {
+
+                    // Stream batches: gated by learned peer + Arc-freshness. A
+                    // skipped tick leaves `last_stream_batch` untouched so the
+                    // same RoundBatch is re-evaluated later.
+                    let stream_tick = {
                         let guard = learned_peer_sender.read();
-                        match plan_sender_tick(
+                        plan_sender_tick(
                             last_stream_batch.as_ref(),
                             &stream_batch,
                             guard.as_deref(),
-                        ) {
-                            SenderTick::SkipPeerUnknown | SenderTick::SkipBatchUnchanged => {
-                                continue
-                            }
-                            SenderTick::Emit(b) => b,
-                        }
+                        )
                     };
-                    // Only mark this batch consumed after building with a
-                    // real peer_id. If `plan_sender_tick` short-circuited
-                    // (peer unknown or batch unchanged), `last_stream_batch`
-                    // is untouched and the same RoundBatch will be
-                    // re-evaluated on a later tick.
-                    last_stream_batch = Some(stream_batch.clone());
-
-                    for batch in batches {
-                        sequence_counter += 1;
-                        let msg = wrap_stream_batch(batch, sequence_counter, &self_name_sender);
-                        match tx_sender.try_send(Ok(msg)) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                log::debug!("server-side stream batch dropped on backpressure");
-                                break;
+                    if let SenderTick::Emit(batches) = stream_tick {
+                        last_stream_batch = Some(stream_batch.clone());
+                        for batch in batches {
+                            sequence_counter += 1;
+                            let msg = wrap_stream_batch(batch, sequence_counter, &self_name_sender);
+                            match tx_sender.try_send(Ok(msg)) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    log::debug!("server-side stream batch dropped on backpressure");
+                                    break;
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => return,
                             }
-                            Err(mpsc::error::TrySendError::Closed(_)) => return,
                         }
                     }
 
-                    // CRDT op-log: broadcast the full snapshot this round,
-                    // split to stay under the gRPC message cap (idempotent
-                    // merge on the peer).
-                    for crdt_batch in
-                        build_crdt_batches(&stream_batch.crdt_ops, MAX_STREAM_CHUNK_BYTES)
-                    {
+                    // CRDT op-log: evaluated every tick (acks shrink the delta
+                    // even when the RoundBatch is unchanged). Send only ops the
+                    // peer has not acked; the watermark advances solely on
+                    // CrdtAck, so unacked keys retry next round.
+                    let crdt_ops: Vec<_> = {
+                        let acked = acked_sender.read();
+                        stream_batch
+                            .crdt_ops
+                            .iter()
+                            .filter(|op| acked.allows(op))
+                            .cloned()
+                            .collect()
+                    };
+                    for crdt_batch in build_crdt_batches(&crdt_ops, MAX_STREAM_CHUNK_BYTES) {
                         sequence_counter += 1;
                         let msg = wrap_crdt_batch(crdt_batch, sequence_counter, &self_name_sender);
                         match tx_sender.try_send(Ok(msg)) {
@@ -347,6 +362,7 @@ impl Gossip for GossipService {
         };
 
         let learned_peer_inbound = learned_peer.clone();
+        let acked_inbound = acked.clone();
         #[expect(
             clippy::disallowed_methods,
             reason = "server-side inbound handler bound to sync_stream lifetime; terminates when the stream closes"
@@ -425,7 +441,20 @@ impl Gossip for GossipService {
                             Some(gossip::stream_message::Payload::CrdtBatch(batch)),
                         ) = (&mesh_kv, msg.payload)
                         {
-                            dispatch_crdt_batch(mesh_kv, batch);
+                            // Merge, then ack the per-key versions back so the
+                            // peer can advance its send watermark. Ack loss is
+                            // fine — the peer resends unacked keys next round —
+                            // so drop it on a full channel rather than block.
+                            let ack = dispatch_crdt_batch(mesh_kv, batch);
+                            if !ack.is_empty() {
+                                let _ = tx.try_send(Ok(wrap_crdt_ack(&ack, sequence, &self_name)));
+                            }
+                        }
+                    }
+                    // CRDT delivery ack: advance this peer's send watermark.
+                    StreamMessageType::CrdtAck => {
+                        if let Some(gossip::stream_message::Payload::CrdtAck(ack)) = msg.payload {
+                            acked_inbound.write().merge_max(&crdt_ack_to_watermark(ack));
                         }
                     }
                     StreamMessageType::IncrementalUpdate

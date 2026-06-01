@@ -8,17 +8,19 @@
 //!   message cap; [`wrap_crdt_batch`] builds the `StreamMessage` envelope.
 //! - Inbound: [`dispatch_crdt_batch`] decodes a received `CrdtBatch` back into
 //!   `Operation`s and merges them into the local CRDT store via `MeshKV`.
+//! - Ack: [`dispatch_crdt_batch`] returns a [`CrdtWatermark`] of the per-key
+//!   versions it merged; [`wrap_crdt_ack`] / [`watermark_to_crdt_ack`] /
+//!   [`crdt_ack_to_watermark`] carry it back over the wire so a sender can skip
+//!   keys the peer already holds.
 //!
-//! The op-log is broadcast in full each round; merge is idempotent by op-id,
-//! so re-sending already-seen ops is a no-op. Per-peer watermark filtering (to
-//! send only ops the peer has not acked) is a follow-up.
+//! Merge is idempotent by op-id, so re-sending already-seen ops is a no-op.
 
 use crate::{
-    crdt_kv::{Operation, ReplicaId},
+    crdt_kv::{CrdtWatermark, Operation, ReplicaId},
     kv::MeshKV,
     service::gossip::{
-        stream_message::Payload as StreamPayload, CrdtBatch, CrdtOp, StreamMessage,
-        StreamMessageType,
+        stream_message::Payload as StreamPayload, CrdtAck, CrdtBatch, CrdtKeyVersion, CrdtOp,
+        StreamMessage, StreamMessageType,
     },
 };
 
@@ -113,17 +115,56 @@ pub fn wrap_crdt_batch(batch: CrdtBatch, sequence: u64, self_name: &str) -> Stre
     }
 }
 
+/// Encode a [`CrdtWatermark`] as a wire [`CrdtAck`] — one entry per known key.
+pub fn watermark_to_crdt_ack(watermark: &CrdtWatermark) -> CrdtAck {
+    CrdtAck {
+        entries: watermark
+            .iter()
+            .map(|(key, version)| CrdtKeyVersion {
+                key: key.to_owned(),
+                version,
+            })
+            .collect(),
+    }
+}
+
+/// Decode a received [`CrdtAck`] into a [`CrdtWatermark`] for merging into the
+/// sender's per-peer send watermark.
+pub fn crdt_ack_to_watermark(ack: CrdtAck) -> CrdtWatermark {
+    ack.entries
+        .into_iter()
+        .map(|entry| (entry.key, entry.version))
+        .collect()
+}
+
+/// Wrap a [`CrdtWatermark`] in a `CrdtAck` `StreamMessage` envelope.
+pub fn wrap_crdt_ack(watermark: &CrdtWatermark, sequence: u64, self_name: &str) -> StreamMessage {
+    StreamMessage {
+        message_type: StreamMessageType::CrdtAck as i32,
+        payload: Some(StreamPayload::CrdtAck(watermark_to_crdt_ack(watermark))),
+        sequence,
+        peer_id: self_name.to_owned(),
+    }
+}
+
 /// Receiver-side dispatch for a `CrdtBatch`: decode each op and merge the batch
 /// into the local CRDT store, firing subscribers for keys whose value changed
 /// (via `MeshKV::merge_crdt_ops`). Ops with an unparsable `replica_id` are
 /// skipped. Merge is idempotent by op-id, so a batch the node has already
 /// absorbed is a no-op and fires no subscriber event.
-pub fn dispatch_crdt_batch(mesh_kv: &MeshKV, batch: CrdtBatch) {
+///
+/// Returns the per-key versions of the ops just received as a [`CrdtWatermark`],
+/// which the caller sends back as a [`CrdtAck`] so the peer can advance its
+/// send watermark for those keys. An empty/all-invalid batch returns an empty
+/// watermark (nothing to ack).
+pub fn dispatch_crdt_batch(mesh_kv: &MeshKV, batch: CrdtBatch) -> CrdtWatermark {
     let ops: Vec<Operation> = batch.ops.into_iter().filter_map(proto_to_op).collect();
     if ops.is_empty() {
-        return;
+        return CrdtWatermark::new();
     }
+    let ack = CrdtWatermark::from_ops(&ops);
     mesh_kv.merge_crdt_ops(ops);
+    ack
 }
 
 #[cfg(test)]
@@ -202,5 +243,31 @@ mod tests {
         assert_eq!(msg.sequence, 11);
         assert_eq!(msg.peer_id, "node-1");
         assert!(matches!(msg.payload, Some(StreamPayload::CrdtBatch(_))));
+    }
+
+    #[test]
+    fn watermark_round_trips_through_ack() {
+        let replica = ReplicaId::new();
+        let wm = CrdtWatermark::from_ops(&[
+            Operation::insert("worker:a".to_string(), b"v".to_vec(), 5, replica),
+            Operation::insert("rl:c".to_string(), b"x".to_vec(), 9, replica),
+        ]);
+        let back = crdt_ack_to_watermark(watermark_to_crdt_ack(&wm));
+        assert_eq!(back, wm);
+    }
+
+    #[test]
+    fn wrap_crdt_ack_envelope_shape() {
+        let wm = CrdtWatermark::from_ops(&[Operation::insert(
+            "worker:a".to_string(),
+            b"v".to_vec(),
+            5,
+            ReplicaId::new(),
+        )]);
+        let msg = wrap_crdt_ack(&wm, 12, "node-1");
+        assert_eq!(msg.message_type, StreamMessageType::CrdtAck as i32);
+        assert_eq!(msg.sequence, 12);
+        assert_eq!(msg.peer_id, "node-1");
+        assert!(matches!(msg.payload, Some(StreamPayload::CrdtAck(_))));
     }
 }
