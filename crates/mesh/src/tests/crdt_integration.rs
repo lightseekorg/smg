@@ -14,7 +14,9 @@ use bytes::Bytes;
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::{
-    crdt_kv::{decode as decode_epoch_count, encode as encode_epoch_count, EpochCount},
+    crdt_kv::{
+        decode as decode_epoch_count, encode as encode_epoch_count, CrdtWatermark, EpochCount,
+    },
     kv::MeshKV,
     transport::{
         crdt_batch::{build_crdt_batches, dispatch_crdt_batch},
@@ -29,6 +31,29 @@ fn deliver_crdt(sender: &MeshKV, receiver: &MeshKV) {
     let ops = sender.collect_round_batch().crdt_ops;
     for batch in build_crdt_batches(&ops, MAX_STREAM_CHUNK_BYTES) {
         dispatch_crdt_batch(receiver, batch);
+    }
+}
+
+/// Snapshot the ops the sender would send this round: the op-log filtered by
+/// the per-key send watermark. Mirrors the live sender's filter step.
+fn pending_ops(sender: &MeshKV, acked: &CrdtWatermark) -> Vec<crate::crdt_kv::Operation> {
+    sender
+        .collect_round_batch()
+        .crdt_ops
+        .into_iter()
+        .filter(|op| acked.allows(op))
+        .collect()
+}
+
+/// One watermark-filtered round: send only ops the peer has not acked, then
+/// advance `acked` from the per-key versions the receiver acks back. Mirrors
+/// the live sender/receiver loop (filter → dispatch → ack → merge_max) without
+/// gossip tasks.
+fn deliver_crdt_watermarked(sender: &MeshKV, receiver: &MeshKV, acked: &mut CrdtWatermark) {
+    let ops = pending_ops(sender, acked);
+    for batch in build_crdt_batches(&ops, MAX_STREAM_CHUNK_BYTES) {
+        let ack = dispatch_crdt_batch(receiver, batch);
+        acked.merge_max(&ack);
     }
 }
 
@@ -162,4 +187,145 @@ async fn remote_tombstone_after_insert_notifies_none() {
     assert_eq!(key, "worker:a");
     assert!(payload.is_none(), "tombstone notifies None");
     assert_eq!(r_ns.get("worker:a"), None);
+}
+
+#[test]
+fn caught_up_peer_is_sent_nothing() {
+    let sender = MeshKV::new("sender".to_string());
+    let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    s_ns.put("worker:a", b"v1".to_vec());
+
+    let receiver = MeshKV::new("receiver".to_string());
+    receiver.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+
+    let mut acked = CrdtWatermark::new();
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+
+    assert!(
+        pending_ops(&sender, &acked).is_empty(),
+        "once acked, a caught-up peer is sent nothing"
+    );
+}
+
+#[test]
+fn ack_advances_watermark_to_delivered_version() {
+    let sender = MeshKV::new("sender".to_string());
+    let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    s_ns.put("worker:a", b"v1".to_vec());
+
+    let receiver = MeshKV::new("receiver".to_string());
+    receiver.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+
+    let sent_version = pending_ops(&sender, &CrdtWatermark::new())
+        .iter()
+        .find(|op| op.key() == "worker:a")
+        .map(|op| op.timestamp())
+        .expect("worker:a is pending before any ack");
+
+    let mut acked = CrdtWatermark::new();
+    assert_eq!(acked.get("worker:a"), 0);
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+    assert_eq!(
+        acked.get("worker:a"),
+        sent_version,
+        "ack advances the watermark to the delivered version"
+    );
+}
+
+#[test]
+fn lost_ack_resends_key_until_acked() {
+    let sender = MeshKV::new("sender".to_string());
+    let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    s_ns.put("worker:a", b"v1".to_vec());
+
+    let receiver = MeshKV::new("receiver".to_string());
+    let r_ns = receiver.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+
+    // Round 1: the batch is delivered and merged, but the ack is lost — the
+    // sender does NOT advance its watermark.
+    let mut acked = CrdtWatermark::new();
+    for batch in build_crdt_batches(&pending_ops(&sender, &acked), MAX_STREAM_CHUNK_BYTES) {
+        let _lost_ack = dispatch_crdt_batch(&receiver, batch);
+    }
+    assert_eq!(
+        r_ns.get("worker:a"),
+        Some(b"v1".to_vec()),
+        "the batch merged even though its ack was lost"
+    );
+
+    // Round 2: with no ack, the key is still pending and gets resent.
+    assert!(
+        !pending_ops(&sender, &acked).is_empty(),
+        "a lost ack leaves the key pending, so it is resent"
+    );
+
+    // Once an ack lands, the watermark advances and the key is suppressed.
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+    assert!(
+        pending_ops(&sender, &acked).is_empty(),
+        "the key stops resending once acked"
+    );
+}
+
+#[test]
+fn dropping_one_keys_batch_does_not_strand_it() {
+    // The per-key regression: with a per-replica watermark, acking one key
+    // could advance past a lower-versioned op of the same author on a DIFFERENT
+    // key and strand it forever. Per-key tracking resends only the dropped key.
+    let sender = MeshKV::new("sender".to_string());
+    let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    s_ns.put("worker:a", vec![0u8; 200]);
+    s_ns.put("worker:b", vec![1u8; 200]);
+
+    let receiver = MeshKV::new("receiver".to_string());
+    let r_ns = receiver.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+
+    let mut acked = CrdtWatermark::new();
+    // A budget that fits one ~200-byte op per frame forces two separate batches.
+    let batches = build_crdt_batches(&pending_ops(&sender, &acked), 300);
+    assert!(
+        batches.len() >= 2,
+        "two large keys must split into separate batches"
+    );
+
+    // Deliver + ack only the first batch; the rest are "dropped on backpressure".
+    let ack = dispatch_crdt_batch(&receiver, batches[0].clone());
+    acked.merge_max(&ack);
+    let delivered = [r_ns.get("worker:a"), r_ns.get("worker:b")]
+        .iter()
+        .filter(|v| v.is_some())
+        .count();
+    assert_eq!(
+        delivered, 1,
+        "exactly one key delivered; the other was dropped"
+    );
+
+    // The dropped key was never acked, so the next round resends it (and the
+    // delivered key, now acked, is suppressed). Both converge.
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+    assert_eq!(r_ns.get("worker:a"), Some(vec![0u8; 200]));
+    assert_eq!(r_ns.get("worker:b"), Some(vec![1u8; 200]));
+}
+
+#[test]
+fn filter_is_per_key_selective() {
+    let sender = MeshKV::new("sender".to_string());
+    let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    s_ns.put("worker:a", b"a".to_vec());
+
+    let receiver = MeshKV::new("receiver".to_string());
+    let r_ns = receiver.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+
+    let mut acked = CrdtWatermark::new();
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+
+    // A new key is added after worker:a is acked; only the new key is sent.
+    s_ns.put("worker:b", b"b".to_vec());
+    let pending = pending_ops(&sender, &acked);
+    assert_eq!(pending.len(), 1, "only the unacked key is sent");
+    assert_eq!(pending[0].key(), "worker:b");
+
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+    assert_eq!(r_ns.get("worker:a"), Some(b"a".to_vec()));
+    assert_eq!(r_ns.get("worker:b"), Some(b"b".to_vec()));
 }
