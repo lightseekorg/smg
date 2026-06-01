@@ -333,6 +333,11 @@ pub(crate) fn init_metrics() {
 
     // Initialize mesh metrics
     smg_mesh::init_mesh_metrics();
+
+    // Priority scheduler metrics (no-op at scrape time unless the scheduler
+    // is enabled and recording).
+    use crate::middleware::scheduler::metrics as scheduler_metrics;
+    scheduler_metrics::describe();
 }
 
 #[expect(

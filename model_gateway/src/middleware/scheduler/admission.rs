@@ -22,9 +22,11 @@ use axum::{
 };
 use smg_auth::RequestId;
 use tokio_util::sync::CancellationToken;
+use tracing::trace;
 
 use super::{
-    state::SchedulerState, AdmitOutcome, Class, SchedulerError, SchedulerGuardBody, PRIORITY_HEADER,
+    metrics as sched_metrics, state::SchedulerState, AdmitOutcome, Class, RejectionReason,
+    SchedulerError, SchedulerGuardBody, HEADER_X_SMG_PREEMPTED, PRIORITY_HEADER,
 };
 use crate::{
     middleware::RouteRequestMeta,
@@ -43,23 +45,51 @@ fn next_registry_id() -> RequestId {
     RequestId(format!("sched-{n}"))
 }
 
+/// The class a request resolves to, plus what it asked for.
+struct ResolvedPriority {
+    /// Post-clamp class the request is admitted under.
+    effective: Class,
+    /// Class parsed from the header before the tenant clamp.
+    requested: Class,
+    /// Header carried a non-empty value that didn't name a known class.
+    unknown: bool,
+}
+
 /// Resolve the effective class: parse the priority header, then clamp it
 /// down to the tenant's configured `max_class` (a low-tier tenant cannot
 /// self-promote by setting the header). `min` is the clamp because of the
 /// `Ord` derive on `Class`.
-fn effective_class(req: &Request<Body>, state: &SchedulerState) -> Class {
-    let header_class = req
+fn resolve_priority(
+    req: &Request<Body>,
+    state: &SchedulerState,
+    tenant: &TenantKey,
+) -> ResolvedPriority {
+    let raw = req
         .headers()
         .get(PRIORITY_HEADER)
-        .and_then(|h| h.to_str().ok())
-        .map(Class::parse_header)
-        .unwrap_or(Class::Default);
-    let tenant = req
-        .extensions()
-        .get::<RouteRequestMeta>()
-        .map(|m| m.tenant_key().clone())
-        .unwrap_or_else(|| TenantKey::new("anonymous"));
-    header_class.min(state.resolver.policy(&tenant).max_class)
+        .and_then(|h| h.to_str().ok());
+    let requested = raw.map(Class::parse_header).unwrap_or(Class::Default);
+    // Unknown = present, non-empty, not "default", yet still parsed to
+    // Default (i.e. an unrecognized value silently downgraded).
+    let unknown = raw.map(str::trim).is_some_and(|v| {
+        !v.is_empty() && !v.eq_ignore_ascii_case("default") && requested == Class::Default
+    });
+    let max_class = state.resolver.policy(tenant).max_class;
+    ResolvedPriority {
+        effective: requested.min(max_class),
+        requested,
+        unknown,
+    }
+}
+
+/// Map an admit rejection to an `admit_total` outcome label.
+fn rejection_outcome(reason: RejectionReason) -> &'static str {
+    match reason {
+        RejectionReason::QueueFull => sched_metrics::outcome::REJECTED_QUEUE_FULL,
+        RejectionReason::QueueTimeout => sched_metrics::outcome::REJECTED_QUEUE_TIMEOUT,
+        RejectionReason::Preempted => sched_metrics::outcome::PREEMPTED,
+        RejectionReason::ClientCancelled => sched_metrics::outcome::CLIENT_CANCELLED,
+    }
 }
 
 pub async fn priority_admission_middleware(
@@ -67,9 +97,25 @@ pub async fn priority_admission_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
+    let tenant = req
+        .extensions()
+        .get::<RouteRequestMeta>()
+        .map(|m| m.tenant_key().clone())
+        .unwrap_or_else(|| TenantKey::new("anonymous"));
+    let resolved = resolve_priority(&req, &state, &tenant);
+    let class = resolved.effective;
+
+    if resolved.unknown {
+        sched_metrics::record_unknown_priority();
+    }
+    if class < resolved.requested {
+        sched_metrics::record_clamp(resolved.requested, class);
+    }
+
     // RPS sibling check (only set when an explicit per-second limit is
     // configured). Checked before admission so a rejected request never
     // consumes a slot. Tokens are not returned — refill is time-based.
+    // Tracked by smg_http_rate_limit_total, so not double-counted here.
     if let Some(bucket) = &state.rate_limiter {
         if bucket.try_acquire(1.0).is_err() {
             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_REJECTED);
@@ -77,7 +123,6 @@ pub async fn priority_admission_middleware(
         }
     }
 
-    let class = effective_class(&req, &state);
     let request_id = next_registry_id();
 
     // NOTE: client-disconnect detection during the queue wait is not yet
@@ -92,9 +137,35 @@ pub async fn priority_admission_middleware(
             // Hand the handler the cancel token (for preemption select!).
             req.extensions_mut().insert(permit.cancel_token());
             let response = next.run(req).await;
+            // The handler's PreemptionGuard tags a preempted response; treat
+            // that as the `preempted` outcome rather than plain admitted.
+            let outcome = if response.headers().contains_key(HEADER_X_SMG_PREEMPTED) {
+                sched_metrics::outcome::PREEMPTED
+            } else {
+                sched_metrics::outcome::ADMITTED
+            };
+            sched_metrics::record_admit(class, outcome);
+            trace!(
+                scheduler.class = class.as_str(),
+                scheduler.requested_class = resolved.requested.as_str(),
+                scheduler.tenant = %tenant,
+                scheduler.admit_outcome = outcome,
+                "scheduler admission decision"
+            );
             let (parts, body) = response.into_parts();
             Response::from_parts(parts, Body::new(SchedulerGuardBody::new(body, permit)))
         }
-        AdmitOutcome::Rejected(reason) => SchedulerError::from(reason).into_response(),
+        AdmitOutcome::Rejected(reason) => {
+            let outcome = rejection_outcome(reason);
+            sched_metrics::record_admit(class, outcome);
+            trace!(
+                scheduler.class = class.as_str(),
+                scheduler.requested_class = resolved.requested.as_str(),
+                scheduler.tenant = %tenant,
+                scheduler.admit_outcome = outcome,
+                "scheduler admission decision"
+            );
+            SchedulerError::from(reason).into_response()
+        }
     }
 }

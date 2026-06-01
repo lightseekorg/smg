@@ -212,6 +212,7 @@ impl PriorityScheduler {
                         "scheduler: preempting pre-TTFT request to admit higher class"
                     );
                     victim.cancel();
+                    super::metrics::record_preemption(victim.class(), class);
                     if let Some(permit) = self
                         .wait_for_slot(class, request_id.clone(), &cancel, PREEMPTION_WAIT_BUDGET)
                         .await
@@ -247,6 +248,7 @@ impl PriorityScheduler {
         {
             return AdmitOutcome::Rejected(RejectionReason::QueueFull);
         }
+        let enqueued_at = Instant::now();
 
         // Lost-wakeup guard: a slot may have been released after our
         // fast-path try_acquire failed but before try_enqueue returned.
@@ -268,6 +270,7 @@ impl PriorityScheduler {
             () = tokio::time::sleep(timeout) => AdmitOutcome::Rejected(RejectionReason::QueueTimeout),
             () = cancel.cancelled() => AdmitOutcome::Rejected(RejectionReason::ClientCancelled),
         };
+        super::metrics::record_queue_wait(class, enqueued_at.elapsed());
 
         // Mark the waiter cancelled on any exit path so the queue's
         // `drop_cancelled_head` reaps it. Harmless if the waiter was
@@ -383,6 +386,7 @@ impl PriorityScheduler {
             }
             if self.slot_pool.try_acquire_ignoring_reservations(class) {
                 if self.send_to_head(class) {
+                    super::metrics::record_starvation_promotion(class);
                     return true;
                 }
                 // Acquired a slot but the head was gone (racy cancel).

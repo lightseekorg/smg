@@ -8,6 +8,7 @@ pub mod engine;
 pub mod error;
 pub mod extract;
 pub mod inflight;
+pub mod metrics;
 pub mod policy;
 pub mod queue;
 pub mod slots;
