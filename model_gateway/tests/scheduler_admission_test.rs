@@ -19,7 +19,7 @@
 //!   capacity to exactly one slot — no reliance on the legacy
 //!   `--max-concurrent-requests` fallback (which only applies when zero workers
 //!   are healthy).
-//! * **Reservations.** Every test ships a YAML config that sets `reserved: 0`
+//! * **Reservations.** Every test ships a YAML config that sets `reserved_floor: 0`
 //!   on *all four* classes. This matters: with the built-in defaults
 //!   (Interactive 128 + System 32 = 160) `PriorityScheduler::new` would reject
 //!   the tiny capacities here and `AdmissionMode::from_config` would silently
@@ -61,16 +61,16 @@ use crate::common::{
 
 /// One class's tunables for the generated YAML.
 ///
-/// [`ClassYaml::base`] zeroes `reserved` (see the module docs for why every
-/// class must read 0 to keep small-capacity tests on the priority path); the
-/// starvation test is the sole place that deliberately sets it non-zero.
+/// [`ClassYaml::base`] zeroes `reserved_floor` (see the module docs for why
+/// every class must read 0 to keep small-capacity tests on the priority path);
+/// the starvation test is the sole place that deliberately sets it non-zero.
 #[derive(Clone, Copy)]
 struct ClassYaml {
     queue_size: u32,
     queue_timeout_secs: u64,
     starvation_threshold_secs: u64,
     can_preempt: bool,
-    reserved: u16,
+    reserved_floor: u16,
 }
 
 impl ClassYaml {
@@ -83,7 +83,7 @@ impl ClassYaml {
             queue_timeout_secs: 30,
             starvation_threshold_secs: 3600,
             can_preempt: false,
-            reserved: 0,
+            reserved_floor: 0,
         }
     }
 }
@@ -119,9 +119,9 @@ impl SchedulerYaml {
 fn write_scheduler_yaml(cfg: &SchedulerYaml) -> NamedTempFile {
     fn class_block(name: &str, c: &ClassYaml) -> String {
         format!(
-            "  {name}:\n    reserved: {}\n    queue_size: {}\n    queue_timeout_secs: {}\n    \
+            "  {name}:\n    reserved_floor: {}\n    queue_size: {}\n    queue_timeout_secs: {}\n    \
              starvation_threshold_secs: {}\n    can_preempt: {}\n",
-            c.reserved,
+            c.reserved_floor,
             c.queue_size,
             c.queue_timeout_secs,
             c.starvation_threshold_secs,
@@ -594,7 +594,7 @@ async fn starvation_override_promotes_aged_bulk_request() {
     // Interactive reserves the whole (capacity-1) pool, locking Bulk out of the
     // normal admission path. Reservations sum to 1 == capacity, so the
     // scheduler still builds (no fallback to legacy).
-    yaml.interactive.reserved = 1;
+    yaml.interactive.reserved_floor = 1;
     // Bulk ages out of starvation quickly; keep a real queue to wait in.
     yaml.bulk.starvation_threshold_secs = 1;
     yaml.bulk.queue_size = 4;

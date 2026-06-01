@@ -45,7 +45,7 @@ use smg_auth::RequestId;
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
-/// Build settings with `reserved = 0` on every class (so admission is
+/// Build settings with no reservations on any class (so admission is
 /// purely capacity-bound and small capacities don't trip the
 /// reserved-vs-capacity guard) and the given per-class `queue_size`.
 /// Other per-class fields stay at their built-in defaults.
@@ -55,7 +55,8 @@ fn settings(queue_size: u32) -> SchedulerSettings {
     let mut classes = HashMap::new();
     for c in Class::ALL {
         let mut cfg = ClassConfig::default_for(c);
-        cfg.reserved = 0;
+        cfg.reserved_floor = 0;
+        cfg.reserved_per_slot = 0.0;
         cfg.queue_size = queue_size;
         classes.insert(c, cfg);
     }

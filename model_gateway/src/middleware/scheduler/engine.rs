@@ -84,11 +84,14 @@ pub struct PriorityScheduler {
     /// exits cleanly.
     pub(super) release_notify: Arc<Notify>,
     class_config: [ClassRuntimeConfig; 4],
-    /// Configured per-class reservations (immutable baseline). The live
-    /// `slot_pool` reservations are recomputed from this on every capacity
-    /// change, so a capacity recovery restores them instead of leaving them
-    /// permanently scaled down.
-    configured_reserved: [u16; 4],
+    /// Per-class reservation floors (immutable baseline). The live
+    /// `slot_pool` reservations are recomputed from the floors + shares on
+    /// every capacity change, so the effective reservation tracks capacity
+    /// and a recovery restores it instead of eroding permanently.
+    reserved_floor: [u16; 4],
+    /// Per-class reservation shares of capacity (immutable baseline).
+    /// Effective = `max(floor, ceil(share × capacity))`.
+    reserved_per_slot: [f64; 4],
 }
 
 impl Drop for PriorityScheduler {
@@ -101,36 +104,39 @@ impl Drop for PriorityScheduler {
 
 impl PriorityScheduler {
     /// Build a scheduler against the given settings and live backend
-    /// capacity. Refuses if the configured reservations sum to more than
-    /// the available capacity (the scheduler would otherwise lock itself
-    /// out of its own non-reserved classes).
+    /// capacity. Refuses if the configured reservation floors + shares, at
+    /// the initial capacity, sum to more than the available capacity (a
+    /// too-small fleet or misconfiguration — the caller falls back to legacy
+    /// admission). Runtime capacity dips are handled gracefully by the
+    /// priority-ordered clamp in `apply_new_capacity`, not by rejection.
     pub fn new(
         settings: &SchedulerSettings,
         capacity: u16,
     ) -> Result<Arc<Self>, SchedulerInitError> {
-        let total_reserved: u32 = Class::ALL
-            .iter()
-            .map(|c| u32::from(settings.class_config(*c).reserved))
-            .sum();
-        if total_reserved > u32::from(capacity) {
+        let reserved_floor = Class::ALL.map(|c| settings.class_config(c).reserved_floor);
+        let reserved_per_slot = Class::ALL.map(|c| settings.class_config(c).reserved_per_slot);
+
+        let desired = desired_reservations(reserved_floor, &reserved_per_slot, capacity);
+        let total: u32 = desired.iter().map(|&r| u32::from(r)).sum();
+        if total > u32::from(capacity) {
             return Err(SchedulerInitError::ReservationsExceedCapacity {
-                reserved: total_reserved,
+                reserved: total,
                 capacity,
             });
         }
 
-        let reserved_arr = Class::ALL.map(|c| settings.class_config(c).reserved);
         let class_queues: [Arc<dyn ClassQueue>; 4] = Class::ALL.map(|c| queue_for(settings, c));
         let class_config: [ClassRuntimeConfig; 4] =
             Class::ALL.map(|c| ClassRuntimeConfig::from_class_config(settings.class_config(c)));
 
         Ok(Arc::new(Self {
-            slot_pool: SlotPool::new(capacity, reserved_arr),
+            slot_pool: SlotPool::new(capacity, desired),
             class_queues,
             inflight_registry: RwLock::new(HashMap::new()),
             release_notify: Arc::new(Notify::new()),
             class_config,
-            configured_reserved: reserved_arr,
+            reserved_floor,
+            reserved_per_slot,
         }))
     }
 
@@ -612,16 +618,14 @@ impl PriorityScheduler {
 
     /// Apply a new backend capacity from the WorkerCapacity watch.
     ///
-    /// Recomputes the live per-class reservations from the configured
-    /// baseline: on shrink past `Σ configured`, scales them down
-    /// proportionally so the new capacity stays usable; otherwise restores
-    /// the configured values. On grow, also fires `release_notify` so the
-    /// dispatcher re-evaluates queued waiters under the larger ceiling.
-    ///
-    /// Driving from the immutable baseline (not the current, possibly
-    /// already-scaled live values) makes this idempotent and lets a capacity
-    /// recovery fully restore the reservations — scaling in place would lose
-    /// the originals and erode them permanently across a shrink/grow cycle.
+    /// Recomputes the live per-class reservations from the immutable floors +
+    /// shares (`desired_reservations`), so the effective reservation tracks
+    /// capacity and a recovery restores it automatically. When the desired
+    /// sum exceeds the new capacity (a runtime dip below what the floors +
+    /// shares want), the priority-ordered clamp keeps the highest classes
+    /// whole and yields the lowest — runtime never rejects. On grow, also
+    /// fires `release_notify` so the dispatcher re-evaluates queued waiters
+    /// under the larger ceiling.
     ///
     /// The capacity and the per-class reservations are separate atomics, so
     /// they cannot be published together. We order the two writes so a
@@ -638,30 +642,22 @@ impl PriorityScheduler {
             return;
         }
 
-        // Effective reservation per class, a pure function of (configured
-        // baseline, new capacity): scale down when the configured sum exceeds
-        // the new capacity, otherwise use the configured value as-is.
-        let configured_total: u32 = self.configured_reserved.iter().map(|&r| u32::from(r)).sum();
-        let scale_down = configured_total > u32::from(new_capacity) && configured_total > 0;
-        let new_reserved = Class::ALL.map(|class| {
-            let base = self.configured_reserved[class as usize];
-            if scale_down {
-                // Exact integer proportional scaling: floor(base * new_capacity
-                // / configured_total). Integer math (u64 temporaries to avoid
-                // overflow) avoids the f64 product/division rounding that could
-                // under-scale a higher class's reservation by one slot and
-                // weaken the reservation guard.
-                ((u64::from(base) * u64::from(new_capacity)) / u64::from(configured_total)) as u16
-            } else {
-                base
-            }
-        });
-        if scale_down {
+        // Desired reservations (floor + share) at the new capacity, then the
+        // priority-ordered clamp if they no longer fit. Pure function of
+        // (immutable baseline, new capacity), so it is idempotent and both
+        // directional.
+        let desired =
+            desired_reservations(self.reserved_floor, &self.reserved_per_slot, new_capacity);
+        let desired_total: u32 = desired.iter().map(|&r| u32::from(r)).sum();
+        let new_reserved = if desired_total > u32::from(new_capacity) {
             warn!(
-                configured_total_reserved = configured_total,
-                new_capacity, "scheduler: reserved slots scaled down after capacity shrink"
+                desired_total_reserved = desired_total,
+                new_capacity, "scheduler: reservations clamped to capacity (priority order)"
             );
-        }
+            clamp_reservations_to_capacity(desired, new_capacity)
+        } else {
+            desired
+        };
 
         if new_capacity > old {
             // Grow: raise the reservations before exposing the larger
@@ -681,6 +677,46 @@ impl PriorityScheduler {
             }
         }
     }
+}
+
+/// Desired per-class reservation at `capacity`:
+/// `max(floor, ceil(per_slot × capacity))`, capped per class at `capacity`.
+/// The per-class result always fits the pool, but `Σ` may exceed `capacity`
+/// (resolved by [`clamp_reservations_to_capacity`]).
+fn desired_reservations(floor: [u16; 4], per_slot: &[f64; 4], capacity: u16) -> [u16; 4] {
+    let cap = u32::from(capacity);
+    Class::ALL.map(|class| {
+        let i = class as usize;
+        // per_slot is validated finite & >= 0 in SchedulerSettings; the guard
+        // and the saturating `as u32` keep a pathological value harmless.
+        let share = (per_slot[i] * f64::from(capacity)).ceil();
+        let share = if share.is_finite() && share >= 0.0 {
+            share as u32
+        } else {
+            0
+        };
+        u32::from(floor[i]).max(share).min(cap) as u16
+    })
+}
+
+/// Clamp desired reservations to fit `capacity`, priority-ordered: fill
+/// System → Bulk, each taking `min(desired, remaining)`. The highest classes
+/// keep their seats under an extreme shrink and the lowest yield first. The
+/// result always sums to `<= capacity`.
+fn clamp_reservations_to_capacity(desired: [u16; 4], capacity: u16) -> [u16; 4] {
+    let mut remaining = capacity;
+    let mut out = [0u16; 4];
+    for class in [
+        Class::System,
+        Class::Interactive,
+        Class::Default,
+        Class::Bulk,
+    ] {
+        let give = desired[class as usize].min(remaining);
+        out[class as usize] = give;
+        remaining -= give;
+    }
+    out
 }
 
 /// Build the per-class queue with its configured fixed depth limit.
@@ -758,19 +794,23 @@ mod tests {
 
     #[test]
     fn test_new_succeeds_when_reservations_fit() {
-        // Built-in defaults: Σ reserved = 128 (Interactive) + 32 (System) = 160.
+        // Built-in defaults at capacity 256: desired Σ = 186 (System 32,
+        // Interactive 128, Default ceil(0.10*256)=26) ≤ 256.
         let s = default_settings();
         assert!(PriorityScheduler::new(&s, 256).is_ok());
     }
 
     #[test]
     fn test_new_rejects_when_reservations_exceed_capacity() {
+        // Capacity 100: desired is System 32, Interactive min(128,100)=100,
+        // Default 10 — Σ 142 > 100, so construction rejects (caller falls
+        // back to legacy).
         let s = default_settings();
         let result = PriorityScheduler::new(&s, 100);
         assert!(matches!(
             result,
             Err(SchedulerInitError::ReservationsExceedCapacity {
-                reserved: 160,
+                reserved: 142,
                 capacity: 100
             })
         ));
@@ -786,13 +826,13 @@ mod tests {
 
     #[test]
     fn test_acquire_returns_none_when_reservation_guard_blocks() {
-        // Capacity 200, reservations 160 (Interactive=128, System=32). Bulk
-        // is the lowest class so it gets capacity - 160 = 40 slots before
-        // the guard refuses further admissions.
+        // Capacity 200, reservations 180 (System 32, Interactive 128, Default
+        // ceil(0.10*200)=20). Bulk is the lowest class so it gets capacity -
+        // 180 = 20 slots before the guard refuses further admissions.
         let s = default_settings();
         let scheduler = PriorityScheduler::new(&s, 200).unwrap();
         let mut held = Vec::new();
-        for i in 0..40 {
+        for i in 0..20 {
             held.push(
                 scheduler
                     .acquire_inflight(Class::Bulk, rid(&format!("req-{i}")))
@@ -847,7 +887,8 @@ mod tests {
         let mut classes = StdMap::new();
         for c in Class::ALL {
             let mut cfg = ClassConfig::default_for(c);
-            cfg.reserved = 0;
+            cfg.reserved_floor = 0;
+            cfg.reserved_per_slot = 0.0;
             if c == class {
                 cfg.queue_size = queue_size;
                 cfg.queue_timeout_secs = queue_timeout_secs;
@@ -1115,7 +1156,8 @@ mod tests {
         let mut classes = StdMap::new();
         for c in Class::ALL {
             let mut cfg = ClassConfig::default_for(c);
-            cfg.reserved = 0;
+            cfg.reserved_floor = 0;
+            cfg.reserved_per_slot = 0.0;
             // Tight thresholds so the test runs fast.
             cfg.starvation_threshold_secs = 1;
             if c == Class::Bulk {
@@ -1124,7 +1166,7 @@ mod tests {
             // Interactive reserves the entire capacity, locking Bulk out
             // of the normal-priority admission path.
             if c == Class::Interactive {
-                cfg.reserved = 1;
+                cfg.reserved_floor = 1;
             }
             classes.insert(c, cfg);
         }
@@ -1158,7 +1200,8 @@ mod tests {
         let mut classes = StdMap::new();
         for c in Class::ALL {
             let mut cfg = ClassConfig::default_for(c);
-            cfg.reserved = 0;
+            cfg.reserved_floor = 0;
+            cfg.reserved_per_slot = 0.0;
             // Set tiny starvation threshold for Bulk so an immediate
             // enqueue is "stale" by the time wake fires.
             if c == Class::Bulk {
@@ -1167,7 +1210,7 @@ mod tests {
             }
             // Interactive holds the full capacity in reservation.
             if c == Class::Interactive {
-                cfg.reserved = 1;
+                cfg.reserved_floor = 1;
             }
             classes.insert(c, cfg);
         }
@@ -1245,10 +1288,11 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_new_capacity_shrink_below_reserved_scales_reservations() {
-        // Built-in defaults: Interactive reserves 128, System reserves 32
-        // = 160 total. Shrink to 80; reservations should scale by 0.5 so
-        // the new sum fits.
+    fn test_apply_new_capacity_shrink_clamps_reservations_priority_ordered() {
+        // Built-in defaults at capacity 80: desired is System 32, Interactive
+        // 128 (floor), Default ceil(0.10*80)=8 — Σ 168 > 80. The
+        // priority-ordered clamp keeps System whole (32), gives Interactive
+        // the remainder (48), and yields Default and Bulk.
         let s = default_settings();
         let scheduler = PriorityScheduler::new(&s, 256).unwrap();
         scheduler.apply_new_capacity(80);
@@ -1259,68 +1303,41 @@ mod tests {
             .sum();
         assert!(
             new_total <= 80,
-            "scaled reservations ({new_total}) must fit under new capacity"
+            "clamped reservations ({new_total}) must fit"
         );
-        // Each individual class is also scaled down proportionally
-        // (floor rounding).
-        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 64);
-        assert_eq!(scheduler.slot_pool.reserved(Class::System), 16);
+        assert_eq!(scheduler.slot_pool.reserved(Class::System), 32);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 48);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Default), 0);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Bulk), 0);
     }
 
     #[test]
     fn test_apply_new_capacity_restores_reservations_after_recovery() {
-        // One-way-degrade fix: a shrink scales reservations down, but a later
-        // capacity recovery fully restores them (the live values are recomputed
-        // from the configured baseline each time, not eroded in place).
+        // Reservations are recomputed from the floors + shares on every
+        // capacity change, so a shrink-then-recover fully restores them (no
+        // one-way degrade), and the share tracks a growing fleet.
         let s = default_settings();
         let scheduler = PriorityScheduler::new(&s, 256).unwrap();
+        // cap 256: System 32, Interactive max(128, 64)=128, Default ceil(25.6)=26.
         assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 128);
-        assert_eq!(scheduler.slot_pool.reserved(Class::System), 32);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Default), 26);
 
-        // Shrink to 80 (< 160 reserved) → scale by 0.5.
+        // Shrink to 80: desired Σ 168 > 80 → priority clamp (System 32, the
+        // remaining 48 to Interactive, Default/Bulk yield).
         scheduler.apply_new_capacity(80);
-        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 64);
-        assert_eq!(scheduler.slot_pool.reserved(Class::System), 16);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 48);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Default), 0);
 
-        // Recover to 256 → reservations fully restored, not stuck at 64/16.
+        // Recover to 256 → fully restored, not stuck at the clamped values.
         scheduler.apply_new_capacity(256);
         assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 128);
-        assert_eq!(scheduler.slot_pool.reserved(Class::System), 32);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Default), 26);
 
-        // A second shrink recomputes from the baseline (128/32), not from the
-        // restored live value: shrink to 120 → scale 0.75 → 96 / 24.
-        scheduler.apply_new_capacity(120);
-        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 96);
-        assert_eq!(scheduler.slot_pool.reserved(Class::System), 24);
-    }
-
-    #[test]
-    fn test_apply_new_capacity_scales_reservations_with_integer_math() {
-        // Exact integer proportional scaling must not under-scale a higher
-        // class's reservation by f64 rounding. One class reserving 22 with
-        // capacity 22 -> 15: exact floor is (22*15)/22 = 15, but the f64 path
-        // (22.0 * (15.0/22.0)).floor() rounds to 14, weakening the guard.
-        use std::collections::HashMap as StdMap;
-        let mut classes = StdMap::new();
-        for c in Class::ALL {
-            let mut cfg = ClassConfig::default_for(c);
-            cfg.reserved = if c == Class::Interactive { 22 } else { 0 };
-            classes.insert(c, cfg);
-        }
-        let yaml = PrioritySchedulerYaml {
-            classes,
-            tenant_policies: StdMap::new(),
-        };
-        let s =
-            SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
-        let scheduler = PriorityScheduler::new(&s, 22).unwrap();
-
-        scheduler.apply_new_capacity(15);
-        assert_eq!(
-            scheduler.slot_pool.reserved(Class::Interactive),
-            15,
-            "floor(22*15/22) = 15, not the f64-rounded 14"
-        );
+        // Grow past Interactive's floor: at 800 the 0.25 share wins (200 > 128)
+        // and Default's 0.10 share is 80 — reservations track the larger fleet.
+        scheduler.apply_new_capacity(800);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), 200);
+        assert_eq!(scheduler.slot_pool.reserved(Class::Default), 80);
     }
 
     #[test]
@@ -1330,6 +1347,45 @@ mod tests {
         let before = scheduler.slot_pool.reserved(Class::Interactive);
         scheduler.apply_new_capacity(256);
         assert_eq!(scheduler.slot_pool.reserved(Class::Interactive), before);
+    }
+
+    // ── reservation math helpers ──────────────────────────────────────
+
+    #[test]
+    fn test_desired_reservations_floor_then_share() {
+        // Indexed by `class as usize`: [Bulk, Default, Interactive, System].
+        let floor = [0u16, 0, 128, 32];
+        let per_slot = [0.0f64, 0.10, 0.25, 0.0];
+        // cap 256: floor wins for Interactive (128 > 64); Default share = 26.
+        let d = desired_reservations(floor, &per_slot, 256);
+        assert_eq!(d[Class::System as usize], 32);
+        assert_eq!(d[Class::Interactive as usize], 128);
+        assert_eq!(d[Class::Default as usize], 26);
+        assert_eq!(d[Class::Bulk as usize], 0);
+        // cap 800: Interactive share (200) overtakes its floor; Default = 80.
+        let d = desired_reservations(floor, &per_slot, 800);
+        assert_eq!(d[Class::Interactive as usize], 200);
+        assert_eq!(d[Class::Default as usize], 80);
+        // Each class is capped at capacity (floor 128 capped to 10).
+        let d = desired_reservations(floor, &per_slot, 10);
+        assert_eq!(d[Class::Interactive as usize], 10);
+    }
+
+    #[test]
+    fn test_clamp_reservations_priority_ordered() {
+        // [Bulk, Default, Interactive, System], Σ 185 > 100.
+        let out = clamp_reservations_to_capacity([5, 20, 128, 32], 100);
+        // System keeps its 32, Interactive takes the remaining 68, rest yield.
+        assert_eq!(out[Class::System as usize], 32);
+        assert_eq!(out[Class::Interactive as usize], 68);
+        assert_eq!(out[Class::Default as usize], 0);
+        assert_eq!(out[Class::Bulk as usize], 0);
+        assert_eq!(out.iter().map(|&r| u32::from(r)).sum::<u32>(), 100);
+        // Fits already: every class keeps its full desired value.
+        assert_eq!(
+            clamp_reservations_to_capacity([1, 2, 3, 4], 100),
+            [1, 2, 3, 4]
+        );
     }
 
     #[tokio::test]
@@ -1418,7 +1474,8 @@ mod tests {
         let mut classes = StdMap::new();
         for c in Class::ALL {
             let mut cfg = ClassConfig::default_for(c);
-            cfg.reserved = 0;
+            cfg.reserved_floor = 0;
+            cfg.reserved_per_slot = 0.0;
             cfg.queue_size = 8;
             cfg.queue_timeout_secs = 1;
             classes.insert(c, cfg);

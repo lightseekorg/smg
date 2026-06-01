@@ -15,10 +15,18 @@ use crate::tenant::TenantKey;
 /// don't repeat the conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClassConfig {
-    /// Slots reserved for this class. Higher-class reservations are
-    /// honored by lower-class admissions via the packed-CAS slot
-    /// accounting in [`super::scheduler`].
-    pub reserved: u16,
+    /// Absolute minimum slots reserved for this class — the value the
+    /// effective reservation never drops below. Higher-class reservations
+    /// are honored by lower-class admissions via the packed-CAS slot
+    /// accounting in [`super::slots`].
+    pub reserved_floor: u16,
+    /// Share of backend capacity reserved for this class, on top of the
+    /// floor: `effective = max(reserved_floor, ceil(reserved_per_slot ×
+    /// capacity))`, recomputed as capacity changes. `0.0` (the default) is
+    /// purely absolute — identical to a fixed `reserved_floor`. Must be
+    /// finite and non-negative.
+    #[serde(default)]
+    pub reserved_per_slot: f64,
     /// Per-class queue depth limit.
     pub queue_size: u32,
     /// How long a queued waiter waits before the admission middleware
@@ -42,28 +50,32 @@ impl ClassConfig {
     pub fn default_for(class: Class) -> Self {
         match class {
             Class::System => Self {
-                reserved: 32,
+                reserved_floor: 32,
+                reserved_per_slot: 0.0,
                 queue_size: 64,
                 queue_timeout_secs: 30,
                 starvation_threshold_secs: 5,
                 can_preempt: true,
             },
             Class::Interactive => Self {
-                reserved: 128,
+                reserved_floor: 128,
+                reserved_per_slot: 0.25,
                 queue_size: 256,
                 queue_timeout_secs: 30,
                 starvation_threshold_secs: 5,
                 can_preempt: true,
             },
             Class::Default => Self {
-                reserved: 0,
+                reserved_floor: 0,
+                reserved_per_slot: 0.10,
                 queue_size: 512,
                 queue_timeout_secs: 60,
                 starvation_threshold_secs: 30,
                 can_preempt: false,
             },
             Class::Bulk => Self {
-                reserved: 0,
+                reserved_floor: 0,
+                reserved_per_slot: 0.0,
                 queue_size: 1024,
                 queue_timeout_secs: 300,
                 starvation_threshold_secs: 120,
@@ -75,8 +87,9 @@ impl ClassConfig {
 
 /// Runtime view of [`ClassConfig`] — only the fields the dispatcher
 /// reads on its hot path, with seconds pre-converted to [`Duration`].
-/// `reserved` and `queue_size` live elsewhere (the packed-CAS array
-/// and the per-class queue impl), so they don't appear here.
+/// `reserved_floor`/`reserved_per_slot` and `queue_size` live elsewhere
+/// (the packed-CAS array and the per-class queue impl), so they don't
+/// appear here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClassRuntimeConfig {
     pub queue_timeout: Duration,
@@ -119,15 +132,18 @@ pub struct PrioritySchedulerYaml {
 }
 
 /// Per-field validation failures discovered while assembling
-/// [`SchedulerSettings`]. Capacity-vs-reserved validation is not in
-/// scope here — the scheduler performs it at construction time, once
-/// the live backend capacity is known.
+/// [`SchedulerSettings`]. Capacity-vs-reserved is not checked here: the
+/// scheduler derives effective reservations from the floors + shares and
+/// clamps them to the live capacity (priority-ordered), so reservations
+/// can never exceed capacity and there is nothing to reject.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SettingsValidationError {
     #[error("class {class:?}: queue_timeout_secs must be > 0")]
     ZeroQueueTimeout { class: Class },
     #[error("class {class:?}: starvation_threshold_secs must be > 0")]
     ZeroStarvationThreshold { class: Class },
+    #[error("class {class:?}: reserved_per_slot must be finite and >= 0")]
+    InvalidReservedPerSlot { class: Class },
 }
 
 /// Runtime scheduler configuration assembled from CLI flags + the
@@ -165,8 +181,8 @@ impl SchedulerSettings {
     }
 
     /// Assemble settings from CLI flags + optional YAML, validating
-    /// per-field invariants. Capacity-vs-reserved validation is the
-    /// scheduler's job at construction time.
+    /// per-field invariants. Reservations are clamped to the live capacity
+    /// by the scheduler, so there is no capacity-vs-reserved check here.
     ///
     /// Merge order: built-in defaults → YAML overrides per class. CLI
     /// flags supply the top-level fields (`enabled`, `default_max_class`,
@@ -197,6 +213,9 @@ impl SchedulerSettings {
             }
             if cfg.starvation_threshold_secs == 0 {
                 return Err(SettingsValidationError::ZeroStarvationThreshold { class });
+            }
+            if !cfg.reserved_per_slot.is_finite() || cfg.reserved_per_slot < 0.0 {
+                return Err(SettingsValidationError::InvalidReservedPerSlot { class });
             }
         }
 
@@ -229,7 +248,7 @@ mod tests {
     #[test]
     fn test_default_for_system() {
         let cfg = ClassConfig::default_for(Class::System);
-        assert_eq!(cfg.reserved, 32);
+        assert_eq!(cfg.reserved_floor, 32);
         assert_eq!(cfg.queue_size, 64);
         assert_eq!(cfg.queue_timeout_secs, 30);
         assert_eq!(cfg.starvation_threshold_secs, 5);
@@ -239,7 +258,7 @@ mod tests {
     #[test]
     fn test_default_for_interactive() {
         let cfg = ClassConfig::default_for(Class::Interactive);
-        assert_eq!(cfg.reserved, 128);
+        assert_eq!(cfg.reserved_floor, 128);
         assert_eq!(cfg.queue_size, 256);
         assert_eq!(cfg.queue_timeout_secs, 30);
         assert_eq!(cfg.starvation_threshold_secs, 5);
@@ -249,7 +268,7 @@ mod tests {
     #[test]
     fn test_default_for_default() {
         let cfg = ClassConfig::default_for(Class::Default);
-        assert_eq!(cfg.reserved, 0);
+        assert_eq!(cfg.reserved_floor, 0);
         assert_eq!(cfg.queue_size, 512);
         assert_eq!(cfg.queue_timeout_secs, 60);
         assert_eq!(cfg.starvation_threshold_secs, 30);
@@ -259,7 +278,7 @@ mod tests {
     #[test]
     fn test_default_for_bulk() {
         let cfg = ClassConfig::default_for(Class::Bulk);
-        assert_eq!(cfg.reserved, 0);
+        assert_eq!(cfg.reserved_floor, 0);
         assert_eq!(cfg.queue_size, 1024);
         assert_eq!(cfg.queue_timeout_secs, 300);
         assert_eq!(cfg.starvation_threshold_secs, 120);
@@ -298,7 +317,7 @@ mod tests {
         let yaml = r"
 classes:
   interactive:
-    reserved: 200
+    reserved_floor: 200
     queue_size: 256
     queue_timeout_secs: 30
     starvation_threshold_secs: 5
@@ -309,7 +328,7 @@ classes:
             .classes
             .get(&Class::Interactive)
             .expect("interactive present");
-        assert_eq!(interactive.reserved, 200);
+        assert_eq!(interactive.reserved_floor, 200);
         // Only one class entry — others are absent (settings layer fills defaults).
         assert_eq!(parsed.classes.len(), 1);
         assert!(parsed.tenant_policies.is_empty());
@@ -382,7 +401,7 @@ tenant_policies:
     fn test_settings_yaml_partial_override_merges_with_defaults() {
         let mut classes = HashMap::new();
         let mut interactive = ClassConfig::default_for(Class::Interactive);
-        interactive.reserved = 64;
+        interactive.reserved_floor = 64;
         classes.insert(Class::Interactive, interactive);
         let yaml = PrioritySchedulerYaml {
             classes,
@@ -390,7 +409,7 @@ tenant_policies:
         };
         let s =
             SchedulerSettings::from_cli_and_yaml(true, Class::Default, 32, Some(&yaml)).unwrap();
-        assert_eq!(s.class_config(Class::Interactive).reserved, 64);
+        assert_eq!(s.class_config(Class::Interactive).reserved_floor, 64);
         // Bulk untouched — still equal to built-in default.
         assert_eq!(
             s.class_config(Class::Bulk),
