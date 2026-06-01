@@ -112,7 +112,7 @@ The dispatcher checks for starved waiters **lowest priority first** (the classes
 The priority scheduler is designed to **fail safe**. It only takes over when it is both enabled and able to start cleanly:
 
 - If the scheduler is **disabled** (the default), the gateway wires the legacy concurrency-limit middleware — no scheduler is even constructed.
-- If the scheduler is **enabled but misconfigured** — unparseable YAML, or reservations that sum to more than the live capacity — the gateway logs the failure at `ERROR` and **falls back to legacy admission** rather than aborting startup. A broken scheduler config must never take the data plane down.
+- If the scheduler is **enabled but misconfigured** — unparsable YAML, or reservations that sum to more than the live capacity — the gateway logs the failure at `ERROR` and **falls back to legacy admission** rather than aborting startup. A broken scheduler config must never take the data plane down.
 
 In both cases the request path is the familiar token-bucket concurrency limiter described in [Rate Limiting](rate-limiting.md). The admission path is chosen once at startup.
 
