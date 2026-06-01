@@ -4,7 +4,10 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,8 +23,127 @@ use axum::{
 };
 use futures_util::stream::{self, StreamExt};
 use serde_json::json;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Notify, RwLock, Semaphore};
 use uuid::Uuid;
+
+/// Test-controlled hold gate for the `/generate` endpoint.
+///
+/// Lets a test pin requests on the mock worker *before* it emits any byte —
+/// i.e. holds them in the pre-TTFT window — and release them on demand. This
+/// replaces racing `sleep`s in scheduler admission tests with explicit
+/// signalling, so capacity occupancy and preemption windows are deterministic.
+///
+/// Flow:
+/// 1. Each `/generate` handler, on entry, bumps `arrived` (one permit) so the
+///    test can `wait_for_arrivals(n)` to learn that exactly `n` requests have
+///    reached the worker and are now occupying scheduler slots.
+/// 2. The handler then parks on `release` until the test calls `release()`.
+///    A request whose admission cancel token fires while parked is unwound by
+///    the gateway's `PreemptionGuard` (the handler future is dropped), so the
+///    gate never needs to observe cancellation itself.
+pub struct HoldGate {
+    arrived: Semaphore,
+    release: Notify,
+    released: AtomicBool,
+}
+
+impl HoldGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            arrived: Semaphore::new(0),
+            release: Notify::new(),
+            released: AtomicBool::new(false),
+        })
+    }
+
+    /// Handler side: signal arrival, then park until released.
+    async fn arrive_and_wait(&self) {
+        self.arrived.add_permits(1);
+        // Loop guards against spurious wakeups and the release-before-park
+        // race: `notified()` registered before the `released` check would miss
+        // a `notify_waiters()` that already fired, so re-check the flag.
+        while !self.released.load(Ordering::Acquire) {
+            let notified = self.release.notified();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    /// Test side: block until `n` handlers have reached the worker (and are
+    /// therefore occupying `n` scheduler slots).
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
+    pub async fn wait_for_arrivals(&self, n: u32) {
+        let permits = self
+            .arrived
+            .acquire_many(n)
+            .await
+            .expect("hold-gate semaphore is never closed");
+        permits.forget();
+    }
+
+    /// Test side: release every parked handler (and any that arrive later).
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release.notify_waiters();
+    }
+}
+
+/// Per-port scheduler test controls, looked up by the mock worker's bound
+/// port. Kept *outside* [`MockWorkerConfig`] so adding scheduler knobs doesn't
+/// force every existing `MockWorkerConfig { .. }` literal in the test suite to
+/// gain new fields. Tests register controls via [`set_scheduler_controls`]
+/// before the worker starts; the relevant handlers consult them by port.
+#[derive(Clone, Default)]
+pub struct SchedulerControls {
+    /// Value reported as `max_running_requests` in `/server_info`. `None`
+    /// keeps the historical default (2048). The priority scheduler derives
+    /// backend capacity from the sum of this across the healthy fleet, so
+    /// admission tests set it to a small, known number (e.g. 1) to pin
+    /// capacity deterministically.
+    pub max_running_requests: Option<u16>,
+    /// Optional pre-TTFT hold gate for `/generate`. When set, each generate
+    /// request signals arrival then parks until [`HoldGate::release`] is
+    /// called. `None` preserves the normal immediate-response behavior.
+    pub hold_gate: Option<Arc<HoldGate>>,
+}
+
+static SCHEDULER_CONTROLS: OnceLock<Mutex<HashMap<u16, SchedulerControls>>> = OnceLock::new();
+
+fn scheduler_controls_table() -> &'static Mutex<HashMap<u16, SchedulerControls>> {
+    SCHEDULER_CONTROLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register scheduler test controls for a mock worker that will bind `port`.
+/// Call this *before* the worker starts (pick a free port via `portpicker`
+/// and pass the same value in [`MockWorkerConfig::port`]).
+#[expect(
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+pub fn set_scheduler_controls(port: u16, controls: SchedulerControls) {
+    scheduler_controls_table()
+        .lock()
+        .expect("scheduler controls mutex poisoned")
+        .insert(port, controls);
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
+fn scheduler_controls_for(port: u16) -> SchedulerControls {
+    scheduler_controls_table()
+        .lock()
+        .expect("scheduler controls mutex poisoned")
+        .get(&port)
+        .cloned()
+        .unwrap_or_default()
+}
 
 /// Configuration for mock worker behavior
 #[derive(Clone)]
@@ -233,6 +355,16 @@ async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
     // server_info is a metadata endpoint used during worker registration.
     // Must always succeed regardless of fail_rate so workers register properly.
 
+    // The worker-registration metadata pipeline reads `max_running_requests`
+    // from here and stores it as a label; `WorkerCapacity` sums it across the
+    // healthy fleet to size the priority scheduler. Tests pin it to a small
+    // value (looked up by port) to make scheduler capacity deterministic;
+    // absent an override we keep the historical 2048 so non-scheduler tests
+    // are unaffected.
+    let max_running_requests = scheduler_controls_for(config.port)
+        .max_running_requests
+        .map_or(2048, u32::from);
+
     Json(json!({
         "model_path": "mock-model",
         "served_model_name": "mock-model",
@@ -259,7 +391,7 @@ async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
         "running_queue_size": 0,
         "req_to_token_ratio": 1.2,
         "min_running_requests": 0,
-        "max_running_requests": 2048,
+        "max_running_requests": max_running_requests,
         "max_req_num": 8192,
         "max_batch_tokens": 32768,
         "schedule_policy": "lpm",
@@ -320,6 +452,15 @@ async fn generate_handler(
             })),
         )
             .into_response();
+    }
+
+    // Pre-TTFT hold: signal arrival (so the test knows this request now holds a
+    // scheduler slot) and park until released. The gate is looked up by port
+    // from the test-controlled registry. If the gateway preempts this request
+    // while parked, `PreemptionGuard` drops this whole future, so we never
+    // reach the response below.
+    if let Some(gate) = scheduler_controls_for(config.port).hold_gate {
+        gate.arrive_and_wait().await;
     }
 
     if config.response_delay_ms > 0 {
