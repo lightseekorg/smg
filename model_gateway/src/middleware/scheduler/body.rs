@@ -34,6 +34,11 @@ pub struct SchedulerGuardBody {
     /// Latch so the TTFT CAS is attempted only once (on the first data
     /// frame); subsequent frames skip the check entirely.
     ttft_marked: bool,
+    /// Set once the stream is force-ended by a lost TTFT/preempt CAS. Keeps
+    /// the terminal state idempotent across re-polls and keeps
+    /// `is_end_stream` consistent with `poll_frame`: the inner body still
+    /// has data, but this wrapper has already signalled `None`.
+    terminated: bool,
 }
 
 impl SchedulerGuardBody {
@@ -42,6 +47,7 @@ impl SchedulerGuardBody {
             inner,
             permit,
             ttft_marked: false,
+            terminated: false,
         }
     }
 }
@@ -58,6 +64,10 @@ impl http_body::Body for SchedulerGuardBody {
         // `Unpin` too, so `get_mut` + `Pin::new(&mut inner)` is sound
         // (mirrors `TokenGuardBody` in `concurrency.rs`).
         let this = self.get_mut();
+        // Stay ended once we've force-ended; never poll the inner body again.
+        if this.terminated {
+            return Poll::Ready(None);
+        }
         let polled = Pin::new(&mut this.inner).poll_frame(cx);
 
         if !this.ttft_marked {
@@ -68,6 +78,7 @@ impl http_body::Body for SchedulerGuardBody {
                     } else {
                         // Lost the TTFT race to a concurrent preemption
                         // CAS. Terminate the stream cleanly.
+                        this.terminated = true;
                         return Poll::Ready(None);
                     }
                 }
@@ -77,7 +88,9 @@ impl http_body::Body for SchedulerGuardBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        // Force-end takes precedence: once we've returned `None` on a lost
+        // CAS, report the stream ended even though the inner body has not.
+        self.terminated || self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
@@ -140,6 +153,16 @@ mod tests {
         assert!(
             next.is_none(),
             "preempted body must end the stream on first frame"
+        );
+        // is_end_stream must agree with the forced None (consistency on the
+        // CAS-loss path), and a re-poll must stay ended.
+        assert!(
+            http_body::Body::is_end_stream(&guarded),
+            "force-ended stream must report is_end_stream() == true"
+        );
+        assert!(
+            guarded.frame().await.is_none(),
+            "re-polling a force-ended stream must stay ended"
         );
     }
 

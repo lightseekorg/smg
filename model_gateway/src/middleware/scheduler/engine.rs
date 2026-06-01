@@ -190,6 +190,20 @@ impl PriorityScheduler {
             if let Some(victim) = self.find_preemption_victim(class) {
                 // CAS the victim pre-TTFT lock. Fire its cancel only on a
                 // win, so we never unwind a request that already streamed.
+                //
+                // The mark is irreversible (no rollback — a CAS back to 0
+                // could race a now-arriving first byte). So a victim that
+                // doesn't unwind within the budget is still preempted: its
+                // first data frame is truncated by `SchedulerGuardBody`. For
+                // the victim to actually unwind, its handler must honor the
+                // cancel token (wired into the long-running handlers in M4.5
+                // / #1577); until that lands the flag must stay off.
+                //
+                // The freed slot is not reserved for this preemptor — the
+                // dispatcher (on the victim's release) or a concurrent
+                // fast-path admit may take it first, in which case we simply
+                // fall through to enqueue. A successful mark therefore does
+                // not guarantee this preemptor benefits.
                 if victim.try_mark_preempted() {
                     info!(
                         victim_id = %victim.request_id().0,
