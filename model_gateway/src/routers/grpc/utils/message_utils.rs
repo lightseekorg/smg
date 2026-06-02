@@ -50,7 +50,10 @@ pub fn process_messages(
             SystemContent::String(s) => s.clone(),
             SystemContent::Blocks(blocks) => blocks
                 .iter()
-                .map(|b| b.text.as_str())
+                .map(|b| {
+                    let messages::SystemContentBlock::Text(tb) = b;
+                    tb.text.as_str()
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         };
@@ -649,6 +652,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            other: serde_json::Map::new(),
         };
         assert_eq!(get_history_tool_calls_count_messages(&request), 0);
 
@@ -697,6 +701,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            other: serde_json::Map::new(),
         };
         assert_eq!(get_history_tool_calls_count_messages(&request), 2);
     }

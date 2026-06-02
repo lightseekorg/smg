@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use validator::Validate;
 
 use crate::{common::GenerationRequest, validated::Normalizable};
@@ -73,6 +73,11 @@ pub struct CreateMessageRequest {
 
     /// MCP servers to be utilized in this request (beta).
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+
+    /// Additional fields not explicitly defined above (e.g. beta features like
+    /// context_management, output_config). Captured and forwarded to backends.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl Normalizable for CreateMessageRequest {
@@ -134,7 +139,8 @@ impl GenerationRequest for CreateMessageRequest {
                 SystemContent::String(s) => push(s, &mut has_content, &mut buffer),
                 SystemContent::Blocks(blocks) => {
                     for block in blocks {
-                        push(&block.text, &mut has_content, &mut buffer);
+                        let SystemContentBlock::Text(text_block) = block;
+                        push(&text_block.text, &mut has_content, &mut buffer);
                     }
                 }
             }
@@ -246,7 +252,15 @@ pub enum ServiceTier {
 #[serde(untagged)]
 pub enum SystemContent {
     String(String),
-    Blocks(Vec<TextBlock>),
+    Blocks(Vec<SystemContentBlock>),
+}
+
+/// System content block — wraps TextBlock with the required `type` discriminator
+/// so it round-trips correctly through serialization.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SystemContentBlock {
+    Text(TextBlock),
 }
 
 /// A single input message in a conversation
@@ -1886,9 +1900,90 @@ pub enum ServerToolCaller {
 
 #[cfg(test)]
 mod tests {
-    use serde_json;
+    use serde_json::{self, json};
 
     use super::*;
+
+    #[test]
+    fn test_system_blocks_preserve_type_field() {
+        let input = json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+            "system": [
+                {"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}
+            ]
+        });
+
+        let req: CreateMessageRequest = serde_json::from_value(input).expect("should deserialize");
+        let reserialized = serde_json::to_value(&req).expect("should serialize");
+
+        let system_blocks = reserialized.get("system").unwrap().as_array().unwrap();
+        let first_block = &system_blocks[0];
+        assert_eq!(
+            first_block.get("type").and_then(|v| v.as_str()),
+            Some("text"),
+            "system block must retain 'type' field after round-trip: got {first_block:?}",
+        );
+    }
+
+    #[test]
+    fn test_message_content_blocks_preserve_type_field() {
+        let input = json!({
+            "model": "test",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}
+                ]
+            }],
+            "max_tokens": 100
+        });
+
+        let req: CreateMessageRequest = serde_json::from_value(input).expect("should deserialize");
+        let reserialized = serde_json::to_value(&req).expect("should serialize");
+
+        let msg = &reserialized["messages"][0];
+        let content_blocks = msg["content"].as_array().unwrap();
+        let first_block = &content_blocks[0];
+        assert_eq!(
+            first_block.get("type").and_then(|v| v.as_str()),
+            Some("text"),
+            "content block must retain 'type' field: got {first_block:?}",
+        );
+    }
+
+    #[test]
+    fn test_unknown_fields_preserved_via_flatten() {
+        let input = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 100,
+            "thinking": {"type": "adaptive"},
+            "context_management": {"edits": [{"type": "clear_thinking", "keep": "all"}]},
+            "output_config": {"effort": "high"},
+            "stream": true
+        });
+
+        let req: CreateMessageRequest =
+            serde_json::from_value(input.clone()).expect("should deserialize");
+        assert!(matches!(
+            req.thinking,
+            Some(ThinkingConfig::Adaptive { .. })
+        ));
+
+        let reserialized = serde_json::to_value(&req).expect("should serialize");
+        assert_eq!(
+            reserialized.get("context_management"),
+            input.get("context_management"),
+            "context_management must survive round-trip"
+        );
+        assert_eq!(
+            reserialized.get("output_config"),
+            input.get("output_config"),
+            "output_config must survive round-trip"
+        );
+    }
 
     fn base_request() -> CreateMessageRequest {
         CreateMessageRequest {
@@ -1911,6 +2006,7 @@ mod tests {
             top_p: None,
             container: None,
             mcp_servers: None,
+            other: Map::new(),
         }
     }
 
