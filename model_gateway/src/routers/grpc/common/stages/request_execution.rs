@@ -350,10 +350,16 @@ impl RequestExecutionStage {
         })?;
 
         let mut prefill_request = proto_request.clone_inner();
-        // Strip multimodal data from decode request — the decode worker only
-        // needs the KV cache from prefill, not the pixel tensors (~40MB saved).
+        // Drop only the heavy pixel tensors from the decode request (~40MB saved),
+        // but KEEP the lightweight mm metadata (placeholders, im_token_id, grid_thw).
+        // The decode engine needs the placeholder offsets to pad_value-disambiguate
+        // image tokens; without it the bare image-placeholder tokens compare equal
+        // across images and the decode prefix cache reuses a previous request's
+        // image KV (reads the wrong image). grid_thw is kept so the decode computes
+        // the same MRoPE positions/delta the prefill did (consistent with the
+        // transferred mrope delta). Non-TokenSpeed backends no-op here.
         let mut decode_request = proto_request;
-        decode_request.clear_mm_inputs();
+        decode_request.clear_mm_pixel_values();
         if let Some(rank) = workers.prefill_worker().and_then(|w| w.dp_rank()) {
             prefill_request.set_data_parallel_rank(rank as i32);
         }
