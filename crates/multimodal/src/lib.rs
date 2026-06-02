@@ -8,12 +8,15 @@ pub mod types;
 pub mod vision;
 
 pub use error::{MediaConnectorError, MultiModalError, MultiModalResult};
-pub use media::{ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource};
+pub use media::{
+    ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource, VideoFetchConfig,
+};
 pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
     FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, MediaContentPart, Modality,
     MultiModalData, MultiModalUUIDs, PlaceholderRange, PromptReplacement, TokenId, TrackedMedia,
+    VideoClip, VideoSource,
 };
 // Re-export vision processing components
 pub use vision::{

@@ -194,6 +194,61 @@ impl QwenVLProcessorBase {
         Ok((h_bar, w_bar))
     }
 
+    /// Smart resize for Qwen3-style video processors.
+    ///
+    /// Unlike image resize, the pixel budget is applied to the full sampled
+    /// video volume (`T * H * W`), matching HuggingFace's Qwen3 video
+    /// processor.
+    pub fn smart_resize_video(
+        &self,
+        num_frames: usize,
+        height: usize,
+        width: usize,
+    ) -> Result<(usize, usize), TransformError> {
+        let factor = self.get_factor();
+
+        if height < factor || width < factor {
+            return Err(TransformError::InvalidShape {
+                expected: format!("height and width >= factor ({factor})"),
+                actual: vec![height, width],
+            });
+        }
+
+        let max_dim = height.max(width) as f64;
+        let min_dim = height.min(width) as f64;
+        let aspect_ratio = max_dim / min_dim;
+        if aspect_ratio > 200.0 {
+            return Err(TransformError::InvalidShape {
+                expected: "aspect ratio < 200:1".to_string(),
+                actual: vec![height, width],
+            });
+        }
+
+        let mut h_bar = round_half_to_even(height as f64 / factor as f64) as usize * factor;
+        let mut w_bar = round_half_to_even(width as f64 / factor as f64) as usize * factor;
+        h_bar = h_bar.max(factor);
+        w_bar = w_bar.max(factor);
+
+        let t_bar =
+            num_frames.div_ceil(self.config.temporal_patch_size) * self.config.temporal_patch_size;
+        let resized_pixels = (t_bar * h_bar * w_bar) as f64;
+        if resized_pixels > self.config.max_pixels as f64 {
+            let beta =
+                ((num_frames * height * width) as f64 / self.config.max_pixels as f64).sqrt();
+            h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
+            w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
+            h_bar = h_bar.max(factor);
+            w_bar = w_bar.max(factor);
+        } else if resized_pixels < self.config.min_pixels as f64 {
+            let beta =
+                (self.config.min_pixels as f64 / (num_frames * height * width) as f64).sqrt();
+            h_bar = ((height as f64 * beta / factor as f64).ceil() as usize) * factor;
+            w_bar = ((width as f64 * beta / factor as f64).ceil() as usize) * factor;
+        }
+
+        Ok((h_bar, w_bar))
+    }
+
     /// Calculate the grid dimensions (T, H, W) for an image.
     ///
     /// For single images, T=1. For video, T = num_frames / temporal_patch_size.
@@ -285,6 +340,85 @@ impl QwenVLProcessorBase {
                         for mw in 0..merge_size {
                             for plane in &planes {
                                 for _tp in 0..temporal_patch_size {
+                                    for py in 0..patch_size {
+                                        let row = (y0 + mh * patch_size + py) * width
+                                            + x0
+                                            + mw * patch_size;
+                                        output[out_idx..out_idx + patch_size]
+                                            .copy_from_slice(&plane[row..row + patch_size]);
+                                        out_idx += patch_size;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Patchify a sequence of frame tensors into Qwen's video patch layout.
+    ///
+    /// `tensors` must already be resized and normalized to the same spatial
+    /// shape. If the frame count is not divisible by `temporal_patch_size`,
+    /// the caller should pad by repeating the final frame before calling this.
+    pub fn patchify_video_into(
+        &self,
+        tensors: &[Array3<f32>],
+        grid_t: usize,
+        grid_h: usize,
+        grid_w: usize,
+        output: &mut Vec<f32>,
+    ) -> Result<(), TransformError> {
+        if tensors.is_empty() {
+            return Err(TransformError::EmptyBatch);
+        }
+
+        let channel = tensors[0].shape()[0];
+        let height = tensors[0].shape()[1];
+        let width = tensors[0].shape()[2];
+        let patch_size = self.config.patch_size;
+        let merge_size = self.config.merge_size;
+        let temporal_patch_size = self.config.temporal_patch_size;
+
+        debug_assert_eq!(height, grid_h * patch_size);
+        debug_assert_eq!(width, grid_w * patch_size);
+        debug_assert_eq!(tensors.len(), grid_t * temporal_patch_size);
+
+        let num_patches = grid_t * grid_h * grid_w;
+        let patch_features = channel * temporal_patch_size * patch_size * patch_size;
+        let base_idx = output.len();
+        output.resize(base_idx + num_patches * patch_features, 0.0);
+
+        let frame_planes: Vec<Vec<&[f32]>> = tensors
+            .iter()
+            .map(|tensor| {
+                let flat = tensor.as_slice().ok_or_else(|| {
+                    TransformError::ShapeError("video frame tensor is not contiguous".to_string())
+                })?;
+                Ok((0..channel)
+                    .map(|c| &flat[c * height * width..(c + 1) * height * width])
+                    .collect::<Vec<_>>())
+            })
+            .collect::<Result<_, TransformError>>()?;
+
+        let merged_patch = merge_size * patch_size;
+        let mut out_idx = base_idx;
+
+        for gt in 0..grid_t {
+            let frame_start = gt * temporal_patch_size;
+            for pr in 0..grid_h / merge_size {
+                for pc in 0..grid_w / merge_size {
+                    let y0 = pr * merged_patch;
+                    let x0 = pc * merged_patch;
+
+                    for mh in 0..merge_size {
+                        for mw in 0..merge_size {
+                            for c in 0..channel {
+                                for tp in 0..temporal_patch_size {
+                                    let plane = frame_planes[frame_start + tp][c];
                                     for py in 0..patch_size {
                                         let row = (y0 + mh * patch_size + py) * width
                                             + x0
@@ -403,6 +537,79 @@ impl ImagePreProcessor for QwenVLProcessorBase {
                 .with_extra(
                     "patches_per_image",
                     ModelSpecificValue::int_1d(patches_per_image),
+                );
+
+        Ok(result)
+    }
+
+    fn preprocess_video(
+        &self,
+        frames: &[DynamicImage],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedImages, TransformError> {
+        if frames.is_empty() {
+            return Err(TransformError::EmptyBatch);
+        }
+
+        let (w, h) = frames[0].dimensions();
+        let image_sizes = vec![(w, h)];
+        let mean = config.get_image_mean();
+        let std = config.get_image_std();
+        let filter = pil_to_filter(config.resampling);
+
+        let temporal_patch_size = self.config.temporal_patch_size;
+        let padded_frames = frames.len().div_ceil(temporal_patch_size) * temporal_patch_size;
+        let (target_h, target_w) = self.smart_resize_video(frames.len(), h as usize, w as usize)?;
+        let (tw32, th32) = (target_w as u32, target_h as u32);
+        let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, padded_frames);
+
+        let mut tensors = Vec::with_capacity(padded_frames);
+        for idx in 0..padded_frames {
+            let frame = &frames[idx.min(frames.len() - 1)];
+            let needs_resize = config.do_resize.unwrap_or(true)
+                && (frame.width() != tw32 || frame.height() != th32);
+            let resized;
+            let frame_ref = if needs_resize {
+                resized = resize(frame, tw32, th32, filter);
+                &resized
+            } else {
+                frame
+            };
+            let tensor = if config.do_normalize.unwrap_or(true) {
+                to_tensor_and_normalize(frame_ref, &mean, &std)
+            } else {
+                to_tensor(frame_ref)
+            };
+            tensors.push(tensor);
+        }
+
+        let patch_size = self.config.patch_size;
+        let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+        let num_patches = grid_t * grid_h * grid_w;
+        let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
+        let mut all_patches = Vec::with_capacity(num_patches * patch_features);
+        self.patchify_video_into(&tensors, grid_t, grid_h, grid_w, &mut all_patches)?;
+
+        let pixel_values = Array2::from_shape_vec((num_patches, patch_features), all_patches)
+            .map_err(|e| {
+                TransformError::ShapeError(format!(
+                    "Failed to create video pixel_values [{num_patches}, {patch_features}]: {e}"
+                ))
+            })?;
+
+        let result =
+            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), vec![tokens], image_sizes)
+                .with_extra(
+                    "video_grid_thw",
+                    ModelSpecificValue::int_2d(
+                        vec![grid_t as i64, grid_h as i64, grid_w as i64],
+                        1,
+                        3,
+                    ),
+                )
+                .with_extra(
+                    "patches_per_video",
+                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
                 );
 
         Ok(result)

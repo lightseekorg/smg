@@ -78,11 +78,20 @@ pub struct TrtllmMultimodalData {
 /// TokenSpeed multimodal data: preprocessed tensors with patch-only placeholders.
 #[derive(Debug)]
 pub struct TokenSpeedMultimodalData {
+    pub modality: TokenSpeedModality,
     pub pixel_values: Vec<u8>,
     pub pixel_values_shape: Vec<u32>,
     pub model_specific_tensors: HashMap<String, TensorBytes>,
-    pub im_token_id: Option<u32>,
+    pub placeholder_token_id: Option<u32>,
     pub mm_placeholders: Vec<(u32, u32)>,
+    pub content_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSpeedModality {
+    Image,
+    Audio,
+    Video,
 }
 
 /// Raw tensor bytes with shape and dtype metadata.
@@ -190,37 +199,76 @@ impl TrtllmMultimodalData {
 impl TokenSpeedMultimodalData {
     /// Convert to TokenSpeed proto MultimodalInputs.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
-        let model_specific_tensors = self
+        let model_specific_tensors: HashMap<_, _> = self
             .model_specific_tensors
+            .clone()
             .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    tokenspeed::TensorData {
-                        data: v.data,
-                        shape: v.shape,
-                        dtype: v.dtype,
-                    },
-                )
-            })
+            .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v)))
             .collect();
 
         let mm_placeholders = self
             .mm_placeholders
+            .iter()
+            .map(|&(offset, length)| tokenspeed::PlaceholderRange { offset, length })
+            .collect::<Vec<_>>();
+
+        let mut item_tensors = self
+            .model_specific_tensors
             .into_iter()
-            .map(|(offset, length)| tokenspeed::PlaceholderRange { offset, length })
-            .collect();
+            .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v)))
+            .collect::<HashMap<_, _>>();
+        item_tensors.insert(
+            "pixel_values".to_string(),
+            tokenspeed::TensorData {
+                data: self.pixel_values.clone(),
+                shape: self.pixel_values_shape.clone(),
+                dtype: "float32".to_string(),
+            },
+        );
+
+        let item = tokenspeed::MultimodalItem {
+            modality: match self.modality {
+                TokenSpeedModality::Image => tokenspeed::Modality::Image as i32,
+                TokenSpeedModality::Audio => tokenspeed::Modality::Audio as i32,
+                TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
+            },
+            content_hash: self.content_hash,
+            tensors: item_tensors,
+            placeholders: mm_placeholders.clone(),
+            placeholder_token_id: self.placeholder_token_id,
+        };
+
+        let (pixel_values, legacy_model_specific, im_token_id, legacy_placeholders) =
+            if self.modality == TokenSpeedModality::Image {
+                (
+                    Some(tokenspeed::TensorData {
+                        data: self.pixel_values,
+                        shape: self.pixel_values_shape,
+                        dtype: "float32".to_string(),
+                    }),
+                    model_specific_tensors,
+                    self.placeholder_token_id,
+                    mm_placeholders,
+                )
+            } else {
+                (None, HashMap::new(), None, Vec::new())
+            };
 
         tokenspeed::MultimodalInputs {
-            pixel_values: Some(tokenspeed::TensorData {
-                data: self.pixel_values,
-                shape: self.pixel_values_shape,
-                dtype: "float32".to_string(),
-            }),
-            model_specific_tensors,
-            im_token_id: self.im_token_id,
-            mm_placeholders,
+            pixel_values,
+            model_specific_tensors: legacy_model_specific,
+            im_token_id,
+            mm_placeholders: legacy_placeholders,
+            items: vec![item],
         }
+    }
+}
+
+fn tensor_bytes_to_tokenspeed(value: TensorBytes) -> tokenspeed::TensorData {
+    tokenspeed::TensorData {
+        data: value.data,
+        shape: value.shape,
+        dtype: value.dtype,
     }
 }
 
@@ -1188,5 +1236,44 @@ impl ProtoEmbedComplete {
             Self::Sglang(r) => r.embedding_dim,
             Self::Vllm(r) => r.embedding_dim,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenspeed_video_into_proto_uses_itemized_payload() {
+        let mut model_specific_tensors = HashMap::new();
+        model_specific_tensors.insert(
+            "video_grid_thw".to_string(),
+            TensorBytes {
+                data: vec![1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0],
+                shape: vec![1, 3],
+                dtype: "uint32".to_string(),
+            },
+        );
+
+        let proto = TokenSpeedMultimodalData {
+            modality: TokenSpeedModality::Video,
+            pixel_values: vec![0; 8],
+            pixel_values_shape: vec![1, 2],
+            model_specific_tensors,
+            placeholder_token_id: Some(151656),
+            mm_placeholders: vec![(4, 2)],
+            content_hash: vec![7; 32],
+        }
+        .into_proto();
+
+        assert!(proto.pixel_values.is_none());
+        assert_eq!(proto.items.len(), 1);
+        let item = &proto.items[0];
+        assert_eq!(item.modality, tokenspeed::Modality::Video as i32);
+        assert!(item.tensors.contains_key("pixel_values"));
+        assert!(item.tensors.contains_key("video_grid_thw"));
+        assert_eq!(item.placeholder_token_id, Some(151656));
+        assert_eq!(item.placeholders[0].offset, 4);
+        assert_eq!(item.placeholders[0].length, 2);
     }
 }

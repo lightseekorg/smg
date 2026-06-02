@@ -9,7 +9,7 @@
 //! functions differ because they work with different input types (`ChatMessage` vs
 //! `InputMessage`).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -17,7 +17,7 @@ use llm_multimodal::{
     AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, ImageProcessorRegistry,
     MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
     ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
-    PromptReplacement, TrackedMedia, TrackerOutput,
+    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip,
 };
 use llm_tokenizer::TokenizerTrait;
 use openai_protocol::{
@@ -30,8 +30,8 @@ use tracing::{debug, warn};
 use crate::routers::grpc::{
     client::GrpcClient,
     proto_wrapper::{
-        SglangMultimodalData, TensorBytes, TokenSpeedMultimodalData, TrtllmMultimodalData,
-        VllmMultimodalData,
+        SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
+        TrtllmMultimodalData, VllmMultimodalData,
     },
     MultimodalData,
 };
@@ -43,6 +43,8 @@ pub(crate) struct MultimodalModelConfig {
     pub config: serde_json::Value,
     /// Preprocessor config (preprocessor_config.json)
     pub preprocessor_config: PreProcessorConfig,
+    /// Video-specific preprocessor config, when provided by the model repo.
+    pub video_preprocessor_config: Option<PreProcessorConfig>,
 }
 
 /// Shared cache of multimodal model configuration files keyed by tokenizer UUID.
@@ -115,39 +117,21 @@ impl MultimodalConfigRegistry {
         // back to `PreProcessorConfig::default()`. This matches the bundle
         // preload path in `try_load_multimodal_config`.
         let pp_config_path = base_dir.join("preprocessor_config.json");
-        let preprocessor_config = if pp_config_path.exists() {
-            match std::fs::read_to_string(&pp_config_path) {
-                Ok(pp_str) => match PreProcessorConfig::from_json(&pp_str) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(
-                            path = %pp_config_path.display(),
-                            error = %e,
-                            "Failed to parse preprocessor_config.json; falling back to defaults"
-                        );
-                        PreProcessorConfig::default()
-                    }
-                },
-                Err(e) => {
-                    warn!(
+        let preprocessor_config =
+            load_preprocessor_config_file(&pp_config_path, "preprocessor_config.json")
+                .unwrap_or_else(|| {
+                    debug!(
                         path = %pp_config_path.display(),
-                        error = %e,
-                        "Failed to read preprocessor_config.json; falling back to defaults"
+                        "No preprocessor_config.json found; using PreProcessorConfig defaults"
                     );
                     PreProcessorConfig::default()
-                }
-            }
-        } else {
-            debug!(
-                path = %pp_config_path.display(),
-                "No preprocessor_config.json found; using PreProcessorConfig defaults"
-            );
-            PreProcessorConfig::default()
-        };
+                });
+        let video_preprocessor_config = load_video_preprocessor_config(&base_dir);
 
         let model_config = Arc::new(MultimodalModelConfig {
             config,
             preprocessor_config,
+            video_preprocessor_config,
         });
 
         self.configs
@@ -161,6 +145,67 @@ impl MultimodalConfigRegistry {
 impl Default for MultimodalConfigRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub(crate) fn load_preprocessor_config_file(
+    path: &Path,
+    label: &str,
+) -> Option<PreProcessorConfig> {
+    if !path.exists() {
+        return None;
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(config_str) => match PreProcessorConfig::from_json(&config_str) {
+            Ok(config) => Some(config),
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to parse {label}"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to read {label}"
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProcessorConfig> {
+    let video_path = base_dir.join("video_preprocessor_config.json");
+    if let Some(config) =
+        load_preprocessor_config_file(&video_path, "video_preprocessor_config.json")
+    {
+        return Some(config);
+    }
+
+    let processor_path = base_dir.join("processor_config.json");
+    if !processor_path.exists() {
+        return None;
+    }
+
+    match std::fs::read_to_string(&processor_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("video_processor").cloned())
+        .and_then(|v| PreProcessorConfig::from_value(v).ok())
+    {
+        Some(config) => Some(config),
+        None => {
+            warn!(
+                path = %processor_path.display(),
+                "Failed to load video_processor from processor_config.json"
+            );
+            None
+        }
     }
 }
 
@@ -208,17 +253,26 @@ pub(crate) struct MultimodalOutput {
 /// The assembly stage converts this into a backend-specific [`MultimodalData`]
 /// variant once the target backend is known (after worker selection).
 #[derive(Debug)]
-pub(crate) struct MultimodalIntermediate {
+pub(crate) enum MultimodalIntermediate {
+    Precomputed(PrecomputedMultimodalIntermediate),
+}
+
+#[derive(Debug)]
+pub(crate) struct PrecomputedMultimodalIntermediate {
+    /// Active modality for this preprocessed payload.
+    pub modality: Modality,
     /// Preprocessed pixel values and model-specific tensors (not yet serialized).
     pub preprocessed: PreprocessedImages,
     /// Raw image frames (bytes + blake3 hashes).
     pub images: Vec<Arc<ImageFrame>>,
+    /// Raw video clips (bytes + blake3 hashes + sampled frames).
+    pub videos: Vec<Arc<VideoClip>>,
     /// Full structural placeholder ranges (offset, length).
     pub placeholders: Vec<PlaceholderRange>,
     /// Patch-only placeholder offsets for sglang.
     pub patch_offsets: Option<Vec<(u32, u32)>>,
-    /// Image token ID from model config.
-    pub im_token_id: Option<u32>,
+    /// Placeholder token ID from model config for the active modality.
+    pub placeholder_token_id: Option<u32>,
     /// Per-tensor field layout classification from the model spec.
     pub field_layouts: HashMap<String, FieldLayout>,
     /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
@@ -237,6 +291,7 @@ pub(crate) async fn resolve_placeholder_token(
     components: &MultimodalComponents,
     tokenizer_id: &str,
     tokenizer_source: &str,
+    modality: Modality,
 ) -> Result<Option<String>> {
     let model_config = components
         .config_registry
@@ -251,14 +306,22 @@ pub(crate) async fn resolve_placeholder_token(
         Some(s) => s,
         None => return Ok(None),
     };
-    Ok(Some(spec.placeholder_token(&metadata).map_err(|e| {
-        anyhow::anyhow!("Failed to get placeholder token: {e}")
-    })?))
+    Ok(Some(
+        spec.placeholder_token_for(&metadata, modality)
+            .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?,
+    ))
 }
 
-/// Check if any messages in the request contain multimodal content (images).
-pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
-    messages.iter().any(|msg| {
+/// Return the multimodal modalities present in OpenAI chat messages.
+pub(crate) fn chat_modalities(messages: &[ChatMessage]) -> Vec<Modality> {
+    let mut modalities = Vec::new();
+    let mut push_unique = |modality| {
+        if !modalities.contains(&modality) {
+            modalities.push(modality);
+        }
+    };
+
+    for msg in messages {
         let content = match msg {
             ChatMessage::User { content, .. } => Some(content),
             ChatMessage::System { content, .. } => Some(content),
@@ -266,13 +329,25 @@ pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
             ChatMessage::Tool { content, .. } => Some(content),
             _ => None,
         };
-        content.is_some_and(|c| match c {
-            MessageContent::Parts(parts) => parts
-                .iter()
-                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
-            MessageContent::Text(_) => false,
-        })
-    })
+
+        if let Some(MessageContent::Parts(parts)) = content {
+            for part in parts {
+                match part {
+                    ContentPart::ImageUrl { .. } => push_unique(Modality::Image),
+                    ContentPart::VideoUrl { .. } => push_unique(Modality::Video),
+                    ContentPart::Text { .. } => {}
+                }
+            }
+        }
+    }
+
+    modalities
+}
+
+/// Check if any messages in the request contain multimodal content.
+#[cfg(test)]
+pub(crate) fn has_multimodal_content(messages: &[ChatMessage]) -> bool {
+    !chat_modalities(messages).is_empty()
 }
 
 /// Extract multimodal content parts from OpenAI chat messages,
@@ -303,7 +378,12 @@ fn extract_content_parts(messages: &[ChatMessage]) -> Vec<MediaContentPart> {
                     ContentPart::Text { text } => {
                         parts.push(MediaContentPart::Text { text: text.clone() });
                     }
-                    ContentPart::VideoUrl { .. } => {} // Skip VideoUrl for now
+                    ContentPart::VideoUrl { video_url } => {
+                        parts.push(MediaContentPart::VideoUrl {
+                            url: video_url.url.clone(),
+                            uuid: None,
+                        });
+                    }
                 }
             }
         }
@@ -476,19 +556,60 @@ async fn process_multimodal_parts(
         })
         .unwrap_or_default();
 
-    if images.is_empty() {
+    let videos: Vec<Arc<VideoClip>> = tracker_output
+        .data
+        .get(&Modality::Video)
+        .map(|media_vec| {
+            media_vec
+                .iter()
+                .filter_map(|m| match m {
+                    TrackedMedia::Video(clip) => Some(clip.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let modality = match (images.is_empty(), videos.is_empty()) {
+        (false, true) => Modality::Image,
+        (true, false) => Modality::Video,
+        (false, false) => {
+            return Err(anyhow::anyhow!(
+                "Mixed image and video multimodal requests are not supported yet"
+            ));
+        }
+        (true, true) => {
+            return Err(anyhow::anyhow!(
+                "No media was successfully fetched for multimodal request"
+            ));
+        }
+    };
+
+    if modality == Modality::Video && videos.len() != 1 {
         return Err(anyhow::anyhow!(
-            "No images were successfully fetched for multimodal request"
+            "Exactly one video is supported per request for the initial video path"
         ));
     }
 
-    debug!(
-        image_count = images.len(),
-        image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
-        "Fetched images for multimodal processing"
-    );
+    match modality {
+        Modality::Image => {
+            debug!(
+                image_count = images.len(),
+                image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
+                "Fetched images for multimodal processing"
+            );
+        }
+        Modality::Video => {
+            debug!(
+                video_count = videos.len(),
+                frame_count = videos.first().map_or(0, |v| v.frames.len()),
+                "Fetched video for multimodal processing"
+            );
+        }
+        _ => {}
+    }
 
-    // Step 2: Resolve model spec and preprocess images
+    // Step 2: Resolve model spec and preprocess media.
     let model_config = components
         .config_registry
         .get_or_load(tokenizer_id, tokenizer_source)
@@ -510,50 +631,76 @@ async fn process_multimodal_parts(
     // Run CPU-intensive image preprocessing on a blocking thread pool so it
     // doesn't block the tokio async runtime under concurrent load.
     // TODO: consider making the thread pool size configurable.
-    let pp_config = model_config.preprocessor_config.clone();
+    let pp_config = match modality {
+        Modality::Video => model_config
+            .video_preprocessor_config
+            .clone()
+            .unwrap_or_else(|| model_config.preprocessor_config.clone()),
+        _ => model_config.preprocessor_config.clone(),
+    };
     let registry = components.image_processor_registry.clone();
     let model_id_owned = model_id.to_string();
     let model_type_owned = model_type.map(String::from);
     let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
+    let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
 
     let preprocessed: PreprocessedImages = tokio::task::spawn_blocking(move || {
-        // Extract DynamicImages inside the blocking closure so the expensive
-        // clone happens off the tokio async runtime.
-        let raw_images: Vec<image::DynamicImage> = images_for_preprocess
-            .iter()
-            .map(|f| f.image.clone())
-            .collect();
         let processor = registry
             .find(&model_id_owned, model_type_owned.as_deref())
             .ok_or_else(|| {
                 anyhow::anyhow!("No image processor found for model: {model_id_owned}")
             })?;
-        processor
-            .preprocess(&raw_images, &pp_config)
-            .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
+
+        match modality {
+            Modality::Image => {
+                // Extract DynamicImages inside the blocking closure so the expensive
+                // clone happens off the tokio async runtime.
+                let raw_images: Vec<image::DynamicImage> = images_for_preprocess
+                    .iter()
+                    .map(|f| f.image.clone())
+                    .collect();
+                processor
+                    .preprocess(&raw_images, &pp_config)
+                    .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))
+            }
+            Modality::Video => {
+                let video = videos_for_preprocess
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
+                let frames: Vec<image::DynamicImage> = video.frames.iter().cloned().collect();
+                processor
+                    .preprocess_video(&frames, &pp_config)
+                    .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
+            }
+            _ => Err(anyhow::anyhow!(
+                "Unsupported modality for preprocessing: {modality}"
+            )),
+        }
     })
     .await
     .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
 
     debug!(
-        num_images = preprocessed.num_img_tokens.len(),
+        ?modality,
+        item_count = preprocessed.num_img_tokens.len(),
         total_tokens = preprocessed.num_img_tokens.iter().sum::<usize>(),
-        "Image preprocessing complete"
+        "Multimodal preprocessing complete"
     );
 
     // Step 3: Compute prompt replacements and expand tokens.
     let prompt_replacements = spec
-        .prompt_replacements(&metadata, &preprocessed)
+        .prompt_replacements_for(&metadata, &preprocessed, modality)
         .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {e}"))?;
 
     // Two token IDs may differ for the same placeholder:
     // - search_token_id: what the tokenizer actually emits (e.g. 200090 for "<|image|>")
-    // - im_token_id: what the model config declares (e.g. config.image_token_index = 200092)
+    // - placeholder_token_id: what the model config declares (e.g. image_token_id/video_token_id)
     let placeholder_token = spec
-        .placeholder_token(&metadata)
+        .placeholder_token_for(&metadata, modality)
         .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
     let search_token_id = tokenizer.token_to_id(&placeholder_token);
-    let im_token_id: Option<u32> = match spec.placeholder_token_id(&metadata) {
+    let placeholder_token_id: Option<u32> = match spec.placeholder_token_id_for(&metadata, modality)
+    {
         Ok(id) => Some(id as u32),
         Err(e) => {
             warn!(
@@ -568,7 +715,7 @@ async fn process_multimodal_parts(
     let expanded = expand_tokens(
         &token_ids,
         search_token_id,
-        im_token_id,
+        placeholder_token_id,
         &prompt_replacements,
     );
 
@@ -577,20 +724,22 @@ async fn process_multimodal_parts(
         expanded_len = expanded.token_ids.len(),
         placeholder_count = expanded.placeholders.len(),
         ?search_token_id,
-        ?im_token_id,
+        ?placeholder_token_id,
         "Token expansion complete"
     );
 
     // Step 4: Build lightweight intermediate (defers tensor serialization to assembly)
-    let intermediate = MultimodalIntermediate {
+    let intermediate = MultimodalIntermediate::Precomputed(PrecomputedMultimodalIntermediate {
+        modality,
         preprocessed,
         images,
+        videos,
         placeholders: expanded.placeholders,
         patch_offsets: expanded.patch_offsets,
-        im_token_id,
+        placeholder_token_id,
         field_layouts: spec.field_layouts(),
         keep_on_cpu_keys: spec.keep_on_cpu_keys(),
-    };
+    });
 
     Ok(MultimodalOutput {
         expanded_token_ids: expanded.token_ids,
@@ -703,19 +852,42 @@ fn expand_tokens(
 pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
-) -> MultimodalData {
-    match client {
-        GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
-        GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
-        GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
-        GrpcClient::TokenSpeed(_) => MultimodalData::TokenSpeed(assemble_tokenspeed(intermediate)),
-        GrpcClient::Mlx(_) => unreachable!(
-            "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
-        ),
+) -> Result<MultimodalData> {
+    match intermediate {
+        MultimodalIntermediate::Precomputed(precomputed) => match client {
+            GrpcClient::Sglang(_) => {
+                ensure_image_only(&precomputed, "SGLang")?;
+                Ok(MultimodalData::Sglang(assemble_sglang(precomputed)))
+            }
+            GrpcClient::Vllm(_) => {
+                ensure_image_only(&precomputed, "vLLM")?;
+                Ok(MultimodalData::Vllm(assemble_vllm(precomputed)))
+            }
+            GrpcClient::Trtllm(_) => {
+                ensure_image_only(&precomputed, "TRT-LLM")?;
+                Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
+            }
+            GrpcClient::TokenSpeed(_) => {
+                Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(precomputed)))
+            }
+            GrpcClient::Mlx(_) => unreachable!(
+                "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
+            ),
+        },
     }
 }
 
-fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData {
+fn ensure_image_only(intermediate: &PrecomputedMultimodalIntermediate, backend: &str) -> Result<()> {
+    if intermediate.modality != Modality::Image {
+        return Err(anyhow::anyhow!(
+            "{backend} multimodal path currently supports image inputs only; got {}",
+            intermediate.modality
+        ));
+    }
+    Ok(())
+}
+
+fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let image_data = intermediate
@@ -740,12 +912,12 @@ fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
-        im_token_id: intermediate.im_token_id,
+        im_token_id: intermediate.placeholder_token_id,
         mm_placeholders,
     }
 }
 
-fn assemble_vllm(intermediate: MultimodalIntermediate) -> VllmMultimodalData {
+fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
@@ -761,7 +933,7 @@ fn assemble_vllm(intermediate: MultimodalIntermediate) -> VllmMultimodalData {
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
-        im_token_id: intermediate.im_token_id,
+        im_token_id: intermediate.placeholder_token_id,
         mm_placeholders,
         mm_hashes,
         batched_keys,
@@ -770,7 +942,7 @@ fn assemble_vllm(intermediate: MultimodalIntermediate) -> VllmMultimodalData {
     }
 }
 
-fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData {
+fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMultimodalData {
     let image_data = intermediate
         .images
         .iter()
@@ -779,7 +951,7 @@ fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData
     TrtllmMultimodalData { image_data }
 }
 
-fn assemble_tokenspeed(intermediate: MultimodalIntermediate) -> TokenSpeedMultimodalData {
+fn assemble_tokenspeed(intermediate: PrecomputedMultimodalIntermediate) -> TokenSpeedMultimodalData {
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
@@ -794,13 +966,35 @@ fn assemble_tokenspeed(intermediate: MultimodalIntermediate) -> TokenSpeedMultim
                 .collect()
         });
 
+    let modality = match intermediate.modality {
+        Modality::Image => TokenSpeedModality::Image,
+        Modality::Video => TokenSpeedModality::Video,
+        Modality::Audio => TokenSpeedModality::Audio,
+        Modality::ImageEmbeds => TokenSpeedModality::Image,
+    };
+    let content_hash = match intermediate.modality {
+        Modality::Image => hash_hex_strings(intermediate.images.iter().map(|f| f.hash.as_str())),
+        Modality::Video => hash_hex_strings(intermediate.videos.iter().map(|v| v.hash.as_str())),
+        _ => Vec::new(),
+    };
+
     TokenSpeedMultimodalData {
+        modality,
         pixel_values,
         pixel_values_shape,
         model_specific_tensors,
-        im_token_id: intermediate.im_token_id,
+        placeholder_token_id: intermediate.placeholder_token_id,
         mm_placeholders,
+        content_hash,
     }
+}
+
+fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    for hash in hashes {
+        hasher.update(hash.as_bytes());
+    }
+    hasher.finalize().as_bytes().to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -902,7 +1096,7 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
 mod tests {
     use std::fs;
 
-    use openai_protocol::common::ImageUrl;
+    use openai_protocol::common::{ImageUrl, VideoUrl};
     use tempfile::TempDir;
 
     use super::*;
@@ -925,6 +1119,21 @@ mod tests {
         }];
 
         assert!(has_multimodal_content(&messages));
+    }
+
+    #[test]
+    fn test_has_multimodal_content_with_video() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::VideoUrl {
+                video_url: VideoUrl {
+                    url: "https://example.com/clip.mp4".to_string(),
+                },
+            }]),
+            name: None,
+        }];
+
+        assert!(has_multimodal_content(&messages));
+        assert_eq!(chat_modalities(&messages), vec![Modality::Video]);
     }
 
     #[test]
@@ -986,6 +1195,27 @@ mod tests {
                 assert_eq!(*detail, Some(ImageDetail::High));
             }
             _ => panic!("Expected ImageUrl part"),
+        }
+    }
+
+    #[test]
+    fn test_extract_video_content_parts() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::VideoUrl {
+                video_url: VideoUrl {
+                    url: "https://example.com/video.mp4".to_string(),
+                },
+            }]),
+            name: None,
+        }];
+
+        let parts = extract_content_parts(&messages);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MediaContentPart::VideoUrl { url, .. } => {
+                assert_eq!(url, "https://example.com/video.mp4");
+            }
+            _ => panic!("Expected VideoUrl part"),
         }
     }
 
@@ -1134,6 +1364,7 @@ mod tests {
                 r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
             )
             .unwrap(),
+            video_preprocessor_config: None,
         });
         reg.insert("tok-uuid-rm".to_string(), cfg.clone());
         assert!(reg.get("tok-uuid-rm").is_some());
@@ -1157,6 +1388,7 @@ mod tests {
                 r#"{"image_processor_type":"Phi3VImageProcessor"}"#,
             )
             .unwrap(),
+            video_preprocessor_config: None,
         });
         reg.insert("tok-uuid-3".to_string(), cfg.clone());
 

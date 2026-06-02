@@ -297,6 +297,22 @@ pub trait ImagePreProcessor: Send + Sync {
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedImages, TransformError>;
 
+    /// Preprocess one decoded video clip represented as sampled frames.
+    ///
+    /// Implementations that support video should emit the same primary
+    /// `pixel_values` tensor shape used by the image path, plus video-specific
+    /// model metadata such as `video_grid_thw`.
+    fn preprocess_video(
+        &self,
+        _frames: &[DynamicImage],
+        _config: &PreProcessorConfig,
+    ) -> Result<PreprocessedImages, TransformError> {
+        Err(TransformError::ShapeError(format!(
+            "{} does not support video preprocessing",
+            self.model_name()
+        )))
+    }
+
     /// Calculate the number of image tokens for a given image size.
     ///
     /// This is used to determine how many placeholder tokens to insert

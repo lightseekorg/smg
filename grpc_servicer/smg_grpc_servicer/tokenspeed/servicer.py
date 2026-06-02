@@ -366,8 +366,18 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             self.server_args, "tokenizer_path", ""
         )
         supports_vision = bool(getattr(model_config, "is_multimodal", False))
+        image_modality = getattr(tokenspeed_scheduler_pb2, "IMAGE", 1)
+        video_modality = getattr(tokenspeed_scheduler_pb2, "VIDEO", 3)
+        audio_modality = getattr(tokenspeed_scheduler_pb2, "AUDIO", 2)
+        supported_modalities = []
+        if supports_vision:
+            supported_modalities.append(image_modality)
+            if hf_config is not None and getattr(hf_config, "video_token_id", None) is not None:
+                supported_modalities.append(video_modality)
+            if hf_config is not None and getattr(hf_config, "audio_token_id", None) is not None:
+                supported_modalities.append(audio_modality)
 
-        return tokenspeed_scheduler_pb2.GetModelInfoResponse(
+        response_kwargs = dict(
             model_path=model_path,
             tokenizer_path=tokenizer_path or "",
             default_sampling_params_json=self.server_args.preferred_sampling_params or "",
@@ -383,6 +393,12 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             max_req_input_len=int(max_req_input_len),
             supports_vision=supports_vision,
         )
+        fields = tokenspeed_scheduler_pb2.GetModelInfoResponse.DESCRIPTOR.fields_by_name
+        if "supports_multimodal" in fields:
+            response_kwargs["supports_multimodal"] = supports_vision
+        if "supported_modalities" in fields:
+            response_kwargs["supported_modalities"] = supported_modalities
+        return tokenspeed_scheduler_pb2.GetModelInfoResponse(**response_kwargs)
 
     # ------------------------------------------------------------------
     # GetServerInfo (unary)
@@ -582,7 +598,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         # Decode the precomputed multimodal payload, if the request carries one.
         precomputed_mm = None
-        if request.HasField("mm_inputs") and request.mm_inputs.HasField("pixel_values"):
+        if request.HasField("mm_inputs"):
             precomputed_mm = self._mm_inputs_from_proto(
                 request.mm_inputs,
                 model_dtype=getattr(self.async_llm.model_config, "dtype", None),
@@ -718,6 +734,14 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         (``precomputed_multimodal_inputs`` is set); this just boxes the tensors and
         placeholder offsets into the engine's data class.
         """
+        if getattr(mm_inputs, "items", None):
+            return self._mm_inputs_from_itemized_proto(mm_inputs, model_dtype=model_dtype)
+
+        if not mm_inputs.HasField("pixel_values"):
+            raise ValueError(
+                "MultimodalInputs carried neither v2 items nor legacy pixel_values"
+            )
+
         feature = self._tensor_from_proto(mm_inputs.pixel_values, cast_to=model_dtype)
         model_specific_data = {}
         for name, tensor_data in mm_inputs.model_specific_tensors.items():
@@ -746,6 +770,85 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         im_token_id = mm_inputs.im_token_id if mm_inputs.HasField("im_token_id") else None
         return MultimodalInputs(mm_items=[mm_item], im_token_id=im_token_id)
 
+    def _mm_inputs_from_itemized_proto(
+        self,
+        mm_inputs: tokenspeed_scheduler_pb2.MultimodalInputs,
+        *,
+        model_dtype: torch.dtype | None = None,
+    ):
+        items = []
+        im_token_id = None
+        video_token_id = None
+
+        for item_proto in mm_inputs.items:
+            modality = self._modality_from_proto(item_proto.modality)
+            tensors = dict(item_proto.tensors)
+            if "pixel_values" not in tensors:
+                raise ValueError("MultimodalItem.tensors must include 'pixel_values'")
+
+            feature = self._tensor_from_proto(tensors.pop("pixel_values"), cast_to=model_dtype)
+            model_specific_data = {
+                name: self._tensor_from_proto(tensor_data, cast_to=model_dtype)
+                for name, tensor_data in tensors.items()
+            }
+            self._validate_item_tensor_consistency(modality, model_specific_data)
+
+            if not item_proto.placeholders:
+                raise ValueError("MultimodalItem carried no placeholders")
+            if any(p.length <= 0 for p in item_proto.placeholders):
+                raise ValueError("MultimodalItem.placeholders.length must be > 0")
+            offsets = [
+                (p.offset, p.offset + p.length - 1) for p in item_proto.placeholders
+            ]
+
+            content_hash = bytes(item_proto.content_hash)
+            mm_item = MultimodalDataItem(
+                modality=modality,
+                feature=feature,
+                model_specific_data=model_specific_data,
+                offsets=offsets,
+                hash=int.from_bytes(content_hash[:8], "little") if content_hash else None,
+            )
+            mm_item.set_pad_value()
+            items.append(mm_item)
+
+            if item_proto.HasField("placeholder_token_id"):
+                if modality is Modality.IMAGE:
+                    im_token_id = int(item_proto.placeholder_token_id)
+                elif modality is Modality.VIDEO:
+                    video_token_id = int(item_proto.placeholder_token_id)
+
+        if not items:
+            raise ValueError("MultimodalInputs.items is empty")
+        return MultimodalInputs(
+            mm_items=items,
+            im_token_id=im_token_id,
+            video_token_id=video_token_id,
+        )
+
+    @staticmethod
+    def _modality_from_proto(modality: int) -> Modality:
+        if modality == getattr(tokenspeed_scheduler_pb2, "IMAGE", 1):
+            return Modality.IMAGE
+        if modality == getattr(tokenspeed_scheduler_pb2, "VIDEO", 3):
+            return Modality.VIDEO
+        if modality == getattr(tokenspeed_scheduler_pb2, "AUDIO", 2):
+            return Modality.AUDIO
+        raise ValueError(f"Unsupported multimodal item modality: {modality}")
+
+    @staticmethod
+    def _validate_item_tensor_consistency(
+        modality: Modality, model_specific_data: dict[str, torch.Tensor]
+    ) -> None:
+        has_image_grid = "image_grid_thw" in model_specific_data
+        has_video_grid = "video_grid_thw" in model_specific_data
+        if modality is Modality.IMAGE and has_video_grid:
+            raise ValueError("IMAGE MultimodalItem must not carry video_grid_thw")
+        if modality is Modality.VIDEO and has_image_grid:
+            raise ValueError("VIDEO MultimodalItem must not carry image_grid_thw")
+        if modality is Modality.VIDEO and not has_video_grid:
+            raise ValueError("VIDEO MultimodalItem must carry video_grid_thw")
+
     @staticmethod
     def _tensor_from_proto(
         tensor_data: tokenspeed_scheduler_pb2.TensorData,
@@ -757,14 +860,28 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         copied so it never aliases the transient proto bytes.
         """
         shape = list(tensor_data.shape)
+
         if tensor_data.dtype == "bfloat16":
             # numpy has no bfloat16 — read the raw bits as uint16, reinterpret.
+            expected = int(np.prod(shape, dtype=np.int64)) * np.dtype(np.uint16).itemsize
+            if len(tensor_data.data) != expected:
+                raise ValueError(
+                    f"TensorData byte length mismatch for bfloat16 shape={shape}: "
+                    f"expected {expected}, got {len(tensor_data.data)}"
+                )
             t = torch.from_numpy(
                 np.frombuffer(tensor_data.data, dtype=np.uint16).reshape(shape)
             ).view(torch.bfloat16)
         else:
+            dtype = np.dtype(tensor_data.dtype)
+            expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+            if len(tensor_data.data) != expected:
+                raise ValueError(
+                    f"TensorData byte length mismatch for dtype={tensor_data.dtype}, "
+                    f"shape={shape}: expected {expected}, got {len(tensor_data.data)}"
+                )
             t = torch.from_numpy(
-                np.frombuffer(tensor_data.data, dtype=np.dtype(tensor_data.dtype)).reshape(shape)
+                np.frombuffer(tensor_data.data, dtype=dtype).reshape(shape)
             )
 
         if cast_to is not None and t.dtype != cast_to and t.is_floating_point():

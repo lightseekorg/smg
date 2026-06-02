@@ -1,23 +1,124 @@
 use std::collections::HashMap;
 
+use llm_tokenizer::Encoding;
 use serde_json::{json, Value};
 
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::PreprocessedImages,
+    vision::image_processor::{ModelSpecificValue, PreprocessedImages},
 };
 
 pub(super) struct Qwen3VLVisionSpec;
 
 impl Qwen3VLVisionSpec {
-    fn pad_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+    fn image_pad_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
         metadata
             .config_u32(&["image_token_id"])
             .map(|v| v as TokenId)
             .ok_or_else(|| ModelRegistryError::MissingConfigField {
                 field: "image_token_id".to_string(),
             })
+    }
+
+    fn video_pad_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        metadata
+            .config_u32(&["video_token_id"])
+            .map(|v| v as TokenId)
+            .ok_or_else(|| ModelRegistryError::MissingConfigField {
+                field: "video_token_id".to_string(),
+            })
+    }
+
+    fn vision_start_token_id(metadata: &ModelMetadata) -> Option<TokenId> {
+        metadata
+            .config_u32(&["vision_start_token_id"])
+            .map(|v| v as TokenId)
+    }
+
+    fn vision_end_token_id(metadata: &ModelMetadata) -> Option<TokenId> {
+        metadata
+            .config_u32(&["vision_end_token_id"])
+            .map(|v| v as TokenId)
+    }
+
+    fn token_for_id(
+        metadata: &ModelMetadata,
+        token_id: TokenId,
+        field: &str,
+    ) -> RegistryResult<String> {
+        metadata
+            .tokenizer
+            .id_to_token(token_id as u32)
+            .ok_or_else(|| ModelRegistryError::TokenNotFound {
+                token: format!("{field}:{token_id}"),
+            })
+    }
+
+    fn is_qwen3_5(metadata: &ModelMetadata) -> bool {
+        let id = metadata.model_id.to_ascii_lowercase();
+        let model_type = metadata.config_model_type();
+        id.contains("qwen3.5")
+            || id.contains("qwen3.6")
+            || model_type.is_some_and(|mt| mt == "qwen3_5" || mt == "qwen3_5_moe")
+    }
+
+    fn video_grid_t(preprocessed: &PreprocessedImages) -> Option<usize> {
+        match preprocessed.model_specific.get("video_grid_thw") {
+            Some(ModelSpecificValue::IntTensor { data, shape })
+                if shape == &[1, 3] && !data.is_empty() =>
+            {
+                usize::try_from(data[0]).ok()
+            }
+            _ => None,
+        }
+    }
+
+    fn encode_plain_text(metadata: &ModelMetadata, text: &str) -> Vec<TokenId> {
+        metadata
+            .tokenizer
+            .encode(text, false)
+            .ok()
+            .map(|encoding| match encoding {
+                Encoding::Hf(inner) => inner
+                    .get_ids()
+                    .iter()
+                    .map(|&id| id as TokenId)
+                    .collect::<Vec<_>>(),
+                Encoding::Plain(ids) | Encoding::Tiktoken(ids) => {
+                    ids.into_iter().map(|id| id as TokenId).collect()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    fn qwen3_5_video_replacement_tokens(
+        metadata: &ModelMetadata,
+        pad_token_id: TokenId,
+        num_tokens: usize,
+        grid_t: usize,
+    ) -> Option<Vec<TokenId>> {
+        if grid_t <= 1 || num_tokens == 0 || num_tokens % grid_t != 0 {
+            return None;
+        }
+        let vision_start = Self::vision_start_token_id(metadata)?;
+        let vision_end = Self::vision_end_token_id(metadata)?;
+        let tokens_per_grid = num_tokens / grid_t;
+        let mut tokens = Vec::with_capacity(num_tokens + (grid_t.saturating_sub(1)) * 8);
+
+        for grid_idx in 0..grid_t {
+            if grid_idx > 0 {
+                tokens.push(vision_end);
+                tokens.extend(Self::encode_plain_text(
+                    metadata,
+                    &format!("<{grid_idx}.0 seconds>"),
+                ));
+                tokens.push(vision_start);
+            }
+            tokens.extend(std::iter::repeat_n(pad_token_id, tokens_per_grid));
+        }
+
+        Some(tokens)
     }
 }
 
@@ -38,24 +139,60 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     }
 
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
-        let token_id = Self::pad_token_id(metadata)? as u32;
-        metadata
-            .tokenizer
-            .id_to_token(token_id)
-            .ok_or_else(|| ModelRegistryError::TokenNotFound {
-                token: format!("image_token_id:{token_id}"),
-            })
+        Self::token_for_id(
+            metadata,
+            Self::image_pad_token_id(metadata)?,
+            "image_token_id",
+        )
     }
 
     fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        Self::pad_token_id(metadata)
+        Self::image_pad_token_id(metadata)
+    }
+
+    fn placeholder_token_for(
+        &self,
+        metadata: &ModelMetadata,
+        modality: Modality,
+    ) -> RegistryResult<String> {
+        match modality {
+            Modality::Image => self.placeholder_token(metadata),
+            Modality::Video => Self::token_for_id(
+                metadata,
+                Self::video_pad_token_id(metadata)?,
+                "video_token_id",
+            ),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
+    }
+
+    fn placeholder_token_id_for(
+        &self,
+        metadata: &ModelMetadata,
+        modality: Modality,
+    ) -> RegistryResult<TokenId> {
+        match modality {
+            Modality::Image => Self::image_pad_token_id(metadata),
+            Modality::Video => Self::video_pad_token_id(metadata),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
     }
 
     fn modality_limits(
         &self,
-        _metadata: &ModelMetadata,
+        metadata: &ModelMetadata,
     ) -> RegistryResult<HashMap<Modality, usize>> {
-        Ok(HashMap::from([(Modality::Image, 10)]))
+        let mut limits = HashMap::from([(Modality::Image, 10)]);
+        if metadata.config_u32(&["video_token_id"]).is_some() {
+            limits.insert(Modality::Video, 1);
+        }
+        Ok(limits)
     }
 
     fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
@@ -67,7 +204,7 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
         metadata: &ModelMetadata,
         preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
-        let pad_token_id = Self::pad_token_id(metadata)?;
+        let pad_token_id = Self::image_pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
         // The chat template already wraps each image with <|vision_start|> ... <|vision_end|>,
         // so we only expand the single <|image_pad|> placeholder to N pad tokens.
@@ -81,6 +218,47 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
             .collect())
     }
 
+    fn prompt_replacements_for(
+        &self,
+        metadata: &ModelMetadata,
+        preprocessed: &PreprocessedImages,
+        modality: Modality,
+    ) -> RegistryResult<Vec<PromptReplacement>> {
+        match modality {
+            Modality::Image => self.prompt_replacements(metadata, preprocessed),
+            Modality::Video => {
+                let pad_token_id = Self::video_pad_token_id(metadata)?;
+                let placeholder_token = self.placeholder_token_for(metadata, Modality::Video)?;
+                let video_grid_t = Self::video_grid_t(preprocessed);
+                Ok(preprocessed
+                    .num_img_tokens
+                    .iter()
+                    .map(|&num_tokens| {
+                        let tokens = if Self::is_qwen3_5(metadata) {
+                            video_grid_t
+                                .and_then(|grid_t| {
+                                    Self::qwen3_5_video_replacement_tokens(
+                                        metadata,
+                                        pad_token_id,
+                                        num_tokens,
+                                        grid_t,
+                                    )
+                                })
+                                .unwrap_or_else(|| vec![pad_token_id; num_tokens])
+                        } else {
+                            vec![pad_token_id; num_tokens]
+                        };
+                        PromptReplacement::sequence(Modality::Video, &placeholder_token, tokens)
+                    })
+                    .collect())
+            }
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
+    }
+
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
         // pixel_values is patchified: [total_patches, patch_features].
         // patches_per_image tells how many patches belong to each image.
@@ -92,11 +270,13 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
             ),
             ("image_grid_thw".to_string(), FieldLayout::Batched),
             ("patches_per_image".to_string(), FieldLayout::Batched),
+            ("video_grid_thw".to_string(), FieldLayout::Batched),
+            ("patches_per_video".to_string(), FieldLayout::Batched),
         ])
     }
 
     fn keep_on_cpu_keys(&self) -> Vec<String> {
-        vec!["image_grid_thw".to_string()]
+        vec!["image_grid_thw".to_string(), "video_grid_thw".to_string()]
     }
 }
 
@@ -138,6 +318,72 @@ mod tests {
         assert_eq!(replacements[0].tokens.len(), 196);
         assert_eq!(replacements[0].tokens[0], 151655); // pad (image_token_id)
         assert_eq!(*replacements[0].tokens.last().unwrap(), 151655); // pad
+    }
+
+    #[test]
+    fn qwen3_vl_video_pad_replacement() {
+        let tokenizer = TestTokenizer::new(&[("<|video_pad|>", 151656)]);
+        let config = json!({
+            "model_type": "qwen3_5",
+            "image_token_id": 151655,
+            "video_token_id": 151656,
+        });
+        let metadata = ModelMetadata {
+            model_id: "Qwen3.5-VL-7B",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("qwen3.5 spec");
+        let replacements = spec
+            .prompt_replacements_for(
+                &metadata,
+                &test_preprocessed_with_tokens(&[ImageSize::new(448, 448)], &[128]),
+                crate::types::Modality::Video,
+            )
+            .unwrap();
+
+        assert_eq!(replacements[0].modality, crate::types::Modality::Video);
+        assert_eq!(replacements[0].tokens.len(), 128);
+        assert_eq!(replacements[0].tokens[0], 151656);
+    }
+
+    #[test]
+    fn qwen3_5_video_replacement_splits_temporal_grid() {
+        let tokenizer = TestTokenizer::new(&[
+            ("<|video_pad|>", 151656),
+            ("<|vision_start|>", 151652),
+            ("<|vision_end|>", 151653),
+        ]);
+        let config = json!({
+            "model_type": "qwen3_5",
+            "image_token_id": 151655,
+            "video_token_id": 151656,
+            "vision_start_token_id": 151652,
+            "vision_end_token_id": 151653,
+        });
+        let metadata = ModelMetadata {
+            model_id: "Qwen/Qwen3.5-4B",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("qwen3.5 spec");
+        let preprocessed = test_preprocessed_with_tokens(&[ImageSize::new(320, 256)], &[160])
+            .with_extra(
+                "video_grid_thw",
+                crate::vision::image_processor::ModelSpecificValue::int_2d(vec![2, 16, 20], 1, 3),
+            );
+        let replacements = spec
+            .prompt_replacements_for(&metadata, &preprocessed, crate::types::Modality::Video)
+            .unwrap();
+
+        let tokens = &replacements[0].tokens;
+        assert_eq!(tokens.len(), 162);
+        assert!(tokens[..80].iter().all(|&token| token == 151656));
+        assert_eq!(tokens[80], 151653);
+        assert_eq!(tokens[81], 151652);
+        assert!(tokens[82..].iter().all(|&token| token == 151656));
     }
 
     #[test]
