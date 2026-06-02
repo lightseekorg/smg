@@ -17,6 +17,11 @@ pub enum ModelRegistryError {
     TokenNotFound { token: String },
     #[error("missing config field '{field}'")]
     MissingConfigField { field: String },
+    #[error("modality {modality} is not supported by model spec {spec}")]
+    UnsupportedModality {
+        spec: &'static str,
+        modality: Modality,
+    },
 }
 
 pub type RegistryResult<T> = Result<T, ModelRegistryError>;
@@ -60,6 +65,32 @@ pub trait ModelProcessorSpec: Send + Sync {
     fn matches(&self, metadata: &ModelMetadata) -> bool;
     fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String>;
     fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId>;
+    fn placeholder_token_for(
+        &self,
+        metadata: &ModelMetadata,
+        modality: Modality,
+    ) -> RegistryResult<String> {
+        match modality {
+            Modality::Image => self.placeholder_token(metadata),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
+    }
+    fn placeholder_token_id_for(
+        &self,
+        metadata: &ModelMetadata,
+        modality: Modality,
+    ) -> RegistryResult<TokenId> {
+        match modality {
+            Modality::Image => self.placeholder_token_id(metadata),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
+    }
     fn modality_limits(&self, metadata: &ModelMetadata)
         -> RegistryResult<HashMap<Modality, usize>>;
     fn processor_kwargs(&self, metadata: &ModelMetadata) -> RegistryResult<Value>;
@@ -73,6 +104,20 @@ pub trait ModelProcessorSpec: Send + Sync {
         metadata: &ModelMetadata,
         preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>>;
+    fn prompt_replacements_for(
+        &self,
+        metadata: &ModelMetadata,
+        preprocessed: &PreprocessedImages,
+        modality: Modality,
+    ) -> RegistryResult<Vec<PromptReplacement>> {
+        match modality {
+            Modality::Image => self.prompt_replacements(metadata, preprocessed),
+            _ => Err(ModelRegistryError::UnsupportedModality {
+                spec: self.name(),
+                modality,
+            }),
+        }
+    }
 
     /// Declare how each tensor's first dimension maps to images.
     ///

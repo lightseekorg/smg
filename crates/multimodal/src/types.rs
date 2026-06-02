@@ -63,12 +63,34 @@ pub enum MediaContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    VideoUrl {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    VideoData {
+        data: Vec<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
 }
 
 /// Image source metadata (useful for hashing & tracing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageSource {
+    Url { url: String },
+    DataUrl,
+    InlineBytes,
+    File { path: PathBuf },
+}
+
+/// Video source metadata (useful for hashing & tracing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VideoSource {
     Url { url: String },
     DataUrl,
     InlineBytes,
@@ -84,6 +106,44 @@ pub struct ImageFrame {
     pub source: ImageSource,
     /// Blake3 hex-digest of raw_bytes, computed at decode time.
     pub hash: String,
+}
+
+/// Decoded video payload captured by the media connector.
+#[derive(Debug, Clone)]
+pub struct VideoClip {
+    pub frames: Vec<DynamicImage>,
+    pub raw_bytes: bytes::Bytes,
+    pub source: VideoSource,
+    /// Blake3 hex-digest of raw_bytes, computed at decode time.
+    pub hash: String,
+}
+
+impl VideoClip {
+    pub fn new(
+        frames: Vec<DynamicImage>,
+        raw_bytes: bytes::Bytes,
+        source: VideoSource,
+        hash: String,
+    ) -> Self {
+        Self {
+            frames,
+            raw_bytes,
+            source,
+            hash,
+        }
+    }
+
+    pub fn frames(&self) -> &[DynamicImage] {
+        &self.frames
+    }
+
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.raw_bytes
+    }
+
+    pub fn source(&self) -> &VideoSource {
+        &self.source
+    }
 }
 
 impl ImageFrame {
@@ -124,9 +184,9 @@ impl ImageFrame {
 #[derive(Debug, Clone)]
 pub enum TrackedMedia {
     Image(Arc<ImageFrame>),
+    Video(Arc<VideoClip>),
     /// Placeholder variants for future modalities.
     Audio,
-    Video,
     Embeddings,
 }
 

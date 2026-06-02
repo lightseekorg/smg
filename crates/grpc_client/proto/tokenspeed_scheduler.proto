@@ -101,6 +101,7 @@ message GenerateRequest {
 
   // Preprocessed multimodal payload. Absent for text-only requests.
   MultimodalInputs mm_inputs = 9;
+
 }
 
 message TokenizedInput {
@@ -121,6 +122,21 @@ message PlaceholderRange {
   uint32 length = 2;
 }
 
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  IMAGE = 1;
+  AUDIO = 2;
+  VIDEO = 3;
+}
+
+message MultimodalItem {
+  Modality modality = 1;
+  bytes content_hash = 2;
+  map<string, TensorData> tensors = 3;
+  repeated PlaceholderRange placeholders = 4;
+  optional uint32 placeholder_token_id = 5;
+}
+
 // Multimodal inputs for vision/audio models. Tensors are produced by the
 // gateway's per-model preprocessor (crates/multimodal); the servicer
 // only reconstructs them and hands them to the engine — no preprocess.
@@ -136,6 +152,10 @@ message MultimodalInputs {
 
   // Placeholder offsets: where each image's tokens are in input_ids.
   repeated PlaceholderRange mm_placeholders = 4;
+
+  // V2 itemized payload for mixed-modality and video/audio requests. When
+  // present, servicers must prefer this over the legacy image-only fields.
+  repeated MultimodalItem items = 10;
 }
 
 message GenerateResponse {
@@ -242,6 +262,8 @@ message GetModelInfoResponse {
   // router's mm_inputs handling (router rejects mm requests for
   // non-vision workers before tokenization).
   bool supports_vision = 14;
+  bool supports_multimodal = 15;
+  repeated Modality supported_modalities = 16;
 }
 
 message GetServerInfoRequest {}

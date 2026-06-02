@@ -153,7 +153,7 @@ pub(crate) fn process_content_format(
 /// Transform a single content field based on content format.
 ///
 /// When `image_placeholder` is provided and the content format is `String`,
-/// each `image_url` part is replaced with the placeholder string instead of
+/// each media URL part is replaced with the placeholder string instead of
 /// being stripped.  This mirrors vLLM's behavior of injecting model-specific
 /// placeholder tokens (e.g. `"<|image|>"`) so that the tokenizer produces
 /// token IDs the multimodal expansion step can find and replace.
@@ -177,6 +177,7 @@ fn transform_content_field(
                     match type_str {
                         "text" => obj.get("text")?.as_str().map(String::from),
                         "image_url" => image_placeholder.map(String::from),
+                        "video_url" => image_placeholder.map(String::from),
                         _ => None,
                     }
                 })
