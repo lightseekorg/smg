@@ -44,6 +44,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("TOKENSPEED_HEALTH_CHECK_TIMEOUT", "20"))
+LOG_MM_TENSOR_DATA = os.getenv("TOKENSPEED_LOG_MM_TENSOR_DATA", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def _lazy_generate_req_input():
@@ -398,6 +403,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             response_kwargs["supports_multimodal"] = supports_vision
         if "supported_modalities" in fields:
             response_kwargs["supported_modalities"] = supported_modalities
+        dtype = self._torch_dtype_to_proto(getattr(model_config, "dtype", None))
+        if "model_dtype" in fields:
+            response_kwargs["model_dtype"] = dtype
+        if "multimodal_encoder_dtype" in fields:
+            response_kwargs["multimodal_encoder_dtype"] = dtype
         return tokenspeed_scheduler_pb2.GetModelInfoResponse(**response_kwargs)
 
     # ------------------------------------------------------------------
@@ -734,41 +744,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         (``precomputed_multimodal_inputs`` is set); this just boxes the tensors and
         placeholder offsets into the engine's data class.
         """
-        if getattr(mm_inputs, "items", None):
-            return self._mm_inputs_from_itemized_proto(mm_inputs, model_dtype=model_dtype)
-
-        if not mm_inputs.HasField("pixel_values"):
-            raise ValueError(
-                "MultimodalInputs carried neither v2 items nor legacy pixel_values"
-            )
-
-        feature = self._tensor_from_proto(mm_inputs.pixel_values, cast_to=model_dtype)
-        model_specific_data = {}
-        for name, tensor_data in mm_inputs.model_specific_tensors.items():
-            model_specific_data[name] = self._tensor_from_proto(tensor_data, cast_to=model_dtype)
-
-        if not mm_inputs.mm_placeholders:
-            raise ValueError(
-                "multimodal request carried no placeholders; "
-                "the image token was not located in input_ids"
-            )
-        if any(p.length <= 0 for p in mm_inputs.mm_placeholders):
-            raise ValueError("mm_placeholders.length must be > 0")
-        # Placeholders arrive as (offset, length); the engine wants inclusive (start, end).
-        offsets = [(p.offset, p.offset + p.length - 1) for p in mm_inputs.mm_placeholders]
-
-        mm_item = MultimodalDataItem(
-            modality=Modality.IMAGE,
-            feature=feature,
-            model_specific_data=model_specific_data,
-            offsets=offsets,
-        )
-        # pad_value must exist before the engine splices features into the embedding
-        # stream, otherwise it fails inferring a dtype from None.
-        mm_item.set_pad_value()
-
-        im_token_id = mm_inputs.im_token_id if mm_inputs.HasField("im_token_id") else None
-        return MultimodalInputs(mm_items=[mm_item], im_token_id=im_token_id)
+        return self._mm_inputs_from_itemized_proto(mm_inputs, model_dtype=model_dtype)
 
     def _mm_inputs_from_itemized_proto(
         self,
@@ -782,14 +758,30 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
 
         for item_proto in mm_inputs.items:
             modality = self._modality_from_proto(item_proto.modality)
-            tensors = dict(item_proto.tensors)
-            if "pixel_values" not in tensors:
-                raise ValueError("MultimodalItem.tensors must include 'pixel_values'")
+            if not item_proto.HasField("encoder_input"):
+                raise ValueError("MultimodalItem must include encoder_input")
 
-            feature = self._tensor_from_proto(tensors.pop("pixel_values"), cast_to=model_dtype)
+            feature = self._tensor_from_proto(item_proto.encoder_input, cast_to=model_dtype)
+            if LOG_MM_TENSOR_DATA:
+                encoder_input = item_proto.encoder_input
+                payload = encoder_input.WhichOneof("payload")
+                inline_nbytes = (
+                    len(encoder_input.inline) if payload == "inline" else None
+                )
+                logger.info(
+                    "Multimodal encoder_input received: modality=%s proto_dtype=%s "
+                    "shape=%s payload=%s inline_nbytes=%s torch_dtype=%s cast_to=%s",
+                    modality,
+                    encoder_input.dtype,
+                    list(encoder_input.shape),
+                    payload,
+                    inline_nbytes,
+                    feature.dtype,
+                    model_dtype,
+                )
             model_specific_data = {
                 name: self._tensor_from_proto(tensor_data, cast_to=model_dtype)
-                for name, tensor_data in tensors.items()
+                for name, tensor_data in item_proto.model_specific_tensors.items()
             }
             self._validate_item_tensor_consistency(modality, model_specific_data)
 
@@ -860,33 +852,55 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         copied so it never aliases the transient proto bytes.
         """
         shape = list(tensor_data.shape)
+        raw = TokenSpeedSchedulerServicer._tensor_payload_bytes(tensor_data)
 
         if tensor_data.dtype == "bfloat16":
             # numpy has no bfloat16 — read the raw bits as uint16, reinterpret.
             expected = int(np.prod(shape, dtype=np.int64)) * np.dtype(np.uint16).itemsize
-            if len(tensor_data.data) != expected:
+            if len(raw) != expected:
                 raise ValueError(
                     f"TensorData byte length mismatch for bfloat16 shape={shape}: "
-                    f"expected {expected}, got {len(tensor_data.data)}"
+                    f"expected {expected}, got {len(raw)}"
                 )
             t = torch.from_numpy(
-                np.frombuffer(tensor_data.data, dtype=np.uint16).reshape(shape)
+                np.frombuffer(raw, dtype=np.uint16).reshape(shape)
             ).view(torch.bfloat16)
         else:
             dtype = np.dtype(tensor_data.dtype)
             expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
-            if len(tensor_data.data) != expected:
+            if len(raw) != expected:
                 raise ValueError(
                     f"TensorData byte length mismatch for dtype={tensor_data.dtype}, "
-                    f"shape={shape}: expected {expected}, got {len(tensor_data.data)}"
+                    f"shape={shape}: expected {expected}, got {len(raw)}"
                 )
             t = torch.from_numpy(
-                np.frombuffer(tensor_data.data, dtype=dtype).reshape(shape)
+                np.frombuffer(raw, dtype=dtype).reshape(shape)
             )
 
         if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
             return t.to(cast_to)
         return t.clone()
+
+    @staticmethod
+    def _tensor_payload_bytes(tensor_data: tokenspeed_scheduler_pb2.TensorData) -> bytes:
+        payload = tensor_data.WhichOneof("payload")
+        if payload == "inline":
+            return bytes(tensor_data.inline)
+        if payload == "shm":
+            raise ValueError("TensorData.shm payload is not implemented yet")
+        if payload == "remote":
+            raise ValueError("TensorData.remote payload is not implemented yet")
+        raise ValueError("TensorData payload is required")
+
+    @staticmethod
+    def _torch_dtype_to_proto(dtype: torch.dtype | None) -> str:
+        if dtype is torch.bfloat16:
+            return "bfloat16"
+        if dtype is torch.float16:
+            return "float16"
+        if dtype is torch.float32:
+            return "float32"
+        return ""
 
     def _generated_output_ids(
         self,

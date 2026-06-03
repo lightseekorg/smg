@@ -6,7 +6,7 @@ import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
 // TokenSpeed scheduler gRPC service. Fully self-contained wire definition.
-// Trimmed to text+image generation (no embed, no PD-disaggregated, no
+// Trimmed to text+multimodal generation (no embed, no PD-disaggregated, no
 // LoRA, no hidden-state forwarding). Multimodal carries preprocessed
 // tensors only — image fetch + per-model preprocess happen in the
 // gateway (see crates/multimodal).
@@ -98,11 +98,34 @@ message TokenizedInput {
   string original_text = 2; // cosmetic, for worker logs
 }
 
-// A typed tensor: raw little-endian bytes + shape + dtype.
+// A typed tensor: shape + dtype + transport-specific payload.
 message TensorData {
-  bytes data = 1;              // Raw little-endian bytes (f32/i64/u32)
-  repeated uint32 shape = 2;   // Dimension sizes
-  string dtype = 3;            // "float32", "int64", "uint32"
+  repeated uint32 shape = 1;   // Dimension sizes
+  string dtype = 2;            // "float32", "bfloat16", "float16", "int64", "uint32"
+
+  oneof payload {
+    // Current path: raw little-endian bytes carried in the gRPC message.
+    bytes inline = 3;
+    // Same-host CPU shared memory path.
+    ShmHandle shm = 4;
+    // Transport-specific remote descriptor (NIXL/RDMA/object-store/etc.).
+    RemoteTensorHandle remote = 5;
+  }
+}
+
+message ShmHandle {
+  string name = 1;
+  uint64 offset = 2;
+  uint64 nbytes = 3;
+  // Producer/lifetime owner. Used by implementations to coordinate cleanup.
+  string owner_id = 4;
+}
+
+message RemoteTensorHandle {
+  // Examples: "nixl", "ucx", "object_store".
+  string transport = 1;
+  bytes descriptor = 2;
+  uint64 nbytes = 3;
 }
 
 // Where a multimodal item's tokens sit inside input_ids.
@@ -121,30 +144,23 @@ enum Modality {
 message MultimodalItem {
   Modality modality = 1;
   bytes content_hash = 2;
-  map<string, TensorData> tensors = 3;
-  repeated PlaceholderRange placeholders = 4;
-  optional uint32 placeholder_token_id = 5;
+  // Primary input to the multimodal encoder for this item. For vision models
+  // this is the preprocessed image/video tensor; for audio models this can be
+  // audio features or waveform-derived encoder input.
+  TensorData encoder_input = 3;
+  // Model-specific side tensors (image_grid_thw, video_grid_thw, etc.).
+  map<string, TensorData> model_specific_tensors = 4;
+  repeated PlaceholderRange placeholders = 5;
+  optional uint32 placeholder_token_id = 6;
 }
 
 // Multimodal inputs for vision/audio models. Tensors are produced by the
 // gateway's per-model preprocessor (crates/multimodal); the servicer
 // only reconstructs them and hands them to the engine — no preprocess.
 message MultimodalInputs {
-  // Preprocessed pixel values tensor.
-  TensorData pixel_values = 1;
-
-  // Model-specific tensors (image_grid_thw, aspect_ratios, etc.).
-  map<string, TensorData> model_specific_tensors = 2;
-
-  // Image token id used for placeholder expansion.
-  optional uint32 im_token_id = 3;
-
-  // Placeholder offsets: where each image's tokens are in input_ids.
-  repeated PlaceholderRange mm_placeholders = 4;
-
-  // V2 itemized payload for mixed-modality and video/audio requests. When
-  // present, servicers must prefer this over the legacy image-only fields.
-  repeated MultimodalItem items = 10;
+  // Per-modality itemized payload. Each item owns its tensor payload,
+  // placeholder metadata, and modality-specific token id.
+  repeated MultimodalItem items = 1;
 }
 
 message GenerateResponse {
@@ -253,6 +269,8 @@ message GetModelInfoResponse {
   bool supports_vision = 14;
   bool supports_multimodal = 15;
   repeated Modality supported_modalities = 16;
+  string model_dtype = 17;
+  string multimodal_encoder_dtype = 18;
 }
 
 message GetServerInfoRequest {}
