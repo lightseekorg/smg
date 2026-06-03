@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 
 use crate::routers::grpc::{
     client::GrpcClient,
+    context::WorkerSelection,
     proto_wrapper::{
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
         TrtllmMultimodalData, VllmMultimodalData,
@@ -852,6 +853,7 @@ fn expand_tokens(
 pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
+    workers: Option<&WorkerSelection>,
 ) -> Result<MultimodalData> {
     match intermediate {
         MultimodalIntermediate::Precomputed(precomputed) => match client {
@@ -868,7 +870,10 @@ pub(crate) fn assemble_multimodal_data(
                 Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
             }
             GrpcClient::TokenSpeed(_) => {
-                Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(precomputed)))
+                Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
+                    precomputed,
+                    workers,
+                )))
             }
             GrpcClient::Mlx(_) => unreachable!(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
@@ -951,9 +956,14 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
     TrtllmMultimodalData { image_data }
 }
 
-fn assemble_tokenspeed(intermediate: PrecomputedMultimodalIntermediate) -> TokenSpeedMultimodalData {
+fn assemble_tokenspeed(
+    intermediate: PrecomputedMultimodalIntermediate,
+    workers: Option<&WorkerSelection>,
+) -> TokenSpeedMultimodalData {
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
-    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
+    let (pixel_values, pixel_values_shape, encoder_input_dtype) =
+        serialize_pixel_values_as_dtype(&intermediate.preprocessed, &encoder_input_dtype);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let mm_placeholders = intermediate
         .patch_offsets
@@ -982,6 +992,7 @@ fn assemble_tokenspeed(intermediate: PrecomputedMultimodalIntermediate) -> Token
         modality,
         pixel_values,
         pixel_values_shape,
+        encoder_input_dtype,
         model_specific_tensors,
         placeholder_token_id: intermediate.placeholder_token_id,
         mm_placeholders,
@@ -1030,13 +1041,151 @@ fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u3
             .flat_map(|v| v.to_le_bytes())
             .collect()
     };
-    let pixel_shape: Vec<u32> = preprocessed
+    (pixel_bytes, pixel_values_shape(preprocessed))
+}
+
+/// Serialize pixel values to the requested wire dtype.
+fn serialize_pixel_values_as_dtype(
+    preprocessed: &PreprocessedImages,
+    dtype: &str,
+) -> (Vec<u8>, Vec<u32>, String) {
+    match canonical_float_dtype(dtype).as_deref() {
+        Some("float32") => {
+            let (data, shape) = serialize_pixel_values(preprocessed);
+            (data, shape, "float32".to_string())
+        }
+        Some("bfloat16") => (
+            preprocessed
+                .pixel_values
+                .iter()
+                .flat_map(|value| f32_to_bf16_bits(*value).to_le_bytes())
+                .collect(),
+            pixel_values_shape(preprocessed),
+            "bfloat16".to_string(),
+        ),
+        Some("float16") => (
+            preprocessed
+                .pixel_values
+                .iter()
+                .flat_map(|value| f32_to_f16_bits(*value).to_le_bytes())
+                .collect(),
+            pixel_values_shape(preprocessed),
+            "float16".to_string(),
+        ),
+        _ => {
+            warn!(
+                dtype,
+                "Unsupported TokenSpeed encoder input dtype; falling back to float32"
+            );
+            let (data, shape) = serialize_pixel_values(preprocessed);
+            (data, shape, "float32".to_string())
+        }
+    }
+}
+
+fn tokenspeed_encoder_input_dtype(
+    modality: Modality,
+    workers: Option<&WorkerSelection>,
+) -> String {
+    if let Some(dtype) = tokenspeed_encoder_input_dtype_from_env(modality) {
+        return dtype;
+    }
+    if let Some(dtype) = tokenspeed_encoder_input_dtype_from_worker(workers) {
+        return dtype;
+    }
+    "float32".to_string()
+}
+
+fn tokenspeed_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
+    let modality_env = match modality {
+        Modality::Image | Modality::ImageEmbeds => "SMG_TOKENSPEED_IMAGE_ENCODER_INPUT_DTYPE",
+        Modality::Video => "SMG_TOKENSPEED_VIDEO_ENCODER_INPUT_DTYPE",
+        Modality::Audio => "SMG_TOKENSPEED_AUDIO_ENCODER_INPUT_DTYPE",
+    };
+    std::env::var(modality_env)
+        .or_else(|_| std::env::var("SMG_TOKENSPEED_ENCODER_INPUT_DTYPE"))
+        .ok()
+        .filter(|dtype| !dtype.is_empty())
+}
+
+fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>) -> Option<String> {
+    let worker = match workers? {
+        WorkerSelection::Single { worker } => worker,
+        WorkerSelection::Dual { prefill, .. } => prefill,
+    };
+    worker
+        .metadata()
+        .spec
+        .labels
+        .get("multimodal_encoder_dtype")
+        .filter(|dtype| !dtype.is_empty())
+        .cloned()
+}
+
+fn canonical_float_dtype(dtype: &str) -> Option<String> {
+    match dtype.trim().to_ascii_lowercase().as_str() {
+        "float32" | "fp32" | "f32" => Some("float32".to_string()),
+        "bfloat16" | "bf16" => Some("bfloat16".to_string()),
+        "float16" | "fp16" | "f16" | "half" => Some("float16".to_string()),
+        _ => None,
+    }
+}
+
+fn pixel_values_shape(preprocessed: &PreprocessedImages) -> Vec<u32> {
+    preprocessed
         .pixel_values
         .shape()
         .iter()
         .map(|&d| d as u32)
-        .collect();
-    (pixel_bytes, pixel_shape)
+        .collect()
+}
+
+fn f32_to_bf16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let lsb = (bits >> 16) & 1;
+    let rounding_bias = 0x7fff + lsb;
+    (bits.wrapping_add(rounding_bias) >> 16) as u16
+}
+
+fn f32_to_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x7fffff;
+
+    if exp == 0xff {
+        return if mant == 0 {
+            sign | 0x7c00
+        } else {
+            sign | 0x7e00
+        };
+    }
+
+    let half_exp = exp - 127 + 15;
+    if half_exp >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if half_exp <= 0 {
+        if half_exp < -10 {
+            return sign;
+        }
+        let mantissa = mant | 0x800000;
+        let shift = (14 - half_exp) as u32;
+        let mut half_mant = (mantissa >> shift) as u16;
+        let round_bit = (mantissa >> (shift - 1)) & 1;
+        let sticky = mantissa & ((1u32 << (shift - 1)) - 1);
+        if round_bit != 0 && (sticky != 0 || (half_mant & 1) != 0) {
+            half_mant += 1;
+        }
+        return sign | half_mant;
+    }
+
+    let mut half = sign | ((half_exp as u16) << 10) | ((mant >> 13) as u16);
+    let round = mant & 0x1fff;
+    if round > 0x1000 || (round == 0x1000 && (half & 1) != 0) {
+        half += 1;
+    }
+    half
 }
 
 /// Serialize model-specific values to TensorBytes, consuming the map to avoid key clones.

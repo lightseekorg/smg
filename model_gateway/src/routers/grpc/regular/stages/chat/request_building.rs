@@ -86,7 +86,9 @@ impl PipelineStage for ChatRequestBuildingStage {
         // Assemble backend-specific multimodal data now that the backend is known
         let multimodal_data = processed_messages
             .multimodal_intermediate
-            .map(|intermediate| assemble_multimodal_data(intermediate, builder_client))
+            .map(|intermediate| {
+                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+            })
             .transpose()
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to assemble multimodal request");
