@@ -11,16 +11,33 @@
 # Usage:
 #   ./scripts/mlx_bench.sh                          # both phases
 #   PHASES=mlx ./scripts/mlx_bench.sh               # only mlx-lm.server
-#   CONCURRENCIES="1 4" ./scripts/mlx_bench.sh      # quick sweep
+#   CHAT_CONCURRENCIES="1" CHAT_REQUESTS=20 ./scripts/mlx_bench.sh   # quick sweep
 
 set -euo pipefail
 
 PHASES="${PHASES:-mlx grpc}"
 MODEL="${MODEL:-mlx-community/gemma-3-4b-it-qat-4bit}"
-CONCURRENCIES="${CONCURRENCIES:-1 4 16 64}"
 SCENARIOS="${SCENARIOS:-chat agent}"
-DURATION_MIN="${DURATION_MIN:-5}"
-MAX_REQUESTS="${MAX_REQUESTS:-100000}"
+
+# Per-scenario concurrency sweep. c16/c64 are intentionally excluded:
+#   - c64 saturates the server (mlx-lm.server returns 503 for every request;
+#     the gRPC path queues with 0 completions in the window).
+#   - the gRPC path stalls at c16 — ~20 requests complete then ~9 min of zero
+#     completions, no result emitted (concurrency ceiling in the serving path).
+# c1/c4 give a clean, symmetric sweep that both backends actually complete.
+CHAT_CONCURRENCIES="${CHAT_CONCURRENCIES:-1 4}"
+AGENT_CONCURRENCIES="${AGENT_CONCURRENCIES:-1 4}"
+
+# Request-bounded, not time-bounded: every cell targets a fixed number of
+# completed requests so latency percentiles are computed over the same sample
+# size across backends. agent prefill (~2.5k tok) is ~3x slower per request, so
+# it gets a smaller target to stay within the time backstop.
+CHAT_REQUESTS="${CHAT_REQUESTS:-60}"
+AGENT_REQUESTS="${AGENT_REQUESTS:-40}"
+
+# Wall-clock safety backstop per cell (minutes). Real cells finish in 6-27 min;
+# this only caps a cell that stalls or runs unexpectedly slowly.
+DURATION_MIN="${DURATION_MIN:-30}"
 RESULTS_DIR="${RESULTS_DIR:-bench-results}"
 SMG_BIN="${SMG_BIN:-target/release/smg}"
 
@@ -34,6 +51,22 @@ scenario_traffic() {
     case "$1" in
         chat)  echo "D(100,256)" ;;
         agent) echo "D(2500,256)" ;;
+        *)     echo "" ;;
+    esac
+}
+
+scenario_concurrencies() {
+    case "$1" in
+        chat)  echo "$CHAT_CONCURRENCIES" ;;
+        agent) echo "$AGENT_CONCURRENCIES" ;;
+        *)     echo "" ;;
+    esac
+}
+
+scenario_requests() {
+    case "$1" in
+        chat)  echo "$CHAT_REQUESTS" ;;
+        agent) echo "$AGENT_REQUESTS" ;;
         *)     echo "" ;;
     esac
 }
@@ -111,11 +144,14 @@ run_bench_cell() {
         return 1
     fi
 
+    local max_requests
+    max_requests="$(scenario_requests "$scenario")"
+
     local exp_name="${label}_${scenario}_c${concurrency}"
     local exp_dir="$RESULTS_DIR/$exp_name"
     mkdir -p "$exp_dir"
 
-    log "[$exp_name] genai-bench scenario=$traffic c=$concurrency duration=${DURATION_MIN}m"
+    log "[$exp_name] genai-bench scenario=$traffic c=$concurrency requests=$max_requests backstop=${DURATION_MIN}m"
 
     if ! genai-bench benchmark \
         --api-backend openai \
@@ -126,13 +162,22 @@ run_bench_cell() {
         --task text-to-text \
         --num-concurrency "$concurrency" \
         --traffic-scenario "$traffic" \
-        --max-requests-per-run "$MAX_REQUESTS" \
+        --max-requests-per-run "$max_requests" \
         --max-time-per-run "$DURATION_MIN" \
         --experiment-folder-name "$exp_name" \
         --experiment-base-dir "$RESULTS_DIR"
     then
         log "[$exp_name] FAILED — recording marker, continuing"
         date -u +"%Y-%m-%dT%H:%M:%SZ" >"$exp_dir/.failed"
+        return
+    fi
+
+    # genai-bench exits 0 even when no request completes within the backstop
+    # (it writes only experiment_metadata.json). Mark that explicitly so the
+    # aggregator renders an honest "0 completed" row instead of a silent blank.
+    if ! ls "$exp_dir"/*text-to-text*.json >/dev/null 2>&1; then
+        log "[$exp_name] no result JSON — 0 completed within ${DURATION_MIN}m backstop"
+        date -u +"%Y-%m-%dT%H:%M:%SZ" >"$exp_dir/.empty"
     fi
 }
 
@@ -147,7 +192,7 @@ run_phase_mlx() {
     log "mlx-lm.server up on :$MLX_PORT (pid=$pid)"
 
     for scenario in $SCENARIOS; do
-        for c in $CONCURRENCIES; do
+        for c in $(scenario_concurrencies "$scenario"); do
             run_bench_cell "mlx" "http://127.0.0.1:$MLX_PORT" "$scenario" "$c"
         done
     done
@@ -181,7 +226,7 @@ run_phase_grpc() {
     log "SMG router up on :$ROUTER_PORT (pid=$router_pid)"
 
     for scenario in $SCENARIOS; do
-        for c in $CONCURRENCIES; do
+        for c in $(scenario_concurrencies "$scenario"); do
             run_bench_cell "grpc" "http://127.0.0.1:$ROUTER_PORT" "$scenario" "$c"
         done
     done

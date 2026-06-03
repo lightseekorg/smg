@@ -14,18 +14,30 @@ on:
         description: "Phases to run (space-separated subset of 'mlx grpc')."
         required: false
         default: "mlx grpc"
-      concurrencies:
-        description: "Space-separated concurrencies"
-        required: false
-        default: "1 4 16 64"
       scenarios:
         description: "Space-separated scenarios (chat agent)"
         required: false
         default: "chat agent"
-      duration_min:
-        description: "Minutes per cell"
+      chat_concurrencies:
+        description: "Space-separated concurrencies for the chat scenario"
         required: false
-        default: "10"
+        default: "1 4"
+      agent_concurrencies:
+        description: "Space-separated concurrencies for the agent scenario"
+        required: false
+        default: "1 4"
+      chat_requests:
+        description: "Completed-request target per chat cell (runs are request-bounded)"
+        required: false
+        default: "60"
+      agent_requests:
+        description: "Completed-request target per agent cell (runs are request-bounded)"
+        required: false
+        default: "40"
+      duration_min:
+        description: "Per-cell wall-clock backstop (minutes); safety cap only, not the primary limit"
+        required: false
+        default: "30"
 
 permissions:
   contents: read
@@ -38,23 +50,27 @@ jobs:
   bench:
     name: MLX bench (mlx-lm vs SMG+gRPC)
     runs-on: macos-latest
-    # 4 concurrencies × 2 scenarios × 2 backends × 10 min ≈ 2.7 h, plus
-    # build + model download. Cap at 5 h for safety.
+    # Request-bounded sweep: chat c1/c4 (60 reqs) + agent c1/c4 (40 reqs), both
+    # backends. From observed RPS that's ~2.5-3 h of benchmarking plus build +
+    # model download. The 30-min/cell backstop caps a stalled cell; cap the job
+    # at 5 h for safety. (c16/c64 are excluded — see scripts/mlx_bench.sh.)
     timeout-minutes: 300
     env:
       MODEL: ${{ github.event.inputs.model || 'mlx-community/gemma-3-4b-it-qat-4bit' }}
       PHASES: >-
         ${{ github.event.inputs.phases || 'mlx grpc' }}
-      CONCURRENCIES: >-
-        ${{ github.event.inputs.concurrencies
-        || (github.event_name == 'pull_request' && '1 4'
-        || '1 4 16 64') }}
       SCENARIOS: >-
         ${{ github.event.inputs.scenarios || 'chat agent' }}
+      CHAT_CONCURRENCIES: >-
+        ${{ github.event.inputs.chat_concurrencies || '1 4' }}
+      AGENT_CONCURRENCIES: >-
+        ${{ github.event.inputs.agent_concurrencies || '1 4' }}
+      CHAT_REQUESTS: >-
+        ${{ github.event.inputs.chat_requests || '60' }}
+      AGENT_REQUESTS: >-
+        ${{ github.event.inputs.agent_requests || '40' }}
       DURATION_MIN: >-
-        ${{ github.event.inputs.duration_min
-        || (github.event_name == 'pull_request' && '3'
-        || '10') }}
+        ${{ github.event.inputs.duration_min || '30' }}
       RESULTS_DIR: bench-results
       PYTHONUNBUFFERED: "1"
     steps:
