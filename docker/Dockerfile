@@ -1,8 +1,10 @@
 ######################## OPENCV IMAGE ########################
 FROM ubuntu:24.04 AS opencv-image
 
-ARG FFMPEG_VERSION=n8.0
+ARG FFMPEG_VERSION=8.0
+ARG FFMPEG_SHA256=b2751fccb6cc4c77708113cd78b561059b6fa904b24162fa0be2d60273d27b8e
 ARG OPENCV_VERSION=4.13.0
+ARG OPENCV_SHA256=1d40ca017ea51c533cf9fd5cbde5b5fe7ae248291ddf2af99d4c17cf8e13017d
 ARG FFMPEG_PREFIX=/opt/ffmpeg
 ARG OPENCV_PREFIX=/opt/opencv
 
@@ -13,17 +15,20 @@ RUN apt update -y \
         ca-certificates \
         cmake \
         curl \
-        git \
         build-essential \
         nasm \
         ninja-build \
         pkg-config \
         python3 \
+        xz-utils \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/* \
     && apt clean
 
-RUN git clone --depth 1 --branch ${FFMPEG_VERSION} https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
+RUN mkdir -p /tmp/ffmpeg \
+    && curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o /tmp/ffmpeg.tar.xz \
+    && echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c - \
+    && tar -C /tmp/ffmpeg --strip-components=1 -xJf /tmp/ffmpeg.tar.xz \
     && cd /tmp/ffmpeg \
     && ./configure \
         --prefix=${FFMPEG_PREFIX} \
@@ -32,14 +37,17 @@ RUN git clone --depth 1 --branch ${FFMPEG_VERSION} https://github.com/FFmpeg/FFm
         --enable-pic \
         --disable-doc \
         --disable-debug \
-        --disable-programs \
+        --disable-ffplay \
         --disable-avdevice \
         --disable-network \
     && make -j"$(nproc)" \
     && make install \
-    && rm -rf /tmp/ffmpeg
+    && rm -rf /tmp/ffmpeg /tmp/ffmpeg.tar.xz
 
-RUN git clone --depth 1 --branch ${OPENCV_VERSION} https://github.com/opencv/opencv.git /tmp/opencv \
+RUN mkdir -p /tmp/opencv \
+    && curl -fsSL "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz" -o /tmp/opencv.tar.gz \
+    && echo "${OPENCV_SHA256}  /tmp/opencv.tar.gz" | sha256sum -c - \
+    && tar -C /tmp/opencv --strip-components=1 -xzf /tmp/opencv.tar.gz \
     && cmake -S /tmp/opencv -B /tmp/opencv-build -G Ninja \
         -D CMAKE_BUILD_TYPE=Release \
         -D CMAKE_INSTALL_PREFIX=${OPENCV_PREFIX} \
@@ -63,8 +71,9 @@ RUN git clone --depth 1 --branch ${OPENCV_VERSION} https://github.com/opencv/ope
         -D WITH_TBB=OFF \
     && cmake --build /tmp/opencv-build --parallel "$(nproc)" \
     && cmake --install /tmp/opencv-build \
-    && rm -rf /tmp/opencv /tmp/opencv-build
+    && rm -rf /tmp/opencv /tmp/opencv-build /tmp/opencv.tar.gz
 
+ENV PATH="${FFMPEG_PREFIX}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${OPENCV_PREFIX}/lib:${FFMPEG_PREFIX}/lib"
 ENV PKG_CONFIG_PATH="${OPENCV_PREFIX}/lib/pkgconfig:${FFMPEG_PREFIX}/lib/pkgconfig"
 
@@ -74,7 +83,7 @@ FROM ubuntu:24.04 AS base
 ARG PYTHON_VERSION=3.12
 
 # set the environment variables
-ENV PATH="/root/.local/bin:${PATH}"
+ENV PATH="/opt/ffmpeg/bin:/root/.local/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LD_LIBRARY_PATH="/opt/opencv/lib:/opt/ffmpeg/lib"
 ENV PKG_CONFIG_PATH="/opt/opencv/lib/pkgconfig:/opt/ffmpeg/lib/pkgconfig"
