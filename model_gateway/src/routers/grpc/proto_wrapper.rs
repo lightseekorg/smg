@@ -415,6 +415,19 @@ pub fn write_tokenspeed_shm_with(
         let _ = remove_file(&path);
         return Err(error);
     }
+    if let Err(error) = file.flush().and_then(|_| {
+        if file.metadata()?.len() != nbytes as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TokenSpeed SHM writer produced an unexpected byte length",
+            ));
+        }
+        Ok(())
+    }) {
+        drop(file);
+        let _ = remove_file(&path);
+        return Err(error);
+    }
 
     Ok(tokenspeed::ShmHandle {
         name,
