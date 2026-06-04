@@ -12,15 +12,16 @@ concurrency:
   group: nightly-engine-docker
   cancel-in-progress: true
 
+# Least-privilege default for all jobs; the build job elevates to packages: write below.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   prep:
     name: Compute nightly tag suffix
     if: github.repository == 'lightseekorg/smg'
     runs-on: ubuntu-latest
+    # Inherits the workflow default (contents: read only) — no package access needed.
     outputs:
       suffix: ${{ steps.suffix.outputs.suffix }}
     steps:
@@ -32,6 +33,11 @@ jobs:
     name: Build ${{ matrix.engine }} nightly
     needs: [prep]
     if: github.repository == 'lightseekorg/smg'
+    # The reusable workflow checks out SMG and pushes images to ghcr.io, so this
+    # job (not the whole workflow) needs packages: write.
+    permissions:
+      contents: read   # checkout in the reusable workflow
+      packages: write  # push to ghcr.io in the reusable workflow
     strategy:
       fail-fast: false
       matrix:
