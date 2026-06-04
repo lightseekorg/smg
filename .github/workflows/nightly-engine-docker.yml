@@ -1,4 +1,5 @@
 name: Nightly Engine Docker Build
+run-name: "Nightly engines | smg=${{ github.sha }} | by @${{ github.actor }}"
 
 on:
   schedule:
@@ -48,7 +49,8 @@ jobs:
     with:
       engine: ${{ matrix.engine }}
       base_image_ref: ${{ matrix.base_image_ref }}
-      smg_commit: main
+      smg_commit: ${{ github.sha }}
       tag: nightly-${{ needs.prep.outputs.suffix }}-${{ matrix.engine }}-${{ matrix.engine_ver }}
+      # Floating "latest nightly" pointer for this engine, intentionally overwritten each run.
       extra_tags: nightly-${{ matrix.engine }}
     secrets: inherit
