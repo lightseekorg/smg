@@ -53,6 +53,11 @@ on:
         required: false
         default: false
         type: boolean
+      extra_tags:
+        description: 'Additional GHCR tags to push from the same build (newline-separated). Empty = none.'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   build-and-push:
@@ -236,13 +241,23 @@ jobs:
         id: push-ghcr
         env:
           IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           BASE_IMAGE_TAG="smg-build:${IMAGE_TAG}"
-          TARGET_IMAGE="ghcr.io/${{ github.repository_owner }}/smg:${IMAGE_TAG}"
+          TARGET_IMAGE="ghcr.io/${OWNER}/smg:${IMAGE_TAG}"
           echo "image_name=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
           docker tag "${BASE_IMAGE_TAG}" "${TARGET_IMAGE}"
           docker push "${TARGET_IMAGE}"
           echo "**Pushed:** \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          # Push any additional (e.g. floating) tags from the same local image.
+          while IFS= read -r extra; do
+            [ -z "${extra}" ] && continue
+            EXTRA_IMAGE="ghcr.io/${OWNER}/smg:${extra}"
+            docker tag "${BASE_IMAGE_TAG}" "${EXTRA_IMAGE}"
+            docker push "${EXTRA_IMAGE}"
+            echo "**Pushed:** \`${EXTRA_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          done <<< "${EXTRA_TAGS}"
 
       # ── Cleanup ──────────────────────────────────────────────────────────────
 
@@ -252,12 +267,18 @@ jobs:
           IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
           PUSHED_IMAGE: ${{ steps.push-ghcr.outputs.image_name }}
           BASE_REF: ${{ steps.resolve.outputs.base_image_ref }}
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           docker rmi "smg-build:${IMAGE_TAG}" || true
           docker rmi "${PUSHED_IMAGE}" || true
           if [ -n "${BASE_REF}" ]; then
             docker rmi "${BASE_REF}" || true
           fi
+          while IFS= read -r extra; do
+            [ -z "${extra}" ] && continue
+            docker rmi "ghcr.io/${OWNER}/smg:${extra}" || true
+          done <<< "${EXTRA_TAGS}"
 
       - name: Summary
         if: always()
