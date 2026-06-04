@@ -41,7 +41,7 @@ use crate::routers::grpc::{
     proto_wrapper::{
         tokenspeed_shm_transport_enabled_for_bytes, write_tokenspeed_shm_with,
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
-        TokenSpeedMultimodalItem, TokenSpeedTensorBytes, TrtllmMultimodalData, VllmMultimodalData,
+        TokenSpeedMultimodalItem, TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
     },
     MultimodalData,
 };
@@ -1348,7 +1348,7 @@ fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
 fn serialize_array_as_tokenspeed_tensor(
     encoder_input: &ArrayD<f32>,
     dtype: &str,
-) -> TokenSpeedTensorBytes {
+) -> TokenSpeedTensor {
     let dtype = match canonical_float_dtype(dtype).as_deref() {
         Some("float32") => "float32".to_string(),
         Some("bfloat16") => "bfloat16".to_string(),
@@ -1382,7 +1382,7 @@ fn serialize_array_as_tokenspeed_tensor(
                         "smg_mm_timing tokenspeed_shm_write_direct"
                     );
                 }
-                return TokenSpeedTensorBytes::shm(handle, shape, dtype);
+                return TokenSpeedTensor::shm(handle, shape, dtype);
             }
             Err(error) => {
                 warn!(
@@ -1396,7 +1396,7 @@ fn serialize_array_as_tokenspeed_tensor(
     }
 
     let (data, shape, dtype) = serialize_array_as_dtype(encoder_input, &dtype);
-    TokenSpeedTensorBytes::bytes(data, shape, dtype)
+    TokenSpeedTensor::inline(data, shape, dtype)
 }
 
 fn write_array_as_dtype(
