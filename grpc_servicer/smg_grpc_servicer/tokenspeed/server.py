@@ -94,8 +94,13 @@ async def serve_grpc(server_args: ServerArgs) -> None:
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
     if server_args.disaggregation_mode == "encode":
-        # EPD encode worker: front the vision-only encode loop with the encoder
-        # service instead of the LM scheduler service.
+        # EPD encode worker: serve the vision-only encode loop via the encoder
+        # service. ALSO mount the scheduler service so the gateway's generic
+        # worker discovery (HealthCheck + GetModelInfo + GetServerInfo, all over
+        # the TokenSpeedScheduler stub) can reach this worker and register it;
+        # the encode pool only ever receives Encode RPCs, so the scheduler
+        # Generate path here is never exercised. HealthCheck short-circuits to a
+        # shallow probe for disaggregation roles, so it won't drive the LM.
         from smg_grpc_proto.generated import (
             tokenspeed_encoder_pb2,
             tokenspeed_encoder_pb2_grpc,
@@ -112,6 +117,17 @@ async def serve_grpc(server_args: ServerArgs) -> None:
             health_servicer=health_servicer,
         )
         tokenspeed_encoder_pb2_grpc.add_TokenSpeedEncoderServicer_to_server(servicer, server)
+
+        discovery_servicer = TokenSpeedSchedulerServicer(
+            async_llm=async_llm,
+            server_args=server_args,
+            scheduler_info=scheduler_info,
+            health_servicer=health_servicer,
+        )
+        tokenspeed_scheduler_pb2_grpc.add_TokenSpeedSchedulerServicer_to_server(
+            discovery_servicer, server
+        )
+
         primary_service = tokenspeed_encoder_pb2.DESCRIPTOR.services_by_name[
             "TokenSpeedEncoder"
         ].full_name

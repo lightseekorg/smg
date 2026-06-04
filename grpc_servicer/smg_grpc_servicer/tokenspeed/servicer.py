@@ -289,6 +289,18 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 healthy=False, message="Server is shutting down"
             )
 
+        # Disaggregation workers (prefill/decode/encode) can't serve a standalone
+        # 1-token generate: a prefill/decode request needs a P->D bootstrap_room
+        # to pair with its peer, and the decode scheduler raises (no peer) on a
+        # bootstrap-less probe. So skip the deep probe and report shallow liveness
+        # for any disaggregated role; the deep generate probe is meaningful only
+        # for aggregated (null) workers.
+        if getattr(self.server_args, "disaggregation_mode", "null") != "null":
+            return tokenspeed_scheduler_pb2.HealthCheckResponse(
+                healthy=True,
+                message="Health check passed (disaggregation worker; shallow probe)",
+            )
+
         GenerateReqInput = _lazy_generate_req_input()
         probe = GenerateReqInput(
             input_ids=[0],
@@ -833,6 +845,20 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 for h in request.encode.items
             ]
 
+        # PD: prefill->decode KV rendezvous. The gateway sends identical params to
+        # both workers; the engine keys the Mooncake transfer on ``bootstrap_room``
+        # and reaches the prefill's bootstrap server at host:port. Scalars are
+        # fine: ``normalize_batch_and_arguments`` broadcasts them per-choice for
+        # n>1. Absent for aggregated (single-worker) requests.
+        bootstrap_host = None
+        bootstrap_port = None
+        bootstrap_room = None
+        if request.HasField("disaggregated_params"):
+            dp = request.disaggregated_params
+            bootstrap_host = dp.bootstrap_host or None
+            bootstrap_port = dp.bootstrap_port
+            bootstrap_room = dp.bootstrap_room
+
         GenerateReqInput = _lazy_generate_req_input()
         obj = GenerateReqInput(
             input_ids=input_ids,
@@ -850,6 +876,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             ),
             precomputed_multimodal_inputs=precomputed_mm,
             encode_handshake=encode_handshake,
+            bootstrap_host=bootstrap_host,
+            bootstrap_port=bootstrap_port,
+            bootstrap_room=bootstrap_room,
         )
         # ``normalize_batch_and_arguments`` asserts ``rid`` is a list when
         # n>1; expand to deterministic per-choice rids so the assert holds.
