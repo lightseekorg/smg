@@ -10,6 +10,8 @@
 //! -> prefill over Mooncake, keyed by `bootstrap_room`; the gateway never sees
 //! them.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use axum::response::Response;
 use futures::future::join_all;
@@ -32,6 +34,12 @@ use crate::{
     },
     worker::DEFAULT_BOOTSTRAP_PORT,
 };
+
+/// Process-global cursor so single-image requests rotate across the encode pool
+/// instead of pinning every request to encode_pool[0] (encode data-parallel).
+/// Relaxed is fine: this is a load-balancing hint, not a synchronization point;
+/// usize wrap is harmless because every use is taken `% pool_len`.
+static ENCODE_RR_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 /// Encode stage: split multimodal items per image, dispatch encode RPCs, and
 /// record the per-item prefill handshakes.
@@ -105,8 +113,14 @@ impl PipelineStage for EncodeStage {
             Vec::with_capacity(splits.len());
         let mut sends = Vec::with_capacity(splits.len());
 
+        // Reserve a contiguous block of cursor slots for this request's images so a
+        // multi-image request still spreads and consecutive requests continue where
+        // the previous one stopped (cross-request balance for single-image requests).
+        let num_images = splits.len();
+        let rr_base = ENCODE_RR_CURSOR.fetch_add(num_images.max(1), Ordering::Relaxed);
+
         for (global_index, split) in splits.into_iter().enumerate() {
-            let worker = encode_pool[global_index % pool_len].clone();
+            let worker = encode_pool[(rr_base + global_index) % pool_len].clone();
             let bootstrap_room = rand::rng().random_range(0..i32::MAX);
 
             let mm_inputs = assemble_tokenspeed_from_split(split, im_token_id).into_proto();
@@ -122,7 +136,10 @@ impl PipelineStage for EncodeStage {
             };
 
             // The handshake points the prefill at THIS worker's Mooncake bootstrap
-            // endpoint (host/port), not its gRPC URL.
+            // endpoint (host/port), not its gRPC URL. One handshake per image: when
+            // prefill_tp > encode_tp the engine broadcasts this single (host,port,room)
+            // to all N prefill ranks (N = prefill_tp / encode_tp, engine-derived), so
+            // the gateway stays rank/N-agnostic.
             handshakes.push(tokenspeed_proto::EncodeItemHandshake {
                 item_index: global_index as u32,
                 bootstrap_room,
@@ -165,7 +182,9 @@ impl PipelineStage for EncodeStage {
 /// Connect to one encode worker and dispatch its `Encode` RPC. Returns a
 /// human-readable error string on connect/RPC failure or worker rejection.
 async fn send_encode_rpc(endpoint: String, request: enc::EncodeRequest) -> Result<(), String> {
-    let client = TokenSpeedEncoderClient::connect(&endpoint)
+    // Reuse a pooled HTTP/2 channel per endpoint instead of dialing afresh on
+    // every image's RPC (the prefill/decode legs already reuse their connection).
+    let client = TokenSpeedEncoderClient::connect_cached(&endpoint)
         .await
         .map_err(|e| format!("connect to encode worker {endpoint} failed: {e}"))?;
     let response = client

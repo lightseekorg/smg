@@ -6,12 +6,28 @@
 //! `bootstrap_room`). The response only confirms the request was accepted — the
 //! embedding transfer happens out of band.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use tonic::{transport::Channel, Request};
 use tracing::{debug, warn};
 
 use crate::{BoxedTraceInjector, NoopTraceInjector};
+
+/// Process-global cache of connected channels, keyed by encode-worker endpoint.
+///
+/// The EPD encode stage dispatches one `Encode` RPC per image per request, so
+/// without pooling every call paid a fresh TCP + HTTP/2 (+ TLS) handshake on the
+/// request's critical path. A `tonic::Channel` is cheap to clone and multiplexes
+/// concurrent RPCs over a single HTTP/2 connection, so we reuse one channel per
+/// endpoint — the same connection reuse the prefill/decode legs already get from
+/// their cached per-worker client.
+fn channel_cache() -> &'static Mutex<HashMap<String, Channel>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Channel>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 #[expect(clippy::allow_attributes)]
 pub mod tokenspeed_encoder_proto {
@@ -29,6 +45,45 @@ pub struct TokenSpeedEncoderClient {
 impl TokenSpeedEncoderClient {
     pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Self::connect_with_trace_injector(endpoint, Arc::new(NoopTraceInjector)).await
+    }
+
+    /// Connect reusing a cached `Channel` for `endpoint` (see [`channel_cache`]).
+    /// Use this on the per-request hot path; [`Self::connect`] always opens a
+    /// fresh connection. The lock is never held across the connect `await`, so a
+    /// rare concurrent first-connect may build two channels for the same endpoint
+    /// — harmless: the first cached wins and the extra is dropped.
+    pub async fn connect_cached(
+        endpoint: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        {
+            let cache = channel_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(channel) = cache.get(endpoint) {
+                return Ok(Self::from_channel(channel.clone()));
+            }
+        }
+        debug!("Connecting to TokenSpeed encoder at {} (caching)", endpoint);
+        let channel = crate::channel::connect_channel(endpoint).await?;
+        {
+            let mut cache = channel_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cache
+                .entry(endpoint.to_string())
+                .or_insert_with(|| channel.clone());
+        }
+        Ok(Self::from_channel(channel))
+    }
+
+    fn from_channel(channel: Channel) -> Self {
+        Self {
+            client:
+                tokenspeed_encoder_proto::token_speed_encoder_client::TokenSpeedEncoderClient::new(
+                    channel,
+                ),
+            trace_injector: Arc::new(NoopTraceInjector),
+        }
     }
 
     pub async fn connect_with_trace_injector(

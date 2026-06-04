@@ -22,13 +22,17 @@ use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
 use tracing::info;
 
-fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
+/// Parse repeated `<flag> <url> [bootstrap_port|none]` occurrences into
+/// (url, optional bootstrap port) pairs. The trailing port is optional, so
+/// these flags are hand-parsed (clap cannot express the optional positional)
+/// and stripped from argv before `Cli::parse_from`.
+fn parse_url_port_args(flag: &str) -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
-    let mut prefill_entries = Vec::new();
+    let mut entries = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
-        if args[i] == "--prefill" && i + 1 < args.len() {
+        if args[i] == flag && i + 1 < args.len() {
             let url = args[i + 1].clone();
             let bootstrap_port = if i + 2 < args.len() && !args[i + 2].starts_with("--") {
                 if let Ok(port) = args[i + 2].parse::<u16>() {
@@ -43,14 +47,22 @@ fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
             } else {
                 None
             };
-            prefill_entries.push((url, bootstrap_port));
+            entries.push((url, bootstrap_port));
             i += 2;
         } else {
             i += 1;
         }
     }
 
-    prefill_entries
+    entries
+}
+
+fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
+    parse_url_port_args("--prefill")
+}
+
+fn parse_encode_args() -> Vec<(String, Option<u16>)> {
+    parse_url_port_args("--encode")
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -252,6 +264,12 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "PD Disaggregation")]
     pd_disaggregation: bool,
 
+    /// Enable EPD (Encode-Prefill-Decode) disaggregated mode (gRPC + TokenSpeed only).
+    /// Encode workers run the vision tower and ship embeddings to prefill over Mooncake;
+    /// prefill/decode reuse the PD path. Encode urls are given via `--encode <url> [bootstrap_port]`.
+    #[arg(long, default_value_t = false, help_heading = "PD Disaggregation")]
+    epd_disaggregation: bool,
+
     /// Decode server URLs (can be specified multiple times)
     #[arg(long, action = ArgAction::Append, help_heading = "PD Disaggregation")]
     decode: Vec<String>,
@@ -263,6 +281,11 @@ struct CliArgs {
     /// Specific policy for decode nodes in PD mode
     #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "least_load", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
     decode_policy: Option<String>,
+
+    /// Specific policy for encode nodes in EPD mode (currently advisory: encode
+    /// workers are assigned round-robin per image in the encode stage).
+    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
+    encode_policy: Option<String>,
 
     /// Timeout in seconds for worker startup and registration
     #[arg(long, default_value_t = 1800, help_heading = "PD Disaggregation")]
@@ -1159,6 +1182,7 @@ impl CliArgs {
     fn to_router_config(
         &self,
         prefill_urls: Vec<(String, Option<u16>)>,
+        encode_urls: Vec<(String, Option<u16>)>,
     ) -> ConfigResult<RouterConfig> {
         // Determine routing mode based on backend type and PD disaggregation flag
         // IGW mode doesn't change routing mode, only affects router initialization
@@ -1173,6 +1197,15 @@ impl CliArgs {
         } else if matches!(self.backend, Some(Backend::Gemini)) {
             RoutingMode::Gemini {
                 worker_urls: self.worker_urls.clone(),
+            }
+        } else if self.epd_disaggregation {
+            RoutingMode::EncodePrefillDecode {
+                encode_urls,
+                prefill_urls,
+                decode_urls: self.decode.clone(),
+                encode_policy: self.encode_policy.as_ref().map(|p| self.parse_policy(p)),
+                prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
+                decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
             }
         } else if self.pd_disaggregation {
             RoutingMode::PrefillDecode {
@@ -1481,13 +1514,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let prefill_urls = parse_prefill_args();
+    let encode_urls = parse_encode_args();
 
     let mut filtered_args: Vec<String> = Vec::new();
     let raw_args: Vec<String> = std::env::args().collect();
     let mut i = 0;
 
     while i < raw_args.len() {
-        if raw_args[i] == "--prefill" && i + 1 < raw_args.len() {
+        if (raw_args[i] == "--prefill" || raw_args[i] == "--encode") && i + 1 < raw_args.len() {
             i += 2;
             if i < raw_args.len()
                 && !raw_args[i].starts_with("--")
@@ -1521,6 +1555,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "OpenAI Backend".to_string()
     } else if matches!(cli_args.backend, Some(Backend::Anthropic)) {
         "Anthropic Backend".to_string()
+    } else if cli_args.epd_disaggregation {
+        "EPD Disaggregated".to_string()
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
     } else if let Some(backend) = &cli_args.backend {
@@ -1538,9 +1574,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Prefill nodes: {prefill_urls:?}");
             println!("Decode nodes: {:?}", cli_args.decode);
         }
+
+        if cli_args.epd_disaggregation {
+            println!("Encode nodes: {encode_urls:?}");
+            println!("Prefill nodes: {prefill_urls:?}");
+            println!("Decode nodes: {:?}", cli_args.decode);
+        }
     }
 
-    let router_config = cli_args.to_router_config(prefill_urls)?;
+    let router_config = cli_args.to_router_config(prefill_urls, encode_urls)?;
     router_config.validate()?;
 
     let server_config = cli_args.to_server_config(router_config)?;
