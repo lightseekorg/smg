@@ -310,7 +310,7 @@ impl StreamingResponseAccumulator {
                     // Ensure we have enough tool calls
                     while self.tool_calls.len() <= index {
                         self.tool_calls.push(ResponseOutputItem::FunctionToolCall {
-                            id: String::new(),
+                            id: None,
                             call_id: String::new(),
                             name: String::new(),
                             arguments: String::new(),
@@ -322,13 +322,15 @@ impl StreamingResponseAccumulator {
                     // Update the tool call at this index
                     if let ResponseOutputItem::FunctionToolCall {
                         id,
+                        call_id,
                         name,
                         arguments,
                         ..
                     } = &mut self.tool_calls[index]
                     {
                         if let Some(delta_id) = &delta.id {
-                            id.push_str(delta_id);
+                            id.get_or_insert_with(String::new).push_str(delta_id);
+                            call_id.push_str(delta_id);
                         }
                         if let Some(function) = &delta.function {
                             if let Some(delta_name) = &function.name {
@@ -1078,5 +1080,33 @@ impl ChatResponseAccumulator {
             }])
             .maybe_usage(self.usage)
             .build()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_accumulator_populates_call_id_from_tool_delta_id() {
+        let request = ResponsesRequest::default();
+        let mut accumulator = StreamingResponseAccumulator::new(&request);
+        let chunk = ChatCompletionStreamResponse::builder("chatcmpl_test", "test-model")
+            .add_choice_tool_name(0, "call_streamed", "lookup")
+            .build();
+
+        accumulator.process_chunk(&chunk);
+
+        assert_eq!(accumulator.tool_calls.len(), 1);
+        match &accumulator.tool_calls[0] {
+            ResponseOutputItem::FunctionToolCall {
+                id, call_id, name, ..
+            } => {
+                assert_eq!(id.as_deref(), Some("call_streamed"));
+                assert_eq!(call_id, "call_streamed");
+                assert_eq!(name, "lookup");
+            }
+            other => panic!("expected function tool call, got {other:?}"),
+        }
     }
 }

@@ -1591,7 +1591,7 @@ pub enum ResponseInputOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         summary: Vec<SummaryTextContent>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         #[serde(default)]
@@ -1606,7 +1606,8 @@ pub enum ResponseInputOutputItem {
     },
     #[serde(rename = "function_call")]
     FunctionToolCall {
-        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
@@ -1617,6 +1618,7 @@ pub enum ResponseInputOutputItem {
     },
     #[serde(rename = "function_call_output")]
     FunctionCallOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         call_id: String,
         output: String,
@@ -2152,7 +2154,7 @@ pub enum ResponseOutputItem {
     #[non_exhaustive]
     Reasoning {
         id: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default)]
         summary: Vec<SummaryTextContent>,
         content: Vec<ResponseReasoningContent>,
         /// Encrypted reasoning payload for gpt-5 / o-series round-trip.
@@ -2164,10 +2166,12 @@ pub enum ResponseOutputItem {
     },
     #[serde(rename = "function_call")]
     FunctionToolCall {
-        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         status: String,
     },
@@ -3873,7 +3877,7 @@ impl ResponseOutputItem {
         status: String,
     ) -> Self {
         Self::FunctionToolCall {
-            id,
+            id: Some(id),
             call_id,
             name,
             arguments,

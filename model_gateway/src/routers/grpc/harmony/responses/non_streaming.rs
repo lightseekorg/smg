@@ -472,7 +472,7 @@ fn build_tool_response(
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
 
         output.push(ResponseOutputItem::FunctionToolCall {
-            id: tool_call.id.clone(),
+            id: Some(tool_call.id.clone()),
             call_id: tool_call.id.clone(),
             name: tool_call.function.name.clone(),
             arguments: tool_call.function.arguments.clone().unwrap_or_default(),
@@ -491,7 +491,7 @@ fn build_tool_response(
         let call_id = tool_call.id.clone();
         let arguments = tool_call.function.arguments.unwrap_or_default();
         output.push(ResponseOutputItem::FunctionToolCall {
-            id: tool_call.id,
+            id: Some(tool_call.id),
             call_id,
             name: tool_call.function.name,
             arguments,

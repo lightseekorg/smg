@@ -42,6 +42,31 @@ fn summary_text_content_round_trips_spec_shape() {
 }
 
 #[test]
+fn reasoning_items_preserve_empty_summary_arrays() {
+    let output_payload = json!({
+        "type": "reasoning",
+        "id": "r_empty",
+        "summary": [],
+        "content": [],
+        "status": "completed",
+    });
+    let output_item: ResponseOutputItem = serde_json::from_value(output_payload.clone())
+        .expect("output reasoning item with empty summary should deserialize");
+    let serialized = serde_json::to_value(&output_item).expect("serialize output reasoning");
+    assert_eq!(serialized, output_payload);
+
+    let input_payload = json!({
+        "type": "reasoning",
+        "id": "r_input_empty",
+        "summary": []
+    });
+    let input_item: ResponseInputOutputItem = serde_json::from_value(input_payload.clone())
+        .expect("input reasoning item with empty summary should deserialize");
+    let serialized = serde_json::to_value(&input_item).expect("serialize input reasoning");
+    assert_eq!(serialized, input_payload);
+}
+
+#[test]
 fn legacy_vec_string_summary_fails_to_deserialize() {
     let legacy = r#"{"type":"reasoning","id":"r_x","summary":["text"]}"#;
     let result: Result<ResponseInputOutputItem, _> = serde_json::from_str(legacy);
@@ -635,6 +660,86 @@ fn content_part_output_text_with_typed_annotations() {
     }
     let roundtripped = serde_json::to_value(&part).unwrap();
     assert_eq!(roundtripped, raw);
+}
+
+#[test]
+fn content_part_output_text_preserves_empty_annotations() {
+    let raw = json!({
+        "type": "output_text",
+        "text": "No citations here.",
+        "annotations": []
+    });
+
+    let part: ResponseContentPart =
+        serde_json::from_value(raw.clone()).expect("output_text should deserialize");
+    match &part {
+        ResponseContentPart::OutputText { annotations, .. } => {
+            assert!(annotations.is_empty());
+        }
+        other => panic!("expected OutputText, got {other:?}"),
+    }
+
+    let roundtripped = serde_json::to_value(&part).expect("output_text should serialize");
+    assert_eq!(roundtripped, raw);
+    assert_eq!(roundtripped["annotations"], json!([]));
+}
+
+#[test]
+fn function_call_items_accept_missing_optional_id() {
+    let input_payload = json!({
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "lookup",
+        "arguments": "{\"q\":\"rust\"}"
+    });
+    let input_item: ResponseInputOutputItem = serde_json::from_value(input_payload.clone())
+        .expect("function_call input item without id should deserialize");
+    match &input_item {
+        ResponseInputOutputItem::FunctionToolCall { id, .. } => assert!(id.is_none()),
+        other => panic!("expected FunctionToolCall, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&input_item).expect("serialize input function_call"),
+        input_payload
+    );
+
+    let output_payload = json!({
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "lookup",
+        "arguments": "{\"q\":\"rust\"}",
+        "status": "completed"
+    });
+    let output_item: ResponseOutputItem = serde_json::from_value(output_payload.clone())
+        .expect("function_call output item without id should deserialize");
+    match &output_item {
+        ResponseOutputItem::FunctionToolCall { id, output, .. } => {
+            assert!(id.is_none());
+            assert!(output.is_none());
+        }
+        other => panic!("expected FunctionToolCall, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&output_item).expect("serialize output function_call"),
+        output_payload
+    );
+
+    let function_output_payload = json!({
+        "type": "function_call_output",
+        "call_id": "call_123",
+        "output": "done"
+    });
+    let function_output_item: ResponseInputOutputItem =
+        serde_json::from_value(function_output_payload.clone())
+            .expect("function_call_output input item without id should deserialize");
+    match &function_output_item {
+        ResponseInputOutputItem::FunctionCallOutput { id, .. } => assert!(id.is_none()),
+        other => panic!("expected FunctionCallOutput, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(&function_output_item).expect("serialize input function_call_output"),
+        function_output_payload
+    );
 }
 
 #[test]

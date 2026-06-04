@@ -76,7 +76,7 @@ impl ToolLoopState {
         let id = call_id.clone();
         self.conversation_history
             .push(ResponseInputOutputItem::FunctionToolCall {
-                id,
+                id: Some(id),
                 call_id,
                 name: tool_name,
                 arguments: args_json_str,
