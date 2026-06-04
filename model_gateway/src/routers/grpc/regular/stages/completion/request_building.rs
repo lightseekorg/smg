@@ -96,6 +96,13 @@ impl PipelineStage for CompletionRequestBuildingStage {
             }
         }
 
+        // EPD: inject the prefill->decode KV rendezvous. Completion EPD is
+        // text-only (no encode stage), so this is the only EPD injection here.
+        // No-op unless this is a TokenSpeed EPD Triple selection.
+        if let Some(workers) = ctx.state.workers.as_ref() {
+            helpers::maybe_inject_tokenspeed_pd_bootstrap(&mut proto_request, workers);
+        }
+
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }

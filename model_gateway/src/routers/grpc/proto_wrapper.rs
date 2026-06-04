@@ -1099,6 +1099,32 @@ impl ProtoGenerateRequest {
             }
         }
     }
+
+    /// Set the PD prefill->decode KV rendezvous params (TokenSpeed only).
+    ///
+    /// The gateway sends identical params to both the prefill and decode worker:
+    /// the prefill hosts the Mooncake bootstrap server at (`bootstrap_host`,
+    /// `bootstrap_port`) and the decode worker discovers it there, keyed by
+    /// `bootstrap_room`.
+    pub fn set_disaggregated(
+        &mut self,
+        bootstrap_host: String,
+        bootstrap_port: i32,
+        bootstrap_room: i32,
+    ) {
+        match self {
+            Self::TokenSpeed(req) => {
+                req.disaggregated_params = Some(tokenspeed::DisaggregatedParams {
+                    bootstrap_host,
+                    bootstrap_port,
+                    bootstrap_room,
+                });
+            }
+            Self::Sglang(_) | Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => {
+                tracing::warn!("set_disaggregated called on non-TokenSpeed request, ignoring");
+            }
+        }
+    }
 }
 
 /// Unified GenerateResponse from stream

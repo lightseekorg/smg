@@ -295,3 +295,50 @@ fn inject_sglang_bootstrap_metadata(
         hostname, bootstrap_port, room_id
     );
 }
+
+/// Inject PD prefill->decode bootstrap metadata for a TokenSpeed EPD request.
+///
+/// Mirrors [`maybe_inject_pd_metadata`] but for the EPD `Triple` selection: the
+/// gateway mints one room per request and sends identical params to both the
+/// prefill and decode worker (`execute_dual_dispatch` clones the request after
+/// this stage). Host/port name the PREFILL worker's Mooncake bootstrap server
+/// (the KV data source); the decode worker discovers it there by `bootstrap_room`.
+///
+/// This is the prefill<->decode KV leg and is independent of the per-item
+/// encode->prefill handshake injected by the encode stage.
+pub(crate) fn maybe_inject_tokenspeed_pd_bootstrap(
+    request: &mut ProtoGenerateRequest,
+    workers: &WorkerSelection,
+) {
+    // Prefill worker + runtime for either a PD (Dual) or EPD (Triple) selection.
+    // The KV bootstrap leg is identical in both; EPD just layers the encode
+    // handshake on top. (Without the Dual arm, TokenSpeed pure-PD via smg never
+    // gets a bootstrap room injected -- the gap that left TS PD "unimplemented"
+    // through the gateway.)
+    let (prefill, runtime_type) = match workers {
+        WorkerSelection::Dual {
+            prefill,
+            runtime_type,
+            ..
+        }
+        | WorkerSelection::Triple {
+            prefill,
+            runtime_type,
+            ..
+        } => (prefill, runtime_type),
+        WorkerSelection::Single { .. } => return,
+    };
+    if *runtime_type == RuntimeType::TokenSpeed {
+        let metadata = prefill.metadata();
+        let hostname = metadata.bootstrap_host();
+        let bootstrap_port = metadata.bootstrap_port().unwrap_or(DEFAULT_BOOTSTRAP_PORT);
+        let room_id = rand::rng().random_range(0..i32::MAX);
+
+        request.set_disaggregated(hostname.to_string(), bootstrap_port as i32, room_id);
+
+        debug!(
+            "Injected TokenSpeed PD bootstrap: host={}, port={}, room={}",
+            hostname, bootstrap_port, room_id
+        );
+    }
+}

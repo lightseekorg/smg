@@ -148,6 +148,12 @@ impl PipelineStage for MessageRequestBuildingStage {
             proto_request.clear_mm_pixel_values();
         }
 
+        // EPD: inject the prefill->decode KV rendezvous (mirrors the chat path).
+        // No-op unless this is a TokenSpeed EPD Triple selection.
+        if let Some(workers) = ctx.state.workers.as_ref() {
+            helpers::maybe_inject_tokenspeed_pd_bootstrap(&mut proto_request, workers);
+        }
+
         ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }

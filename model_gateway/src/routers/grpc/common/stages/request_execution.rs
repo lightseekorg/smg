@@ -209,12 +209,14 @@ impl PipelineStage for RequestExecutionStage {
                                 self.execute_sequential_pd(req, clients, workers, model)
                                     .await
                             }
-                            Some(RuntimeType::Sglang) => {
+                            Some(RuntimeType::Sglang) | Some(RuntimeType::TokenSpeed) => {
+                                // TokenSpeed PD uses the same Mooncake-bootstrap
+                                // parallel dual dispatch as SGLang (bootstrap room
+                                // injected by maybe_inject_tokenspeed_pd_bootstrap).
                                 self.execute_dual_dispatch(req, clients, workers).await
                             }
                             Some(RuntimeType::Trtllm)
                             | Some(RuntimeType::Mlx)
-                            | Some(RuntimeType::TokenSpeed)
                             | Some(RuntimeType::External)
                             | Some(RuntimeType::Unspecified) => {
                                 error!(
