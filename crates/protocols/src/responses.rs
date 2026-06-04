@@ -2087,7 +2087,6 @@ pub enum ResponseContentPart {
     OutputText {
         text: String,
         #[serde(default)]
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         annotations: Vec<Annotation>,
         #[serde(skip_serializing_if = "Option::is_none")]
         logprobs: Option<ChatLogProbs>,
