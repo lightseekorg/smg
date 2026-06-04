@@ -113,6 +113,12 @@ message GenerateRequest {
   // the embedding keyed by `bootstrap_room` rather than running the vision
   // tower. Absent for non-disaggregated (aggregated) requests.
   optional EncodeHandshake encode = 10;
+
+  // PD: present when prefill and decode run on separate workers and hand the KV
+  // cache off over Mooncake. The gateway sends the SAME params to both the
+  // prefill and decode worker; they meet at (`bootstrap_host`, `bootstrap_port`)
+  // keyed by `bootstrap_room`. Absent for aggregated (single-worker) requests.
+  optional DisaggregatedParams disaggregated_params = 11;
 }
 
 // EPD encode->prefill pairing handed to a prefill worker. Each multimodal item
@@ -137,6 +143,16 @@ message EncodeItemHandshake {
   // The encode worker's bootstrap server (data-source side), not the prefill's.
   int32 bootstrap_port = 3;
   string bootstrap_host = 4;
+}
+
+// PD prefill->decode KV rendezvous. The prefill worker is the KV data source:
+// it hosts the bootstrap server at (`bootstrap_host`, `bootstrap_port`) and the
+// decode worker discovers it there, keyed by `bootstrap_room`. The gateway
+// mints one room per request and sends identical params to both workers.
+message DisaggregatedParams {
+  string bootstrap_host = 1;
+  int32 bootstrap_port = 2;
+  int32 bootstrap_room = 3;
 }
 
 message TokenizedInput {
