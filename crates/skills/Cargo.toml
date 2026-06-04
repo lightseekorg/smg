@@ -23,7 +23,7 @@ openai-protocol.workspace = true
 parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-serde_yml = "0.0.12"
+serde_yml = "0.0.13"
 smg-blob-storage.workspace = true
 thiserror.workspace = true
 ulid = "1.2.1"
