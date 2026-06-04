@@ -33,7 +33,7 @@ use crate::routers::grpc::{
     proto_wrapper::{
         tokenspeed_shm_transport_enabled_for_bytes, write_tokenspeed_shm_with,
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
-        TokenSpeedTensorBytes, TrtllmMultimodalData, VllmMultimodalData,
+        TokenSpeedTensor, TrtllmMultimodalData, VllmMultimodalData,
     },
     MultimodalData,
 };
@@ -1135,7 +1135,7 @@ fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u3
 fn serialize_pixel_values_as_tokenspeed_tensor(
     preprocessed: &PreprocessedImages,
     dtype: &str,
-) -> TokenSpeedTensorBytes {
+) -> TokenSpeedTensor {
     let dtype = match canonical_float_dtype(dtype).as_deref() {
         Some("float32") => "float32".to_string(),
         Some("bfloat16") => "bfloat16".to_string(),
@@ -1169,7 +1169,7 @@ fn serialize_pixel_values_as_tokenspeed_tensor(
                         "smg_mm_timing tokenspeed_shm_write_direct"
                     );
                 }
-                return TokenSpeedTensorBytes::shm(handle, shape, dtype);
+                return TokenSpeedTensor::shm(handle, shape, dtype);
             }
             Err(error) => {
                 warn!(
@@ -1183,7 +1183,7 @@ fn serialize_pixel_values_as_tokenspeed_tensor(
     }
 
     let (data, shape, dtype) = serialize_pixel_values_as_dtype(preprocessed, &dtype);
-    TokenSpeedTensorBytes::bytes(data, shape, dtype)
+    TokenSpeedTensor::inline(data, shape, dtype)
 }
 
 fn write_pixel_values_as_dtype(

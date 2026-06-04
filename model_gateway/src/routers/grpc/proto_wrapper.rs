@@ -87,7 +87,7 @@ pub struct TrtllmMultimodalData {
 #[derive(Debug)]
 pub struct TokenSpeedMultimodalData {
     pub modality: TokenSpeedModality,
-    pub encoder_input: TokenSpeedTensorBytes,
+    pub encoder_input: TokenSpeedTensor,
     pub model_specific_tensors: HashMap<String, TensorBytes>,
     pub placeholder_token_id: Option<u32>,
     pub mm_placeholders: Vec<(u32, u32)>,
@@ -109,26 +109,26 @@ pub struct TensorBytes {
     pub dtype: String,
 }
 
-/// TokenSpeed tensor bytes can either be materialized bytes or an already
-/// published SHM handle. The latter lets SMG serialize large encoder inputs
-/// directly into SHM instead of building a temporary Vec<u8> first.
+/// TokenSpeed tensor with storage that can be either inline bytes or an
+/// already-published SHM handle. The latter lets SMG serialize large encoder
+/// inputs directly into SHM instead of building a temporary Vec<u8> first.
 #[derive(Debug, Clone)]
-pub struct TokenSpeedTensorBytes {
-    pub payload: TokenSpeedTensorPayload,
+pub struct TokenSpeedTensor {
+    pub storage: TokenSpeedTensorStorage,
     pub shape: Vec<u32>,
     pub dtype: String,
 }
 
 #[derive(Debug, Clone)]
-pub enum TokenSpeedTensorPayload {
-    Bytes(Vec<u8>),
+pub enum TokenSpeedTensorStorage {
+    Inline(Vec<u8>),
     Shm(tokenspeed::ShmHandle),
 }
 
-impl TokenSpeedTensorBytes {
-    pub fn bytes(data: Vec<u8>, shape: Vec<u32>, dtype: String) -> Self {
+impl TokenSpeedTensor {
+    pub fn inline(data: Vec<u8>, shape: Vec<u32>, dtype: String) -> Self {
         Self {
-            payload: TokenSpeedTensorPayload::Bytes(data),
+            storage: TokenSpeedTensorStorage::Inline(data),
             shape,
             dtype,
         }
@@ -136,16 +136,16 @@ impl TokenSpeedTensorBytes {
 
     pub fn shm(handle: tokenspeed::ShmHandle, shape: Vec<u32>, dtype: String) -> Self {
         Self {
-            payload: TokenSpeedTensorPayload::Shm(handle),
+            storage: TokenSpeedTensorStorage::Shm(handle),
             shape,
             dtype,
         }
     }
 
     pub fn nbytes(&self) -> usize {
-        match &self.payload {
-            TokenSpeedTensorPayload::Bytes(data) => data.len(),
-            TokenSpeedTensorPayload::Shm(handle) => handle.nbytes as usize,
+        match &self.storage {
+            TokenSpeedTensorStorage::Inline(data) => data.len(),
+            TokenSpeedTensorStorage::Shm(handle) => handle.nbytes as usize,
         }
     }
 }
@@ -266,7 +266,7 @@ impl TokenSpeedMultimodalData {
                 TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
             },
             content_hash: self.content_hash,
-            encoder_input: Some(tokenspeed_tensor_bytes_to_proto(self.encoder_input)),
+            encoder_input: Some(tokenspeed_tensor_to_proto(self.encoder_input)),
             model_specific_tensors,
             placeholders: mm_placeholders,
             placeholder_token_id: self.placeholder_token_id,
@@ -276,15 +276,15 @@ impl TokenSpeedMultimodalData {
     }
 }
 
-fn tokenspeed_tensor_bytes_to_proto(value: TokenSpeedTensorBytes) -> tokenspeed::TensorData {
-    let TokenSpeedTensorBytes {
-        payload,
+fn tokenspeed_tensor_to_proto(value: TokenSpeedTensor) -> tokenspeed::TensorData {
+    let TokenSpeedTensor {
+        storage,
         shape,
         dtype,
     } = value;
-    let payload = match payload {
-        TokenSpeedTensorPayload::Bytes(data) => tokenspeed_tensor_payload(data),
-        TokenSpeedTensorPayload::Shm(handle) => tokenspeed::tensor_data::Payload::Shm(handle),
+    let payload = match storage {
+        TokenSpeedTensorStorage::Inline(data) => tokenspeed_tensor_payload(data),
+        TokenSpeedTensorStorage::Shm(handle) => tokenspeed::tensor_data::Payload::Shm(handle),
     };
 
     tokenspeed::TensorData {
@@ -1421,11 +1421,7 @@ mod tests {
 
         let proto = TokenSpeedMultimodalData {
             modality: TokenSpeedModality::Image,
-            encoder_input: TokenSpeedTensorBytes::bytes(
-                vec![42; 8],
-                vec![1, 2],
-                "float32".to_string(),
-            ),
+            encoder_input: TokenSpeedTensor::inline(vec![42; 8], vec![1, 2], "float32".to_string()),
             model_specific_tensors,
             placeholder_token_id: Some(151655),
             mm_placeholders: vec![(4, 2)],
@@ -1460,11 +1456,7 @@ mod tests {
 
         let proto = TokenSpeedMultimodalData {
             modality: TokenSpeedModality::Video,
-            encoder_input: TokenSpeedTensorBytes::bytes(
-                vec![0; 8],
-                vec![1, 2],
-                "float32".to_string(),
-            ),
+            encoder_input: TokenSpeedTensor::inline(vec![0; 8], vec![1, 2], "float32".to_string()),
             model_specific_tensors,
             placeholder_token_id: Some(151656),
             mm_placeholders: vec![(4, 2)],
@@ -1486,7 +1478,7 @@ mod tests {
     fn tokenspeed_shm_encoder_input_into_proto_uses_shm_payload() {
         let proto = TokenSpeedMultimodalData {
             modality: TokenSpeedModality::Image,
-            encoder_input: TokenSpeedTensorBytes::shm(
+            encoder_input: TokenSpeedTensor::shm(
                 tokenspeed::ShmHandle {
                     name: "smg-test-shm".to_string(),
                     offset: 0,
