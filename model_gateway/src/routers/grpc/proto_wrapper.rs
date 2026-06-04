@@ -4,7 +4,15 @@
 //! supported backend, allowing the router to work with any backend
 //! transparently.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    fs::{remove_file, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    process,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use futures_util::StreamExt;
 use smg_grpc_client::{
@@ -75,7 +83,7 @@ pub struct TrtllmMultimodalData {
     pub image_data: Vec<Vec<u8>>,
 }
 
-/// TokenSpeed multimodal data: preprocessed tensors with patch-only placeholders.
+/// TokenSpeed multimodal data: preprocessed encoder input with patch-only placeholders.
 #[derive(Debug)]
 pub struct TokenSpeedMultimodalData {
     pub items: Vec<TokenSpeedMultimodalItem>,
@@ -84,9 +92,7 @@ pub struct TokenSpeedMultimodalData {
 #[derive(Debug)]
 pub struct TokenSpeedMultimodalItem {
     pub modality: TokenSpeedModality,
-    pub encoder_input: Vec<u8>,
-    pub encoder_input_shape: Vec<u32>,
-    pub encoder_input_dtype: String,
+    pub encoder_input: TokenSpeedTensorBytes,
     pub model_specific_tensors: HashMap<String, TensorBytes>,
     pub placeholder_token_id: Option<u32>,
     pub mm_placeholders: Vec<(u32, u32)>,
@@ -106,6 +112,47 @@ pub struct TensorBytes {
     pub data: Vec<u8>,
     pub shape: Vec<u32>,
     pub dtype: String,
+}
+
+/// TokenSpeed tensor bytes can either be materialized bytes or an already
+/// published SHM handle. The latter lets SMG serialize large encoder inputs
+/// directly into SHM instead of building a temporary Vec<u8> first.
+#[derive(Debug, Clone)]
+pub struct TokenSpeedTensorBytes {
+    pub payload: TokenSpeedTensorPayload,
+    pub shape: Vec<u32>,
+    pub dtype: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum TokenSpeedTensorPayload {
+    Bytes(Vec<u8>),
+    Shm(tokenspeed::ShmHandle),
+}
+
+impl TokenSpeedTensorBytes {
+    pub fn bytes(data: Vec<u8>, shape: Vec<u32>, dtype: String) -> Self {
+        Self {
+            payload: TokenSpeedTensorPayload::Bytes(data),
+            shape,
+            dtype,
+        }
+    }
+
+    pub fn shm(handle: tokenspeed::ShmHandle, shape: Vec<u32>, dtype: String) -> Self {
+        Self {
+            payload: TokenSpeedTensorPayload::Shm(handle),
+            shape,
+            dtype,
+        }
+    }
+
+    pub fn nbytes(&self) -> usize {
+        match &self.payload {
+            TokenSpeedTensorPayload::Bytes(data) => data.len(),
+            TokenSpeedTensorPayload::Shm(handle) => handle.nbytes as usize,
+        }
+    }
 }
 
 impl SglangMultimodalData {
@@ -235,11 +282,7 @@ impl TokenSpeedMultimodalItem {
                 TokenSpeedModality::Video => tokenspeed::Modality::Video as i32,
             },
             content_hash: self.content_hash,
-            encoder_input: Some(tensor_bytes_to_tokenspeed(TensorBytes {
-                data: self.encoder_input,
-                shape: self.encoder_input_shape,
-                dtype: self.encoder_input_dtype,
-            })),
+            encoder_input: Some(tokenspeed_tensor_bytes_to_proto(self.encoder_input)),
             model_specific_tensors,
             placeholders,
             placeholder_token_id: self.placeholder_token_id,
@@ -247,13 +290,151 @@ impl TokenSpeedMultimodalItem {
     }
 }
 
-fn tensor_bytes_to_tokenspeed(value: TensorBytes) -> tokenspeed::TensorData {
-    let data = value.data;
+fn tokenspeed_tensor_bytes_to_proto(value: TokenSpeedTensorBytes) -> tokenspeed::TensorData {
+    let TokenSpeedTensorBytes {
+        payload,
+        shape,
+        dtype,
+    } = value;
+    let payload = match payload {
+        TokenSpeedTensorPayload::Bytes(data) => tokenspeed_tensor_payload(data),
+        TokenSpeedTensorPayload::Shm(handle) => tokenspeed::tensor_data::Payload::Shm(handle),
+    };
+
     tokenspeed::TensorData {
-        shape: value.shape,
-        dtype: value.dtype,
-        payload: Some(tokenspeed::tensor_data::Payload::Inline(data)),
+        shape,
+        dtype,
+        payload: Some(payload),
     }
+}
+
+fn tensor_bytes_to_tokenspeed(value: TensorBytes) -> tokenspeed::TensorData {
+    let TensorBytes { data, shape, dtype } = value;
+
+    tokenspeed::TensorData {
+        shape,
+        dtype,
+        payload: Some(tokenspeed_tensor_payload(data)),
+    }
+}
+
+fn tokenspeed_tensor_payload(data: Vec<u8>) -> tokenspeed::tensor_data::Payload {
+    let log_timing = log_tokenspeed_mm_timing_enabled();
+    let mode = std::env::var("SMG_TOKENSPEED_TENSOR_TRANSPORT")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mode != "shm" {
+        if log_timing {
+            tracing::info!(
+                nbytes = data.len(),
+                "smg_mm_timing tokenspeed_tensor_payload_inline"
+            );
+        }
+        return tokenspeed::tensor_data::Payload::Inline(data);
+    }
+
+    let min_bytes = std::env::var("SMG_TOKENSPEED_SHM_MIN_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(64 * 1024);
+    if data.len() < min_bytes {
+        if log_timing {
+            tracing::info!(
+                nbytes = data.len(),
+                min_bytes,
+                "smg_mm_timing tokenspeed_tensor_payload_inline_below_threshold"
+            );
+        }
+        return tokenspeed::tensor_data::Payload::Inline(data);
+    }
+
+    let started = Instant::now();
+    match write_tokenspeed_shm(&data) {
+        Ok(handle) => {
+            if log_timing {
+                tracing::info!(
+                    nbytes = data.len(),
+                    elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    "smg_mm_timing tokenspeed_shm_write"
+                );
+            }
+            tokenspeed::tensor_data::Payload::Shm(handle)
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                nbytes = data.len(),
+                "Failed to create TokenSpeed SHM tensor payload; falling back to inline"
+            );
+            tokenspeed::tensor_data::Payload::Inline(data)
+        }
+    }
+}
+
+fn log_tokenspeed_mm_timing_enabled() -> bool {
+    std::env::var("SMG_LOG_MM_TIMING")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+pub fn tokenspeed_shm_transport_enabled_for_bytes(nbytes: usize) -> bool {
+    let mode = std::env::var("SMG_TOKENSPEED_TENSOR_TRANSPORT")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if mode != "shm" {
+        return false;
+    }
+
+    let min_bytes = std::env::var("SMG_TOKENSPEED_SHM_MIN_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(64 * 1024);
+    nbytes >= min_bytes
+}
+
+static TOKENSPEED_SHM_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn write_tokenspeed_shm(data: &[u8]) -> std::io::Result<tokenspeed::ShmHandle> {
+    write_tokenspeed_shm_with(data.len(), |file| file.write_all(data))
+}
+
+pub fn write_tokenspeed_shm_with(
+    nbytes: usize,
+    write_fn: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<tokenspeed::ShmHandle> {
+    let name = next_tokenspeed_shm_name();
+    let path = tokenspeed_shm_path(&name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = write_fn(&mut file) {
+        drop(file);
+        let _ = remove_file(&path);
+        return Err(error);
+    }
+
+    Ok(tokenspeed::ShmHandle {
+        name,
+        offset: 0,
+        nbytes: nbytes as u64,
+        owner_id: format!("smg:{}", process::id()),
+    })
+}
+
+fn next_tokenspeed_shm_name() -> String {
+    let seq = TOKENSPEED_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("smg-tokenspeed-{}-{}-{}", process::id(), nanos, seq)
+}
+
+fn tokenspeed_shm_path(name: &str) -> PathBuf {
+    PathBuf::from("/dev/shm").join(name)
 }
 
 // =====================
@@ -1307,9 +1488,11 @@ mod tests {
         let proto = TokenSpeedMultimodalData {
             items: vec![TokenSpeedMultimodalItem {
                 modality: TokenSpeedModality::Image,
-                encoder_input: vec![42; 8],
-                encoder_input_shape: vec![1, 2],
-                encoder_input_dtype: "float32".to_string(),
+                encoder_input: TokenSpeedTensorBytes::bytes(
+                    vec![42; 8],
+                    vec![1, 2],
+                    "float32".to_string(),
+                ),
                 model_specific_tensors,
                 placeholder_token_id: Some(151655),
                 mm_placeholders: vec![(4, 2)],
@@ -1346,9 +1529,11 @@ mod tests {
         let proto = TokenSpeedMultimodalData {
             items: vec![TokenSpeedMultimodalItem {
                 modality: TokenSpeedModality::Video,
-                encoder_input: vec![42; 8],
-                encoder_input_shape: vec![1, 2],
-                encoder_input_dtype: "float32".to_string(),
+                encoder_input: TokenSpeedTensorBytes::bytes(
+                    vec![42; 8],
+                    vec![1, 2],
+                    "float32".to_string(),
+                ),
                 model_specific_tensors,
                 placeholder_token_id: Some(151656),
                 mm_placeholders: vec![(4, 2)],
@@ -1386,6 +1571,41 @@ mod tests {
                 0x1a, 0x02, 0xaa, 0xbb, // inline = 3
             ]
         );
+    }
+
+    #[test]
+    fn tokenspeed_shm_encoder_input_into_proto_uses_shm_payload() {
+        let proto = TokenSpeedMultimodalData {
+            items: vec![TokenSpeedMultimodalItem {
+                modality: TokenSpeedModality::Image,
+                encoder_input: TokenSpeedTensorBytes::shm(
+                    tokenspeed::ShmHandle {
+                        name: "smg-test-shm".to_string(),
+                        offset: 0,
+                        nbytes: 8,
+                        owner_id: "smg:test".to_string(),
+                    },
+                    vec![1, 2],
+                    "bfloat16".to_string(),
+                ),
+                model_specific_tensors: HashMap::new(),
+                placeholder_token_id: Some(151655),
+                mm_placeholders: vec![(4, 2)],
+                content_hash: vec![7; 32],
+            }],
+        }
+        .into_proto();
+
+        let tensor = proto.items[0].encoder_input.as_ref().unwrap();
+        assert_eq!(tensor.shape, vec![1, 2]);
+        assert_eq!(tensor.dtype, "bfloat16");
+        match tensor.payload.as_ref() {
+            Some(tokenspeed::tensor_data::Payload::Shm(handle)) => {
+                assert_eq!(handle.name, "smg-test-shm");
+                assert_eq!(handle.nbytes, 8);
+            }
+            _ => panic!("expected shm TensorData payload"),
+        }
     }
 
     fn inline_tensor_data(tensor: &tokenspeed::TensorData) -> &[u8] {
