@@ -62,9 +62,12 @@ def _read_cell(folder: Path) -> Cell | None:
     is rendered rather than silently dropped: `.failed` (run exited non-zero) is
     kept distinct from `.empty` (ran to the backstop with zero completions).
     """
+    # Run status (failed/empty markers) is tracked independently of whether the
+    # result JSON has usable per-request samples.
+    failed = (folder / ".failed").exists()
     j = _find_result_json(folder)
     if j is None:
-        if (folder / ".failed").exists():
+        if failed:
             return Cell(agg={}, completed=[], empty=True, failed=True)
         if (folder / ".empty").exists():
             return Cell(agg={}, completed=[], empty=True)
@@ -84,7 +87,7 @@ def _read_cell(folder: Path) -> Cell | None:
     if not isinstance(individual, list):
         individual = []
     completed = [r for r in individual if isinstance(r, dict) and not r.get("error_code")]
-    return Cell(agg=agg, completed=completed, empty=not completed)
+    return Cell(agg=agg, completed=completed, empty=not completed, failed=failed)
 
 
 def collect(results_dir: Path) -> dict[tuple[str, str, int], Cell]:
@@ -140,7 +143,6 @@ def fmt_ms(v_seconds: float | None) -> str:
 def build_section(
     results: dict[tuple[str, str, int], Cell],
     scenario: str,
-    concurrencies: list[int],
     labels: list[str],
 ) -> list[str]:
     lines = [
@@ -151,6 +153,10 @@ def build_section(
         "| TTFT mean (ms) | TTFT p99 (ms) | TPOT mean (ms) |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
+    # Only the concurrencies actually present for THIS scenario — scenarios can
+    # be swept at different concurrencies, so a global union would render an
+    # unrequested cell as a misleading "not-run" (—) row.
+    concurrencies = sorted({k[2] for k in results if k[1] == scenario})
     for c in concurrencies:
         # Equal-N: compare the backends present for this cell on the smaller of
         # their completed counts.
@@ -170,14 +176,23 @@ def build_section(
                 lines.append(f"| {c} | {pretty} | — | — | — | — | — | — | — |")
                 continue
             if cell.empty or not cell.completed:
+                # No usable latency samples — blank TTFT/TPOT/N. But keep any
+                # whole-run aggregates that were recorded (a result with valid
+                # aggregated_metrics but no per-request samples shouldn't lose
+                # its RPS/throughput/count).
                 err = cell.agg.get("error_codes_frequency") or {}
                 if cell.failed:
-                    note = "0 (failed)"
+                    status = "failed"
                 elif err:
-                    note = f"0 ({', '.join(f'{k}×{v}' for k, v in err.items())})"
+                    status = ", ".join(f"{k}×{v}" for k, v in err.items())
                 else:
-                    note = "0 (timed out)"
-                lines.append(f"| {c} | {pretty} | {note} | — | 0.00 | 0.0 | — | — | — |")
+                    status = "timed out"
+                done = int(cell.agg.get("num_completed_requests") or 0)
+                rps = fmt_float(cell.agg.get("requests_per_second") or 0.0)
+                tok = fmt_float(cell.agg.get("mean_output_throughput_tokens_per_s") or 0.0, 1)
+                lines.append(
+                    f"| {c} | {pretty} | {done} ({status}) | — | {rps} | {tok} | — | — | — |"
+                )
                 continue
 
             sample = cell.completed[:n]
@@ -213,7 +228,7 @@ def build_table(results: dict[tuple[str, str, int], Cell], model: str) -> str:
     present = {k[0] for k in results}
     labels = [label for label in LABEL_ORDER if label in present]
     scenarios = sorted({k[1] for k in results})
-    concurrencies = sorted({k[2] for k in results})
+    concurrencies = sorted({k[2] for k in results})  # union, for the intro line only
     way = WAY_NAME.get(len(labels), f"{len(labels)}-way")
     lines = [
         f"## MLX {way} Benchmark",
@@ -235,7 +250,7 @@ def build_table(results: dict[tuple[str, str, int], Cell], model: str) -> str:
     ]
     lines.extend(f"- {LABEL_DESCRIPTION[label]}" for label in labels)
     for s in scenarios:
-        lines.extend(build_section(results, s, concurrencies, labels))
+        lines.extend(build_section(results, s, labels))
     return "\n".join(lines)
 
 
