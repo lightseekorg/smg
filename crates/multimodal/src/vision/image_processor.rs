@@ -9,7 +9,7 @@ use image::DynamicImage;
 use ndarray::{Array4, ArrayD};
 
 use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
-use crate::types::FieldLayout;
+use crate::types::{FieldLayout, RgbFrameRef};
 
 /// Helper to extract a dimension from pixel_values given an ndim-dependent axis index.
 /// Returns `Err` if the ndim is not 4 or 5.
@@ -309,6 +309,20 @@ pub trait ImagePreProcessor: Send + Sync {
     ) -> Result<PreprocessedImages, TransformError> {
         Err(TransformError::ShapeError(format!(
             "{} does not support video preprocessing",
+            self.model_name()
+        )))
+    }
+
+    /// Preprocess one decoded video clip represented as borrowed RGB frame
+    /// buffers. Implementations can override this to avoid materializing
+    /// `DynamicImage` objects after media decode.
+    fn preprocess_video_rgb(
+        &self,
+        _frames: &[RgbFrameRef<'_>],
+        _config: &PreProcessorConfig,
+    ) -> Result<PreprocessedImages, TransformError> {
+        Err(TransformError::ShapeError(format!(
+            "{} does not support RGB video preprocessing",
             self.model_name()
         )))
     }

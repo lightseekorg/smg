@@ -21,10 +21,13 @@ use std::ops::Deref;
 use image::DynamicImage;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
-use crate::vision::{
-    image_processor::{ImagePreProcessor, PreprocessedImages},
-    preprocessor_config::PreProcessorConfig,
-    transforms::TransformError,
+use crate::{
+    types::RgbFrameRef,
+    vision::{
+        image_processor::{ImagePreProcessor, PreprocessedImages},
+        preprocessor_config::PreProcessorConfig,
+        transforms::TransformError,
+    },
 };
 
 /// Qwen3-VL normalization mean values (simple [0.5, 0.5, 0.5]).
@@ -227,6 +230,14 @@ impl ImagePreProcessor for Qwen3VLProcessor {
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedImages, TransformError> {
         self.inner.preprocess_video(frames, config)
+    }
+
+    fn preprocess_video_rgb(
+        &self,
+        frames: &[RgbFrameRef<'_>],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedImages, TransformError> {
+        self.inner.preprocess_video_rgb(frames, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {

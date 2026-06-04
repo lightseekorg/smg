@@ -21,13 +21,21 @@
 //! num_tokens = (grid_t * grid_h * grid_w) / merge_size²
 //! ```
 
+use std::borrow::Cow;
+
 use image::{DynamicImage, GenericImageView};
 use ndarray::{Array2, Array3};
 
-use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
-    preprocessor_config::PreProcessorConfig,
-    transforms::{pil_to_filter, resize, to_tensor, to_tensor_and_normalize, TransformError},
+use crate::{
+    types::RgbFrameRef,
+    vision::{
+        image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
+        preprocessor_config::PreProcessorConfig,
+        transforms::{
+            pil_to_filter, resize, resize_rgb_bytes, rgb_bytes, to_tensor, to_tensor_and_normalize,
+            TransformError,
+        },
+    },
 };
 
 /// Python-compatible rounding (banker's rounding / round half to even).
@@ -72,6 +80,12 @@ pub struct QwenVLConfig {
     pub std: [f64; 3],
     /// Model name for identification
     pub model_name: &'static str,
+}
+
+struct VideoFrameRgb<'a> {
+    width: usize,
+    height: usize,
+    data: Cow<'a, [u8]>,
 }
 
 /// Generic Qwen VL image processor.
@@ -437,6 +451,69 @@ impl QwenVLProcessorBase {
 
         Ok(())
     }
+
+    fn patchify_video_rgb_chunk_into(
+        &self,
+        frames: &[VideoFrameRgb<'_>],
+        grid_h: usize,
+        grid_w: usize,
+        output: &mut [f32],
+        out_idx: &mut usize,
+        lut: &[[f32; 256]; 3],
+    ) -> Result<(), TransformError> {
+        let patch_size = self.config.patch_size;
+        let merge_size = self.config.merge_size;
+        let temporal_patch_size = self.config.temporal_patch_size;
+        if frames.len() != temporal_patch_size {
+            return Err(TransformError::InvalidShape {
+                expected: format!("{temporal_patch_size} video frames in temporal patch"),
+                actual: vec![frames.len()],
+            });
+        }
+
+        let height = grid_h * patch_size;
+        let width = grid_w * patch_size;
+        for frame in frames {
+            if frame.height != height || frame.width != width {
+                return Err(TransformError::InvalidShape {
+                    expected: format!("video frame size {width}x{height}"),
+                    actual: vec![frame.width, frame.height],
+                });
+            }
+        }
+
+        let merged_patch = merge_size * patch_size;
+        for pr in 0..grid_h / merge_size {
+            for pc in 0..grid_w / merge_size {
+                let y0 = pr * merged_patch;
+                let x0 = pc * merged_patch;
+
+                for mh in 0..merge_size {
+                    for mw in 0..merge_size {
+                        for c in 0..3 {
+                            let lut_c = &lut[c];
+                            for frame in frames {
+                                let raw = frame.data.as_ref();
+                                for py in 0..patch_size {
+                                    let row =
+                                        (y0 + mh * patch_size + py) * width + x0 + mw * patch_size;
+                                    let mut src_idx = row * 3 + c;
+                                    let dst_end = *out_idx + patch_size;
+                                    for dst in &mut output[*out_idx..dst_end] {
+                                        *dst = lut_c[raw[src_idx] as usize];
+                                        src_idx += 3;
+                                    }
+                                    *out_idx = dst_end;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ImagePreProcessor for QwenVLProcessorBase {
@@ -563,32 +640,221 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         let (tw32, th32) = (target_w as u32, target_h as u32);
         let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, padded_frames);
 
-        let mut tensors = Vec::with_capacity(padded_frames);
-        for idx in 0..padded_frames {
-            let frame = &frames[idx.min(frames.len() - 1)];
-            let needs_resize = config.do_resize.unwrap_or(true)
-                && (frame.width() != tw32 || frame.height() != th32);
-            let resized;
-            let frame_ref = if needs_resize {
-                resized = resize(frame, tw32, th32, filter);
-                &resized
-            } else {
-                frame
-            };
-            let tensor = if config.do_normalize.unwrap_or(true) {
-                to_tensor_and_normalize(frame_ref, &mean, &std)
-            } else {
-                to_tensor(frame_ref)
-            };
-            tensors.push(tensor);
+        let patch_size = self.config.patch_size;
+        let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+        let num_patches = grid_t * grid_h * grid_w;
+        let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
+        let mut all_patches = vec![0.0; num_patches * patch_features];
+
+        let do_normalize = config.do_normalize.unwrap_or(true);
+        let scale: [f32; 3] = if do_normalize {
+            std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32))
+        } else {
+            [1.0 / 255.0; 3]
+        };
+        let bias: [f32; 3] = if do_normalize {
+            std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32))
+        } else {
+            [0.0; 3]
+        };
+        let lut: [[f32; 256]; 3] =
+            std::array::from_fn(|c| std::array::from_fn(|v| v as f32 * scale[c] + bias[c]));
+
+        let mut out_idx = 0;
+        for gt in 0..grid_t {
+            let mut frame_refs = Vec::with_capacity(temporal_patch_size);
+            let mut resized_frames = Vec::with_capacity(temporal_patch_size);
+            for tp in 0..temporal_patch_size {
+                let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
+                let frame = &frames[idx];
+                frame_refs.push(frame);
+                let needs_resize = config.do_resize.unwrap_or(true)
+                    && (frame.width() != tw32 || frame.height() != th32);
+                resized_frames.push(if needs_resize {
+                    Some(resize(frame, tw32, th32, filter))
+                } else {
+                    None
+                });
+            }
+
+            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+            for tp in 0..temporal_patch_size {
+                let frame_ref = resized_frames[tp].as_ref().unwrap_or(frame_refs[tp]);
+                let (width, height, data) = rgb_bytes(frame_ref);
+                frame_rgbs.push(VideoFrameRgb {
+                    width,
+                    height,
+                    data,
+                });
+            }
+
+            self.patchify_video_rgb_chunk_into(
+                &frame_rgbs,
+                grid_h,
+                grid_w,
+                &mut all_patches,
+                &mut out_idx,
+                &lut,
+            )?;
         }
+        debug_assert_eq!(out_idx, all_patches.len());
+
+        let pixel_values = Array2::from_shape_vec((num_patches, patch_features), all_patches)
+            .map_err(|e| {
+                TransformError::ShapeError(format!(
+                    "Failed to create video pixel_values [{num_patches}, {patch_features}]: {e}"
+                ))
+            })?;
+
+        let result =
+            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), vec![tokens], image_sizes)
+                .with_extra(
+                    "video_grid_thw",
+                    ModelSpecificValue::int_2d(
+                        vec![grid_t as i64, grid_h as i64, grid_w as i64],
+                        1,
+                        3,
+                    ),
+                )
+                .with_extra(
+                    "patches_per_video",
+                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
+                );
+
+        Ok(result)
+    }
+
+    fn preprocess_video_rgb(
+        &self,
+        frames: &[RgbFrameRef<'_>],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedImages, TransformError> {
+        if frames.is_empty() {
+            return Err(TransformError::EmptyBatch);
+        }
+
+        let w = frames[0].width;
+        let h = frames[0].height;
+        let image_sizes = vec![(w, h)];
+        let mean = config.get_image_mean();
+        let std = config.get_image_std();
+        let filter = pil_to_filter(config.resampling);
+
+        let temporal_patch_size = self.config.temporal_patch_size;
+        let padded_frames = frames.len().div_ceil(temporal_patch_size) * temporal_patch_size;
+        let (target_h, target_w) = self.smart_resize_video(frames.len(), h as usize, w as usize)?;
+        let (tw32, th32) = (target_w as u32, target_h as u32);
+        let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, padded_frames);
 
         let patch_size = self.config.patch_size;
         let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
         let num_patches = grid_t * grid_h * grid_w;
         let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
-        let mut all_patches = Vec::with_capacity(num_patches * patch_features);
-        self.patchify_video_into(&tensors, grid_t, grid_h, grid_w, &mut all_patches)?;
+        let mut all_patches = vec![0.0; num_patches * patch_features];
+
+        let do_normalize = config.do_normalize.unwrap_or(true);
+        let scale: [f32; 3] = if do_normalize {
+            std::array::from_fn(|c| 1.0 / (255.0 * std[c] as f32))
+        } else {
+            [1.0 / 255.0; 3]
+        };
+        let bias: [f32; 3] = if do_normalize {
+            std::array::from_fn(|c| -(mean[c] as f32) / (std[c] as f32))
+        } else {
+            [0.0; 3]
+        };
+        let lut: [[f32; 256]; 3] =
+            std::array::from_fn(|c| std::array::from_fn(|v| v as f32 * scale[c] + bias[c]));
+
+        let mut needs_resize_any = false;
+        let do_resize = config.do_resize.unwrap_or(true);
+        for frame in frames {
+            let expected_len = (frame.width as usize)
+                .checked_mul(frame.height as usize)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or_else(|| {
+                    TransformError::ShapeError(format!(
+                        "video frame dimensions are too large: {}x{}",
+                        frame.width, frame.height
+                    ))
+                })?;
+            if frame.data.len() != expected_len {
+                return Err(TransformError::InvalidShape {
+                    expected: format!(
+                        "RGB frame byte length {expected_len} for {}x{}",
+                        frame.width, frame.height
+                    ),
+                    actual: vec![frame.data.len()],
+                });
+            }
+            needs_resize_any |= do_resize && (frame.width != tw32 || frame.height != th32);
+        }
+
+        let mut out_idx = 0;
+        if !needs_resize_any {
+            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+            for gt in 0..grid_t {
+                frame_rgbs.clear();
+                for tp in 0..temporal_patch_size {
+                    let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
+                    let frame = frames[idx];
+                    frame_rgbs.push(VideoFrameRgb {
+                        width: frame.width as usize,
+                        height: frame.height as usize,
+                        data: Cow::Borrowed(frame.data),
+                    });
+                }
+
+                self.patchify_video_rgb_chunk_into(
+                    &frame_rgbs,
+                    grid_h,
+                    grid_w,
+                    &mut all_patches,
+                    &mut out_idx,
+                    &lut,
+                )?;
+            }
+        } else {
+            for gt in 0..grid_t {
+                let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+                for tp in 0..temporal_patch_size {
+                    let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
+                    let frame = frames[idx];
+                    let needs_resize = do_resize && (frame.width != tw32 || frame.height != th32);
+                    if needs_resize {
+                        let resized = resize_rgb_bytes(
+                            frame.data,
+                            frame.width,
+                            frame.height,
+                            tw32,
+                            th32,
+                            filter,
+                        )?;
+                        frame_rgbs.push(VideoFrameRgb {
+                            width: tw32 as usize,
+                            height: th32 as usize,
+                            data: Cow::Owned(resized.into_raw()),
+                        });
+                    } else {
+                        frame_rgbs.push(VideoFrameRgb {
+                            width: frame.width as usize,
+                            height: frame.height as usize,
+                            data: Cow::Borrowed(frame.data),
+                        });
+                    }
+                }
+
+                self.patchify_video_rgb_chunk_into(
+                    &frame_rgbs,
+                    grid_h,
+                    grid_w,
+                    &mut all_patches,
+                    &mut out_idx,
+                    &lut,
+                )?;
+            }
+        }
+        debug_assert_eq!(out_idx, all_patches.len());
 
         let pixel_values = Array2::from_shape_vec((num_patches, patch_features), all_patches)
             .map_err(|e| {
@@ -644,6 +910,7 @@ impl ImagePreProcessor for QwenVLProcessorBase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::RgbImage;
 
     fn create_test_config() -> QwenVLConfig {
         QwenVLConfig {
@@ -656,6 +923,37 @@ mod tests {
             std: [0.5, 0.5, 0.5],
             model_name: "test-qwen-vl",
         }
+    }
+
+    fn create_video_test_config() -> QwenVLConfig {
+        QwenVLConfig {
+            patch_size: 2,
+            merge_size: 1,
+            min_pixels: 1,
+            max_pixels: 1024 * 1024,
+            temporal_patch_size: 2,
+            mean: [0.5, 0.25, 0.75],
+            std: [0.5, 0.25, 0.5],
+            model_name: "test-qwen-vl-video",
+        }
+    }
+
+    fn create_pattern_frame(seed: u8) -> DynamicImage {
+        let mut image = RgbImage::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                image.put_pixel(
+                    x,
+                    y,
+                    image::Rgb([
+                        seed.wrapping_add((x * 3 + y) as u8),
+                        seed.wrapping_add((x + y * 5) as u8),
+                        seed.wrapping_add((x * 7 + y * 11) as u8),
+                    ]),
+                );
+            }
+        }
+        DynamicImage::ImageRgb8(image)
     }
 
     #[test]
@@ -697,5 +995,94 @@ mod tests {
         let processor = QwenVLProcessorBase::new(create_test_config());
         let tokens = processor.calculate_tokens_from_grid(1, 32, 32);
         assert_eq!(tokens, (32 * 32) / 4);
+    }
+
+    #[test]
+    fn test_preprocess_video_matches_tensor_patchify() {
+        let processor = QwenVLProcessorBase::new(create_video_test_config());
+        let config = PreProcessorConfig {
+            image_mean: Some(processor.default_mean().to_vec()),
+            image_std: Some(processor.default_std().to_vec()),
+            ..Default::default()
+        };
+        let frames = vec![create_pattern_frame(3), create_pattern_frame(101)];
+
+        let result = processor.preprocess_video(&frames, &config).unwrap();
+        let actual = result.pixel_values.as_slice_memory_order().unwrap();
+
+        let tensors = frames
+            .iter()
+            .map(|frame| {
+                to_tensor_and_normalize(frame, &processor.default_mean(), &processor.default_std())
+            })
+            .collect::<Vec<_>>();
+        let (grid_t, grid_h, grid_w) = processor.calculate_grid_thw(4, 4, frames.len());
+        let mut expected = Vec::new();
+        processor
+            .patchify_video_into(&tensors, grid_t, grid_h, grid_w, &mut expected)
+            .unwrap();
+
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "video patch value differs at index {idx}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_preprocess_video_rgb_matches_dynamic_video() {
+        let processor = QwenVLProcessorBase::new(create_video_test_config());
+        let config = PreProcessorConfig {
+            image_mean: Some(processor.default_mean().to_vec()),
+            image_std: Some(processor.default_std().to_vec()),
+            ..Default::default()
+        };
+        let frames = vec![
+            create_pattern_frame(3),
+            create_pattern_frame(101),
+            create_pattern_frame(177),
+        ];
+
+        let rgb_frames = frames
+            .iter()
+            .map(|frame| {
+                let DynamicImage::ImageRgb8(rgb) = frame else {
+                    panic!("test frame is not RGB8");
+                };
+                RgbFrameRef {
+                    width: rgb.width(),
+                    height: rgb.height(),
+                    data: rgb.as_raw(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let dynamic_result = processor.preprocess_video(&frames, &config).unwrap();
+        let rgb_result = processor
+            .preprocess_video_rgb(&rgb_frames, &config)
+            .unwrap();
+
+        assert_eq!(
+            dynamic_result.pixel_values.shape(),
+            rgb_result.pixel_values.shape()
+        );
+        let mut dynamic_keys = dynamic_result.model_specific.keys().collect::<Vec<_>>();
+        let mut rgb_keys = rgb_result.model_specific.keys().collect::<Vec<_>>();
+        dynamic_keys.sort();
+        rgb_keys.sort();
+        assert_eq!(dynamic_keys, rgb_keys);
+
+        let dynamic_values = dynamic_result.pixel_values.as_slice_memory_order().unwrap();
+        let rgb_values = rgb_result.pixel_values.as_slice_memory_order().unwrap();
+        for (idx, (&got, &want)) in rgb_values.iter().zip(dynamic_values.iter()).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "RGB video patch value differs at index {idx}: got {got}, want {want}"
+            );
+        }
     }
 }

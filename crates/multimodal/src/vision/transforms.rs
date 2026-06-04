@@ -6,7 +6,8 @@
 use std::cell::RefCell;
 
 use fast_image_resize::{
-    images::Image as FirImage, IntoImageView, ResizeAlg, ResizeOptions, Resizer,
+    images::{Image as FirImage, ImageRef as FirImageRef},
+    IntoImageView, PixelType, ResizeAlg, ResizeOptions, Resizer,
 };
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
 use ndarray::{s, Array3, Array4};
@@ -232,6 +233,31 @@ pub fn resize(image: &DynamicImage, width: u32, height: u32, filter: FilterType)
         return image.resize_exact(width, height, filter);
     }
     fir_image_to_dynamic(dst, width, height, image, filter)
+}
+
+/// Resize borrowed interleaved RGB bytes without first materializing an
+/// `image::RgbImage` over an owned input buffer.
+pub fn resize_rgb_bytes(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    target_width: u32,
+    target_height: u32,
+    filter: FilterType,
+) -> Result<RgbImage> {
+    let src = FirImageRef::new(width, height, data, PixelType::U8x3)
+        .map_err(|e| TransformError::ShapeError(format!("invalid RGB source image: {e}")))?;
+    let mut dst = FirImage::new(target_width, target_height, PixelType::U8x3);
+    let options = ResizeOptions::new().resize_alg(to_fir_algorithm(filter));
+    RESIZER
+        .with(|r| r.borrow_mut().resize(&src, &mut dst, &options))
+        .map_err(|e| TransformError::ShapeError(format!("RGB resize failed: {e}")))?;
+
+    RgbImage::from_raw(target_width, target_height, dst.into_vec()).ok_or_else(|| {
+        TransformError::ShapeError(format!(
+            "failed to build resized RGB image for {target_width}x{target_height}"
+        ))
+    })
 }
 
 /// Convert a `fast_image_resize::Image` back to a `DynamicImage`.
