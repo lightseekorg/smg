@@ -215,7 +215,6 @@ impl ConfigValidator {
                 encode_urls,
                 prefill_urls,
                 decode_urls,
-                encode_policy,
                 prefill_policy,
                 decode_policy,
             } => {
@@ -240,10 +239,8 @@ impl ConfigValidator {
                 if !decode_urls.is_empty() {
                     Self::validate_urls(decode_urls)?;
                 }
-                for policy in [encode_policy, prefill_policy, decode_policy] {
-                    if let Some(p) = policy {
-                        Self::validate_policy(p)?;
-                    }
+                for p in [prefill_policy, decode_policy].into_iter().flatten() {
+                    Self::validate_policy(p)?;
                 }
             }
             RoutingMode::OpenAI { worker_urls } => {

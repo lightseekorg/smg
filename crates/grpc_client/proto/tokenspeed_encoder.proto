@@ -40,9 +40,6 @@ message EncodeRequest {
 // the receive buffer and comes to this worker to register it, so the worker
 // needs only the room here, not any prefill address.
 message EncodeItemAssignment {
-  // Index into mm_inputs.items carried by THIS request (local order). Explicit
-  // to guard against any reordering between the gateway and the worker.
-  uint32 item_index = 1;
   int32 bootstrap_room = 2;
 }
 

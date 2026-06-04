@@ -282,11 +282,6 @@ struct CliArgs {
     #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "least_load", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
     decode_policy: Option<String>,
 
-    /// Specific policy for encode nodes in EPD mode (currently advisory: encode
-    /// workers are assigned round-robin per image in the encode stage).
-    #[arg(long, value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "prefix_hash", "consistent_hashing", "manual", "bucket"], help_heading = "PD Disaggregation")]
-    encode_policy: Option<String>,
-
     /// Timeout in seconds for worker startup and registration
     #[arg(long, default_value_t = 1800, help_heading = "PD Disaggregation")]
     worker_startup_timeout_secs: u64,
@@ -1203,7 +1198,6 @@ impl CliArgs {
                 encode_urls,
                 prefill_urls,
                 decode_urls: self.decode.clone(),
-                encode_policy: self.encode_policy.as_ref().map(|p| self.parse_policy(p)),
                 prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
                 decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
             }

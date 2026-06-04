@@ -605,15 +605,6 @@ impl WorkerSelection {
         }
     }
 
-    /// The encode candidate pool, present only in EPD (Triple) mode. The encode
-    /// stage assigns each multimodal item to one of these per request.
-    pub fn encode_pool(&self) -> Option<&[Arc<dyn Worker>]> {
-        match self {
-            Self::Triple { encode_pool, .. } => Some(encode_pool),
-            Self::Single { .. } | Self::Dual { .. } => None,
-        }
-    }
-
     /// Record circuit breaker outcome for all workers based on HTTP status code.
     pub fn record_outcome(&self, status_code: u16) {
         match self {
@@ -650,7 +641,7 @@ impl WorkerSelection {
     pub fn record_outcome_prefill(&self, status_code: u16) {
         match self {
             Self::Dual { prefill, .. } | Self::Triple { prefill, .. } => {
-                prefill.record_outcome(status_code)
+                prefill.record_outcome(status_code);
             }
             Self::Single { .. } => {
                 debug!("record_outcome_prefill called on Single worker selection, ignoring");
@@ -662,7 +653,7 @@ impl WorkerSelection {
     pub fn record_outcome_decode(&self, status_code: u16) {
         match self {
             Self::Dual { decode, .. } | Self::Triple { decode, .. } => {
-                decode.record_outcome(status_code)
+                decode.record_outcome(status_code);
             }
             Self::Single { .. } => {
                 debug!("record_outcome_decode called on Single worker selection, ignoring");

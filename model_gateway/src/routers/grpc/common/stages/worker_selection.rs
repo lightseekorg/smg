@@ -449,8 +449,8 @@ impl WorkerSelectionStage {
 
         let policy_name = policy.name();
 
-        // Record worker selection metrics for prefill and decode (encode is a
-        // pool selected per item later, recorded by the encode stage).
+        // Record worker selection metrics for prefill and decode (the encode
+        // worker is picked per image round-robin later, in the encode stage).
         Metrics::record_worker_selection(
             metrics_labels::WORKER_PREFILL,
             metrics_labels::CONNECTION_GRPC,

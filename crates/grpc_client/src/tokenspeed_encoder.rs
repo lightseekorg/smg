@@ -43,10 +43,6 @@ pub struct TokenSpeedEncoderClient {
 }
 
 impl TokenSpeedEncoderClient {
-    pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::connect_with_trace_injector(endpoint, Arc::new(NoopTraceInjector)).await
-    }
-
     /// Connect reusing a cached `Channel` for `endpoint` (see [`channel_cache`]).
     /// Use this on the per-request hot path; [`Self::connect`] always opens a
     /// fresh connection. The lock is never held across the connect `await`, so a
@@ -84,29 +80,6 @@ impl TokenSpeedEncoderClient {
                 ),
             trace_injector: Arc::new(NoopTraceInjector),
         }
-    }
-
-    pub async fn connect_with_trace_injector(
-        endpoint: &str,
-        trace_injector: BoxedTraceInjector,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        debug!("Connecting to TokenSpeed encoder at {}", endpoint);
-        let channel = crate::channel::connect_channel(endpoint).await?;
-        let client =
-            tokenspeed_encoder_proto::token_speed_encoder_client::TokenSpeedEncoderClient::new(
-                channel,
-            );
-
-        Ok(Self {
-            client,
-            trace_injector,
-        })
-    }
-
-    #[must_use]
-    pub fn with_trace_injector(mut self, trace_injector: BoxedTraceInjector) -> Self {
-        self.trace_injector = trace_injector;
-        self
     }
 
     /// Trigger the vision tower on a request's multimodal inputs. Returns once

@@ -127,12 +127,9 @@ impl PipelineStage for EncodeStage {
             let request = enc::EncodeRequest {
                 request_id: format!("encode-{}", Uuid::now_v7()),
                 mm_inputs: Some(mm_inputs),
-                // Single image per RPC, so its local index is always 0; the room
-                // is the link to this image's prefill handshake below.
-                items: vec![enc::EncodeItemAssignment {
-                    item_index: 0,
-                    bootstrap_room,
-                }],
+                // One assignment per image; the room is the link to this image's
+                // prefill handshake below.
+                items: vec![enc::EncodeItemAssignment { bootstrap_room }],
             };
 
             // The handshake points the prefill at THIS worker's Mooncake bootstrap

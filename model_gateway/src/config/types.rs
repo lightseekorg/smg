@@ -249,8 +249,6 @@ pub enum RoutingMode {
         prefill_urls: Vec<(String, Option<u16>)>,
         decode_urls: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        encode_policy: Option<PolicyConfig>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         prefill_policy: Option<PolicyConfig>,
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
@@ -266,10 +264,6 @@ pub enum RoutingMode {
 impl RoutingMode {
     pub fn is_pd_mode(&self) -> bool {
         matches!(self, RoutingMode::PrefillDecode { .. })
-    }
-
-    pub fn is_epd_mode(&self) -> bool {
-        matches!(self, RoutingMode::EncodePrefillDecode { .. })
     }
 
     pub fn worker_count(&self) -> usize {
@@ -311,17 +305,6 @@ impl RoutingMode {
             RoutingMode::PrefillDecode { decode_policy, .. }
             | RoutingMode::EncodePrefillDecode { decode_policy, .. } => {
                 decode_policy.as_ref().unwrap_or(main_policy)
-            }
-            _ => main_policy,
-        }
-    }
-
-    /// Get the effective encode policy for EPD mode. Falls back to the main
-    /// policy if no specific encode policy is set.
-    pub fn get_encode_policy<'a>(&'a self, main_policy: &'a PolicyConfig) -> &'a PolicyConfig {
-        match self {
-            RoutingMode::EncodePrefillDecode { encode_policy, .. } => {
-                encode_policy.as_ref().unwrap_or(main_policy)
             }
             _ => main_policy,
         }
