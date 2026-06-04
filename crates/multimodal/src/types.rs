@@ -148,19 +148,24 @@ impl DecodedRgbVideo {
         Self { data, frames }
     }
 
-    pub fn frame_refs(&self) -> Vec<RgbFrameRef<'_>> {
-        self.frames
-            .iter()
-            .filter_map(|frame| {
-                let end = frame.offset.checked_add(frame.len)?;
-                let data = self.data.get(frame.offset..end)?;
-                Some(RgbFrameRef {
-                    width: frame.width,
-                    height: frame.height,
-                    data,
-                })
-            })
-            .collect()
+    pub fn try_frame_refs(&self) -> Result<Vec<RgbFrameRef<'_>>, String> {
+        let mut refs = Vec::with_capacity(self.frames.len());
+        for frame in &self.frames {
+            let end = frame
+                .offset
+                .checked_add(frame.len)
+                .ok_or_else(|| "decoded RGB frame offset overflow".to_string())?;
+            let data = self
+                .data
+                .get(frame.offset..end)
+                .ok_or_else(|| "decoded RGB frame range is out of bounds".to_string())?;
+            refs.push(RgbFrameRef {
+                width: frame.width,
+                height: frame.height,
+                data,
+            });
+        }
+        Ok(refs)
     }
 
     pub fn to_dynamic_images(&self) -> Result<Vec<DynamicImage>, String> {

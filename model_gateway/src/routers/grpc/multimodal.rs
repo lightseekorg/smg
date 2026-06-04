@@ -690,8 +690,7 @@ async fn process_multimodal_parts(
                 }
 
                 if let Some(rgb_video) = video.rgb_video() {
-                    let frame_refs = rgb_video.frame_refs();
-                    if frame_refs.len() == rgb_video.frames.len() {
+                    if let Ok(frame_refs) = rgb_video.try_frame_refs() {
                         if let Ok(preprocessed) =
                             processor.preprocess_video_rgb(&frame_refs, &pp_config)
                         {
