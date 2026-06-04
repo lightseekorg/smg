@@ -42,6 +42,9 @@ class Cell:
     completed: list[dict[str, Any]]
     # True when the cell produced no result JSON (0 completed within backstop).
     empty: bool = False
+    # True when the run exited non-zero (`.failed` marker) rather than merely
+    # completing nothing — rendered as `0 (failed)` so crashes are triageable.
+    failed: bool = False
 
 
 def _find_result_json(folder: Path) -> Path | None:
@@ -55,21 +58,32 @@ def _find_result_json(folder: Path) -> Path | None:
 def _read_cell(folder: Path) -> Cell | None:
     """Return a Cell for a run dir, or None if the dir isn't a benchmark cell.
 
-    A dir that ran but completed nothing (only experiment_metadata.json, or a
-    `.empty` / `.failed` marker) yields an empty Cell so the row is rendered
-    rather than silently dropped.
+    A dir that ran but produced no result JSON yields an empty Cell so the row
+    is rendered rather than silently dropped: `.failed` (run exited non-zero) is
+    kept distinct from `.empty` (ran to the backstop with zero completions).
     """
     j = _find_result_json(folder)
     if j is None:
-        if (folder / ".empty").exists() or (folder / ".failed").exists():
+        if (folder / ".failed").exists():
+            return Cell(agg={}, completed=[], empty=True, failed=True)
+        if (folder / ".empty").exists():
             return Cell(agg={}, completed=[], empty=True)
         return None
     try:
         data = json.loads(j.read_text())
     except json.JSONDecodeError:
         return None
-    agg = data.get("aggregated_metrics", {})
-    completed = [r for r in data.get("individual_request_metrics", []) if not r.get("error_code")]
+    # genai-bench output is trusted, but tolerate malformed/partial JSON rather
+    # than crashing the whole aggregation on one bad cell.
+    if not isinstance(data, dict):
+        return None
+    agg = data.get("aggregated_metrics")
+    if not isinstance(agg, dict):
+        agg = {}
+    individual = data.get("individual_request_metrics")
+    if not isinstance(individual, list):
+        individual = []
+    completed = [r for r in individual if isinstance(r, dict) and not r.get("error_code")]
     return Cell(agg=agg, completed=completed, empty=not completed)
 
 
@@ -143,7 +157,10 @@ def build_section(
         present = [
             results[(label, scenario, c)] for label in labels if (label, scenario, c) in results
         ]
-        completed_counts = [len(cell.completed) for cell in present if cell.completed]
+        # Include zero-completion cells: if a present backend completed nothing,
+        # N collapses to 0 and the surviving backend's latency is left blank —
+        # there is no equal-N peer to compare it against.
+        completed_counts = [len(cell.completed) for cell in present]
         n = min(completed_counts) if completed_counts else 0
 
         for label in labels:
@@ -154,15 +171,16 @@ def build_section(
                 continue
             if cell.empty or not cell.completed:
                 err = cell.agg.get("error_codes_frequency") or {}
-                note = (
-                    f"0 ({', '.join(f'{k}×{v}' for k, v in err.items())})"
-                    if err
-                    else "0 (timed out)"
-                )
+                if cell.failed:
+                    note = "0 (failed)"
+                elif err:
+                    note = f"0 ({', '.join(f'{k}×{v}' for k, v in err.items())})"
+                else:
+                    note = "0 (timed out)"
                 lines.append(f"| {c} | {pretty} | {note} | — | 0.00 | 0.0 | — | — | — |")
                 continue
 
-            sample = cell.completed[:n] if n else cell.completed
+            sample = cell.completed[:n]
             ttft = _vals(sample, "ttft")
             tpot = _vals(sample, "tpot")
             lines.append(
@@ -180,8 +198,9 @@ def build_section(
             "",
             "> `N (compared)` = min completed across backends for the cell; TTFT/TPOT "
             "are computed over each backend's first N completed requests so the latency "
-            "comparison uses an equal sample size. RPS, output tok/s and `Completed` are "
-            "whole-run values.",
+            "comparison uses an equal sample size. When a backend completed 0 (timed "
+            "out / failed / saturated), N is 0 and latency is left blank — there is no "
+            "equal-N peer. RPS, output tok/s and `Completed` are whole-run values.",
             "",
         ]
     )

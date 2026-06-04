@@ -175,7 +175,8 @@ run_bench_cell() {
     # genai-bench exits 0 even when no request completes within the backstop
     # (it writes only experiment_metadata.json). Mark that explicitly so the
     # aggregator renders an honest "0 completed" row instead of a silent blank.
-    if ! ls "$exp_dir"/*text-to-text*.json >/dev/null 2>&1; then
+    local result_files=("$exp_dir"/*text-to-text*.json)
+    if [ ! -e "${result_files[0]:-}" ]; then
         log "[$exp_name] no result JSON — 0 completed within ${DURATION_MIN}m backstop"
         date -u +"%Y-%m-%dT%H:%M:%SZ" >"$exp_dir/.empty"
     fi
@@ -237,6 +238,15 @@ run_phase_grpc() {
     PIDS=()
     sleep 3
 }
+
+# Validate scenarios up front — before any model server loads — so a typo in
+# SCENARIOS fails loudly instead of silently skipping cells and exiting green.
+for scenario in $SCENARIOS; do
+    if [ -z "$(scenario_traffic "$scenario")" ]; then
+        log "Unknown scenario: $scenario (expected one of: chat agent)"
+        exit 1
+    fi
+done
 
 for phase in $PHASES; do
     case "$phase" in
