@@ -684,8 +684,29 @@ async fn process_multimodal_parts(
                 let video = videos_for_preprocess
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
+
+                if !video.frames().is_empty() {
+                    return processor
+                        .preprocess_video(video.frames(), &pp_config)
+                        .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
+                }
+
+                if let Some(rgb_video) = video.rgb_video() {
+                    let frame_refs = rgb_video.frame_refs();
+                    if frame_refs.len() == rgb_video.frames.len() {
+                        if let Ok(preprocessed) =
+                            processor.preprocess_video_rgb(&frame_refs, &pp_config)
+                        {
+                            return Ok(preprocessed);
+                        }
+                    }
+                }
+
+                let frames = video
+                    .materialized_frames()
+                    .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
                 processor
-                    .preprocess_video(video.frames.as_slice(), &pp_config)
+                    .preprocess_video(&frames, &pp_config)
                     .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
             }
             _ => Err(anyhow::anyhow!(

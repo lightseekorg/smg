@@ -1,3 +1,73 @@
+######################## OPENCV IMAGE ########################
+FROM ubuntu:24.04 AS opencv-image
+
+ARG FFMPEG_VERSION=n8.0
+ARG OPENCV_VERSION=4.13.0
+ARG FFMPEG_PREFIX=/opt/ffmpeg
+ARG OPENCV_PREFIX=/opt/opencv
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt update -y \
+    && apt install -y \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        build-essential \
+        nasm \
+        ninja-build \
+        pkg-config \
+        python3 \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt clean
+
+RUN git clone --depth 1 --branch ${FFMPEG_VERSION} https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg \
+    && cd /tmp/ffmpeg \
+    && ./configure \
+        --prefix=${FFMPEG_PREFIX} \
+        --enable-shared \
+        --disable-static \
+        --enable-pic \
+        --disable-doc \
+        --disable-debug \
+        --disable-programs \
+        --disable-avdevice \
+        --disable-network \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/ffmpeg
+
+RUN git clone --depth 1 --branch ${OPENCV_VERSION} https://github.com/opencv/opencv.git /tmp/opencv \
+    && cmake -S /tmp/opencv -B /tmp/opencv-build -G Ninja \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=${OPENCV_PREFIX} \
+        -D CMAKE_PREFIX_PATH=${FFMPEG_PREFIX} \
+        -D PKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config \
+        -D OPENCV_GENERATE_PKGCONFIG=ON \
+        -D BUILD_LIST=core,imgproc,videoio \
+        -D BUILD_SHARED_LIBS=ON \
+        -D BUILD_TESTS=OFF \
+        -D BUILD_PERF_TESTS=OFF \
+        -D BUILD_EXAMPLES=OFF \
+        -D BUILD_opencv_apps=OFF \
+        -D BUILD_JAVA=OFF \
+        -D BUILD_opencv_python2=OFF \
+        -D BUILD_opencv_python3=OFF \
+        -D WITH_FFMPEG=ON \
+        -D WITH_GSTREAMER=OFF \
+        -D WITH_GTK=OFF \
+        -D WITH_QT=OFF \
+        -D WITH_OPENGL=OFF \
+        -D WITH_TBB=OFF \
+    && cmake --build /tmp/opencv-build --parallel "$(nproc)" \
+    && cmake --install /tmp/opencv-build \
+    && rm -rf /tmp/opencv /tmp/opencv-build
+
+ENV LD_LIBRARY_PATH="${OPENCV_PREFIX}/lib:${FFMPEG_PREFIX}/lib"
+ENV PKG_CONFIG_PATH="${OPENCV_PREFIX}/lib/pkgconfig:${FFMPEG_PREFIX}/lib/pkgconfig"
+
 ######################## BASE IMAGE ##########################
 FROM ubuntu:24.04 AS base
 
@@ -6,6 +76,8 @@ ARG PYTHON_VERSION=3.12
 # set the environment variables
 ENV PATH="/root/.local/bin:${PATH}"
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LD_LIBRARY_PATH="/opt/opencv/lib:/opt/ffmpeg/lib"
+ENV PKG_CONFIG_PATH="/opt/opencv/lib/pkgconfig:/opt/ffmpeg/lib/pkgconfig"
 
 # uv environment variables
 ENV UV_HTTP_TIMEOUT=500
@@ -19,9 +91,12 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt update -y \
-    && apt install -y curl \
+    && apt install -y curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt clean
+
+COPY --from=opencv-image /opt/ffmpeg /opt/ffmpeg
+COPY --from=opencv-image /opt/opencv /opt/opencv
 
 # install uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -40,7 +115,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # install dependencies
 RUN apt update -y \
-    && apt install -y git build-essential libssl-dev pkg-config protobuf-compiler \
+    && apt install -y git build-essential clang libclang-dev libssl-dev patchelf pkg-config protobuf-compiler \
     && rm -rf /var/lib/apt/lists/* \
     && apt clean
 
