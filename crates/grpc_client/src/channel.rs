@@ -40,11 +40,13 @@ pub async fn connect_channel(
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .tcp_nodelay(true)
         .http2_adaptive_window(true)
-        // 16MB stream window, 32MB connection window — sized for the
-        // typical inference response (multi-MB tokenized payloads +
-        // streaming chunks) without head-of-line blocking.
-        .initial_stream_window_size(Some(16 * 1024 * 1024))
-        .initial_connection_window_size(Some(32 * 1024 * 1024))
+        // 64MB stream window, 256MB connection window. A single EPD encode
+        // pixel_values body is ~19MB; the old 16MB stream window was SMALLER
+        // than the body, so every large request stalled mid-body on a per-RTT
+        // WINDOW_UPDATE (~150MB/s single-stream). One body must fit in one
+        // stream window, and several must be in flight at once on a connection.
+        .initial_stream_window_size(Some(64 * 1024 * 1024))
+        .initial_connection_window_size(Some(256 * 1024 * 1024))
         .connect()
         .await?;
     Ok(channel)

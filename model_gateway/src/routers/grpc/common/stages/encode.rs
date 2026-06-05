@@ -111,7 +111,8 @@ impl PipelineStage for EncodeStage {
         let pool_len = encode_pool.len();
         let mut handshakes: Vec<tokenspeed_proto::EncodeItemHandshake> =
             Vec::with_capacity(splits.len());
-        let mut sends = Vec::with_capacity(splits.len());
+        let mut sends: Vec<tokio::task::JoinHandle<Result<(), String>>> =
+            Vec::with_capacity(splits.len());
 
         // Reserve a contiguous block of cursor slots for this request's images so a
         // multi-image request still spreads and consecutive requests continue where
@@ -123,20 +124,13 @@ impl PipelineStage for EncodeStage {
             let worker = encode_pool[(rr_base + global_index) % pool_len].clone();
             let bootstrap_room = rand::rng().random_range(0..i32::MAX);
 
-            let mm_inputs = assemble_tokenspeed_from_split(split, im_token_id).into_proto();
-            let request = enc::EncodeRequest {
-                request_id: format!("encode-{}", Uuid::now_v7()),
-                mm_inputs: Some(mm_inputs),
-                // One assignment per image; the room is the link to this image's
-                // prefill handshake below.
-                items: vec![enc::EncodeItemAssignment { bootstrap_room }],
-            };
-
             // The handshake points the prefill at THIS worker's Mooncake bootstrap
             // endpoint (host/port), not its gRPC URL. One handshake per image: when
             // prefill_tp > encode_tp the engine broadcasts this single (host,port,room)
             // to all N prefill ranks (N = prefill_tp / encode_tp, engine-derived), so
-            // the gateway stays rank/N-agnostic.
+            // the gateway stays rank/N-agnostic. Built on the loop thread (cheap, no
+            // tensor copy) so handshake host/port/room stays paired with the worker
+            // this image's RPC targets below (both read the same loop iteration).
             handshakes.push(tokenspeed_proto::EncodeItemHandshake {
                 item_index: global_index as u32,
                 bootstrap_room,
@@ -145,20 +139,49 @@ impl PipelineStage for EncodeStage {
             });
 
             let endpoint = worker.url().to_string();
-            sends.push(send_encode_rpc(endpoint, request));
+            // Spawn the heavy work (the ~19MB pixel_values serialize + proto framing
+            // + RPC) onto the multi-thread runtime so N images assemble/transmit in
+            // PARALLEL instead of one-after-another on this task. Previously the
+            // serialize ran serially in this loop (futures are lazy; only the RPC
+            // await overlapped), which alone made dispatch ~serial per image.
+            sends.push(tokio::spawn(async move {
+                let mm_inputs = assemble_tokenspeed_from_split(split, im_token_id).into_proto();
+                let request = enc::EncodeRequest {
+                    request_id: format!("encode-{}", Uuid::now_v7()),
+                    mm_inputs: Some(mm_inputs),
+                    // One assignment per image; the room links to this image's
+                    // prefill handshake recorded above.
+                    items: vec![enc::EncodeItemAssignment { bootstrap_room }],
+                };
+                send_encode_rpc(endpoint, request).await
+            }));
         }
 
-        // Fire all encode RPCs concurrently. If ANY fails we must return an error
+        // Await all encode RPCs. If ANY fails (or its task panicked) we must error
         // BEFORE request building / execution: a prefill dispatched without its
         // encode peer would hang forever waiting on the Mooncake room.
-        for result in join_all(sends).await {
-            if let Err(message) = result {
-                error!(
-                    function = "EncodeStage::execute",
-                    error = %message,
-                    "Encode RPC failed; aborting before prefill dispatch"
-                );
-                return Err(error::internal_error("encode_dispatch_failed", message));
+        for join_res in join_all(sends).await {
+            match join_res {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    error!(
+                        function = "EncodeStage::execute",
+                        error = %message,
+                        "Encode RPC failed; aborting before prefill dispatch"
+                    );
+                    return Err(error::internal_error("encode_dispatch_failed", message));
+                }
+                Err(join_err) => {
+                    error!(
+                        function = "EncodeStage::execute",
+                        error = %join_err,
+                        "Encode dispatch task panicked; aborting before prefill dispatch"
+                    );
+                    return Err(error::internal_error(
+                        "encode_dispatch_panicked",
+                        join_err.to_string(),
+                    ));
+                }
             }
         }
 
