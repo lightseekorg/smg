@@ -16,7 +16,7 @@ categories = ["multimedia::images", "science"]
 name = "llm_multimodal"
 
 [features]
-default = ["opencv-video"]
+default = []
 opencv-video = ["dep:opencv"]
 
 [dependencies]
@@ -34,7 +34,7 @@ serde_bytes = "0.11"
 serde_json.workspace = true
 tempfile = "3.8"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "fs", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["sync", "fs", "rt-multi-thread", "process", "time"] }
 tracing.workspace = true
 url = "2.5.4"
 

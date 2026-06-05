@@ -18,6 +18,7 @@ categories = ["web-programming", "network-programming"]
 default = ["grpc-client"]
 grpc-client = []
 grpc-server = []
+opencv-video = ["llm-multimodal/opencv-video"]
 
 vendored-openssl = ["openssl/vendored"]
 
@@ -72,7 +73,7 @@ smg-auth.workspace = true
 smg-mcp.workspace = true
 kv-index.workspace = true
 smg-data-connector.workspace = true
-llm-multimodal.workspace = true
+llm-multimodal = { workspace = true, default-features = false }
 smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true

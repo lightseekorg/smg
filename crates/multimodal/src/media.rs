@@ -1,10 +1,9 @@
 use std::{
     collections::HashSet,
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -18,9 +17,11 @@ use opencv::{
     videoio,
 };
 use reqwest::Client;
-use tokio::{fs, task};
+use tokio::{fs, process::Command, task, time};
 use tracing::info;
 use url::Url;
+
+const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::{
     error::MediaConnectorError,
@@ -29,10 +30,6 @@ use super::{
         VideoSource,
     },
 };
-
-const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
-const VIDEO_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const VIDEO_PROCESS_TIMEOUT_ENV: &str = "SMG_VIDEO_PROCESS_TIMEOUT_SECS";
 
 #[derive(Clone)]
 pub struct MediaConnectorConfig {
@@ -372,15 +369,11 @@ impl MediaConnector {
         }
 
         let hash = crate::hasher::hash_video(&bytes);
-        let input = bytes.clone();
         let source_path = match &source {
             VideoSource::File { path } => Some(path.clone()),
             _ => None,
         };
-        let decoded =
-            task::spawn_blocking(move || decode_video_frames(&input, cfg, source_path.as_deref()))
-                .await
-                .map_err(MediaConnectorError::Blocking)??;
+        let decoded = decode_video_frames(bytes.clone(), cfg, source_path).await?;
 
         let clip = match decoded {
             DecodedVideoFrames::Images(frames) => VideoClip::new(frames, bytes, source, hash),
@@ -397,17 +390,24 @@ enum DecodedVideoFrames {
     Rgb(DecodedRgbVideo),
 }
 
-fn decode_video_frames(
-    bytes: &[u8],
+async fn decode_video_frames(
+    bytes: Bytes,
     cfg: VideoFetchConfig,
-    source_path: Option<&std::path::Path>,
+    source_path: Option<PathBuf>,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     match video_decode_backend_override().as_deref() {
-        Some("ffmpeg") => return decode_video_with_ffmpeg(bytes, cfg, source_path),
+        Some("ffmpeg") => {
+            return decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref()).await;
+        }
         Some("opencv") => {
             #[cfg(feature = "opencv-video")]
             {
-                return decode_video_with_opencv_logged(bytes, cfg, source_path);
+                let source_path = source_path.clone();
+                return task::spawn_blocking(move || {
+                    decode_video_with_opencv_logged(&bytes, cfg, source_path.as_deref())
+                })
+                .await
+                .map_err(MediaConnectorError::Blocking)?;
             }
             #[cfg(not(feature = "opencv-video"))]
             {
@@ -424,7 +424,19 @@ fn decode_video_frames(
         None => {
             #[cfg(feature = "opencv-video")]
             {
-                match decode_video_with_opencv_logged(bytes, cfg, source_path) {
+                let opencv_bytes = bytes.clone();
+                let opencv_source_path = source_path.clone();
+                let opencv_result = task::spawn_blocking(move || {
+                    decode_video_with_opencv_logged(
+                        &opencv_bytes,
+                        cfg,
+                        opencv_source_path.as_deref(),
+                    )
+                })
+                .await
+                .map_err(MediaConnectorError::Blocking)?;
+
+                match opencv_result {
                     Ok(frames) => return Ok(frames),
                     Err(opencv_error) => {
                         if log_video_decode_timing_enabled() {
@@ -434,7 +446,9 @@ fn decode_video_frames(
                             );
                         }
 
-                        return match decode_video_with_ffmpeg(bytes, cfg, source_path) {
+                        return match decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref())
+                            .await
+                        {
                             Ok(frames) => Ok(frames),
                             Err(ffmpeg_error) => Err(MediaConnectorError::VideoDecode(format!(
                                 "OpenCV decode failed: {opencv_error}; ffmpeg fallback failed: {ffmpeg_error}"
@@ -446,7 +460,7 @@ fn decode_video_frames(
 
             #[cfg(not(feature = "opencv-video"))]
             {
-                return decode_video_with_ffmpeg(bytes, cfg, source_path);
+                return decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref()).await;
             }
         }
     }
@@ -702,7 +716,7 @@ fn opencv_decode_error(err: opencv::Error) -> MediaConnectorError {
     MediaConnectorError::VideoDecode(format!("OpenCV video decode failed: {err}"))
 }
 
-fn decode_video_with_ffmpeg(
+async fn decode_video_with_ffmpeg(
     bytes: &[u8],
     cfg: VideoFetchConfig,
     source_path: Option<&std::path::Path>,
@@ -713,9 +727,9 @@ fn decode_video_with_ffmpeg(
     };
     let input_path = input_path.path();
 
-    if let Ok(metadata) = probe_video_metadata(input_path) {
+    if let Ok(metadata) = probe_video_metadata(input_path).await {
         let started = Instant::now();
-        match decode_video_with_ffmpeg_ppm(input_path, cfg, metadata) {
+        match decode_video_with_ffmpeg_ppm(input_path, cfg, metadata).await {
             Ok(frames) => {
                 log_video_decode_backend_timing("ffmpeg_ppm_file", started, bytes.len(), cfg, None);
                 return Ok(DecodedVideoFrames::Images(frames));
@@ -732,7 +746,7 @@ fn decode_video_with_ffmpeg(
         }
 
         let started = Instant::now();
-        match decode_video_with_ffmpeg_raw(input_path, cfg, metadata) {
+        match decode_video_with_ffmpeg_raw(input_path, cfg, metadata).await {
             Ok(frames) => {
                 log_video_decode_backend_timing("ffmpeg_raw_file", started, bytes.len(), cfg, None);
                 return Ok(DecodedVideoFrames::Images(frames));
@@ -750,7 +764,7 @@ fn decode_video_with_ffmpeg(
     }
 
     let started = Instant::now();
-    match decode_video_with_ffmpeg_png(input_path, cfg) {
+    match decode_video_with_ffmpeg_png(input_path, cfg).await {
         Ok(frames) => {
             log_video_decode_backend_timing("ffmpeg_png_file", started, bytes.len(), cfg, None);
             Ok(DecodedVideoFrames::Images(frames))
@@ -820,7 +834,45 @@ fn video_temp_suffix(bytes: &[u8]) -> &'static str {
     ".video"
 }
 
-fn decode_video_with_ffmpeg_ppm(
+fn video_process_timeout() -> Duration {
+    std::env::var("SMG_VIDEO_PROCESS_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(DEFAULT_VIDEO_PROCESS_TIMEOUT)
+}
+
+async fn run_video_command_output(
+    mut command: Command,
+    program: &'static str,
+) -> Result<Output, MediaConnectorError> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = command.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MediaConnectorError::VideoDecode(format!(
+                "{program} executable not found; install {program} to decode video_url inputs"
+            ))
+        } else {
+            MediaConnectorError::Io(e)
+        }
+    })?;
+
+    let timeout = video_process_timeout();
+    match time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(MediaConnectorError::Io(error)),
+        Err(_) => Err(MediaConnectorError::VideoDecode(format!(
+            "{program} timed out after {:.3} seconds",
+            timeout.as_secs_f64()
+        ))),
+    }
+}
+
+async fn decode_video_with_ffmpeg_ppm(
     input_path: &std::path::Path,
     cfg: VideoFetchConfig,
     metadata: VideoMetadata,
@@ -829,7 +881,7 @@ fn decode_video_with_ffmpeg_ppm(
     let max_frames = cfg.max_frames.to_string();
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(input_path)
         .args([
             "-vf",
@@ -844,7 +896,7 @@ fn decode_video_with_ffmpeg_ppm(
             "rgb24",
             "pipe:1",
         ]);
-    let output = run_video_command_output(command, "ffmpeg")?;
+    let output = run_video_command_output(command, "ffmpeg").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -856,7 +908,7 @@ fn decode_video_with_ffmpeg_ppm(
     parse_ppm_stream(&output.stdout)
 }
 
-fn decode_video_with_ffmpeg_raw(
+async fn decode_video_with_ffmpeg_raw(
     input_path: &std::path::Path,
     cfg: VideoFetchConfig,
     metadata: VideoMetadata,
@@ -865,7 +917,7 @@ fn decode_video_with_ffmpeg_raw(
     let max_frames = cfg.max_frames.to_string();
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(input_path)
         .args([
             "-vf",
@@ -878,7 +930,7 @@ fn decode_video_with_ffmpeg_raw(
             "rgb24",
             "pipe:1",
         ]);
-    let output = run_video_command_output(command, "ffmpeg")?;
+    let output = run_video_command_output(command, "ffmpeg").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -914,15 +966,15 @@ fn decode_video_with_ffmpeg_raw(
     Ok(frames)
 }
 
-fn decode_video_with_ffmpeg_png(
+async fn decode_video_with_ffmpeg_png(
     input_path: &std::path::Path,
     cfg: VideoFetchConfig,
 ) -> Result<Vec<image::DynamicImage>, MediaConnectorError> {
-    let fps_filter = fps_filter_for_video(input_path, cfg);
+    let fps_filter = fps_filter_for_video(input_path, cfg).await;
     let max_frames = cfg.max_frames.to_string();
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(input_path)
         .args([
             "-vf",
@@ -935,7 +987,7 @@ fn decode_video_with_ffmpeg_png(
             "png",
             "pipe:1",
         ]);
-    let output = run_video_command_output(command, "ffmpeg")?;
+    let output = run_video_command_output(command, "ffmpeg").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -964,7 +1016,7 @@ struct VideoMetadata {
     duration_seconds: Option<f64>,
 }
 
-fn probe_video_metadata(
+async fn probe_video_metadata(
     input_path: &std::path::Path,
 ) -> Result<VideoMetadata, MediaConnectorError> {
     let mut command = Command::new("ffprobe");
@@ -981,7 +1033,7 @@ fn probe_video_metadata(
             "default=noprint_wrappers=1",
         ])
         .arg(input_path);
-    let output = run_video_command_output(command, "ffprobe")?;
+    let output = run_video_command_output(command, "ffprobe").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1040,8 +1092,8 @@ fn fps_filter_for_duration(duration: f64, cfg: VideoFetchConfig) -> Option<Strin
     Some(format!("fps={fps:.6}"))
 }
 
-fn fps_filter_for_video(input_path: &std::path::Path, cfg: VideoFetchConfig) -> String {
-    if let Ok(duration) = probe_video_duration_seconds(input_path) {
+async fn fps_filter_for_video(input_path: &std::path::Path, cfg: VideoFetchConfig) -> String {
+    if let Ok(duration) = probe_video_duration_seconds(input_path).await {
         if let Some(filter) = fps_filter_for_duration(duration, cfg) {
             return filter;
         }
@@ -1050,7 +1102,9 @@ fn fps_filter_for_video(input_path: &std::path::Path, cfg: VideoFetchConfig) -> 
     format!("fps={}", cfg.sample_fps)
 }
 
-fn probe_video_duration_seconds(input_path: &std::path::Path) -> Result<f64, MediaConnectorError> {
+async fn probe_video_duration_seconds(
+    input_path: &std::path::Path,
+) -> Result<f64, MediaConnectorError> {
     let mut command = Command::new("ffprobe");
     command
         .args([
@@ -1063,25 +1117,25 @@ fn probe_video_duration_seconds(input_path: &std::path::Path) -> Result<f64, Med
             "default=noprint_wrappers=1:nokey=1",
         ])
         .arg(input_path);
-    match run_video_command_output(command, "ffprobe") {
+    match run_video_command_output(command, "ffprobe").await {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stdout.trim().parse::<f64>().map_err(|err| {
                 MediaConnectorError::VideoDecode(format!("failed to parse ffprobe duration: {err}"))
             })
         }
-        Ok(_) | Err(_) => probe_video_duration_seconds_with_ffmpeg(input_path),
+        Ok(_) | Err(_) => probe_video_duration_seconds_with_ffmpeg(input_path).await,
     }
 }
 
-fn probe_video_duration_seconds_with_ffmpeg(
+async fn probe_video_duration_seconds_with_ffmpeg(
     input_path: &std::path::Path,
 ) -> Result<f64, MediaConnectorError> {
     let mut command = Command::new("ffmpeg");
     command
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(input_path);
-    let output = run_video_command_output(command, "ffmpeg")?;
+    let output = run_video_command_output(command, "ffmpeg").await?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     parse_ffmpeg_duration_seconds(&stderr).ok_or_else(|| {
@@ -1098,77 +1152,6 @@ fn parse_ffmpeg_duration_seconds(stderr: &str) -> Option<f64> {
     let minutes = parts.next()?.parse::<f64>().ok()?;
     let seconds = parts.next()?.parse::<f64>().ok()?;
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
-}
-
-fn video_process_timeout() -> Duration {
-    std::env::var(VIDEO_PROCESS_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .filter(|timeout| *timeout > Duration::ZERO)
-        .unwrap_or(DEFAULT_VIDEO_PROCESS_TIMEOUT)
-}
-
-fn run_video_command_output(
-    mut command: Command,
-    program: &'static str,
-) -> Result<Output, MediaConnectorError> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            MediaConnectorError::VideoDecode(format!(
-                "{program} executable not found; install ffmpeg to decode video_url inputs"
-            ))
-        } else {
-            MediaConnectorError::Io(error)
-        }
-    })?;
-
-    let mut stdout = child.stdout.take().ok_or_else(|| {
-        MediaConnectorError::VideoDecode(format!("{program} stdout pipe was not captured"))
-    })?;
-    let mut stderr = child.stderr.take().ok_or_else(|| {
-        MediaConnectorError::VideoDecode(format!("{program} stderr pipe was not captured"))
-    })?;
-
-    let stdout_handle = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stdout.read_to_end(&mut buffer).map(|_| buffer)
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stderr.read_to_end(&mut buffer).map(|_| buffer)
-    });
-
-    let timeout = video_process_timeout();
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(MediaConnectorError::VideoDecode(format!(
-                "{program} timed out after {:.1}s",
-                timeout.as_secs_f64()
-            )));
-        }
-        thread::sleep(VIDEO_PROCESS_POLL_INTERVAL);
-    };
-
-    let stdout = stdout_handle.join().map_err(|_| {
-        MediaConnectorError::VideoDecode(format!("{program} stdout reader panicked"))
-    })??;
-    let stderr = stderr_handle.join().map_err(|_| {
-        MediaConnectorError::VideoDecode(format!("{program} stderr reader panicked"))
-    })??;
-
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
 }
 
 fn split_png_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, MediaConnectorError> {
