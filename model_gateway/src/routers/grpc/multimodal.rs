@@ -1517,6 +1517,36 @@ mod tests {
         assert!(reg.get("tok-uuid-nopp").is_some());
     }
 
+    #[test]
+    fn load_video_preprocessor_config_ignores_missing_video_processor_key() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("processor_config.json"),
+            r#"{"image_processor":{"image_processor_type":"Qwen3VLImageProcessor"}}"#,
+        )
+        .unwrap();
+
+        assert!(load_video_preprocessor_config(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn load_video_preprocessor_config_reads_video_processor_key() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("processor_config.json"),
+            r#"{"video_processor":{"image_processor_type":"Qwen3VLVideoProcessor","do_resize":true}}"#,
+        )
+        .unwrap();
+
+        let config =
+            load_video_preprocessor_config(tmp.path()).expect("video_processor should parse");
+        assert_eq!(
+            config.image_processor_type.as_deref(),
+            Some("Qwen3VLVideoProcessor")
+        );
+        assert_eq!(config.do_resize, Some(true));
+    }
+
     #[tokio::test]
     async fn registry_remove_drops_cached_entry() {
         let reg = MultimodalConfigRegistry::new();
