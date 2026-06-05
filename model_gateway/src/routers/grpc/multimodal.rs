@@ -680,6 +680,10 @@ async fn process_multimodal_parts(
     let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
 
     let preprocess_started = Instant::now();
+    let _epd_tl = std::env::var("EPD_TL").is_ok();
+    if _epd_tl {
+        tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_start num_images={} epoch_ms={}", images.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    }
     let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
         let processor = registry
             .find(&model_id_owned, model_type_owned.as_deref())
@@ -747,6 +751,10 @@ async fn process_multimodal_parts(
     .await
     .map_err(|e| anyhow::anyhow!("Preprocessing task panicked: {e}"))??;
     let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
+
+    if _epd_tl {
+        tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_end num_tokens={} epoch_ms={}", preprocessed.num_img_tokens.iter().sum::<usize>(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    }
 
     debug!(
         ?modality,
