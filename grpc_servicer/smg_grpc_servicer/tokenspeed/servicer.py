@@ -375,14 +375,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         supports_vision = bool(getattr(model_config, "is_multimodal", False))
         image_modality = getattr(tokenspeed_scheduler_pb2, "IMAGE", 1)
         video_modality = getattr(tokenspeed_scheduler_pb2, "VIDEO", 3)
-        audio_modality = getattr(tokenspeed_scheduler_pb2, "AUDIO", 2)
         supported_modalities = []
         if supports_vision:
             supported_modalities.append(image_modality)
             if hf_config is not None and getattr(hf_config, "video_token_id", None) is not None:
                 supported_modalities.append(video_modality)
-            if hf_config is not None and getattr(hf_config, "audio_token_id", None) is not None:
-                supported_modalities.append(audio_modality)
 
         response_kwargs = dict(
             model_path=model_path,
@@ -901,9 +898,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             items.append(mm_item)
 
             if item_proto.HasField("placeholder_token_id"):
-                if modality is Modality.IMAGE:
+                if modality == Modality.IMAGE:
                     im_token_id = int(item_proto.placeholder_token_id)
-                elif modality is Modality.VIDEO:
+                elif modality == Modality.VIDEO:
                     video_token_id = int(item_proto.placeholder_token_id)
 
         if not items:
@@ -921,7 +918,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if modality == getattr(tokenspeed_scheduler_pb2, "VIDEO", 3):
             return Modality.VIDEO
         if modality == getattr(tokenspeed_scheduler_pb2, "AUDIO", 2):
-            return Modality.AUDIO
+            raise ValueError("TokenSpeed audio multimodal inputs are not supported yet")
         raise ValueError(f"Unsupported multimodal item modality: {modality}")
 
     @staticmethod
@@ -930,11 +927,11 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
     ) -> None:
         has_image_grid = "image_grid_thw" in model_specific_data
         has_video_grid = "video_grid_thw" in model_specific_data
-        if modality is Modality.IMAGE and has_video_grid:
+        if modality == Modality.IMAGE and has_video_grid:
             raise ValueError("IMAGE MultimodalItem must not carry video_grid_thw")
-        if modality is Modality.VIDEO and has_image_grid:
+        if modality == Modality.VIDEO and has_image_grid:
             raise ValueError("VIDEO MultimodalItem must not carry image_grid_thw")
-        if modality is Modality.VIDEO and not has_video_grid:
+        if modality == Modality.VIDEO and not has_video_grid:
             raise ValueError("VIDEO MultimodalItem must carry video_grid_thw")
 
     @staticmethod
@@ -986,6 +983,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             raise ValueError("TensorData.shm payload is not implemented yet")
         if payload == "remote":
             raise ValueError("TensorData.remote payload is not implemented yet")
+        legacy_data = getattr(tensor_data, "data", b"")
+        if legacy_data:
+            return bytes(legacy_data)
         raise ValueError("TensorData payload is required")
 
     @staticmethod

@@ -586,7 +586,7 @@ mod tests {
     use llm_tokenizer::chat_template::ChatTemplateContentFormat;
     use openai_protocol::{
         chat::{ChatMessage, MessageContent},
-        common::{ContentPart, ImageUrl},
+        common::{ContentPart, ImageUrl, VideoUrl},
     };
     use serde_json::json;
 
@@ -624,6 +624,35 @@ mod tests {
             "Hello\nWorld"
         );
         assert_eq!(transformed_message["role"].as_str().unwrap(), "user");
+    }
+
+    #[test]
+    fn test_transform_messages_string_format_with_video_placeholder() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Watch this".to_string(),
+                },
+                ContentPart::VideoUrl {
+                    video_url: VideoUrl {
+                        url: "https://example.com/video.mp4".to_string(),
+                    },
+                },
+            ]),
+            name: None,
+        }];
+
+        let result = process_content_format(
+            &messages,
+            ChatTemplateContentFormat::String,
+            Some("<|video|>"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result[0]["content"].as_str().unwrap(),
+            "Watch this\n<|video|>"
+        );
     }
 
     #[test]

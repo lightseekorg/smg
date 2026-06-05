@@ -109,18 +109,22 @@ message TokenizedInput {
   string original_text = 2; // cosmetic, for worker logs
 }
 
-// A typed tensor: shape + dtype + transport-specific payload.
+// A typed tensor: raw little-endian bytes + shape + dtype.
+//
+// Keep tags 1/2/3 compatible with the original image-only ABI so rolling
+// gateway/worker upgrades do not reinterpret existing tensor fields.
 message TensorData {
-  repeated uint32 shape = 1;   // Dimension sizes
-  string dtype = 2;            // "float32", "bfloat16", "float16", "int64", "uint32"
+  bytes data = 1;              // Legacy inline bytes.
+  repeated uint32 shape = 2;   // Dimension sizes
+  string dtype = 3;            // "float32", "bfloat16", "float16", "int64", "uint32"
 
   oneof payload {
-    // Current path: raw little-endian bytes carried in the gRPC message.
-    bytes inline = 3;
+    // New inline path. Producers may also use legacy field 1 for compatibility.
+    bytes inline = 4;
     // Same-host CPU shared memory path.
-    ShmHandle shm = 4;
+    ShmHandle shm = 5;
     // Transport-specific remote descriptor (NIXL/RDMA/object-store/etc.).
-    RemoteTensorHandle remote = 5;
+    RemoteTensorHandle remote = 6;
   }
 }
 

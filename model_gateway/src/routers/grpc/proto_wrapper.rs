@@ -234,10 +234,12 @@ impl TokenSpeedMultimodalData {
 }
 
 fn tensor_bytes_to_tokenspeed(value: TensorBytes) -> tokenspeed::TensorData {
+    let data = value.data;
     tokenspeed::TensorData {
+        data: data.clone(),
         shape: value.shape,
         dtype: value.dtype,
-        payload: Some(tokenspeed::tensor_data::Payload::Inline(value.data)),
+        payload: Some(tokenspeed::tensor_data::Payload::Inline(data)),
     }
 }
 

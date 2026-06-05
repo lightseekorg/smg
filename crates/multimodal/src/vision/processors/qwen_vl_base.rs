@@ -207,6 +207,13 @@ impl QwenVLProcessorBase {
     ) -> Result<(usize, usize), TransformError> {
         let factor = self.get_factor();
 
+        if num_frames == 0 {
+            return Err(TransformError::InvalidShape {
+                expected: "num_frames > 0".to_string(),
+                actual: vec![num_frames],
+            });
+        }
+
         if height < factor || width < factor {
             return Err(TransformError::InvalidShape {
                 expected: format!("height and width >= factor ({factor})"),
@@ -233,15 +240,13 @@ impl QwenVLProcessorBase {
             num_frames.div_ceil(self.config.temporal_patch_size) * self.config.temporal_patch_size;
         let resized_pixels = (t_bar * h_bar * w_bar) as f64;
         if resized_pixels > self.config.max_pixels as f64 {
-            let beta =
-                ((num_frames * height * width) as f64 / self.config.max_pixels as f64).sqrt();
+            let beta = ((t_bar * height * width) as f64 / self.config.max_pixels as f64).sqrt();
             h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
             w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
             h_bar = h_bar.max(factor);
             w_bar = w_bar.max(factor);
         } else if resized_pixels < self.config.min_pixels as f64 {
-            let beta =
-                (self.config.min_pixels as f64 / (num_frames * height * width) as f64).sqrt();
+            let beta = (self.config.min_pixels as f64 / (t_bar * height * width) as f64).sqrt();
             h_bar = ((height as f64 * beta / factor as f64).ceil() as usize) * factor;
             w_bar = ((width as f64 * beta / factor as f64).ceil() as usize) * factor;
         }
@@ -609,6 +614,10 @@ impl ImagePreProcessor for QwenVLProcessorBase {
                 )
                 .with_extra(
                     "patches_per_video",
+                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
+                )
+                .with_extra(
+                    "patches_per_image",
                     ModelSpecificValue::int_1d(vec![num_patches as i64]),
                 );
 

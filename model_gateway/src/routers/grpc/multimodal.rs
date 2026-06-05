@@ -9,7 +9,11 @@
 //! functions differ because they work with different input types (`ChatMessage` vs
 //! `InputMessage`).
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -681,9 +685,8 @@ async fn process_multimodal_parts(
                 let video = videos_for_preprocess
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
-                let frames: Vec<image::DynamicImage> = video.frames.iter().cloned().collect();
                 processor
-                    .preprocess_video(&frames, &pp_config)
+                    .preprocess_video(video.frames.as_slice(), &pp_config)
                     .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
             }
             _ => Err(anyhow::anyhow!(
@@ -1110,15 +1113,36 @@ fn tokenspeed_encoder_input_dtype(
 }
 
 fn tokenspeed_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
-    let modality_env = match modality {
-        Modality::Image | Modality::ImageEmbeds => "SMG_TOKENSPEED_IMAGE_ENCODER_INPUT_DTYPE",
-        Modality::Video => "SMG_TOKENSPEED_VIDEO_ENCODER_INPUT_DTYPE",
-        Modality::Audio => "SMG_TOKENSPEED_AUDIO_ENCODER_INPUT_DTYPE",
+    static IMAGE_DTYPE: OnceLock<Option<String>> = OnceLock::new();
+    static VIDEO_DTYPE: OnceLock<Option<String>> = OnceLock::new();
+    static AUDIO_DTYPE: OnceLock<Option<String>> = OnceLock::new();
+    static DEFAULT_DTYPE: OnceLock<Option<String>> = OnceLock::new();
+
+    let modality_dtype = match modality {
+        Modality::Image | Modality::ImageEmbeds => cached_env_dtype(
+            &IMAGE_DTYPE,
+            "SMG_TOKENSPEED_IMAGE_ENCODER_INPUT_DTYPE",
+        ),
+        Modality::Video => cached_env_dtype(
+            &VIDEO_DTYPE,
+            "SMG_TOKENSPEED_VIDEO_ENCODER_INPUT_DTYPE",
+        ),
+        Modality::Audio => cached_env_dtype(
+            &AUDIO_DTYPE,
+            "SMG_TOKENSPEED_AUDIO_ENCODER_INPUT_DTYPE",
+        ),
     };
-    std::env::var(modality_env)
-        .or_else(|_| std::env::var("SMG_TOKENSPEED_ENCODER_INPUT_DTYPE"))
-        .ok()
-        .filter(|dtype| !dtype.is_empty())
+    modality_dtype.or_else(|| {
+        cached_env_dtype(
+            &DEFAULT_DTYPE,
+            "SMG_TOKENSPEED_ENCODER_INPUT_DTYPE",
+        )
+    })
+}
+
+fn cached_env_dtype(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<String> {
+    cell.get_or_init(|| std::env::var(name).ok().filter(|dtype| !dtype.is_empty()))
+        .clone()
 }
 
 fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>) -> Option<String> {
