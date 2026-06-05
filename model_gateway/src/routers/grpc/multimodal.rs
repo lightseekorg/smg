@@ -193,17 +193,30 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
         return None;
     }
 
-    match std::fs::read_to_string(&processor_path)
+    let processor_config = match std::fs::read_to_string(&processor_path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("video_processor").cloned())
-        .and_then(|v| PreProcessorConfig::from_value(v).ok())
     {
-        Some(config) => Some(config),
+        Some(config) => config,
         None => {
             warn!(
                 path = %processor_path.display(),
-                "Failed to load video_processor from processor_config.json"
+                "Failed to load processor_config.json for video_processor"
+            );
+            return None;
+        }
+    };
+
+    let Some(video_processor) = processor_config.get("video_processor") else {
+        return None;
+    };
+    match PreProcessorConfig::from_value(video_processor.clone()) {
+        Ok(config) => Some(config),
+        Err(error) => {
+            warn!(
+                path = %processor_path.display(),
+                error = %error,
+                "Failed to parse video_processor from processor_config.json"
             );
             None
         }
