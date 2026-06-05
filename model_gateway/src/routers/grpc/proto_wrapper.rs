@@ -437,6 +437,81 @@ pub fn write_tokenspeed_shm_with(
     })
 }
 
+pub fn collect_tokenspeed_multimodal_inputs_shm_handles(
+    inputs: &tokenspeed::MultimodalInputs,
+) -> Vec<tokenspeed::ShmHandle> {
+    let mut handles = Vec::new();
+    for item in &inputs.items {
+        collect_optional_tokenspeed_tensor_shm_handles(&item.encoder_input, &mut handles);
+        for tensor in item.model_specific_tensors.values() {
+            collect_tokenspeed_tensor_shm_handles(tensor, &mut handles);
+        }
+    }
+    handles
+}
+
+pub fn collect_tokenspeed_generate_request_shm_handles(
+    request: &tokenspeed::GenerateRequest,
+) -> Vec<tokenspeed::ShmHandle> {
+    request
+        .mm_inputs
+        .as_ref()
+        .map(collect_tokenspeed_multimodal_inputs_shm_handles)
+        .unwrap_or_default()
+}
+
+pub fn cleanup_tokenspeed_shm_handles(handles: &[tokenspeed::ShmHandle]) {
+    for handle in handles {
+        let Some(name) = validate_tokenspeed_shm_name_for_cleanup(&handle.name) else {
+            tracing::warn!(
+                name = %handle.name,
+                "Skipping cleanup for invalid TokenSpeed SHM name"
+            );
+            continue;
+        };
+        let path = tokenspeed_shm_path(name);
+        match remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    path = %path.display(),
+                    "Failed to cleanup TokenSpeed SHM file"
+                );
+            }
+        }
+    }
+}
+
+fn collect_optional_tokenspeed_tensor_shm_handles(
+    tensor: &Option<tokenspeed::TensorData>,
+    handles: &mut Vec<tokenspeed::ShmHandle>,
+) {
+    let Some(tensor) = tensor else {
+        return;
+    };
+    collect_tokenspeed_tensor_shm_handles(tensor, handles);
+}
+
+fn collect_tokenspeed_tensor_shm_handles(
+    tensor: &tokenspeed::TensorData,
+    handles: &mut Vec<tokenspeed::ShmHandle>,
+) {
+    if let Some(tokenspeed::tensor_data::Payload::Shm(handle)) = &tensor.payload {
+        handles.push(handle.clone());
+    }
+}
+
+fn validate_tokenspeed_shm_name_for_cleanup(name: &str) -> Option<&str> {
+    let name = name.strip_prefix('/').unwrap_or(name);
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." || name.contains('\0')
+    {
+        return None;
+    }
+    Some(name)
+}
+
 fn next_tokenspeed_shm_name() -> String {
     let seq = TOKENSPEED_SHM_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()

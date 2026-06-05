@@ -13,7 +13,11 @@ use smg_grpc_client::{
 };
 
 use crate::routers::grpc::{
-    proto_wrapper::{ProtoEmbedComplete, ProtoEmbedRequest, ProtoGenerateRequest, ProtoStream},
+    proto_wrapper::{
+        cleanup_tokenspeed_shm_handles, collect_tokenspeed_generate_request_shm_handles,
+        collect_tokenspeed_multimodal_inputs_shm_handles, ProtoEmbedComplete, ProtoEmbedRequest,
+        ProtoGenerateRequest, ProtoStream,
+    },
     MultimodalData,
 };
 
@@ -405,8 +409,14 @@ impl GrpcClient {
                 Ok(ProtoStream::Mlx(stream))
             }
             (Self::TokenSpeed(client), ProtoGenerateRequest::TokenSpeed(boxed_req)) => {
-                let stream = client.generate(*boxed_req).await?;
-                Ok(ProtoStream::TokenSpeed(stream))
+                let shm_handles = collect_tokenspeed_generate_request_shm_handles(&boxed_req);
+                match client.generate(*boxed_req).await {
+                    Ok(stream) => Ok(ProtoStream::TokenSpeed(stream)),
+                    Err(error) => {
+                        cleanup_tokenspeed_shm_handles(&shm_handles);
+                        Err(error)
+                    }
+                }
             }
             #[expect(
                 clippy::panic,
@@ -520,14 +530,24 @@ impl GrpcClient {
                     MultimodalData::TokenSpeed(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
-                let req = client.build_generate_request_from_chat(
+                let shm_handles = tokenspeed_mm
+                    .as_ref()
+                    .map(collect_tokenspeed_multimodal_inputs_shm_handles)
+                    .unwrap_or_default();
+                let req = match client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
                     tokenspeed_mm,
                     options.tool_constraints,
-                )?;
+                ) {
+                    Ok(req) => req,
+                    Err(error) => {
+                        cleanup_tokenspeed_shm_handles(&shm_handles);
+                        return Err(error);
+                    }
+                };
                 Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
             }
         }
@@ -610,14 +630,24 @@ impl GrpcClient {
                     MultimodalData::TokenSpeed(data) => data.into_proto(),
                     _ => unreachable!("caller guarantees matching variant"),
                 });
-                let req = client.build_generate_request_from_messages(
+                let shm_handles = tokenspeed_mm
+                    .as_ref()
+                    .map(collect_tokenspeed_multimodal_inputs_shm_handles)
+                    .unwrap_or_default();
+                let req = match client.build_generate_request_from_messages(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
                     tokenspeed_mm,
                     options.tool_constraints,
-                )?;
+                ) {
+                    Ok(req) => req,
+                    Err(error) => {
+                        cleanup_tokenspeed_shm_handles(&shm_handles);
+                        return Err(error);
+                    }
+                };
                 Ok(ProtoGenerateRequest::TokenSpeed(Box::new(req)))
             }
         }
