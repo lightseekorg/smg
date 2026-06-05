@@ -1,6 +1,9 @@
 //! Essential coverage for the Kimi-K2.5 tool renderer:
 //!   - encoder shapes a nested-object schema with `?` for optional fields
 //!   - encoder emits a TS union for `enum` schemas
+//!   - encoder preserves `$defs` insertion order (byte-equal with upstream)
+//!   - encoder abandons the TS namespace (returns `None`) on unsupported
+//!     schemas, so the chat template falls back to JSON tool declarations
 //!   - end-to-end: a tokenizer loaded with `KimiK25ForConditionalGeneration`
 //!     dispatches tools through the TS-namespace encoder (not the JSON fallback)
 
@@ -75,6 +78,90 @@ fn encoder_renders_enum_as_union() {
         encode_tools_to_typescript(&tools).as_deref(),
         Some(expected)
     );
+}
+
+#[test]
+fn encoder_preserves_defs_insertion_order() {
+    // `$defs` are declared Zebra-then-Apple (non-alphabetical). Upstream emits
+    // interfaces in insertion order; a naive sort would flip them to Apple,
+    // Zebra and break byte-equivalence.
+    let tools: Vec<Value> = serde_json::from_str(
+        r##"[{
+            "type": "function",
+            "function": {
+                "name": "zoo",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {
+                        "Zebra": {"type": "object", "properties": {"stripes": {"type": "integer"}}, "required": ["stripes"]},
+                        "Apple": {"type": "object", "properties": {"color": {"type": "string"}}, "required": ["color"]}
+                    },
+                    "properties": {
+                        "z": {"$ref": "#/$defs/Zebra"},
+                        "a": {"$ref": "#/$defs/Apple"}
+                    },
+                    "required": ["z", "a"]
+                }
+            }
+        }]"##,
+    )
+    .unwrap();
+
+    let out = encode_tools_to_typescript(&tools).expect("schema is fully supported");
+    let zebra = out
+        .find("interface Zebra")
+        .expect("Zebra interface present");
+    let apple = out
+        .find("interface Apple")
+        .expect("Apple interface present");
+    assert!(
+        zebra < apple,
+        "expected $defs insertion order (Zebra before Apple), got:\n{out}"
+    );
+}
+
+#[test]
+fn encoder_returns_none_on_unresolvable_ref() {
+    // `$ref` points at a definition that does not exist. Upstream raises and
+    // the caller falls back to JSON; we signal that by returning `None`.
+    let tools: Vec<Value> = serde_json::from_str(
+        r##"[{
+            "type": "function",
+            "function": {
+                "name": "broken",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"$ref": "#/$defs/Missing"}},
+                    "required": ["x"]
+                }
+            }
+        }]"##,
+    )
+    .unwrap();
+
+    assert_eq!(encode_tools_to_typescript(&tools), None);
+}
+
+#[test]
+fn encoder_returns_none_on_unrecognized_schema() {
+    // A non-empty property schema with no type/anyOf/enum/$ref is invalid;
+    // upstream raises `ValueError`, so we abandon the TS namespace.
+    let tools: Vec<Value> = serde_json::from_str(
+        r#"[{
+            "type": "function",
+            "function": {
+                "name": "weird",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"title": "no recognized keyword"}},
+                    "required": ["x"]
+                }
+            }
+        }]"#,
+    )
+    .unwrap();
+
+    assert_eq!(encode_tools_to_typescript(&tools), None);
 }
 
 #[test]

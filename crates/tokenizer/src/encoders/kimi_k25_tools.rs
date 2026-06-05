@@ -3,7 +3,7 @@
 //! Ported from <https://huggingface.co/moonshotai/Kimi-K2.5/blob/main/tool_declaration_ts.py>.
 //! Mirrors the upstream Python reference function-by-function. Output must be
 //! byte-equal to the Python reference; gated by golden tests in
-//! `tests/kimi_k25.rs`.
+//! `tests/kimi_k25_renderer_detection.rs`.
 
 use std::{collections::HashMap, fmt::Write};
 
@@ -22,16 +22,32 @@ pub fn encode_tools_to_typescript(tools: &[Value]) -> Option<String> {
     if tools.is_empty() {
         return None;
     }
-    let function_strs: Vec<String> = tools
-        .iter()
-        .filter_map(|t| {
-            if t.get("type").and_then(Value::as_str) != Some("function") {
+    let mut function_strs: Vec<String> = Vec::new();
+    for t in tools {
+        // Skip unsupported tool types (e.g. "_plugin"), matching upstream.
+        if t.get("type").and_then(Value::as_str) != Some("function") {
+            continue;
+        }
+        // Upstream `if func_def:` skips a missing/empty function object.
+        let func = match t.get("function") {
+            Some(f) if f.as_object().is_some_and(|o| !o.is_empty()) => f,
+            _ => continue,
+        };
+        match openai_function_to_typescript(func) {
+            Some(s) => function_strs.push(s),
+            // Upstream raises here; the caller catches and renders JSON tool
+            // declarations instead. We return `None` so `tools_ts_str` stays
+            // undefined and the chat template takes its JSON fallback branch.
+            None => {
+                tracing::warn!(
+                    "Kimi-K2.5 tool schema unsupported by the TypeScript encoder; \
+                     leaving tools_ts_str undefined so the template falls back to JSON \
+                     tool declarations"
+                );
                 return None;
             }
-            let func = t.get("function")?;
-            Some(openai_function_to_typescript(func))
-        })
-        .collect();
+        }
+    }
     if function_strs.is_empty() {
         return None;
     }
@@ -76,7 +92,7 @@ pub(crate) fn apply_kimi_k25_tools(
 // Function-level encoding
 // ---------------------------------------------------------------------------
 
-fn openai_function_to_typescript(function: &Value) -> String {
+fn openai_function_to_typescript(function: &Value) -> Option<String> {
     let parameters = function
         .get("parameters")
         .cloned()
@@ -103,13 +119,19 @@ fn openai_function_to_typescript(function: &Value) -> String {
         interfaces.push(format!("interface parameters {{{body}}}"));
     }
 
-    let mut defs_clone: Vec<(String, Value)> = registry
-        .definitions
+    // Emit definitions in `$defs` insertion order to match upstream, which
+    // iterates an insertion-ordered Python dict (do NOT sort).
+    let defs_ordered: Vec<(String, Value)> = registry
+        .order
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .filter_map(|name| {
+            registry
+                .definitions
+                .get(name)
+                .map(|v| (name.clone(), v.clone()))
+        })
         .collect();
-    defs_clone.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, schema) in defs_clone {
+    for (name, schema) in defs_ordered {
         let obj_type = parse_parameter_type(&schema, &mut registry);
         let body = obj_type.to_typescript("", &registry);
         let mut def_str = String::new();
@@ -151,11 +173,19 @@ fn openai_function_to_typescript(function: &Value) -> String {
         format_description(description, "")
     };
 
-    [interface_str, desc_block, type_def]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    // Upstream raises on unsupported schema constructs, aborting the whole TS
+    // encoding; mirror that by signalling the caller to drop to JSON.
+    if registry.unsupported {
+        return None;
+    }
+
+    Some(
+        [interface_str, desc_block, type_def]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -165,14 +195,29 @@ fn openai_function_to_typescript(function: &Value) -> String {
 #[derive(Default)]
 struct SchemaRegistry {
     definitions: HashMap<String, Value>,
+    /// Insertion order of `$defs` keys. Upstream iterates a Python `dict`,
+    /// which is insertion-ordered, so we must preserve that order (not sort)
+    /// to stay byte-equal for schemas whose keys aren't alphabetical.
+    order: Vec<String>,
     has_self_ref: bool,
     depth: usize,
+    /// Set when a schema construct is encountered that upstream would `raise`
+    /// on (unresolvable `$ref`, unsupported reference format, or an
+    /// unrecognized schema shape). The caller abandons the TypeScript
+    /// namespace and leaves `tools_ts_str` undefined so the chat template
+    /// falls back to JSON tool declarations — matching upstream semantics.
+    unsupported: bool,
 }
 
 impl SchemaRegistry {
     fn register_definitions(&mut self, defs: &Value) {
         if let Some(map) = defs.as_object() {
             for (name, schema) in map {
+                // A Python dict keeps a key's original position on re-assignment;
+                // only record order the first time we see a key.
+                if !self.definitions.contains_key(name) {
+                    self.order.push(name.clone());
+                }
                 self.definitions.insert(name.clone(), schema.clone());
             }
         }
@@ -184,8 +229,17 @@ impl SchemaRegistry {
             return Some(serde_json::json!({"$self_ref": true}));
         }
         if let Some(name) = reference.strip_prefix("#/$defs/") {
-            return self.definitions.get(name).cloned();
+            match self.definitions.get(name).cloned() {
+                Some(v) => return Some(v),
+                // Upstream: `raise ValueError(f"Reference not found: {ref}")`.
+                None => {
+                    self.unsupported = true;
+                    return None;
+                }
+            }
         }
+        // Upstream: `raise ValueError(f"Unsupported reference format: {ref}")`.
+        self.unsupported = true;
         None
     }
 }
@@ -501,7 +555,8 @@ impl ParameterTypeEnum {
         self.values
             .iter()
             .map(|v| match v {
-                Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+                // Upstream emits `f'"{e}"'` with no escaping; match it byte-for-byte.
+                Value::String(s) => format!("\"{s}\""),
                 Value::Null => "None".to_string(),
                 Value::Bool(true) => "True".to_string(),
                 Value::Bool(false) => "False".to_string(),
@@ -630,7 +685,11 @@ fn parse_parameter_type_inner(schema: &Value, registry: &mut SchemaRegistry) -> 
     }
     let obj = match schema.as_object() {
         Some(o) => o,
-        None => return ParameterType::Scalar(ParameterTypeScalar::any()),
+        // A non-object, non-boolean schema is malformed; upstream raises.
+        None => {
+            registry.unsupported = true;
+            return ParameterType::Scalar(ParameterTypeScalar::any());
+        }
     };
 
     if obj.contains_key("$ref") {
@@ -657,10 +716,13 @@ fn parse_parameter_type_inner(schema: &Value, registry: &mut SchemaRegistry) -> 
         }
     }
     if obj.is_empty() {
+        // Upstream maps the empty schema `{}` to `any`.
         return ParameterType::Scalar(ParameterTypeScalar::any());
     }
-    // Fallthrough: schemas with no type/anyOf/enum/$ref. Degrade to `any`
-    // permissively rather than erroring — matches the Python reference.
+    // Fallthrough: a non-empty schema with no type/anyOf/enum/$ref. Upstream
+    // raises `ValueError(f"Invalid JSON Schema object: ...")` here; flag it so
+    // the caller drops the TS namespace and falls back to JSON.
+    registry.unsupported = true;
     ParameterType::Scalar(ParameterTypeScalar::any())
 }
 
