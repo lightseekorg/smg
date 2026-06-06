@@ -246,6 +246,15 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # mlx_lm/server.py's ``ctx.stop()`` pattern.
         self._aborted_request_ids: set[str] = set()
         self._pending_lock = threading.Lock()
+        # Admission coalescing window (seconds). When a fresh batch is forming
+        # (nothing generating yet) and only part of a concurrent burst has
+        # landed in _pending, a single next() prefill chunk (seconds long for a
+        # multi-thousand-token prompt) blocks admission of the siblings that
+        # arrive microseconds later — splitting one wave into misaligned
+        # prefill groups and inflating TTFT ~50% at concurrency. Waiting a few
+        # ms for the burst to fully arrive lets them prefill as one batch.
+        # Negligible vs a multi-second prefill; only applied when idle.
+        self._coalesce_s = float(os.environ.get("MLX_COALESCE_MS", "50")) / 1000.0
         # Resolve context length once — config doesn't change at runtime,
         # and Generate was previously scanning these keys on every request.
         self._ctx_limit = 0
@@ -590,6 +599,19 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             prompt_responses: list = []
             gen_responses: list = []
             try:
+                # Phase 0: coalesce a concurrent burst into one prefill batch.
+                # Only when idle (a fresh batch is forming) and the burst is
+                # still arriving (0 < pending < prefill_batch_size): wait a
+                # short window so siblings land before the first multi-second
+                # prefill chunk commits and blocks their admission. Skipped
+                # entirely once a batch is generating, preserving the
+                # per-step (mlx-lm.server-style) mid-decode admission latency.
+                if self._coalesce_s and not self._active_uids:
+                    with self._pending_lock:
+                        n_pending = len(self._pending)
+                    if 0 < n_pending < self._prefill_batch_size:
+                        time.sleep(self._coalesce_s)
+
                 # Phase 1: admit pending. NOT gated on _active_uids —
                 # pending requests can join while a batch is mid-decode,
                 # the whole point of mlx-lm.server-style scheduling.
