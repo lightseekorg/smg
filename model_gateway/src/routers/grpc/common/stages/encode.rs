@@ -157,40 +157,49 @@ impl PipelineStage for EncodeStage {
             }));
         }
 
-        // Await all encode RPCs. If ANY fails (or its task panicked) we must error
-        // BEFORE request building / execution: a prefill dispatched without its
-        // encode peer would hang forever waiting on the Mooncake room.
-        for join_res in join_all(sends).await {
-            match join_res {
-                Ok(Ok(())) => {}
-                Ok(Err(message)) => {
-                    error!(
-                        function = "EncodeStage::execute",
-                        error = %message,
-                        "Encode RPC failed; aborting before prefill dispatch"
-                    );
-                    return Err(error::internal_error("encode_dispatch_failed", message));
-                }
-                Err(join_err) => {
-                    error!(
-                        function = "EncodeStage::execute",
-                        error = %join_err,
-                        "Encode dispatch task panicked; aborting before prefill dispatch"
-                    );
-                    return Err(error::internal_error(
-                        "encode_dispatch_panicked",
-                        join_err.to_string(),
-                    ));
-                }
-            }
-        }
-
+        // Record the handshakes NOW (rooms/host/port are gateway-minted above, not
+        // returned by the encode RPC) so RequestBuilding + RequestExecution proceed
+        // immediately and dispatch the prefill while the encode RPCs are still
+        // in flight. The prefill's embedding-receiver then registers WHILE the encode
+        // is transferring pixels / running the ViT, so the encode sender no longer
+        // PARKS ~400ms/image waiting for a late receiver -- that park (the prefill
+        // dispatched only AFTER a fully-awaited Encode stage) was the dominant EPD
+        // per-image cost. Measured: ViT ~30ms, RDMA ~20ms, but enc_send_issue ->
+        // enc_send_start (the park) ~358-470ms.
         debug!(
             num_images = handshakes.len(),
             num_encode_workers = pool_len,
-            "EPD encode dispatch complete"
+            "EPD encode dispatch issued (non-blocking; prefill registers concurrently)"
         );
         ctx.state.encode_handshake = Some(handshakes);
+
+        // Supervise the in-flight encode RPCs in the background instead of blocking
+        // the stage on join_all. A failed/lost embedding is caught by the prefill's
+        // embedding-receive timeout (engine-side), which aborts the request and
+        // propagates the failure to the decode (so the client gets an error, not a
+        // hang). Healthy workers are pre-filtered by WorkerSelection, so a mid-flight
+        // RPC failure here is rare.
+        tokio::spawn(async move {
+            for join_res in join_all(sends).await {
+                match join_res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(message)) => {
+                        error!(
+                            function = "EncodeStage::execute",
+                            error = %message,
+                            "Encode RPC failed after prefill dispatch; embedding-receive timeout will abort the request"
+                        );
+                    }
+                    Err(join_err) => {
+                        error!(
+                            function = "EncodeStage::execute",
+                            error = %join_err,
+                            "Encode dispatch task panicked after prefill dispatch"
+                        );
+                    }
+                }
+            }
+        });
         Ok(None)
     }
 
