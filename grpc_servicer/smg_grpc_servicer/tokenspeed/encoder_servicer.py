@@ -71,13 +71,21 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # buffer from the gateway's exported memory instead of receiving it inline.
         # Lazy + gated so non-RDMA deploys never import NIXL.
         self._nixl_agent = None
+        self._rdma_md_sent = set()  # (ip, port) we've already send_local_metadata'd
         if os.environ.get("SMG_MM_PIXEL_RDMA") in ("1", "true"):
             try:
-                from nixl._api import nixl_agent, nixl_agent_config
+                try:
+                    from nixl_cu13._api import nixl_agent, nixl_agent_config
+                except ImportError:
+                    from nixl._api import nixl_agent, nixl_agent_config
 
+                # Initiator side: a listen thread (ephemeral port) is needed so the
+                # bidirectional metadata exchange with the gateway's listener works.
                 self._nixl_agent = nixl_agent(
                     f"smg-encode-{self._bootstrap_host}-{self._bootstrap_port}",
-                    nixl_agent_config(backends=["UCX"]),
+                    nixl_agent_config(
+                        enable_listen_thread=True, listen_port=0, backends=["UCX"]
+                    ),
                 )
                 logger.info("EPD RDMA: encode NIXL puller agent up")
             except Exception as e:  # noqa: BLE001
@@ -90,37 +98,55 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         """PULL the pixel tensor from the gateway's exported NIXL memory (one-sided
         READ), then reconstruct it exactly like the inline path.
 
-        Descriptor wire format (set by the gateway rdma.rs): [addr u64 LE][agent_md].
-        We add the gateway as a remote agent, READ nbytes from its addr into a pinned
-        landing buffer, tag the transfer with the bootstrap_room so the gateway frees
-        the MR, then validate length + reinterpret (the M1 corruption guard).
+        Descriptor wire format (gateway rdma.rs): [addr u64 LE][port u16 LE][ip utf8].
+        Cross-node NIXL needs the bidirectional metadata exchange against the
+        gateway's listener (fetch_remote_metadata + send_local_metadata) BEFORE the
+        one-sided READ -- a one-way add_remote_agent hits the gateway's non-listening
+        ephemeral worker port ("Connection refused"). Then READ nbytes from addr,
+        tag the transfer with the room so the gateway frees the MR, length-assert.
         """
+        import time
+
         import numpy as np
         import torch
 
         agent = self._nixl_agent
         desc = bytes(td.remote.descriptor)
         nbytes = int(td.remote.nbytes)
-        if len(desc) < 8:
+        if len(desc) < 10:
             raise ValueError("remote descriptor too short")
         remote_addr = int.from_bytes(desc[:8], "little")
-        md = desc[8:]
+        port = int.from_bytes(desc[8:10], "little")
+        ip = desc[10:].decode()
+        gw_name = "smg-gateway-encode"
 
-        remote_name = agent.add_remote_agent(md)
-        if isinstance(remote_name, (bytes, bytearray)):
-            remote_name = remote_name.decode()
+        # Bidirectional metadata exchange via the gateway's listener. Re-fetch each
+        # call so a newly-registered region becomes visible; send our own md once per
+        # endpoint so the gateway can complete the connection wireup.
+        agent.fetch_remote_metadata(gw_name, ip, port)
+        if (ip, port) not in self._rdma_md_sent:
+            agent.send_local_metadata(ip, port)
+            self._rdma_md_sent.add((ip, port))
 
         landing = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
         laddr = landing.data_ptr()
         reg = agent.get_reg_descs([(laddr, nbytes, 0, "")], "DRAM")
         agent.register_memory(reg)
         try:
-            local = agent.get_xfer_descs([(laddr, nbytes, 0)], "DRAM")
             remote = agent.get_xfer_descs([(remote_addr, nbytes, 0)], "DRAM")
-            tag = str(room).encode()
-            h = agent.initialize_xfer("READ", local, remote, remote_name, tag)
+            # Wait for this region's metadata to load before building the xfer.
+            ready = False
+            for _ in range(5000):
+                if agent.check_remote_metadata(gw_name, remote):
+                    ready = True
+                    break
+                time.sleep(0.001)
+            if not ready:
+                raise RuntimeError(f"NIXL remote metadata not ready room={room}")
+            local = agent.get_xfer_descs([(laddr, nbytes, 0)], "DRAM")
+            h = agent.initialize_xfer("READ", local, remote, gw_name, str(room).encode())
             state = agent.transfer(h)
-            while state == "PROC":
+            while state in ("PROC", "IN_PROG"):
                 state = agent.check_xfer_state(h)
             agent.release_xfer_handle(h)
             if state != "DONE":

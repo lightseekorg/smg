@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use nixl_sys::{
-    Agent, Backend, MemType, MemoryRegion, NixlDescriptor, NotificationMap, RegistrationHandle,
+    Agent, AgentConfig, Backend, MemType, MemoryRegion, NixlDescriptor, NotificationMap,
+    RegistrationHandle,
 };
 use parking_lot::Mutex;
 use tracing::{debug, error, warn};
@@ -116,12 +117,44 @@ fn agent() -> Option<&'static Mutex<GatewayRdma>> {
 }
 
 fn init_agent() -> Result<GatewayRdma, nixl_sys::NixlError> {
-    let agent = Agent::new("smg-gateway-encode")?;
+    // enable_listen_thread + a fixed listen_port so the encode worker (initiator)
+    // can do the bidirectional NIXL metadata exchange (fetch_remote_metadata +
+    // send_local_metadata) against this gateway (target). Without the listener the
+    // worker's connect hits the ephemeral worker port -> "Connection refused"
+    // cross-node (same-host worked over shm). enable_prog_thread (default) keeps the
+    // UCX worker progressing so one-sided READs complete without our intervention.
+    let cfg = AgentConfig {
+        enable_listen_thread: true,
+        listen_port: i32::from(gw_listen_port()),
+        ..Default::default()
+    };
+    let agent = Agent::new_configured(GATEWAY_AGENT_NAME, &cfg)?;
     let (_mems, params) = agent.get_plugin_params("UCX")?;
     let backend = agent.create_backend("UCX", &params)?;
     Ok(GatewayRdma {
         agent,
         _backend: backend,
+    })
+}
+
+/// Fixed agent name the encode worker passes to fetch_remote_metadata.
+const GATEWAY_AGENT_NAME: &str = "smg-gateway-encode";
+
+/// The gateway's RDMA listener IP (its RoCE address, e.g. 172.16.1.80) that the
+/// encode worker dials for the metadata exchange. Empty -> RDMA disabled (inline).
+fn gw_listen_ip() -> &'static str {
+    static IP: OnceLock<String> = OnceLock::new();
+    IP.get_or_init(|| std::env::var("SMG_RDMA_LISTEN_IP").unwrap_or_default())
+}
+
+/// The gateway's NIXL listener port (default 18515).
+fn gw_listen_port() -> u16 {
+    static PORT: OnceLock<u16> = OnceLock::new();
+    *PORT.get_or_init(|| {
+        std::env::var("SMG_RDMA_LISTEN_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(18515)
     })
 }
 
@@ -157,10 +190,16 @@ fn spawn_reaper() {
 
 /// Register `bytes` (the serialized pixel buffer for one image) with NIXL, keyed by
 /// `room` (its bootstrap_room), and return the wire descriptor for the puller:
-/// `[addr u64 LE][agent_metadata]`. The buffer stays pinned in MR_REGISTRY until the
-/// worker's free-notif or the TTL. On any failure returns `Err(bytes)` so the caller
-/// re-attaches them as the inline payload (no behaviour change).
+/// `[addr u64 LE][port u16 LE][listener_ip utf8]`. The worker connects to the
+/// gateway's listener (ip:port) for the bidirectional metadata exchange, then reads
+/// `nbytes` (the proto field) from `addr`. The buffer stays pinned in MR_REGISTRY
+/// until the worker's free-notif or the TTL. On any failure returns `Err(bytes)` so
+/// the caller re-attaches them as the inline payload (no behaviour change).
 pub(crate) fn export_pixel_buffer(room: i32, bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
+    if gw_listen_ip().is_empty() {
+        // No listener IP configured -> cannot do the cross-node metadata exchange.
+        return Err(bytes);
+    }
     let Some(g) = agent() else {
         return Err(bytes);
     };
@@ -169,24 +208,13 @@ pub(crate) fn export_pixel_buffer(room: i32, bytes: Vec<u8>) -> Result<Vec<u8>, 
     let buf = Arc::new(bytes);
     let addr = buf.as_ptr() as u64;
     let region = HostDramRegion(buf.clone());
-
-    let md = {
+    {
         let guard = g.lock();
         let handle = match guard.agent.register_memory(&region, None) {
             Ok(h) => h,
             Err(e) => {
                 warn!(error = ?e, room, "EPD RDMA: register_memory failed; inline fallback");
                 drop(guard);
-                drop(region);
-                return Err(Arc::try_unwrap(buf).unwrap_or_default());
-            }
-        };
-        let md = match guard.agent.get_local_md() {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(error = ?e, room, "EPD RDMA: get_local_md failed; inline fallback");
-                drop(guard);
-                drop(handle);
                 drop(region);
                 return Err(Arc::try_unwrap(buf).unwrap_or_default());
             }
@@ -199,18 +227,21 @@ pub(crate) fn export_pixel_buffer(room: i32, bytes: Vec<u8>) -> Result<Vec<u8>, 
                 at: Instant::now(),
             },
         );
-        md
-    };
+    }
     drop(region);
 
-    let mut descriptor = Vec::with_capacity(8 + md.len());
+    let ip = gw_listen_ip().as_bytes();
+    let port = gw_listen_port();
+    let mut descriptor = Vec::with_capacity(10 + ip.len());
     descriptor.extend_from_slice(&addr.to_le_bytes());
-    descriptor.extend_from_slice(&md);
+    descriptor.extend_from_slice(&port.to_le_bytes());
+    descriptor.extend_from_slice(ip);
     debug!(
         room,
         addr,
-        md_bytes = md.len(),
-        "EPD RDMA: exported pixel MR"
+        "EPD RDMA: exported pixel MR (listener {}:{})",
+        gw_listen_ip(),
+        port
     );
     Ok(descriptor)
 }
