@@ -957,10 +957,16 @@ fn expand_tokens(
     clippy::unreachable,
     reason = "MLX multimodal rejected by caller before reaching here"
 )]
+/// `skip_pixel_values`: TokenSpeed EPD only -- the prefill receives embeddings over
+/// Mooncake and never reads pixel_values (they're stripped from its request anyway),
+/// so don't serialize the ~100 MB tensor just to drop it. Saved ~550 ms/req in
+/// RequestBuilding at high concurrency (it delayed the prefill dispatch and parked
+/// the encode sender). The encode leg keeps its pixels via assemble_tokenspeed_from_split.
 pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
     workers: Option<&WorkerSelection>,
+    skip_pixel_values: bool,
 ) -> Result<MultimodalData> {
     match intermediate {
         MultimodalIntermediate::Precomputed(precomputed) => match client {
@@ -979,6 +985,7 @@ pub(crate) fn assemble_multimodal_data(
             GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
                 precomputed,
                 workers,
+                skip_pixel_values,
             )?)),
             GrpcClient::Mlx(_) => unreachable!(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
@@ -1067,6 +1074,7 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
 fn assemble_tokenspeed(
     intermediate: PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
+    skip_pixel_values: bool,
 ) -> Result<TokenSpeedMultimodalData> {
     let log_timing = log_mm_timing_enabled();
     let total_started = Instant::now();
@@ -1097,23 +1105,30 @@ fn assemble_tokenspeed(
     // cleanup, leaking files until the next sweep.
     let mut items: Vec<TokenSpeedMultimodalItem> = Vec::with_capacity(item_count);
     for item_index in 0..item_count {
-        let item_encoder_input = match encoder_input_for_item(
-            &intermediate.preprocessed,
-            &intermediate.field_layouts,
-            item_index,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                cleanup_tokenspeed_items_encoder_shm(&items, None);
-                return Err(error);
-            }
-        };
         let encoder_input_started = Instant::now();
-        let encoder_input = serialize_array_as_tokenspeed_tensor(
-            &item_encoder_input,
-            &encoder_input_dtype,
-            shm_enabled,
-        );
+        // EPD prefill: the embedding arrives over Mooncake and this item's
+        // encoder_input is stripped downstream (clear_mm_pixel_values), so skip
+        // the per-item slice + serialize entirely when skip_pixel_values is set.
+        let encoder_input = if skip_pixel_values {
+            TokenSpeedTensor::inline(Vec::new(), Vec::new(), encoder_input_dtype.clone())
+        } else {
+            let item_encoder_input = match encoder_input_for_item(
+                &intermediate.preprocessed,
+                &intermediate.field_layouts,
+                item_index,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    cleanup_tokenspeed_items_encoder_shm(&items, None);
+                    return Err(error);
+                }
+            };
+            serialize_array_as_tokenspeed_tensor(
+                &item_encoder_input,
+                &encoder_input_dtype,
+                shm_enabled,
+            )
+        };
         let encoder_input_serialize_ms = encoder_input_started.elapsed().as_secs_f64() * 1000.0;
         let model_specific_started = Instant::now();
         let model_specific_tensors = match serialize_model_specific_for_item(

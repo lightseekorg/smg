@@ -89,11 +89,20 @@ impl PipelineStage for MessageRequestBuildingStage {
             ));
         }
 
-        // Assemble backend-specific multimodal data now that the backend is known
+        // Assemble backend-specific multimodal data now that the backend is known.
+        // EPD: skip serializing the prefill's pixel_values (it receives embeddings
+        // over Mooncake and they're stripped). encode_handshake is None unless this
+        // is an encode-routed (EPD) request, so non-EPD is untouched.
+        let skip_prefill_pixels = ctx.state.encode_handshake.is_some();
         let multimodal_data = processed_messages
             .multimodal_intermediate
             .map(|intermediate| {
-                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+                assemble_multimodal_data(
+                    intermediate,
+                    builder_client,
+                    ctx.state.workers.as_ref(),
+                    skip_prefill_pixels,
+                )
             })
             .transpose()
             .map_err(|e| {

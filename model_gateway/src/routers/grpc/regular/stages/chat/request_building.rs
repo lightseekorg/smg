@@ -87,11 +87,21 @@ impl PipelineStage for ChatRequestBuildingStage {
             ));
         }
 
-        // Assemble backend-specific multimodal data now that the backend is known
+        // Assemble backend-specific multimodal data now that the backend is known.
+        // EPD: the prefill receives embeddings over Mooncake and never reads its
+        // pixel_values (stripped below), so skip serializing them here -- that
+        // serialize was ~550ms/req at high conc, delaying the prefill dispatch and
+        // parking the encode sender. Encode-routed iff encode_handshake is present.
+        let skip_prefill_pixels = ctx.state.encode_handshake.is_some();
         let multimodal_data = processed_messages
             .multimodal_intermediate
             .map(|intermediate| {
-                assemble_multimodal_data(intermediate, builder_client, ctx.state.workers.as_ref())
+                assemble_multimodal_data(
+                    intermediate,
+                    builder_client,
+                    ctx.state.workers.as_ref(),
+                    skip_prefill_pixels,
+                )
             })
             .transpose()
             .map_err(|e| {
@@ -140,11 +150,10 @@ impl PipelineStage for ChatRequestBuildingStage {
 
         // EPD: the encode stage already dispatched this request's images and
         // recorded the per-item handshakes. Inject them so the prefill receives
-        // embeddings over Mooncake, and drop the prefill's pixel_values (it skips
-        // the vision tower). Present only in the EPD pipeline (the encode stage is
-        // the only writer), so non-EPD requests are untouched. Build-then-strip;
-        // a metadata-only assemble that skips serializing the prefill pixels
-        // entirely is a follow-up optimization.
+        // embeddings over Mooncake. The prefill's pixel_values were already SKIPPED
+        // at assemble time (skip_prefill_pixels above); clear here is the belt-and-
+        // suspenders that drops the now-empty field to None. Present only in the EPD
+        // pipeline (the encode stage is the only handshake writer).
         if let Some(handshake) = ctx.state.encode_handshake.take() {
             proto_request.set_encode(handshake);
             proto_request.clear_mm_pixel_values();
