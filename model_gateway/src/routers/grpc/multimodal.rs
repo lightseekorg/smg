@@ -1353,7 +1353,7 @@ pub(crate) fn assemble_tokenspeed_from_split(
     preprocessed: PreprocessedImages,
     im_token_id: Option<u32>,
 ) -> TokenSpeedMultimodalData {
-    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&preprocessed);
+    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&preprocessed, pixel_wire_dtype());
     let model_specific_tensors = serialize_model_specific(preprocessed.model_specific);
     TokenSpeedMultimodalData {
         pixel_values,
@@ -1645,7 +1645,11 @@ fn tokenspeed_encoder_input_dtype(modality: Modality, workers: Option<&WorkerSel
     if let Some(dtype) = tokenspeed_encoder_input_dtype_from_worker(workers) {
         return dtype;
     }
-    "float32".to_string()
+    // Default to bf16 on the wire: the engine casts encoder_input to the model
+    // dtype (bf16) at the ViT regardless, so this is numerically identical to f32
+    // while halving the ~10-50 MB/image gateway->encode payload (the EPD throughput
+    // limiter). Override per-modality via SMG_TOKENSPEED_*_ENCODER_INPUT_DTYPE.
+    "bfloat16".to_string()
 }
 
 fn tokenspeed_encoder_input_dtype_from_env(modality: Modality) -> Option<String> {
