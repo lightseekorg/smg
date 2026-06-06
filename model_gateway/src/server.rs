@@ -67,6 +67,7 @@ use crate::{
     worker::{
         manager::{WorkerManager, WorkerManagerConfig},
         worker::WorkerType,
+        ConnectionMode,
     },
     workflow::{
         job_queue::{JobQueue, JobQueueConfig},
@@ -108,7 +109,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
     let workers = state.context.worker_registry.get_all();
     let healthy_workers: Vec<_> = workers.iter().filter(|w| w.is_healthy()).collect();
 
-    let is_ready = if state.context.router_config.enable_igw {
+    let workers_ready = if state.context.router_config.enable_igw {
         !healthy_workers.is_empty()
     } else {
         match &state.context.router_config.mode {
@@ -128,7 +129,21 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
         }
     };
 
-    if is_ready {
+    // A worker reports healthy (engine SERVING) as soon as its process is up,
+    // but the gateway autoloads each gRPC worker's tokenizer asynchronously
+    // afterward (`SubmitTokenizerJobStep`, fire-and-forget). Until that lands,
+    // generation requests fail with `tokenizer_not_found`, so `/readiness` must
+    // not report ready yet. Hold readiness until every healthy gRPC worker's
+    // tokenizer is registered. HTTP/proxy workers never autoload a local
+    // tokenizer and are exempt; when autoload is disabled the gateway does not
+    // manage tokenizers at all.
+    let tokenizers_ready = state.context.router_config.disable_tokenizer_autoload
+        || healthy_workers
+            .iter()
+            .filter(|w| matches!(w.connection_mode(), ConnectionMode::Grpc))
+            .all(|w| state.context.tokenizer_registry.get(w.model_id()).is_some());
+
+    if workers_ready && tokenizers_ready {
         (
             StatusCode::OK,
             Json(json!({
@@ -139,11 +154,16 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
         )
             .into_response()
     } else {
+        let reason = if workers_ready {
+            "tokenizer not yet registered"
+        } else {
+            "insufficient healthy workers"
+        };
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "not ready",
-                "reason": "insufficient healthy workers"
+                "reason": reason
             })),
         )
             .into_response()
