@@ -35,6 +35,10 @@ name = "amg"
 path = "src/main.rs"
 
 [dependencies]
+# EPD RDMA pixel transport (M2). stub-api = dlopen libnixl_capi.so at runtime, no
+# build-time link, so this builds on boxes without NIXL installed. Every call site is
+# gated behind SMG_MM_PIXEL_RDMA (a missing .so aborts on first call, not a no-op).
+nixl-sys = { version = "0.10.1", features = ["stub-api"] }
 # Workspace dependencies (simple)
 anyhow.workspace = true
 async-trait.workspace = true

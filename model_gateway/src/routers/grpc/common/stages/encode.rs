@@ -145,7 +145,41 @@ impl PipelineStage for EncodeStage {
             // serialize ran serially in this loop (futures are lazy; only the RPC
             // await overlapped), which alone made dispatch ~serial per image.
             sends.push(tokio::spawn(async move {
-                let mm_inputs = assemble_tokenspeed_from_split(split, im_token_id).into_proto();
+                let mut mm_inputs = assemble_tokenspeed_from_split(split, im_token_id).into_proto();
+                // EPD RDMA (M2): export this image's pixel buffer over NIXL and swap the
+                // inline payload for a remote handle so the encode worker PULLs it instead
+                // of receiving ~10-50MB in this gRPC frame. Keyed by bootstrap_room (the
+                // worker tags its free-notif with it). Any export failure re-attaches the
+                // inline bytes -> no behaviour change. Off unless SMG_MM_PIXEL_RDMA is set.
+                if crate::routers::grpc::rdma::rdma_enabled() {
+                    if let Some(pv) = mm_inputs.pixel_values.as_mut() {
+                        if let Some(tokenspeed_proto::tensor_data::Payload::Inline(bytes)) =
+                            pv.payload.take()
+                        {
+                            let nbytes = bytes.len() as u64;
+                            match crate::routers::grpc::rdma::export_pixel_buffer(
+                                bootstrap_room,
+                                bytes,
+                            ) {
+                                Ok(descriptor) => {
+                                    pv.payload =
+                                        Some(tokenspeed_proto::tensor_data::Payload::Remote(
+                                            tokenspeed_proto::RemoteTensorHandle {
+                                                transport: "nixl".to_string(),
+                                                descriptor,
+                                                nbytes,
+                                            },
+                                        ));
+                                }
+                                Err(bytes) => {
+                                    pv.payload = Some(
+                                        tokenspeed_proto::tensor_data::Payload::Inline(bytes),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 let request = enc::EncodeRequest {
                     request_id: format!("encode-{}", Uuid::now_v7()),
                     mm_inputs: Some(mm_inputs),

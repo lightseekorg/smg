@@ -10,6 +10,7 @@ servicer only acks (the embeddings never flow back through the gateway).
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import TYPE_CHECKING
 
@@ -65,15 +66,98 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # Spatial merge factor for post-merge token counts (Qwen vision default 2).
         self._merge_size = self._resolve_merge_size()
 
+        # EPD RDMA (M3): persistent NIXL puller agent. When the gateway ships
+        # pixel_values as a remote handle (SMG_MM_PIXEL_RDMA), this agent READs the
+        # buffer from the gateway's exported memory instead of receiving it inline.
+        # Lazy + gated so non-RDMA deploys never import NIXL.
+        self._nixl_agent = None
+        if os.environ.get("SMG_MM_PIXEL_RDMA") in ("1", "true"):
+            try:
+                from nixl._api import nixl_agent, nixl_agent_config
+
+                self._nixl_agent = nixl_agent(
+                    f"smg-encode-{self._bootstrap_host}-{self._bootstrap_port}",
+                    nixl_agent_config(backends=["UCX"]),
+                )
+                logger.info("EPD RDMA: encode NIXL puller agent up")
+            except Exception as e:  # noqa: BLE001
+                logger.error("EPD RDMA: NIXL agent init failed (%s); inline only", e)
+
         self.async_llm.auto_create_handle_loop()
         logger.info("TokenSpeedEncoderServicer initialized")
+
+    def _feature_from_remote(self, td, room: int, cast_to):
+        """PULL the pixel tensor from the gateway's exported NIXL memory (one-sided
+        READ), then reconstruct it exactly like the inline path.
+
+        Descriptor wire format (set by the gateway rdma.rs): [addr u64 LE][agent_md].
+        We add the gateway as a remote agent, READ nbytes from its addr into a pinned
+        landing buffer, tag the transfer with the bootstrap_room so the gateway frees
+        the MR, then validate length + reinterpret (the M1 corruption guard).
+        """
+        import numpy as np
+        import torch
+
+        agent = self._nixl_agent
+        desc = bytes(td.remote.descriptor)
+        nbytes = int(td.remote.nbytes)
+        if len(desc) < 8:
+            raise ValueError("remote descriptor too short")
+        remote_addr = int.from_bytes(desc[:8], "little")
+        md = desc[8:]
+
+        remote_name = agent.add_remote_agent(md)
+        if isinstance(remote_name, (bytes, bytearray)):
+            remote_name = remote_name.decode()
+
+        landing = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+        laddr = landing.data_ptr()
+        reg = agent.get_reg_descs([(laddr, nbytes, 0, "")], "DRAM")
+        agent.register_memory(reg)
+        try:
+            local = agent.get_xfer_descs([(laddr, nbytes, 0)], "DRAM")
+            remote = agent.get_xfer_descs([(remote_addr, nbytes, 0)], "DRAM")
+            tag = str(room).encode()
+            h = agent.initialize_xfer("READ", local, remote, remote_name, tag)
+            state = agent.transfer(h)
+            while state == "PROC":
+                state = agent.check_xfer_state(h)
+            agent.release_xfer_handle(h)
+            if state != "DONE":
+                raise RuntimeError(f"NIXL READ state={state} room={room}")
+
+            shape = list(td.shape)
+            itemsize = 2 if td.dtype == "bfloat16" else np.dtype(td.dtype).itemsize
+            expected = itemsize
+            for d in shape:
+                expected *= d
+            if nbytes != expected:
+                raise ValueError(
+                    f"remote pixel size mismatch: nbytes={nbytes} expected={expected} "
+                    f"(shape={shape} dtype={td.dtype})"
+                )
+            raw = landing.numpy().tobytes()
+        finally:
+            agent.deregister_memory(reg)
+
+        if td.dtype == "bfloat16":
+            t = torch.from_numpy(
+                np.frombuffer(raw, dtype=np.uint16).reshape(shape)
+            ).view(torch.bfloat16)
+        else:
+            t = torch.from_numpy(
+                np.frombuffer(raw, dtype=np.dtype(td.dtype)).reshape(shape)
+            )
+        if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
+            return t.to(cast_to)
+        return t.clone()
 
     def _resolve_merge_size(self) -> int:
         hf_config = getattr(self.async_llm.model_config, "hf_config", None)
         vision_config = getattr(hf_config, "vision_config", None)
         return int(getattr(vision_config, "spatial_merge_size", 2) or 2)
 
-    def _items_from_proto(self, mm_inputs):
+    def _items_from_proto(self, mm_inputs, bootstrap_room: int = 0):
         """Reconstruct the engine MultimodalDataItem(s) for the encode worker.
 
         Unlike the prefill leg, the encode worker NEEDS pixel_values (it runs the
@@ -86,9 +170,14 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         Modality, MultimodalDataItem = _lazy_mm_item()
         model_dtype = getattr(self.async_llm.model_config, "dtype", None)
 
-        feature = TokenSpeedSchedulerServicer._tensor_from_proto(
-            mm_inputs.pixel_values, cast_to=model_dtype
-        )
+        td = mm_inputs.pixel_values
+        if td.WhichOneof("payload") == "remote":
+            # EPD RDMA: PULL the pixels from the gateway's exported NIXL memory.
+            feature = self._feature_from_remote(td, bootstrap_room, model_dtype)
+        else:
+            feature = TokenSpeedSchedulerServicer._tensor_from_proto(
+                td, cast_to=model_dtype
+            )
         model_specific = {
             name: TokenSpeedSchedulerServicer._tensor_from_proto(td, cast_to=model_dtype)
             for name, td in mm_inputs.model_specific_tensors.items()
@@ -117,13 +206,14 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         return [item]
 
     async def Encode(self, request, context):
+        # The gateway sends one image per RPC, so one EncodeItemAssignment / room.
+        # (Multiple items per RPC would need per-item rooms; not used today.) The
+        # room also tags the RDMA free-notif, so resolve it before reading pixels.
+        bootstrap_room = request.items[0].bootstrap_room if request.items else 0
+
         items = []
         if request.HasField("mm_inputs"):
-            items = self._items_from_proto(request.mm_inputs)
-
-        # The gateway sends one image per RPC, so one EncodeItemAssignment / room.
-        # (Multiple items per RPC would need per-item rooms; not used today.)
-        bootstrap_room = request.items[0].bootstrap_room if request.items else 0
+            items = self._items_from_proto(request.mm_inputs, bootstrap_room)
 
         EncodeRequest = _lazy_encode_request()
         encode_request = EncodeRequest(

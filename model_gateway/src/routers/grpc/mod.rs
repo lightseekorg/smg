@@ -10,6 +10,7 @@ pub(crate) mod multimodal;
 pub(crate) mod pd_router; // Used by routers/factory
 pub(crate) mod pipeline;
 pub(crate) mod proto_wrapper;
+pub(crate) mod rdma;
 pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
 pub mod utils; // Used by routers/http and bindings/golang
