@@ -246,15 +246,28 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
         # mlx_lm/server.py's ``ctx.stop()`` pattern.
         self._aborted_request_ids: set[str] = set()
         self._pending_lock = threading.Lock()
-        # Admission coalescing window (seconds). When a fresh batch is forming
-        # (nothing generating yet) and only part of a concurrent burst has
-        # landed in _pending, a single next() prefill chunk (seconds long for a
+        # Admission coalescing. When a fresh batch is forming (nothing
+        # generating yet) and only part of a concurrent burst has landed in
+        # _pending, a single next() prefill chunk (seconds long for a
         # multi-thousand-token prompt) blocks admission of the siblings that
         # arrive microseconds later — splitting one wave into misaligned
-        # prefill groups and inflating TTFT ~50% at concurrency. Waiting a few
-        # ms for the burst to fully arrive lets them prefill as one batch.
-        # Negligible vs a multi-second prefill; only applied when idle.
-        self._coalesce_s = float(os.environ.get("MLX_COALESCE_MS", "50")) / 1000.0
+        # prefill groups and inflating TTFT ~50% at concurrency. We wait for
+        # the burst to finish arriving before kicking off the first chunk.
+        #
+        # Adaptive: poll _pending every _coalesce_tick; proceed as soon as it
+        # stops growing (burst done) or the batch is full, capped at
+        # _coalesce_cap. A lone request therefore pays ~one tick, not the full
+        # cap, while a real burst is fully coalesced. Both are negligible next
+        # to a multi-second prefill, and the wait is skipped once generating.
+        self._coalesce_cap = float(os.environ.get("MLX_COALESCE_MS", "50")) / 1000.0
+        self._coalesce_tick = float(os.environ.get("MLX_COALESCE_TICK_MS", "5")) / 1000.0
+        # Prompt prefill chunk size (tokens per next() prefill step). Smaller
+        # chunks shorten the admission-blocking window, but benchmarking found
+        # this insufficient alone (still above floor) and costlier in
+        # throughput from extra kernel launches — admission coalescing above is
+        # the real fix. Exposed as a tuning lever; default matches mlx-lm (2048)
+        # so behaviour is unchanged unless explicitly overridden.
+        self._prefill_step_size = int(os.environ.get("MLX_PREFILL_STEP", "2048"))
         # Resolve context length once — config doesn't change at runtime,
         # and Generate was previously scanning these keys on every request.
         self._ctx_limit = 0
@@ -565,6 +578,7 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
                 self._model,
                 completion_batch_size=self._completion_batch_size,
                 prefill_batch_size=self._prefill_batch_size,
+                prefill_step_size=self._prefill_step_size,
             )
         except Exception:
             logger.exception("BatchGenerator construction failed")
@@ -600,17 +614,23 @@ class MlxEngineServicer(mlx_engine_pb2_grpc.MlxEngineServicer):
             gen_responses: list = []
             try:
                 # Phase 0: coalesce a concurrent burst into one prefill batch.
-                # Only when idle (a fresh batch is forming) and the burst is
-                # still arriving (0 < pending < prefill_batch_size): wait a
-                # short window so siblings land before the first multi-second
-                # prefill chunk commits and blocks their admission. Skipped
-                # entirely once a batch is generating, preserving the
-                # per-step (mlx-lm.server-style) mid-decode admission latency.
-                if self._coalesce_s and not self._active_uids:
+                # Only when idle (a fresh batch is forming): poll _pending and
+                # proceed as soon as it stops growing or fills a prefill batch,
+                # capped at _coalesce_cap. Skipped entirely once a batch is
+                # generating, preserving the per-step (mlx-lm.server-style)
+                # mid-decode admission latency.
+                if self._coalesce_cap and self._coalesce_tick and not self._active_uids:
                     with self._pending_lock:
                         n_pending = len(self._pending)
-                    if 0 < n_pending < self._prefill_batch_size:
-                        time.sleep(self._coalesce_s)
+                    waited = 0.0
+                    while 0 < n_pending < self._prefill_batch_size and waited < self._coalesce_cap:
+                        time.sleep(self._coalesce_tick)
+                        waited += self._coalesce_tick
+                        with self._pending_lock:
+                            n_now = len(self._pending)
+                        if n_now == n_pending:
+                            break  # burst stopped growing — admit what we have
+                        n_pending = n_now
 
                 # Phase 1: admit pending. NOT gated on _active_uids —
                 # pending requests can join while a batch is mid-decode,
