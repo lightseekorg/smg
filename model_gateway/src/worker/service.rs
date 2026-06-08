@@ -16,7 +16,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::{
-    config::RouterConfig,
+    config::{validation::validate_worker_url, RouterConfig},
     worker::{registry::WorkerId, worker::worker_to_info, WorkerRegistry},
     workflow::{Job, JobQueue},
 };
@@ -256,6 +256,8 @@ impl WorkerService {
         &self,
         config: WorkerSpec,
     ) -> Result<CreateWorkerResult, WorkerServiceError> {
+        validate_worker_url_request(&config.url)?;
+
         if self.router_config.api_key.is_some() && config.api_key.is_none() {
             warn!(
                 "Adding worker {} without API key while router has API key configured. \
@@ -446,5 +448,67 @@ impl WorkerService {
             .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
 
         Ok(UpdateWorkerResult { worker_id, url })
+    }
+}
+
+/// Wrap [`validate_worker_url`] so the API layer surfaces a 400 instead of a
+/// config-layer error.
+fn validate_worker_url_request(url: &str) -> Result<(), WorkerServiceError> {
+    validate_worker_url(url).map_err(|reason| WorkerServiceError::BadRequest {
+        message: format!("Worker URL '{url}' is invalid: {reason}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_worker_url_request_accepts_all_four_schemes() {
+        assert!(validate_worker_url_request("http://10.0.0.5:8000").is_ok());
+        assert!(validate_worker_url_request("https://10.0.0.5:8000").is_ok());
+        assert!(validate_worker_url_request("grpc://10.0.0.5:8000").is_ok());
+        assert!(validate_worker_url_request("grpcs://10.0.0.5:8000").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_url_request_accepts_case_insensitive_schemes() {
+        assert!(validate_worker_url_request("HTTP://10.0.0.5:8000").is_ok());
+        assert!(validate_worker_url_request("GrPc://10.0.0.5:8000").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_url_request_rejects_bare_host_port_as_400() {
+        let err = validate_worker_url_request("10.0.0.5:8000").unwrap_err();
+        assert!(matches!(err, WorkerServiceError::BadRequest { .. }));
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+        assert!(err
+            .to_string()
+            .contains("http://, https://, grpc://, or grpcs://"));
+    }
+
+    #[test]
+    fn validate_worker_url_request_rejects_empty_as_400() {
+        let err = validate_worker_url_request("").unwrap_err();
+        assert!(matches!(err, WorkerServiceError::BadRequest { .. }));
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn validate_worker_url_request_rejects_unknown_scheme() {
+        let err = validate_worker_url_request("ftp://10.0.0.5:8000").unwrap_err();
+        assert!(matches!(err, WorkerServiceError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn validate_worker_url_request_rejects_missing_host() {
+        let err = validate_worker_url_request("http://").unwrap_err();
+        assert!(matches!(err, WorkerServiceError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn validate_worker_url_request_rejects_unparsable_url() {
+        let err = validate_worker_url_request("http://[invalid").unwrap_err();
+        assert!(matches!(err, WorkerServiceError::BadRequest { .. }));
     }
 }
