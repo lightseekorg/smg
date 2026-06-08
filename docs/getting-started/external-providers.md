@@ -4,7 +4,7 @@ title: External Providers
 
 # External Providers
 
-SMG can route requests to external LLM provider APIs (OpenAI, Anthropic, xAI, Google Gemini), acting as a unified gateway. This enables provider-agnostic applications, load balancing across providers, and centralized observability.
+SMG can route requests to external LLM provider APIs (OpenAI, Anthropic, xAI, Google Gemini, and AWS Bedrock), acting as a unified gateway. This enables provider-agnostic applications, load balancing across providers, and centralized observability.
 
 <div class="prerequisites" markdown>
 
@@ -27,6 +27,24 @@ SMG auto-detects the provider from the model name in each request and applies th
 | Anthropic | `claude-*` models | `x-api-key` (plus `anthropic-version`) |
 | xAI | `grok-*` models | `Authorization: Bearer` |
 | Google Gemini | `gemini-*` models | `x-goog-api-key` |
+| AWS Bedrock | `anthropic.claude*`, `amazon.*`, `meta.*`, `mistral.*` | AWS SigV4 (`Authorization`, `X-Amz-Date`, etc.) |
+
+### Bedrock notes
+
+- Bedrock runs as a first-class routing mode (`routing.mode.type: bedrock`) and is HTTP-only.
+- SMG signs Bedrock requests with SigV4 using this credential resolution order:
+  1) environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`)
+  2) shared credentials profile (`AWS_PROFILE` / `~/.aws/credentials`)
+  3) container/instance metadata (ECS/EC2 IMDS).
+- Configure Bedrock region/service in `router_config.bedrock`:
+
+```yaml
+bedrock:
+  region: us-east-1
+  service: bedrock
+  model_map:
+    claude-opus-4-5: us.anthropic.claude-opus-4-5-20251101-v1:0
+```
 
 ---
 

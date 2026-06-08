@@ -144,6 +144,8 @@ pub struct RouterConfig {
     pub disable_circuit_breaker: bool,
     pub health_check: HealthCheckConfig,
     #[serde(default)]
+    pub bedrock: BedrockConfig,
+    #[serde(default)]
     pub enable_igw: bool,
     /// Can be a HuggingFace model ID or local path
     pub model_path: Option<String>,
@@ -232,6 +234,55 @@ pub struct TokenizerCacheConfig {
     pub l1_max_memory: usize,
 }
 
+/// AWS Bedrock routing configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BedrockConfig {
+    /// AWS region used for request signing (e.g. us-east-1).
+    pub region: Option<String>,
+    /// AWS service identifier for SigV4 (defaults to `bedrock`).
+    ///
+    /// Note: Bedrock uses `bedrock` as the SigV4 signing service for BOTH the
+    /// control plane (`bedrock.<region>.amazonaws.com`) and the runtime data
+    /// plane (`bedrock-runtime.<region>.amazonaws.com`). The hostname differs
+    /// but the credential scope service does not. See AWS SDK for Go
+    /// `bedrockruntime/service.go` and AWS SDK for JS v3 `client-bedrock-runtime`,
+    /// both of which set `SigningName = "bedrock"`.
+    pub service: String,
+    /// Optional model-id remapping from incoming model -> Bedrock model ID.
+    pub model_map: HashMap<String, String>,
+}
+
+impl Default for BedrockConfig {
+    fn default() -> Self {
+        Self {
+            region: None,
+            service: "bedrock".to_string(),
+            model_map: HashMap::new(),
+        }
+    }
+}
+
+impl BedrockConfig {
+    /// AWS region for SigV4: non-empty `region`, else `AWS_REGION`, else `AWS_DEFAULT_REGION`.
+    pub(crate) fn resolved_signing_region(&self) -> Option<String> {
+        if let Some(r) = &self.region {
+            let trimmed = r.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        std::env::var("AWS_REGION")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("AWS_DEFAULT_REGION")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+    }
+}
+
 fn default_load_monitor_interval_secs() -> u64 {
     10
 }
@@ -309,6 +360,8 @@ pub enum RoutingMode {
     Anthropic { worker_urls: Vec<String> },
     #[serde(rename = "gemini")]
     Gemini { worker_urls: Vec<String> },
+    #[serde(rename = "bedrock")]
+    Bedrock { worker_urls: Vec<String> },
 }
 
 impl RoutingMode {
@@ -327,6 +380,7 @@ impl RoutingMode {
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
             RoutingMode::Gemini { worker_urls } => worker_urls.len(),
+            RoutingMode::Bedrock { worker_urls } => worker_urls.len(),
         }
     }
 
@@ -698,6 +752,7 @@ impl Default for RouterConfig {
             disable_retries: false,
             disable_circuit_breaker: false,
             health_check: HealthCheckConfig::default(),
+            bedrock: BedrockConfig::default(),
             enable_igw: false,
             connection_mode: ConnectionMode::Http,
             model_path: None,
@@ -747,6 +802,7 @@ impl RouterConfig {
             RoutingMode::OpenAI { .. } => "openai",
             RoutingMode::Anthropic { .. } => "anthropic",
             RoutingMode::Gemini { .. } => "gemini",
+            RoutingMode::Bedrock { .. } => "bedrock",
         }
     }
 

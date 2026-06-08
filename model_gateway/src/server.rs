@@ -126,6 +126,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
             RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
             RoutingMode::Gemini { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Bedrock { .. } => !healthy_workers.is_empty(),
         }
     };
 

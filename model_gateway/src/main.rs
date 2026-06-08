@@ -65,6 +65,8 @@ pub enum Backend {
     Anthropic,
     #[value(name = "gemini")]
     Gemini,
+    #[value(name = "bedrock")]
+    Bedrock,
 }
 
 impl std::fmt::Display for Backend {
@@ -76,6 +78,7 @@ impl std::fmt::Display for Backend {
             Backend::Openai => "openai",
             Backend::Anthropic => "anthropic",
             Backend::Gemini => "gemini",
+            Backend::Bedrock => "bedrock",
         };
         write!(f, "{s}")
     }
@@ -1124,6 +1127,10 @@ impl CliArgs {
             RoutingMode::Gemini {
                 worker_urls: self.worker_urls.clone(),
             }
+        } else if matches!(self.backend, Some(Backend::Bedrock)) {
+            RoutingMode::Bedrock {
+                worker_urls: self.worker_urls.clone(),
+            }
         } else if self.pd_disaggregation {
             RoutingMode::PrefillDecode {
                 prefill_urls,
@@ -1189,6 +1196,9 @@ impl CliArgs {
                 all_urls.extend(worker_urls.clone());
             }
             RoutingMode::Gemini { worker_urls } => {
+                all_urls.extend(worker_urls.clone());
+            }
+            RoutingMode::Bedrock { worker_urls } => {
                 all_urls.extend(worker_urls.clone());
             }
         }
@@ -1461,6 +1471,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "OpenAI Backend".to_string()
     } else if matches!(cli_args.backend, Some(Backend::Anthropic)) {
         "Anthropic Backend".to_string()
+    } else if matches!(cli_args.backend, Some(Backend::Bedrock)) {
+        "Bedrock Backend".to_string()
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
     } else if let Some(backend) = &cli_args.backend {

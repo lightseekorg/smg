@@ -1,6 +1,7 @@
 //! Provider abstractions for vendor-specific API transformations.
 
 mod anthropic;
+mod bedrock;
 mod gemini;
 mod openai;
 mod provider_trait;
@@ -12,6 +13,7 @@ mod types;
 mod xai;
 
 pub use anthropic::AnthropicProvider;
+pub use bedrock::BedrockProvider;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAIProvider;
 pub use provider_trait::Provider;

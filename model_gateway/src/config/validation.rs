@@ -43,6 +43,7 @@ impl ConfigValidator {
         }
 
         Self::validate_tokenizer_cache(&config.tokenizer_cache)?;
+        Self::validate_bedrock(&config.mode, &config.bedrock)?;
         Self::validate_skills(config)?;
         Self::validate_background(&config.background)?;
 
@@ -97,6 +98,31 @@ impl ConfigValidator {
         })?;
 
         Self::validate_skills_config(skills)
+    }
+
+    fn validate_bedrock(mode: &RoutingMode, cfg: &BedrockConfig) -> ConfigResult<()> {
+        if cfg.service.trim().is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: "bedrock.service".to_string(),
+                value: cfg.service.clone(),
+                reason: "Must not be empty".to_string(),
+            });
+        }
+        if let Some(region) = &cfg.region {
+            if region.trim().is_empty() {
+                return Err(ConfigError::InvalidValue {
+                    field: "bedrock.region".to_string(),
+                    value: region.clone(),
+                    reason: "Must not be empty when set".to_string(),
+                });
+            }
+        }
+        if matches!(mode, RoutingMode::Bedrock { .. }) && cfg.resolved_signing_region().is_none() {
+            return Err(ConfigError::ValidationFailed {
+                reason: "Bedrock routing requires a non-empty bedrock.region, or AWS_REGION / AWS_DEFAULT_REGION (used for SigV4 signing)".to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn validate_skills_config(skills: &SkillsConfig) -> ConfigResult<()> {
@@ -349,6 +375,20 @@ impl ConfigValidator {
                     Self::validate_urls(worker_urls)?;
                 }
             }
+            RoutingMode::Bedrock { worker_urls } => {
+                // Allow empty URLs to support dynamic worker addition
+                if !worker_urls.is_empty() {
+                    Self::validate_urls(worker_urls)?;
+                    if worker_urls.iter().any(|u| u.starts_with("grpc://")) {
+                        return Err(ConfigError::InvalidValue {
+                            field: "worker_url".to_string(),
+                            value: "grpc://...".to_string(),
+                            reason: "Bedrock mode only supports http:// or https:// URLs"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -591,6 +631,11 @@ impl ConfigValidator {
             RoutingMode::Gemini { .. } => {
                 return Err(ConfigError::ValidationFailed {
                     reason: "Gemini mode does not support service discovery".to_string(),
+                });
+            }
+            RoutingMode::Bedrock { .. } => {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "Bedrock mode does not support service discovery".to_string(),
                 });
             }
         }
@@ -890,6 +935,8 @@ fn validate_mebibyte_limit(field: &str, value_mb: usize) -> ConfigResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
     use crate::worker::ConnectionMode;
 
@@ -1222,6 +1269,60 @@ mod tests {
 
         // Should pass validation even with empty URLs
         assert!(ConfigValidator::validate(&config).is_ok());
+
+        // Test that empty URLs are allowed in Bedrock mode
+        let mut config = RouterConfig::new(
+            RoutingMode::Bedrock {
+                worker_urls: vec![],
+            },
+            PolicyConfig::Random,
+        );
+        config.bedrock.region = Some("us-east-1".to_string());
+        assert!(ConfigValidator::validate(&config).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn bedrock_routing_rejects_missing_signing_region() {
+        struct EnvRestore {
+            saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        }
+        impl EnvRestore {
+            fn new(keys: &[&'static str]) -> Self {
+                let saved = keys
+                    .iter()
+                    .map(|k| (*k, std::env::var_os(k)))
+                    .collect::<Vec<_>>();
+                Self { saved }
+            }
+        }
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (k, v) in &self.saved {
+                    match v {
+                        Some(val) => std::env::set_var(k, val),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+
+        let _guard = EnvRestore::new(&["AWS_REGION", "AWS_DEFAULT_REGION"]);
+        std::env::remove_var("AWS_REGION");
+        std::env::remove_var("AWS_DEFAULT_REGION");
+
+        let mut config = RouterConfig::new(
+            RoutingMode::Bedrock {
+                worker_urls: vec![],
+            },
+            PolicyConfig::Random,
+        );
+        config.bedrock.region = None;
+        let result = ConfigValidator::validate(&config);
+        assert!(
+            result.is_err(),
+            "expected validation error when Bedrock mode has no region and no AWS_* env"
+        );
     }
 
     #[test]

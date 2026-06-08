@@ -157,11 +157,13 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::PrefillDecode { .. }) => router_ids::HTTP_PD,
             (ConnectionMode::Http, RoutingMode::OpenAI { .. }) => router_ids::HTTP_OPENAI,
             (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
+            (ConnectionMode::Http, RoutingMode::Bedrock { .. }) => router_ids::HTTP_BEDROCK,
             (ConnectionMode::Grpc, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
             (ConnectionMode::Http, RoutingMode::Gemini { .. }) => router_ids::HTTP_GEMINI,
             (ConnectionMode::Grpc, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::Anthropic { .. }) => router_ids::GRPC_REGULAR,
+            (ConnectionMode::Grpc, RoutingMode::Bedrock { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc, RoutingMode::Gemini { .. }) => router_ids::GRPC_REGULAR,
         }
     }
@@ -236,9 +238,15 @@ impl RouterManager {
         if let Some(model) = model_id {
             for w in workers {
                 if matches!(w.metadata().spec.runtime_type, RuntimeType::External) {
-                    let router_id = match w.provider_for_model(model) {
+                    let provider = w
+                        .provider_for_model(model)
+                        .cloned()
+                        .or_else(|| ProviderType::from_url(w.url()))
+                        .or_else(|| ProviderType::from_model_name(model));
+                    let router_id = match provider.as_ref() {
                         Some(ProviderType::Gemini) => &router_ids::HTTP_GEMINI,
                         Some(ProviderType::Anthropic) => &router_ids::HTTP_ANTHROPIC,
+                        Some(ProviderType::Bedrock) => &router_ids::HTTP_BEDROCK,
                         _ => &router_ids::HTTP_OPENAI,
                     };
                     return self.routers.get(router_id).map(|r| r.clone());
