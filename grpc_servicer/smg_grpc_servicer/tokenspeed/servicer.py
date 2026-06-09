@@ -983,9 +983,6 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             raise ValueError("TensorData.shm payload is not implemented yet")
         if payload == "remote":
             raise ValueError("TensorData.remote payload is not implemented yet")
-        legacy_data = getattr(tensor_data, "data", b"")
-        if legacy_data:
-            return bytes(legacy_data)
         raise ValueError("TensorData payload is required")
 
     @staticmethod

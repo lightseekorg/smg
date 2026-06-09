@@ -100,7 +100,19 @@ jobs:
       - name: Test import
         run: |
           pip install crates/grpc_client/python/dist/*.whl
-          python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
+          python - <<'PY'
+          from smg_grpc_proto import sglang_scheduler_pb2, tokenspeed_scheduler_pb2
+
+          fields = tokenspeed_scheduler_pb2.TensorData.DESCRIPTOR.fields_by_name
+          assert "data" not in fields
+          assert fields["shape"].number == 1
+          assert fields["dtype"].number == 2
+          assert fields["inline"].number == 3
+          assert fields["shm"].number == 4
+          assert fields["remote"].number == 5
+
+          print("OK")
+          PY
 
   build-wheel:
     runs-on: k8s-runner-gpu

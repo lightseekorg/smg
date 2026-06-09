@@ -1850,6 +1850,112 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assemble_tokenspeed_splits_video_items() {
+        let mut model_specific = HashMap::new();
+        model_specific.insert(
+            "patches_per_video".to_string(),
+            ModelSpecificValue::UintTensor {
+                data: vec![2, 2],
+                shape: vec![2],
+            },
+        );
+        model_specific.insert(
+            "video_grid_thw".to_string(),
+            ModelSpecificValue::UintTensor {
+                data: vec![1, 2, 3, 4, 5, 6],
+                shape: vec![2, 3],
+            },
+        );
+
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(
+                IxDyn(&[4, 2]),
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            )
+            .unwrap(),
+            feature_token_counts: vec![2, 2],
+            item_sizes: vec![(1, 1), (1, 1)],
+            model_specific,
+        };
+
+        let videos = vec![
+            Arc::new(VideoClip::new(
+                vec![image::DynamicImage::new_rgb8(1, 1)],
+                bytes::Bytes::from_static(b"a"),
+                llm_multimodal::VideoSource::InlineBytes,
+                "video-hash-a".to_string(),
+            )),
+            Arc::new(VideoClip::new(
+                vec![image::DynamicImage::new_rgb8(1, 1)],
+                bytes::Bytes::from_static(b"b"),
+                llm_multimodal::VideoSource::InlineBytes,
+                "video-hash-b".to_string(),
+            )),
+        ];
+
+        let intermediate = PrecomputedMultimodalIntermediate {
+            modality: Modality::Video,
+            preprocessed,
+            images: vec![],
+            videos,
+            placeholders: vec![
+                PlaceholderRange {
+                    offset: 30,
+                    length: 2,
+                },
+                PlaceholderRange {
+                    offset: 40,
+                    length: 2,
+                },
+            ],
+            patch_offsets: Some(vec![(30, 2), (40, 2)]),
+            placeholder_token_id: Some(151656),
+            field_layouts: HashMap::from([
+                (
+                    "pixel_values".to_string(),
+                    FieldLayout::flat("patches_per_video"),
+                ),
+                ("patches_per_video".to_string(), FieldLayout::Batched),
+                ("video_grid_thw".to_string(), FieldLayout::Batched),
+            ]),
+            keep_on_cpu_keys: vec![],
+        };
+
+        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        assert_eq!(assembled.items.len(), 2);
+
+        let first = &assembled.items[0];
+        assert_eq!(first.modality, TokenSpeedModality::Video);
+        assert_eq!(first.encoder_input_shape, vec![2, 2]);
+        assert_eq!(first.encoder_input.len(), 4 * size_of::<f32>());
+        assert_eq!(first.mm_placeholders, vec![(30, 2)]);
+        assert_eq!(
+            first.content_hash,
+            hash_hex_strings(std::iter::once("video-hash-a"))
+        );
+        assert_eq!(
+            first.model_specific_tensors["video_grid_thw"].shape,
+            vec![1, 3]
+        );
+        assert_eq!(
+            first.model_specific_tensors["patches_per_video"].shape,
+            vec![1]
+        );
+
+        let second = &assembled.items[1];
+        assert_eq!(second.encoder_input_shape, vec![2, 2]);
+        assert_eq!(second.mm_placeholders, vec![(40, 2)]);
+        assert_eq!(
+            second.content_hash,
+            hash_hex_strings(std::iter::once("video-hash-b"))
+        );
+        assert_eq!(
+            second.model_specific_tensors["video_grid_thw"].shape,
+            vec![1, 3]
+        );
+    }
+
     // ------------------------------------------------------------------
     // MultimodalConfigRegistry tests
     // ------------------------------------------------------------------

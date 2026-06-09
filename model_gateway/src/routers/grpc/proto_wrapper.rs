@@ -1263,6 +1263,8 @@ impl ProtoEmbedComplete {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message;
+
     use super::*;
 
     #[test]
@@ -1319,7 +1321,7 @@ mod tests {
         let proto = TokenSpeedMultimodalData {
             items: vec![TokenSpeedMultimodalItem {
                 modality: TokenSpeedModality::Video,
-                encoder_input: vec![0; 8],
+                encoder_input: vec![42; 8],
                 encoder_input_shape: vec![1, 2],
                 encoder_input_dtype: "float32".to_string(),
                 model_specific_tensors,
@@ -1333,11 +1335,32 @@ mod tests {
         assert_eq!(proto.items.len(), 1);
         let item = &proto.items[0];
         assert_eq!(item.modality, tokenspeed::Modality::Video as i32);
-        assert!(item.encoder_input.is_some());
-        assert!(item.model_specific_tensors.contains_key("video_grid_thw"));
         assert_eq!(item.placeholder_token_id, Some(151656));
         assert_eq!(item.placeholders[0].offset, 4);
         assert_eq!(item.placeholders[0].length, 2);
+        assert_eq!(
+            inline_tensor_data(item.encoder_input.as_ref().unwrap()),
+            &[42; 8]
+        );
+        assert!(item.model_specific_tensors.contains_key("video_grid_thw"));
+    }
+
+    #[test]
+    fn tokenspeed_tensor_data_uses_clean_payload_tags() {
+        let tensor = tensor_bytes_to_tokenspeed(TensorBytes {
+            data: vec![0xaa, 0xbb],
+            shape: vec![2, 3],
+            dtype: "uint32".to_string(),
+        });
+
+        assert_eq!(
+            tensor.encode_to_vec(),
+            vec![
+                0x0a, 0x02, 0x02, 0x03, // shape = 1, packed uint32 [2, 3]
+                0x12, 0x06, b'u', b'i', b'n', b't', b'3', b'2', // dtype = 2
+                0x1a, 0x02, 0xaa, 0xbb, // inline = 3
+            ]
+        );
     }
 
     fn inline_tensor_data(tensor: &tokenspeed::TensorData) -> &[u8] {
