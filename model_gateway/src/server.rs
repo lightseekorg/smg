@@ -54,8 +54,12 @@ use crate::{
         otel_trace,
     },
     routers::{
-        conversations, openai::realtime::ws::RealtimeQueryParams, parse,
-        responses as response_handlers, router_manager::RouterManager, tokenize, RouterTrait,
+        common::background::create::{handle_background_create, BackgroundCreateDeps},
+        conversations,
+        openai::realtime::ws::RealtimeQueryParams,
+        parse, responses as response_handlers,
+        router_manager::RouterManager,
+        tokenize, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -280,6 +284,18 @@ async fn v1_responses(
     cancel: middleware::scheduler::PreemptionGuard,
     ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
+    if body.background.unwrap_or(false) {
+        let request_context = smg_data_connector::current_request_context();
+        let deps = BackgroundCreateDeps {
+            repository: state.context.background_repository.as_ref(),
+            response_storage: state.context.response_storage.as_ref(),
+            conversation_storage: state.context.conversation_storage.as_ref(),
+            conversation_item_storage: state.context.conversation_item_storage.as_ref(),
+            background_config: &state.context.router_config.background,
+            request_context: request_context.as_ref(),
+        };
+        return handle_background_create(deps, &body, &body.model).await;
+    }
     cancel
         .guard(
             state
