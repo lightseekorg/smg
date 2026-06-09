@@ -894,10 +894,15 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             items.append(mm_item)
 
             if item_proto.HasField("placeholder_token_id"):
+                placeholder_token_id = int(item_proto.placeholder_token_id)
                 if modality == Modality.IMAGE:
-                    im_token_id = int(item_proto.placeholder_token_id)
+                    im_token_id = self._merge_placeholder_token_id(
+                        im_token_id, placeholder_token_id, modality
+                    )
                 elif modality == Modality.VIDEO:
-                    video_token_id = int(item_proto.placeholder_token_id)
+                    video_token_id = self._merge_placeholder_token_id(
+                        video_token_id, placeholder_token_id, modality
+                    )
 
         if not items:
             raise ValueError("MultimodalInputs.items is empty")
@@ -916,6 +921,18 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if modality == getattr(tokenspeed_scheduler_pb2, "AUDIO", 2):
             raise ValueError("TokenSpeed audio multimodal inputs are not supported yet")
         raise ValueError(f"Unsupported multimodal item modality: {modality}")
+
+    @staticmethod
+    def _merge_placeholder_token_id(
+        current: int | None,
+        incoming: int,
+        modality: Modality,
+    ) -> int:
+        if current is not None and current != incoming:
+            raise ValueError(
+                f"Conflicting placeholder_token_id for {modality.name}: {current} != {incoming}"
+            )
+        return incoming
 
     @staticmethod
     def _validate_item_tensor_consistency(
