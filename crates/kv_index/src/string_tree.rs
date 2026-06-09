@@ -622,7 +622,7 @@ impl Tree {
                         .iter()
                         .next()
                         .map(|kv| Arc::clone(kv.key()))
-                        .unwrap_or_else(|| Arc::from("empty"));
+                        .unwrap_or_else(|| intern_tenant("empty"));
                     *curr.last_tenant.write() = Some(Arc::clone(&t));
                     t
                 }
@@ -634,7 +634,7 @@ impl Tree {
                     .iter()
                     .next()
                     .map(|kv| Arc::clone(kv.key()))
-                    .unwrap_or_else(|| Arc::from("empty"));
+                    .unwrap_or_else(|| intern_tenant("empty"));
                 *curr.last_tenant.write() = Some(Arc::clone(&t));
                 t
             }
@@ -689,7 +689,7 @@ impl Tree {
             .iter()
             .next()
             .map(|kv| Arc::clone(kv.key()))
-            .unwrap_or_else(|| Arc::from("empty"));
+            .unwrap_or_else(|| intern_tenant("empty"));
         (t, true)
     }
 
@@ -752,7 +752,8 @@ impl Tree {
         // full-match node, the partial child, or the root if nothing matched.
         let mut match_curr = Arc::clone(&self.root);
         // (node, char_count) for each full-match edge, in order.
-        let mut path: Vec<(NodeRef, usize)> = Vec::new();
+        // Pre-allocated; most matched paths are well under this depth.
+        let mut path: Vec<(NodeRef, usize)> = Vec::with_capacity(16);
 
         while let Some(first_char) = remaining.chars().next() {
             let child_node = current.children.get(&first_char).map(|e| e.value().clone());

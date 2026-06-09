@@ -650,7 +650,7 @@ impl TokenTree {
                 tenant: self
                     .root
                     .get_any_tenant()
-                    .unwrap_or_else(|| Arc::from("empty")),
+                    .unwrap_or_else(|| intern_tenant("empty")),
                 matched_token_count: 0,
                 input_token_count,
             };
@@ -760,7 +760,7 @@ impl TokenTree {
         }
 
         PrefixMatchResult {
-            tenant: last_tenant.unwrap_or_else(|| Arc::from("empty")),
+            tenant: last_tenant.unwrap_or_else(|| intern_tenant("empty")),
             matched_token_count: matched_tokens,
             input_token_count,
         }
@@ -832,7 +832,7 @@ impl TokenTree {
                 tenant: self
                     .root
                     .get_any_tenant()
-                    .unwrap_or_else(|| Arc::from("empty")),
+                    .unwrap_or_else(|| intern_tenant("empty")),
                 matched_token_count: 0,
                 input_token_count,
             };
@@ -1084,7 +1084,7 @@ impl TokenTree {
         }
 
         PrefixMatchResult {
-            tenant: last_tenant.unwrap_or_else(|| Arc::from("empty")),
+            tenant: last_tenant.unwrap_or_else(|| intern_tenant("empty")),
             matched_token_count: matched_tokens,
             input_token_count,
         }
@@ -1151,7 +1151,7 @@ impl TokenTree {
                 tenant: self
                     .root
                     .get_any_tenant()
-                    .unwrap_or_else(|| Arc::from("empty")),
+                    .unwrap_or_else(|| intern_tenant("empty")),
                 matched_token_count: 0,
                 input_token_count,
             };
@@ -1171,7 +1171,8 @@ impl TokenTree {
         let mut remaining = tokens;
         let mut current = Arc::clone(&self.root);
         // (node, advance) for each edge we descended through, in order.
-        let mut path: Vec<(NodeRef, usize)> = Vec::new();
+        // Pre-allocated; most matched paths are well under this depth.
+        let mut path: Vec<(NodeRef, usize)> = Vec::with_capacity(16);
         // Once match would stop (all-evicted node / partial), freeze the match
         // result but keep descending for insert (insert's reach is a superset).
         let mut match_frozen = false;
@@ -1254,7 +1255,7 @@ impl TokenTree {
 
         // ---- Decide the insert tenant from the match result ----
         let result = PrefixMatchResult {
-            tenant: last_tenant.unwrap_or_else(|| Arc::from("empty")),
+            tenant: last_tenant.unwrap_or_else(|| intern_tenant("empty")),
             matched_token_count: matched_tokens,
             input_token_count,
         };
