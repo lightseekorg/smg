@@ -858,9 +858,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             if LOG_MM_TENSOR_DATA:
                 encoder_input = item_proto.encoder_input
                 payload = encoder_input.WhichOneof("payload")
-                inline_nbytes = (
-                    len(encoder_input.inline) if payload == "inline" else None
-                )
+                inline_nbytes = len(encoder_input.inline) if payload == "inline" else None
                 logger.info(
                     "Multimodal encoder_input received: modality=%s proto_dtype=%s "
                     "shape=%s payload=%s inline_nbytes=%s torch_dtype=%s cast_to=%s",
@@ -882,9 +880,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 raise ValueError("MultimodalItem carried no placeholders")
             if any(p.length <= 0 for p in item_proto.placeholders):
                 raise ValueError("MultimodalItem.placeholders.length must be > 0")
-            offsets = [
-                (p.offset, p.offset + p.length - 1) for p in item_proto.placeholders
-            ]
+            offsets = [(p.offset, p.offset + p.length - 1) for p in item_proto.placeholders]
 
             content_hash = bytes(item_proto.content_hash)
             mm_item = MultimodalDataItem(
@@ -955,9 +951,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                     f"TensorData byte length mismatch for bfloat16 shape={shape}: "
                     f"expected {expected}, got {len(raw)}"
                 )
-            t = torch.from_numpy(
-                np.frombuffer(raw, dtype=np.uint16).reshape(shape)
-            ).view(torch.bfloat16)
+            t = torch.from_numpy(np.frombuffer(raw, dtype=np.uint16).reshape(shape)).view(
+                torch.bfloat16
+            )
         else:
             dtype = np.dtype(tensor_data.dtype)
             expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
@@ -966,9 +962,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                     f"TensorData byte length mismatch for dtype={tensor_data.dtype}, "
                     f"shape={shape}: expected {expected}, got {len(raw)}"
                 )
-            t = torch.from_numpy(
-                np.frombuffer(raw, dtype=dtype).reshape(shape)
-            )
+            t = torch.from_numpy(np.frombuffer(raw, dtype=dtype).reshape(shape))
 
         if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
             return t.to(cast_to)
