@@ -12,6 +12,11 @@ use uuid::Uuid;
 pub struct ReplicaId(Uuid);
 
 impl ReplicaId {
+    /// Greatest possible replica id. As a watermark tie-breaker it makes a
+    /// `(timestamp, MAX)` entry suppress every op at or below that timestamp —
+    /// the timestamp-only semantics legacy acks (no `replica_id`) speak.
+    pub const MAX: Self = Self(Uuid::max());
+
     /// Generate a new replica ID
     pub fn new() -> Self {
         Self(Uuid::now_v7())
