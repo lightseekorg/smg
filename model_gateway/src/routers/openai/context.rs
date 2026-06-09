@@ -6,15 +6,15 @@ use axum::http::HeaderMap;
 use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
 use smg_data_connector::{
-    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
-    RequestContext as StorageRequestContext, ResponseStorage,
+    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
+    ResponseStorage,
 };
 use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
 use crate::{
-    config::RouterConfig, memory::MemoryExecutionContext, middleware,
-    middleware::TenantRequestMeta, routers::common::openai_bridge, worker::Worker,
+    config::RouterConfig, middleware::TenantRequestMeta, routers::common::openai_bridge,
+    worker::Worker,
 };
 
 pub struct RequestContext {
@@ -22,7 +22,6 @@ pub struct RequestContext {
     pub components: ComponentRefs,
     pub state: ProcessingState,
     pub storage_request_context: Option<StorageRequestContext>,
-    pub memory_execution_context: MemoryExecutionContext,
     /// Explicit tenant identity resolved at the HTTP boundary.
     pub tenant_request_meta: Option<TenantRequestMeta>,
 }
@@ -51,7 +50,6 @@ pub struct ResponsesComponents {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
 }
 
 pub enum ComponentRefs {
@@ -109,14 +107,6 @@ impl ComponentRefs {
             ComponentRefs::Responses(r) => Some(&r.conversation_item_storage),
         }
     }
-
-    /// Access optional conversation memory writer when response storage is available.
-    pub fn conversation_memory_writer(&self) -> Option<&Arc<dyn ConversationMemoryWriter>> {
-        match self {
-            ComponentRefs::Shared(_) => None,
-            ComponentRefs::Responses(r) => Some(&r.conversation_memory_writer),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -143,20 +133,13 @@ pub struct ResponsesPayloadState {
 }
 
 impl RequestContext {
-    /// Build request context for Responses API calls and initialize memory execution context.
+    /// Build request context for Responses API calls.
     pub fn for_responses(
         request: Arc<ResponsesRequest>,
         headers: Option<HeaderMap>,
         model_id: Option<String>,
         components: ComponentRefs,
     ) -> Self {
-        let empty_headers = HeaderMap::new();
-        let memory_execution_context = middleware::build_memory_execution_context(
-            components.router_config(),
-            headers.as_ref().unwrap_or(&empty_headers),
-        );
-        // TODO: Wire `memory_execution_context` into Responses store/recall execution flow.
-
         Self {
             input: RequestInput {
                 request_type: RequestType::Responses(request),
@@ -166,12 +149,11 @@ impl RequestContext {
             components,
             state: ProcessingState::default(),
             storage_request_context: None,
-            memory_execution_context,
             tenant_request_meta: None,
         }
     }
 
-    /// Build request context for Chat Completions calls and initialize memory execution context.
+    /// Build request context for Chat Completions calls.
     pub fn for_chat(
         request: Arc<ChatCompletionRequest>,
         headers: Option<HeaderMap>,
@@ -187,29 +169,12 @@ impl RequestContext {
             components,
             state: ProcessingState::default(),
             storage_request_context: None,
-            // Memory execution is currently scoped to Responses flows.
-            memory_execution_context: MemoryExecutionContext::default(),
             tenant_request_meta: None,
         }
     }
 }
 
 impl RequestContext {
-    /// Recompute memory execution context from current headers and router runtime settings.
-    /// Reserved for follow-up consumers that refresh request headers during pipeline mutation.
-    pub fn refresh_memory_execution_context(&mut self) {
-        if matches!(&self.input.request_type, RequestType::Responses(_)) {
-            let empty_headers = HeaderMap::new();
-            let headers = self.headers().unwrap_or(&empty_headers);
-            self.memory_execution_context = middleware::build_memory_execution_context(
-                self.components.router_config(),
-                headers,
-            );
-        } else {
-            self.memory_execution_context = MemoryExecutionContext::default();
-        }
-    }
-
     pub fn responses_request(&self) -> Option<&ResponsesRequest> {
         match &self.input.request_type {
             RequestType::Responses(req) => Some(req.as_ref()),
@@ -264,10 +229,7 @@ pub struct StorageHandles {
     pub response: Arc<dyn ResponseStorage>,
     pub conversation: Arc<dyn ConversationStorage>,
     pub conversation_item: Arc<dyn ConversationItemStorage>,
-    /// Conversation memory writer (can be NoOp depending on backend).
-    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
     pub request_context: Option<StorageRequestContext>,
-    pub memory_execution_context: MemoryExecutionContext,
 }
 
 pub struct OwnedStreamingContext {
@@ -302,11 +264,6 @@ impl RequestContext {
             .conversation_item_storage()
             .ok_or("Conversation item storage required")?
             .clone();
-        let conversation_memory_writer = self
-            .components
-            .conversation_memory_writer()
-            .ok_or("Conversation memory writer required")?
-            .clone();
 
         Ok(OwnedStreamingContext {
             url: payload_state.url,
@@ -318,9 +275,7 @@ impl RequestContext {
                 response,
                 conversation,
                 conversation_item,
-                conversation_memory_writer,
                 request_context: self.storage_request_context,
-                memory_execution_context: self.memory_execution_context,
             },
         })
     }

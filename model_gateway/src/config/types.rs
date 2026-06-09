@@ -10,14 +10,6 @@ pub use smg_data_connector::{
 use super::{validation::ConfigValidator, ConfigResult};
 use crate::{tenant::DEFAULT_TENANT_HEADER_NAME, worker::ConnectionMode};
 
-/// Runtime feature flags for memory behavior.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MemoryRuntimeConfig {
-    /// Master switch for memory features.
-    pub enabled: bool,
-}
-
 /// Background-mode tuning knobs. Availability is gated by backend capability
 /// (whether the active `history_backend` provides a
 /// `BackgroundResponseRepository`), not by a flag here.
@@ -104,8 +96,6 @@ pub struct RouterConfig {
     pub request_id_headers: Option<Vec<String>>,
     #[serde(default)]
     pub storage_context_headers: HashMap<String, String>,
-    #[serde(default)]
-    pub memory_runtime: MemoryRuntimeConfig,
     #[serde(default)]
     pub background: BackgroundConfig,
     #[serde(default)]
@@ -673,7 +663,6 @@ impl Default for RouterConfig {
             log_level: None,
             request_id_headers: None,
             storage_context_headers: HashMap::new(),
-            memory_runtime: MemoryRuntimeConfig::default(),
             background: BackgroundConfig::default(),
             tenant_resolution: TenantResolutionConfig::default(),
             max_concurrent_requests: -1,

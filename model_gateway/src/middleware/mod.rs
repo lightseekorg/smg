@@ -22,7 +22,6 @@ pub use concurrency::{
 pub use logging::{create_logging_layer, RequestLogger, RequestSpan, ResponseLogger};
 pub use metrics::{HttpMetricsLayer, HttpMetricsMiddleware};
 pub use request_id::{RequestId, RequestIdLayer, RequestIdMiddleware};
-pub(crate) use storage_context::build_memory_execution_context;
 pub use storage_context::storage_context_middleware;
 pub use tenant_resolution::{
     ordinary_tenant_resolution_middleware, route_request_meta_middleware, TenantResolutionState,

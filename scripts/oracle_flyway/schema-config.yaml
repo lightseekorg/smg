@@ -28,6 +28,3 @@ conversation_items:
 
 conversation_item_links:
   table: CONVERSATION_ITEM_LINKS
-
-conversation_memories:
-  table: CONVERSATION_MEMORIES

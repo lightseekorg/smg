@@ -35,10 +35,8 @@ pub(crate) mod versioning;
 // Re-export core types and traits
 pub use core::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
-    ConversationMemoryId, ConversationMemoryResult, ConversationMemoryStatus,
-    ConversationMemoryStorageError, ConversationMemoryType, ConversationMemoryWriter,
-    ConversationStorage, ListParams, NewConversation, NewConversationItem, NewConversationMemory,
-    ResponseId, ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
+    ConversationStorage, ListParams, NewConversation, NewConversationItem, ResponseId,
+    ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
 };
 
 pub use background::{
@@ -53,13 +51,10 @@ pub use context::{
     RequestContext,
 };
 // Re-export factory
-pub use factory::{
-    backend_supports_memory_writer, create_storage, StorageBundle, StorageFactoryConfig,
-};
+pub use factory::{create_storage, StorageBundle, StorageFactoryConfig};
 pub use hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
 pub use memory_background::MemoryBackgroundRepository;
-pub use noop::NoOpConversationMemoryWriter;
 // Re-export schema config types
 pub use schema::{ColumnDef, SchemaConfig, TableConfig};

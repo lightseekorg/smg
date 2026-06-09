@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use smg_data_connector::{
-    ConversationItemStorage, ConversationMemoryWriter, ConversationStorage,
-    RequestContext as StorageRequestContext, ResponseStorage,
+    ConversationItemStorage, ConversationStorage, RequestContext as StorageRequestContext,
+    ResponseStorage,
 };
 use smg_mcp::McpOrchestrator;
 
@@ -36,9 +36,6 @@ pub(crate) struct ResponsesContext {
     /// Conversation item storage backend
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
 
-    /// Conversation memory writer (can be NoOp depending on backend)
-    pub conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
-
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
 
@@ -60,7 +57,6 @@ impl ResponsesContext {
         response_storage: Arc<dyn ResponseStorage>,
         conversation_storage: Arc<dyn ConversationStorage>,
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
-        conversation_memory_writer: Arc<dyn ConversationMemoryWriter>,
         mcp_orchestrator: Arc<McpOrchestrator>,
         mcp_format_registry: FormatRegistry,
         request_context: Option<StorageRequestContext>,
@@ -71,7 +67,6 @@ impl ResponsesContext {
             response_storage,
             conversation_storage,
             conversation_item_storage,
-            conversation_memory_writer,
             mcp_orchestrator,
             mcp_format_registry,
             request_context,
