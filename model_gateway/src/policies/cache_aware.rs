@@ -41,16 +41,21 @@
     block_size:              Backend KV cache block size for event-driven routing
 */
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
+use openai_protocol::worker::WorkerLoadResponse;
 use parking_lot::RwLock;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use super::{
@@ -61,6 +66,9 @@ use crate::{
     mesh::adapters::tree_sync::{RepairEntry, TreeRepairPage},
     worker::{KvEventMonitor, Worker},
 };
+
+/// Latest per-worker backend load snapshot stream, keyed by worker URL.
+pub(crate) type LoadReceiver = watch::Receiver<HashMap<String, WorkerLoadResponse>>;
 
 /// Cache-aware routing policy
 ///
@@ -83,6 +91,11 @@ pub struct CacheAwarePolicy {
     _eviction_task: Option<PeriodicTask>,
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
+    /// Latest per-worker backend load snapshot (keyed by worker URL) from the
+    /// `WorkerMonitor` load poll. Read on the hot path for the KV-usage imbalance
+    /// trigger. `None` until wired by the registry (then the policy stays
+    /// count-only, preserving current behavior).
+    load_rx: RwLock<Option<LoadReceiver>>,
     /// Model-scoped hash indexes for resolving tenant delta hashes.
     /// Outer key is the normalized model_id; inner maps hold
     /// `hash → reconstructable prefix/tokens` per tree kind.
@@ -214,6 +227,7 @@ impl CacheAwarePolicy {
             token_trees,
             _eviction_task: eviction_task,
             kv_monitor: RwLock::new(None),
+            load_rx: RwLock::new(None),
             hash_index,
             populate_hash_index: AtomicBool::new(false),
         }
@@ -236,12 +250,89 @@ impl CacheAwarePolicy {
         *self.kv_monitor.write() = monitor;
     }
 
+    /// Set the backend load-snapshot receiver (thread-safe, after construction).
+    /// Wired from the `WorkerMonitor` via the `PolicyRegistry` so the KV-usage
+    /// imbalance trigger can read fresh per-worker `token_usage`.
+    pub fn set_load_receiver(&self, rx: Option<LoadReceiver>) {
+        *self.load_rx.write() = rx;
+    }
+
+    /// True when the pool is imbalanced enough to abandon cache affinity.
+    ///
+    /// Three independent triggers, OR'd together. The two KV-based triggers
+    /// require a backend `token_usage` snapshot and are disabled at their `1.0`
+    /// default (utilization and spread are both `<= 1.0`, so `> 1.0` never
+    /// fires):
+    ///
+    /// - **overload** (`overload_token_usage_threshold`): the hottest engine's
+    ///   KV utilization exceeds the ceiling — a critically-saturated engine,
+    ///   shed regardless of balance. Set high (e.g. 0.9) as a safety valve.
+    /// - **KV spread** (`balance_token_usage_threshold`): the hottest engine is
+    ///   materially more KV-saturated than the coldest, i.e. a cooler engine
+    ///   exists to spill toward. This is the true balance signal for long-context
+    ///   workloads, and — unlike request counts, which each gateway sees only
+    ///   locally — it is invariant to the number of gateway replicas.
+    /// - **count spread**: request-count dispersion (abs AND rel) over healthy
+    ///   workers. Always evaluated, so high-count / low-KV imbalance is still
+    ///   caught when KV looks even.
+    fn is_imbalanced(&self, workers: &[Arc<dyn Worker>], healthy_indices: &[usize]) -> bool {
+        // KV-based triggers — need a load snapshot; both default 1.0 = disabled.
+        if let Some((min_usage, max_usage)) =
+            self.backend_token_usage_bounds(workers, healthy_indices)
+        {
+            // Overload: a single engine is critically saturated.
+            if max_usage > f64::from(self.config.overload_token_usage_threshold) {
+                return true;
+            }
+            // KV imbalance: a hot engine with a materially cooler home.
+            if max_usage - min_usage > f64::from(self.config.balance_token_usage_threshold) {
+                return true;
+            }
+        }
+
+        // Count spread (abs AND rel) over healthy workers.
+        let (min_load, max_load) =
+            healthy_indices
+                .iter()
+                .fold((usize::MAX, 0usize), |(min, max), &idx| {
+                    let load = workers[idx].load();
+                    (min.min(load), max.max(load))
+                });
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
+        max_load.saturating_sub(min_load) > self.config.balance_abs_threshold
+            && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold)
+    }
+
+    /// Min and max backend KV-cache utilization (0.0–1.0) across healthy workers
+    /// that have a `WorkerMonitor` snapshot entry, as `(min, max)`. `None` when
+    /// no receiver is wired or no healthy worker has a load entry (→ caller
+    /// relies on the request-count spread).
+    fn backend_token_usage_bounds(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        healthy_indices: &[usize],
+    ) -> Option<(f64, f64)> {
+        let guard = self.load_rx.read();
+        let rx = guard.as_ref()?;
+        let loads = rx.borrow();
+        let mut bounds: Option<(f64, f64)> = None;
+        for &idx in healthy_indices {
+            if let Some(load) = loads.get(workers[idx].url()) {
+                let usage = load.effective_token_usage();
+                bounds = Some(match bounds {
+                    Some((min, max)) => (min.min(usage), max.max(usage)),
+                    None => (usage, usage),
+                });
+            }
+        }
+        bounds
+    }
+
     /// Initialize the trees with worker URLs (used only during initial setup)
     /// Initializes both string trees (HTTP) and token trees (gRPC) for each model.
     pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
         // Group workers by model
-        let mut model_workers: std::collections::HashMap<String, Vec<&Arc<dyn Worker>>> =
-            std::collections::HashMap::new();
+        let mut model_workers: HashMap<String, Vec<&Arc<dyn Worker>>> = HashMap::new();
         for worker in workers {
             let tree_key = normalize_model_key(worker.model_id());
             model_workers
@@ -686,18 +777,9 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         // All workers should be from the same model
         let model_id = normalize_model_key(workers[healthy_indices[0]].model_id());
 
-        // Get current load statistics - compute min/max in single pass without allocation
-        let (min_load, max_load) = workers.iter().fold((usize::MAX, 0usize), |(min, max), w| {
-            let load = w.load();
-            (min.min(load), max.max(load))
-        });
-        let min_load = if min_load == usize::MAX { 0 } else { min_load };
-
-        // Check if load is imbalanced
-        let is_imbalanced = max_load.saturating_sub(min_load) > self.config.balance_abs_threshold
-            && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold);
-
-        if is_imbalanced {
+        // Abandon cache affinity for shortest-queue when the pool is imbalanced —
+        // by request count, or (for long-context workloads) by backend KV usage.
+        if self.is_imbalanced(workers, &healthy_indices) {
             return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
         }
 
@@ -1038,7 +1120,7 @@ impl Default for CacheAwarePolicy {
 #[cfg(test)]
 mod tests {
     use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
-    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+    use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot, WorkerStatus};
 
     use super::*;
     use crate::worker::{BasicWorkerBuilder, WorkerType};
@@ -1123,6 +1205,8 @@ mod tests {
             eviction_interval_secs: 0, // Disable eviction thread
             max_tree_size: 10000,
             block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         });
 
         let worker1 = BasicWorkerBuilder::new("http://w1:8000")
@@ -1152,6 +1236,145 @@ mod tests {
             let idx = policy.select_worker(&workers, &info).unwrap();
             assert_eq!(idx, 1); // Should always pick worker2
         }
+    }
+
+    // ---- is_imbalanced: 3-term trigger (overload ∨ KV-spread ∨ count) ----
+
+    /// Single-DP load snapshot reporting the given KV utilization (0.0–1.0).
+    fn kv_load(token_usage: f64) -> WorkerLoadResponse {
+        WorkerLoadResponse {
+            loads: vec![SchedulerLoadSnapshot {
+                token_usage,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Healthy workers (health checks disabled) for the given URLs.
+    fn make_workers(urls: &[&str]) -> Vec<Arc<dyn Worker>> {
+        urls.iter()
+            .map(|u| {
+                Arc::new(
+                    BasicWorkerBuilder::new(*u)
+                        .worker_type(WorkerType::Regular)
+                        .health_config(no_health_check())
+                        .build(),
+                ) as Arc<dyn Worker>
+            })
+            .collect()
+    }
+
+    /// Inject a backend KV snapshot (utilization per worker, by index). Returns
+    /// the sender; bind it (`let _tx = ...`) to keep the watch channel open.
+    fn inject_kv(
+        policy: &CacheAwarePolicy,
+        workers: &[Arc<dyn Worker>],
+        usages: &[f64],
+    ) -> watch::Sender<HashMap<String, WorkerLoadResponse>> {
+        let map: HashMap<String, WorkerLoadResponse> = workers
+            .iter()
+            .zip(usages)
+            .map(|(w, &u)| (w.url().to_string(), kv_load(u)))
+            .collect();
+        let (tx, rx) = watch::channel(map);
+        policy.set_load_receiver(Some(rx));
+        tx
+    }
+
+    /// Config isolating the KV triggers (count effectively disabled): `balance`
+    /// is the spread threshold, `overload` the ceiling.
+    fn kv_only_config(balance_spread: f32, overload_ceiling: f32) -> CacheAwareConfig {
+        CacheAwareConfig {
+            balance_abs_threshold: usize::MAX,
+            eviction_interval_secs: 0,
+            balance_token_usage_threshold: balance_spread,
+            overload_token_usage_threshold: overload_ceiling,
+            ..Default::default()
+        }
+    }
+
+    fn all_healthy(workers: &[Arc<dyn Worker>]) -> Vec<usize> {
+        (0..workers.len()).collect()
+    }
+
+    #[test]
+    fn is_imbalanced_uniform_high_kv_does_not_fire() {
+        // All engines equally saturated: high utilization, zero spread.
+        let policy = CacheAwarePolicy::with_config(kv_only_config(0.3, 0.95));
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.9, 0.9, 0.9]);
+        // max 0.9 < 0.95 ceiling, spread 0.0 < 0.3 → keep cache affinity.
+        assert!(
+            !policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            "uniform-high KV (no cooler home) must not abandon cache affinity"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_one_hot_rest_idle_fires_via_spread() {
+        // Same hottest engine (0.9) as the uniform case, but neighbors are idle.
+        let policy = CacheAwarePolicy::with_config(kv_only_config(0.3, 0.95));
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.9, 0.15, 0.15]);
+        // spread 0.75 > 0.3 → spill toward a cooler engine.
+        assert!(
+            policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            "a hot engine with idle neighbors (large KV spread) must rebalance"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_overload_ceiling_fires_below_spread() {
+        // Critically hot engine, but the spread is under the balance threshold.
+        let policy = CacheAwarePolicy::with_config(kv_only_config(0.3, 0.95));
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.97, 0.80]);
+        // spread 0.17 < 0.3 (balance quiet) but 0.97 > 0.95 ceiling → shed.
+        assert!(
+            policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            "a critically-saturated engine must shed even below the spread threshold"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_high_count_low_kv_caught_by_count() {
+        // KV is even, so both KV triggers stay quiet — count must still catch it.
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            balance_token_usage_threshold: 0.3,
+            overload_token_usage_threshold: 0.95,
+            ..Default::default()
+        });
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000"]);
+        let _tx = inject_kv(&policy, &workers, &[0.3, 0.3]);
+        for _ in 0..20 {
+            workers[0].increment_load();
+        }
+        // KV spread 0.0, max 0.3 → KV quiet; count 20 vs 0 → fire.
+        assert!(
+            policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            "count spread must still trigger when KV utilization looks even"
+        );
+    }
+
+    #[test]
+    fn is_imbalanced_kv_disabled_by_default_ignores_snapshot() {
+        // Default config: both KV thresholds 1.0 (disabled).
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+        let workers = make_workers(&["http://w1:8000", "http://w2:8000"]);
+        // A massive KV spread that WOULD fire if KV balancing were enabled...
+        let _tx = inject_kv(&policy, &workers, &[0.95, 0.05]);
+        // ...is ignored at the 1.0 default; counts balanced → no rebalance.
+        assert!(
+            !policy.is_imbalanced(&workers, &all_healthy(&workers)),
+            "default thresholds (1.0) must ignore KV usage entirely"
+        );
     }
 
     #[test]
@@ -1981,6 +2204,8 @@ mod tests {
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0,
             block_size: 4,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
             ..Default::default()
         });
 

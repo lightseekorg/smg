@@ -164,6 +164,20 @@ struct CliArgs {
     #[arg(long, default_value_t = 1.5, help_heading = "Routing Policy")]
     balance_rel_threshold: f32,
 
+    /// Cache-aware KV-usage spread (hottest minus coldest backend, 0.0-1.0)
+    /// above which cache affinity is abandoned for shortest-queue, even if
+    /// request counts look balanced (catches long-context KV imbalance). Backend
+    /// must report token_usage. >= 1.0 disables it.
+    #[arg(long, default_value_t = 1.0, help_heading = "Routing Policy")]
+    balance_token_usage_threshold: f32,
+
+    /// Cache-aware KV-utilization ceiling (0.0-1.0): when the hottest backend
+    /// exceeds it, shed load off that engine regardless of spread. A safety
+    /// valve for critically-saturated engines, best set high (e.g. 0.9).
+    /// >= 1.0 disables it.
+    #[arg(long, default_value_t = 1.0, help_heading = "Routing Policy")]
+    overload_token_usage_threshold: f32,
+
     /// Interval in seconds between cache eviction operations
     #[arg(long, default_value_t = 120, help_heading = "Routing Policy")]
     eviction_interval: u64,
@@ -939,6 +953,8 @@ impl CliArgs {
                 eviction_interval_secs: self.eviction_interval,
                 max_tree_size: self.max_tree_size,
                 block_size: self.block_size,
+                balance_token_usage_threshold: self.balance_token_usage_threshold,
+                overload_token_usage_threshold: self.overload_token_usage_threshold,
             },
             "power_of_two" => PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 5,

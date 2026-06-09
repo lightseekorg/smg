@@ -48,6 +48,8 @@ class RouterArgs:
     cache_threshold: float = 0.3
     balance_abs_threshold: int = 64
     balance_rel_threshold: float = 1.5
+    balance_token_usage_threshold: float = 1.0
+    overload_token_usage_threshold: float = 1.0
     eviction_interval_secs: int = 60
     max_tree_size: int = 2**26
     block_size: int = 16
@@ -375,6 +377,29 @@ class RouterArgs:
             help=(
                 "Relative threshold for load difference. Balancing is triggered if"
                 " `max_load > min_load * rel_threshold` and the absolute threshold is also met."
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}balance-token-usage-threshold",
+            type=float,
+            default=RouterArgs.balance_token_usage_threshold,
+            help=(
+                "Cache-aware KV-usage SPREAD threshold (0.0-1.0): the hottest minus"
+                " coldest backend KV utilization above which cache affinity is"
+                " abandoned for shortest-queue. Catches long-context KV imbalance that"
+                " in-flight request counts miss, and is invariant to gateway replica"
+                " count. Backend must report token_usage. Defaults to 1.0 (disabled)."
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}overload-token-usage-threshold",
+            type=float,
+            default=RouterArgs.overload_token_usage_threshold,
+            help=(
+                "Cache-aware KV-utilization CEILING (0.0-1.0): when the hottest backend"
+                " exceeds it, shed load off that engine regardless of spread. A safety"
+                " valve for critically-saturated engines, best set high (e.g. 0.9)."
+                " Backend must report token_usage. Defaults to 1.0 (disabled)."
             ),
         )
         routing_group.add_argument(

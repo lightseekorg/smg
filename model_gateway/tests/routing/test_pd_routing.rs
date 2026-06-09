@@ -166,6 +166,8 @@ mod pd_routing_unit_tests {
                     eviction_interval_secs: 60,
                     max_tree_size: 1000000,
                     block_size: 16,
+                    balance_token_usage_threshold: 1.0,
+                    overload_token_usage_threshold: 1.0,
                 },
             ),
             (

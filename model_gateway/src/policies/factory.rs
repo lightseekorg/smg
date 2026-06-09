@@ -36,6 +36,8 @@ impl PolicyFactory {
                 eviction_interval_secs,
                 max_tree_size,
                 block_size,
+                balance_token_usage_threshold,
+                overload_token_usage_threshold,
             } => {
                 let config = CacheAwareConfig {
                     cache_threshold: *cache_threshold,
@@ -44,6 +46,8 @@ impl PolicyFactory {
                     eviction_interval_secs: *eviction_interval_secs,
                     max_tree_size: *max_tree_size,
                     block_size: *block_size,
+                    balance_token_usage_threshold: *balance_token_usage_threshold,
+                    overload_token_usage_threshold: *overload_token_usage_threshold,
                 };
                 Arc::new(CacheAwarePolicy::with_config(config))
             }
@@ -128,6 +132,8 @@ mod tests {
             eviction_interval_secs: 30,
             max_tree_size: 1000,
             block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         });
         assert_eq!(policy.name(), "cache_aware");
 

@@ -656,6 +656,12 @@ impl AppContextBuilder {
             // and any other existing cache-aware policies.
             if let Some(ref registry) = self.policy_registry {
                 registry.set_kv_event_monitor(Some(Arc::clone(&monitor)));
+                // Wire the backend load snapshot so cache-aware policies can use
+                // the KV-usage imbalance trigger. `with_worker_monitor` ran
+                // earlier in the build chain, so this is already set.
+                if let Some(ref worker_monitor) = self.worker_monitor {
+                    registry.set_load_receiver(Some(worker_monitor.subscribe()));
+                }
             }
 
             self.kv_event_monitor = Some(monitor);

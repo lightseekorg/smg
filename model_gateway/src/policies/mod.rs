@@ -112,6 +112,20 @@ pub struct CacheAwareConfig {
     /// Used by `compute_request_content_hashes` to chunk request tokens into blocks.
     /// Must match the backend's block size. Default: 16 (SGLang page size).
     pub block_size: usize,
+    /// KV-usage **spread** (hottest minus coldest backend, 0.0–1.0) above which
+    /// the pool is treated as imbalanced and cache affinity is abandoned for
+    /// shortest-queue. This is the balance signal for long-context workloads
+    /// where a few requests saturate one engine's KV without tripping the
+    /// request-count thresholds; being backend-reported, it is invariant to the
+    /// number of gateway replicas. Requires the backend to report `token_usage`
+    /// (gRPC/`GetLoads`); falls back to the count spread when unavailable.
+    /// `>= 1.0` disables it (default).
+    pub balance_token_usage_threshold: f32,
+    /// Backend KV-cache utilization **ceiling** (0.0–1.0): when the hottest
+    /// engine exceeds it the pool is treated as imbalanced regardless of spread,
+    /// shedding load off a critically-saturated engine. A safety valve, best set
+    /// high (e.g. 0.9). Requires `token_usage`; `>= 1.0` disables it (default).
+    pub overload_token_usage_threshold: f32,
 }
 
 impl Default for CacheAwareConfig {
@@ -123,6 +137,10 @@ impl Default for CacheAwareConfig {
             eviction_interval_secs: 30,
             max_tree_size: 10000,
             block_size: 16,
+            // Both KV triggers disabled by default (>= 1.0 never trips). Set
+            // balance e.g. 0.5 (spread) and/or overload e.g. 0.9 (ceiling).
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         }
     }
 }

@@ -248,12 +248,30 @@ impl ConfigValidator {
                 eviction_interval_secs,
                 max_tree_size,
                 block_size,
+                balance_token_usage_threshold,
+                overload_token_usage_threshold,
             } => {
                 if *block_size == 0 {
                     return Err(ConfigError::InvalidValue {
                         field: "block_size".to_string(),
                         value: block_size.to_string(),
                         reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if *balance_token_usage_threshold <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "balance_token_usage_threshold".to_string(),
+                        value: balance_token_usage_threshold.to_string(),
+                        reason: "Must be > 0.0 (use >= 1.0 to disable)".to_string(),
+                    });
+                }
+
+                if *overload_token_usage_threshold <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "overload_token_usage_threshold".to_string(),
+                        value: overload_token_usage_threshold.to_string(),
+                        reason: "Must be > 0.0 (use >= 1.0 to disable)".to_string(),
                     });
                 }
 
@@ -895,6 +913,8 @@ mod tests {
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
                 block_size: 16,
+                balance_token_usage_threshold: 1.0,
+                overload_token_usage_threshold: 1.0,
             },
         );
 
@@ -915,6 +935,8 @@ mod tests {
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
                 block_size: 16,
+                balance_token_usage_threshold: 1.0,
+                overload_token_usage_threshold: 1.0,
             },
         );
 
@@ -970,6 +992,8 @@ mod tests {
                 eviction_interval_secs: 60,
                 max_tree_size: 1000,
                 block_size: 16,
+                balance_token_usage_threshold: 1.0,
+                overload_token_usage_threshold: 1.0,
             },
         );
 
@@ -1015,6 +1039,8 @@ mod tests {
                     eviction_interval_secs: 60,
                     max_tree_size: 1000,
                     block_size: 16,
+                    balance_token_usage_threshold: 1.0,
+                    overload_token_usage_threshold: 1.0,
                 }),
                 decode_policy: Some(PolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 60,

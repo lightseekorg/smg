@@ -130,6 +130,8 @@ impl RouterConfigBuilder {
             eviction_interval_secs,
             max_tree_size,
             block_size: 16,
+            balance_token_usage_threshold: 1.0,
+            overload_token_usage_threshold: 1.0,
         };
         self
     }
