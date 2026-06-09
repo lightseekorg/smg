@@ -1133,8 +1133,22 @@ impl TokenTree {
     /// instead of interleaving them, which only changes the exact monotonic
     /// timestamp values written (immaterial to relative LRU/LFU ordering); the
     /// set of touched (node, tenant) pairs and the LFU hit-count increments are
-    /// unchanged. Concurrency is no weaker than the original two calls — they
-    /// also release every guard between the separate `match` and `insert`.
+    /// unchanged.
+    ///
+    /// # Equivalence scope (single-threaded vs concurrent)
+    ///
+    /// The "identical" guarantees above hold exactly **single-threaded**
+    /// (covered by `test_match_and_insert_equiv_*`). Under **concurrent** node
+    /// splits the equivalence is on **routing and `tenant_token_count`**, not on
+    /// per-node access *timestamps*: this path replays onto the nodes recorded
+    /// during the match rather than re-walking, so if another thread splits one
+    /// of those nodes mid-flight, a freshly-created intermediate can miss a
+    /// timestamp bump — it is then evicted slightly earlier (a bounded,
+    /// self-healing cache-hit-rate effect on an approximate tree). The token
+    /// count stays exact because the recorded per-node `advance`s are frozen at
+    /// match time; `test_concurrent_match_and_insert_count_and_route_integrity`
+    /// proves both the exact count and route integrity under a concurrent-split
+    /// stress.
     pub fn match_and_insert_with<'t, F>(&self, tokens: &[TokenId], select: F) -> PrefixMatchResult
     where
         F: FnOnce(&PrefixMatchResult) -> Option<&'t str>,
@@ -3371,5 +3385,96 @@ mod tests {
             before,
             "None selection must not insert"
         );
+    }
+
+    /// Concurrency stress test — settles whether the fused
+    /// `match_and_insert` / `match_and_insert_with` path corrupts
+    /// `tenant_token_count` or loses routes under concurrent node splits
+    /// (the review concern).
+    ///
+    /// Invariant under test (exact, concurrency-independent): every insert
+    /// adds `align_to_page(input_len)` to its tenant's count, no matter how
+    /// nodes are split mid-flight — the per-node `advance`s are frozen at match
+    /// time, and the suffix splice re-walks from the fall-off node. If a
+    /// concurrent split inflated the count (the "Major" review claim), the
+    /// exact-equality assert below would fail. There is no background eviction
+    /// in a bare `TokenTree`, so the count is pure-cumulative here.
+    ///
+    /// Both variants run concurrently (inline + replay) on overlapping, nested,
+    /// diverging prefixes chosen to force splits.
+    #[test]
+    fn test_concurrent_match_and_insert_count_and_route_integrity() {
+        const N_PREFIXES: usize = 8;
+        const N_THREADS: usize = 8;
+        const ITERS: usize = 3000;
+
+        // Nested shared head [1,2,3,…] (a shorter prefix matching inside a
+        // longer node forces a split) + a disjoint divergent tail per tenant.
+        let prefixes: Vec<Vec<TokenId>> = (0..N_PREFIXES)
+            .map(|j| {
+                let mut v = make_tokens(1, j + 1);
+                v.extend(make_tokens(10_000 + (j as u32) * 100, 1));
+                v
+            })
+            .collect();
+        let tenants: Vec<String> = (0..N_PREFIXES).map(|j| format!("t{j}")).collect();
+        let lens: Vec<usize> = prefixes.iter().map(|p| align_to_page(p.len())).collect();
+
+        let tree = Arc::new(TokenTree::new());
+        let prefixes = Arc::new(prefixes);
+        let tenants = Arc::new(tenants);
+
+        let handles: Vec<_> = (0..N_THREADS)
+            .map(|t| {
+                let tree = Arc::clone(&tree);
+                let prefixes = Arc::clone(&prefixes);
+                let tenants = Arc::clone(&tenants);
+                thread::spawn(move || {
+                    let mut local = [0usize; N_PREFIXES];
+                    for i in 0..ITERS {
+                        let j = (t + i) % N_PREFIXES;
+                        if t % 2 == 0 {
+                            // replay variant (#1: count-drift concern)
+                            let tn = tenants[j].as_str();
+                            tree.match_and_insert_with(&prefixes[j], |_| Some(tn));
+                        } else {
+                            // inline variant (#2: touch-order concern)
+                            tree.match_and_insert(&prefixes[j], tenants[j].as_str());
+                        }
+                        local[j] += 1;
+                    }
+                    local
+                })
+            })
+            .collect();
+
+        let mut total = [0usize; N_PREFIXES];
+        for h in handles {
+            let local = h.join().expect("worker panicked (deadlock/corruption)");
+            for j in 0..N_PREFIXES {
+                total[j] += local[j];
+            }
+        }
+
+        // DEFINITIVE: exact, concurrency-independent count.
+        let counts = tree.get_tenant_token_counts();
+        for j in 0..N_PREFIXES {
+            let expected = total[j] * lens[j];
+            let actual = counts.get(&tenants[j]).copied().unwrap_or(0);
+            assert_eq!(
+                actual, expected,
+                "tenant {} token count diverged under concurrency: expected {expected}, got {actual}",
+                tenants[j]
+            );
+        }
+
+        // Route integrity: every prefix is still fully cached at the end.
+        for j in 0..N_PREFIXES {
+            let r = tree.match_prefix_with_counts(&prefixes[j]);
+            assert_eq!(
+                r.matched_token_count, lens[j],
+                "prefix {j} not fully cached after concurrent stress (route loss)"
+            );
+        }
     }
 }
