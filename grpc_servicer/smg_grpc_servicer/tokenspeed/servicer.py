@@ -63,9 +63,11 @@ LOG_MM_TIMING = os.getenv("TOKENSPEED_LOG_MM_TIMING", "").lower() in (
     "true",
     "yes",
 )
-UNLINK_MM_SHM_AFTER_READ = os.getenv(
-    "TOKENSPEED_UNLINK_MM_SHM_AFTER_READ", "1"
-).lower() not in ("0", "false", "no")
+UNLINK_MM_SHM_AFTER_READ = os.getenv("TOKENSPEED_UNLINK_MM_SHM_AFTER_READ", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
 
 def _lazy_generate_req_input():
@@ -153,9 +155,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             build_started = time.perf_counter()
             req_obj = self._build_generate_req(request)
             if LOG_MM_TIMING:
-                has_mm = (
-                    getattr(req_obj, "precomputed_multimodal_inputs", None) is not None
-                )
+                has_mm = getattr(req_obj, "precomputed_multimodal_inputs", None) is not None
                 logger.info(
                     "mm_timing generate_build_ms rid=%s elapsed=%.3f has_mm=%s",
                     rid,
@@ -961,9 +961,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 raise ValueError("MultimodalItem must include encoder_input")
 
             feature_started = time.perf_counter() if LOG_MM_TIMING else None
-            feature = self._feature_from_proto(
-                item_proto.encoder_input, cast_to=model_dtype
-            )
+            feature = self._feature_from_proto(item_proto.encoder_input, cast_to=model_dtype)
             feature_elapsed_ms = (
                 (time.perf_counter() - feature_started) * 1000
                 if feature_started is not None
@@ -992,9 +990,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
                 for name, tensor_data in item_proto.model_specific_tensors.items()
             }
             model_elapsed_ms = (
-                (time.perf_counter() - model_started) * 1000
-                if model_started is not None
-                else None
+                (time.perf_counter() - model_started) * 1000 if model_started is not None else None
             )
             self._validate_item_tensor_consistency(modality, model_specific_data)
 
@@ -1143,28 +1139,22 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         materializing bytes and cloning a CPU tensor.
         """
         if tensor_data.WhichOneof("payload") != "shm":
-            return TokenSpeedSchedulerServicer._tensor_from_proto(
-                tensor_data, cast_to=cast_to
-            )
+            return TokenSpeedSchedulerServicer._tensor_from_proto(tensor_data, cast_to=cast_to)
 
         dtype = TokenSpeedSchedulerServicer._torch_dtype_from_proto(tensor_data.dtype)
-        if cast_to is not None and dtype != cast_to and torch.is_floating_point(
-            torch.empty((), dtype=dtype)
+        if (
+            cast_to is not None
+            and dtype != cast_to
+            and torch.is_floating_point(torch.empty((), dtype=dtype))
         ):
-            return TokenSpeedSchedulerServicer._tensor_from_proto(
-                tensor_data, cast_to=cast_to
-            )
+            return TokenSpeedSchedulerServicer._tensor_from_proto(tensor_data, cast_to=cast_to)
 
         shm = tensor_data.shm
         if shm.offset != 0:
-            return TokenSpeedSchedulerServicer._tensor_from_proto(
-                tensor_data, cast_to=cast_to
-            )
+            return TokenSpeedSchedulerServicer._tensor_from_proto(tensor_data, cast_to=cast_to)
 
         shape = tuple(int(dim) for dim in tensor_data.shape)
-        expected = int(np.prod(shape, dtype=np.int64)) * torch.empty(
-            (), dtype=dtype
-        ).element_size()
+        expected = int(np.prod(shape, dtype=np.int64)) * torch.empty((), dtype=dtype).element_size()
         if int(shm.nbytes) != expected:
             raise ValueError(
                 f"TensorData.shm byte length mismatch for dtype={tensor_data.dtype}, "
@@ -1180,9 +1170,7 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
         if payload == "inline":
             return bytes(tensor_data.inline)
         if payload == "shm":
-            return TokenSpeedSchedulerServicer._tensor_payload_bytes_from_shm(
-                tensor_data.shm
-            )
+            return TokenSpeedSchedulerServicer._tensor_payload_bytes_from_shm(tensor_data.shm)
         if payload == "remote":
             raise ValueError("TensorData.remote payload is not implemented yet")
         raise ValueError("TensorData payload is required")
