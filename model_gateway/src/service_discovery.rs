@@ -1310,7 +1310,6 @@ mod tests {
             mcp_format_registry: openai_bridge::FormatRegistry::new(),
             tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
             multimodal_config_registry: Arc::new(MultimodalConfigRegistry::new()),
-            skill_service: None,
             wasm_manager: None,
             worker_service: Arc::new(WorkerService::new(
                 worker_registry,

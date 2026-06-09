@@ -5,8 +5,7 @@ use smg_mcp::McpConfig;
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
     HistoryBackend, MemoryRuntimeConfig, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig,
-    RedisConfig, RetryConfig, RouterConfig, RoutingMode, SkillsConfig, TokenizerCacheConfig,
-    TraceConfig,
+    RedisConfig, RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
 };
 use crate::worker::ConnectionMode;
 
@@ -22,7 +21,6 @@ pub struct RouterConfigBuilder {
     server_cert_path: Option<String>,
     server_key_path: Option<String>,
     mcp_config_path: Option<String>,
-    skills_config_path: Option<String>,
 }
 
 impl RouterConfigBuilder {
@@ -40,7 +38,6 @@ impl RouterConfigBuilder {
             server_cert_path: None,
             server_key_path: None,
             mcp_config_path: None,
-            skills_config_path: None,
         }
     }
 
@@ -726,30 +723,6 @@ impl RouterConfigBuilder {
         self
     }
 
-    // ==================== Skills ====================
-
-    pub fn skills_enabled(mut self, enabled: bool) -> Self {
-        self.config.skills_enabled = enabled;
-        self
-    }
-
-    pub fn skills_config(mut self, skills: SkillsConfig) -> Self {
-        self.config.skills = Some(skills);
-        self
-    }
-
-    /// Config file loaded during build() when skills are enabled.
-    pub fn skills_config_path<S: Into<String>>(mut self, path: S) -> Self {
-        self.skills_config_path = Some(path.into());
-        self
-    }
-
-    /// Config file loaded during build() when skills are enabled.
-    pub fn maybe_skills_config_path(mut self, path: Option<impl Into<String>>) -> Self {
-        self.skills_config_path = path.map(|p| p.into());
-        self
-    }
-
     // ==================== Build ====================
 
     pub fn build(self) -> ConfigResult<RouterConfig> {
@@ -769,9 +742,6 @@ impl RouterConfigBuilder {
 
         // Read MCP config from path if provided
         self = self.read_mcp_config()?;
-
-        // Read skills config from path if provided
-        self = self.read_skills_config()?;
 
         let config: RouterConfig = self.into();
         if validate {
@@ -870,38 +840,6 @@ impl RouterConfigBuilder {
 
         Ok(self)
     }
-
-    /// Internal method to read skills config from path.
-    fn read_skills_config(mut self) -> ConfigResult<Self> {
-        if !self.config.skills_enabled {
-            self.config.skills = None;
-            return Ok(self);
-        }
-
-        if self.config.skills.is_some() {
-            return Ok(self);
-        }
-
-        if let Some(skills_config_path) = &self.skills_config_path {
-            let contents = std::fs::read_to_string(skills_config_path).map_err(|e| {
-                ConfigError::ValidationFailed {
-                    reason: format!("Failed to read skills config from {skills_config_path}: {e}"),
-                }
-            })?;
-            let skills_config: SkillsConfig =
-                serde_yaml::from_str(&contents).map_err(|e| ConfigError::ValidationFailed {
-                    reason: format!("Failed to parse skills config from {skills_config_path}: {e}"),
-                })?;
-            self.config.skills = Some(skills_config);
-        } else {
-            return Err(ConfigError::ValidationFailed {
-                reason: "skills are enabled but no skills config was provided; set --skills-config-path or preload RouterConfig.skills"
-                    .to_string(),
-            });
-        }
-
-        Ok(self)
-    }
 }
 
 impl From<RouterConfigBuilder> for RouterConfig {
@@ -924,9 +862,7 @@ impl RouterConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, io::Write};
-
-    use tempfile::NamedTempFile;
+    use std::collections::HashMap;
 
     use super::*;
 
@@ -998,74 +934,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.storage_context_headers, headers);
-    }
-
-    #[test]
-    fn test_builder_loads_skills_config_from_yaml() {
-        let mut skills_config = NamedTempFile::new().unwrap();
-        writeln!(
-            skills_config,
-            "max_skills_per_request: 3\nexecution:\n  executor_url: http://executor.internal\n  executor_api_key: secret\n"
-        )
-        .unwrap();
-
-        let config = RouterConfigBuilder::new()
-            .regular_mode(vec!["http://worker1:8000".to_string()])
-            .skills_enabled(true)
-            .skills_config_path(skills_config.path().to_str().unwrap())
-            .build()
-            .unwrap();
-
-        assert!(config.skills_enabled);
-        assert_eq!(config.skills.as_ref().unwrap().max_skills_per_request, 3);
-        assert_eq!(
-            config
-                .skills
-                .as_ref()
-                .unwrap()
-                .execution
-                .executor_url
-                .as_deref(),
-            Some("http://executor.internal")
-        );
-        assert_eq!(
-            config
-                .skills
-                .as_ref()
-                .unwrap()
-                .execution
-                .executor_api_key
-                .as_deref(),
-            Some("secret")
-        );
-    }
-
-    #[test]
-    fn test_builder_ignores_skills_path_when_disabled() {
-        let mut skills_config = NamedTempFile::new().unwrap();
-        writeln!(skills_config, "max_skills_per_request: 2").unwrap();
-
-        let config = RouterConfigBuilder::new()
-            .regular_mode(vec!["http://worker1:8000".to_string()])
-            .skills_enabled(false)
-            .skills_config_path(skills_config.path().to_str().unwrap())
-            .build()
-            .unwrap();
-
-        assert!(!config.skills_enabled);
-        assert!(config.skills.is_none());
-    }
-
-    #[test]
-    fn test_builder_rejects_enabled_skills_without_nested_config() {
-        let error = RouterConfigBuilder::new()
-            .regular_mode(vec!["http://worker1:8000".to_string()])
-            .skills_enabled(true)
-            .build()
-            .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("skills are enabled but no skills config was provided"));
     }
 }

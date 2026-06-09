@@ -36,11 +36,6 @@ use openai_protocol::{
     UNKNOWN_MODEL_ID,
 };
 use serde_json::Value;
-use smg_skills::{
-    resolve_messages_skill_manifest, resolve_responses_skill_manifest,
-    validate_messages_reserved_skill_tool_names, validate_responses_reserved_skill_tool_names,
-    SkillService,
-};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -63,7 +58,6 @@ pub struct RouterManager {
     gateway_api_key: Option<String>,
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
     default_router: Arc<std::sync::RwLock<Option<RouterId>>>,
-    skill_service: Option<Arc<SkillService>>,
     enable_igw: bool,
 }
 
@@ -75,7 +69,6 @@ impl RouterManager {
             gateway_api_key: None,
             routers: Arc::new(DashMap::new()),
             default_router: Arc::new(std::sync::RwLock::new(None)),
-            skill_service: None,
             enable_igw: false,
         }
     }
@@ -107,7 +100,6 @@ impl RouterManager {
             app_context.client.clone(),
         );
         manager.enable_igw = config.router_config.enable_igw;
-        manager.skill_service.clone_from(&app_context.skill_service);
         manager
             .gateway_api_key
             .clone_from(&config.router_config.api_key);
@@ -600,29 +592,10 @@ impl RouterTrait for RouterManager {
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        if let Err(error) = validate_messages_reserved_skill_tool_names(body.tools.as_deref()) {
-            return route_error::reserved_skill_tool_name(error);
-        }
-
         let router = self.select_router_for_request(Some(model_id));
         if let Some(router) = router {
-            let skill_manifest = match resolve_messages_skill_manifest(
-                self.skill_service.as_deref(),
-                tenant_meta.tenant_key().as_str(),
-                body,
-            )
-            .await
-            {
-                Ok(manifest) => manifest,
-                Err(error) => return route_error::skill_resolution_error(error),
-            };
-            let tenant_meta = if skill_manifest.is_empty() {
-                tenant_meta.clone()
-            } else {
-                tenant_meta.clone().with_extension(skill_manifest)
-            };
             router
-                .route_messages(headers, &tenant_meta, body, model_id)
+                .route_messages(headers, tenant_meta, body, model_id)
                 .await
         } else {
             (
@@ -640,29 +613,10 @@ impl RouterTrait for RouterManager {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        if let Err(error) = validate_responses_reserved_skill_tool_names(body.tools.as_deref()) {
-            return route_error::reserved_skill_tool_name(error);
-        }
-
         let router = self.select_router_for_request(Some(model_id));
         if let Some(router) = router {
-            let skill_manifest = match resolve_responses_skill_manifest(
-                self.skill_service.as_deref(),
-                tenant_meta.tenant_key().as_str(),
-                body,
-            )
-            .await
-            {
-                Ok(manifest) => manifest,
-                Err(error) => return route_error::skill_resolution_error(error),
-            };
-            let tenant_meta = if skill_manifest.is_empty() {
-                tenant_meta.clone()
-            } else {
-                tenant_meta.clone().with_extension(skill_manifest)
-            };
             router
-                .route_responses(headers, &tenant_meta, body, model_id)
+                .route_responses(headers, tenant_meta, body, model_id)
                 .await
         } else {
             (

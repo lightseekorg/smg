@@ -6,14 +6,12 @@ use std::{
 use llm_tokenizer::registry::TokenizerRegistry;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
-use smg_blob_storage::create_blob_store;
 use smg_data_connector::{
     backend_supports_memory_writer, create_storage, BackgroundResponseRepository,
     ConversationItemStorage, ConversationMemoryWriter, ConversationStorage, ResponseStorage,
     StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
-use smg_skills::{SkillService, SkillUploadLimits};
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
@@ -74,7 +72,6 @@ pub struct AppContext {
     pub workflow_engines: Arc<OnceLock<WorkflowEngines>>,
     pub mcp_orchestrator: Arc<OnceLock<Arc<McpOrchestrator>>>,
     pub mcp_format_registry: FormatRegistry,
-    pub skill_service: Option<Arc<SkillService>>,
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
@@ -114,7 +111,6 @@ pub struct AppContextBuilder {
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
     mcp_format_registry: Option<FormatRegistry>,
-    skill_service: Option<Arc<SkillService>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
     kv_event_monitor: Option<Arc<KvEventMonitor>>,
     webrtc_bind_addr: Option<std::net::IpAddr>,
@@ -170,7 +166,6 @@ impl AppContextBuilder {
             workflow_engines: None,
             mcp_orchestrator: None,
             mcp_format_registry: None,
-            skill_service: None,
             wasm_manager: None,
             kv_event_monitor: None,
             webrtc_bind_addr: None,
@@ -405,7 +400,6 @@ impl AppContextBuilder {
                 .mcp_orchestrator
                 .ok_or(AppContextBuildError::MissingField("mcp_orchestrator"))?,
             mcp_format_registry: self.mcp_format_registry.unwrap_or_default(),
-            skill_service: self.skill_service,
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
@@ -443,7 +437,6 @@ impl AppContextBuilder {
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
             .await?
-            .with_skill_service(&router_config)?
             .with_wasm_manager(&router_config)
             .with_kv_event_monitor(&router_config)
             .webrtc_bind_addr(webrtc_bind_addr)
@@ -682,31 +675,6 @@ impl AppContextBuilder {
         Ok(self)
     }
 
-    fn with_skill_service(mut self, config: &RouterConfig) -> Result<Self, String> {
-        if !config.skills_enabled {
-            self.skill_service = None;
-            return Ok(self);
-        }
-
-        let Some(skills_config) = config.skills.as_ref() else {
-            return Err(
-                "Skills are enabled but no validated skills config was loaded at startup"
-                    .to_string(),
-            );
-        };
-
-        let blob_store =
-            create_blob_store(&skills_config.blob_store, Some(&skills_config.cache))
-                .map_err(|error| format!("Failed to initialize skills blob store: {error}"))?;
-        let upload_limits = SkillUploadLimits::from_config(skills_config)
-            .map_err(|error| format!("Invalid skills upload limits: {error}"))?;
-        self.skill_service = Some(Arc::new(SkillService::in_memory_with_limits(
-            blob_store,
-            upload_limits,
-        )));
-        Ok(self)
-    }
-
     /// Create KV event monitor for event-driven cache-aware routing.
     ///
     /// The monitor is created when the default policy is cache_aware, regardless
@@ -770,38 +738,4 @@ fn validate_memory_writer_configuration(config: &RouterConfig) -> Result<(), Str
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::{anyhow, Result};
-    use smg_skills::{SkillServiceMode, SkillsConfig};
-    use tempfile::TempDir;
-
-    use super::AppContextBuilder;
-    use crate::config::RouterConfig;
-
-    #[test]
-    fn with_skill_service_builds_single_process_service_when_enabled() -> Result<()> {
-        let blob_root = TempDir::new()?;
-        let cache_root = TempDir::new()?;
-        let mut config = RouterConfig {
-            skills_enabled: true,
-            ..RouterConfig::default()
-        };
-        let mut skills = SkillsConfig::default();
-        skills.blob_store.path = blob_root.path().display().to_string();
-        skills.cache.path = cache_root.path().display().to_string();
-        config.skills = Some(skills);
-
-        let builder = AppContextBuilder::new()
-            .with_skill_service(&config)
-            .map_err(anyhow::Error::msg)?;
-        let service = builder
-            .skill_service
-            .ok_or_else(|| anyhow!("skill service should be built"))?;
-
-        assert_eq!(service.mode(), SkillServiceMode::SingleProcess);
-        Ok(())
-    }
 }

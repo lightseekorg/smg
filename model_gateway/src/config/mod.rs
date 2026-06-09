@@ -3,7 +3,6 @@ pub mod types;
 pub(crate) mod validation;
 
 pub use builder::*;
-pub use smg_skills::SkillsConfig;
 pub use types::*;
 
 #[derive(Debug, thiserror::Error)]

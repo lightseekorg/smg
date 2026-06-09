@@ -22,31 +22,6 @@ const POSTGRES_V3: Migration = Migration {
     description: "Drop redundant output, metadata, instructions, tool_calls columns from responses",
     up: pg_v3_up,
 };
-const POSTGRES_V4: Migration = Migration {
-    version: 4,
-    description: "Create skills table",
-    up: pg_v4_up,
-};
-const POSTGRES_V5: Migration = Migration {
-    version: 5,
-    description: "Create skill_versions table",
-    up: pg_v5_up,
-};
-const POSTGRES_V6: Migration = Migration {
-    version: 6,
-    description: "Create tenant_aliases table",
-    up: pg_v6_up,
-};
-const POSTGRES_V7: Migration = Migration {
-    version: 7,
-    description: "Create bundle_tokens table",
-    up: pg_v7_up,
-};
-const POSTGRES_V8: Migration = Migration {
-    version: 8,
-    description: "Create continuation_cookies table",
-    up: pg_v8_up,
-};
 const POSTGRES_V9: Migration = Migration {
     version: 9,
     description: "Extend responses with background-mode columns",
@@ -69,15 +44,14 @@ pub(crate) static POSTGRES_HISTORY_MIGRATIONS: [Migration; 3] =
     [POSTGRES_V1, POSTGRES_V2, POSTGRES_V3];
 
 /// Postgres migration list. Append new migrations here.
-pub(crate) static POSTGRES_MIGRATIONS: [Migration; 11] = [
+///
+/// Versions 4–8 (skills / tenant-alias / bundle-token / continuation-cookie
+/// tables) were removed with the Skills subsystem, leaving an intentional
+/// numbering gap before the background-mode migrations (9–11).
+pub(crate) static POSTGRES_MIGRATIONS: [Migration; 6] = [
     POSTGRES_V1,
     POSTGRES_V2,
     POSTGRES_V3,
-    POSTGRES_V4,
-    POSTGRES_V5,
-    POSTGRES_V6,
-    POSTGRES_V7,
-    POSTGRES_V8,
     POSTGRES_V9,
     POSTGRES_V10,
     POSTGRES_V11,
@@ -145,114 +119,6 @@ fn pg_v3_up(schema: &SchemaConfig) -> Vec<String> {
     }
 
     vec![format!("ALTER TABLE {table} {}", cols_to_drop.join(", "))]
-}
-
-fn pg_v4_up(schema: &SchemaConfig) -> Vec<String> {
-    let table = pg_qualified_table(schema, "skills");
-    vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {table} (\
-             skill_id VARCHAR(64) PRIMARY KEY, \
-             tenant_id VARCHAR(64) NOT NULL, \
-             name VARCHAR(64) NOT NULL, \
-             short_description TEXT, \
-             description TEXT, \
-             source VARCHAR(64) NOT NULL DEFAULT 'custom', \
-             has_code_files BOOLEAN NOT NULL DEFAULT false, \
-             latest_version VARCHAR(64), \
-             default_version VARCHAR(64), \
-             created_at TIMESTAMPTZ NOT NULL, \
-             updated_at TIMESTAMPTZ NOT NULL)"
-        ),
-        format!("CREATE INDEX IF NOT EXISTS idx_skills_tenant_name ON {table}(tenant_id, name)"),
-    ]
-}
-
-fn pg_v5_up(schema: &SchemaConfig) -> Vec<String> {
-    let skills_table = pg_qualified_table(schema, "skills");
-    let table = pg_qualified_table(schema, "skill_versions");
-    vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {table} (\
-             skill_id VARCHAR(64) NOT NULL REFERENCES {skills_table}(skill_id) ON DELETE CASCADE, \
-             version VARCHAR(64) NOT NULL, \
-             version_number INTEGER NOT NULL, \
-             name VARCHAR(64) NOT NULL, \
-             short_description TEXT, \
-             description TEXT NOT NULL, \
-             interface JSONB, \
-             dependencies JSONB, \
-             policy JSONB, \
-             deprecated BOOLEAN NOT NULL DEFAULT false, \
-             file_manifest JSONB NOT NULL, \
-             instruction_token_counts JSONB NOT NULL, \
-             created_at TIMESTAMPTZ NOT NULL, \
-             PRIMARY KEY (skill_id, version))"
-        ),
-        format!(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_version_number ON {table}(skill_id, version_number)"
-        ),
-    ]
-}
-
-fn pg_v6_up(schema: &SchemaConfig) -> Vec<String> {
-    let table = pg_qualified_table(schema, "tenant_aliases");
-    vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {table} (\
-             alias_tenant_id VARCHAR(64) PRIMARY KEY, \
-             canonical_tenant_id VARCHAR(64) NOT NULL, \
-             created_at TIMESTAMPTZ NOT NULL, \
-             expires_at TIMESTAMPTZ)"
-        ),
-        format!(
-            "CREATE INDEX IF NOT EXISTS idx_tenant_aliases_canonical ON {table}(canonical_tenant_id)"
-        ),
-    ]
-}
-
-fn pg_v7_up(schema: &SchemaConfig) -> Vec<String> {
-    let table = pg_qualified_table(schema, "bundle_tokens");
-    vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {table} (\
-             token_hash VARCHAR(64) PRIMARY KEY, \
-             tenant_id VARCHAR(64) NOT NULL, \
-             exec_id VARCHAR(64) NOT NULL, \
-             skill_id VARCHAR(64) NOT NULL, \
-             skill_version VARCHAR(64) NOT NULL, \
-             created_at TIMESTAMPTZ NOT NULL, \
-             expires_at TIMESTAMPTZ NOT NULL)"
-        ),
-        format!("CREATE INDEX IF NOT EXISTS idx_bundle_tokens_exec_id ON {table}(exec_id)"),
-        format!("CREATE INDEX IF NOT EXISTS idx_bundle_tokens_expires_at ON {table}(expires_at)"),
-    ]
-}
-
-fn pg_v8_up(schema: &SchemaConfig) -> Vec<String> {
-    let table = pg_qualified_table(schema, "continuation_cookies");
-    vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {table} (\
-             cookie_hash VARCHAR(64) PRIMARY KEY, \
-             tenant_id VARCHAR(64) NOT NULL, \
-             exec_id VARCHAR(64) NOT NULL, \
-             request_id VARCHAR(64) NOT NULL, \
-             created_at TIMESTAMPTZ NOT NULL, \
-             expires_at TIMESTAMPTZ NOT NULL)"
-        ),
-        format!("CREATE INDEX IF NOT EXISTS idx_continuation_cookies_exec_id ON {table}(exec_id)"),
-        format!(
-            "CREATE INDEX IF NOT EXISTS idx_continuation_cookies_expires_at ON {table}(expires_at)"
-        ),
-    ]
-}
-
-fn pg_qualified_table(schema: &SchemaConfig, table: &str) -> String {
-    match schema.owner.as_deref() {
-        Some(owner) => format!("{owner}.{table}"),
-        None => table.to_string(),
-    }
 }
 
 /// Extend `responses` with background-mode columns + backfill `started_at` /
@@ -421,9 +287,17 @@ mod tests {
     }
 
     #[test]
-    fn postgres_migrations_are_sequential() {
-        for (i, m) in POSTGRES_MIGRATIONS.iter().enumerate() {
-            assert_eq!(m.version, (i + 1) as u32, "migration {i} has wrong version");
+    fn postgres_migrations_are_strictly_increasing() {
+        // Versions must be strictly increasing and unique. A numbering gap is
+        // allowed (skills migrations 4–8 were removed), so we no longer require
+        // `version == index + 1`.
+        for pair in POSTGRES_MIGRATIONS.windows(2) {
+            assert!(
+                pair[1].version > pair[0].version,
+                "migration versions must strictly increase: {} then {}",
+                pair[0].version,
+                pair[1].version
+            );
         }
     }
 
@@ -549,60 +423,6 @@ mod tests {
             !stmts[0].contains("EXISTS output"),
             "should not use logical name: {stmts:?}"
         );
-    }
-
-    #[test]
-    fn pg_v4_up_creates_skills_table_and_index() {
-        let schema = SchemaConfig::default();
-        let stmts = pg_v4_up(&schema);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS skills"));
-        assert!(stmts[0].contains("skill_id VARCHAR(64) PRIMARY KEY"));
-        assert!(stmts[0].contains("source VARCHAR(64) NOT NULL DEFAULT 'custom'"));
-        assert!(stmts[1].contains("idx_skills_tenant_name"));
-    }
-
-    #[test]
-    fn pg_v5_up_creates_skill_versions_table_and_index() {
-        let schema = SchemaConfig::default();
-        let stmts = pg_v5_up(&schema);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS skill_versions"));
-        assert!(stmts[0].contains("REFERENCES skills(skill_id) ON DELETE CASCADE"));
-        assert!(stmts[0].contains("file_manifest JSONB NOT NULL"));
-        assert!(stmts[0].contains("instruction_token_counts JSONB NOT NULL"));
-        assert!(stmts[1].contains("idx_skill_version_number"));
-    }
-
-    #[test]
-    fn pg_v6_up_creates_tenant_aliases_table() {
-        let schema = SchemaConfig::default();
-        let stmts = pg_v6_up(&schema);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS tenant_aliases"));
-        assert!(stmts[1].contains("idx_tenant_aliases_canonical"));
-    }
-
-    #[test]
-    fn pg_v7_up_creates_bundle_tokens_table() {
-        let schema = SchemaConfig::default();
-        let stmts = pg_v7_up(&schema);
-        assert_eq!(stmts.len(), 3);
-        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS bundle_tokens"));
-        assert!(stmts[0].contains("token_hash VARCHAR(64) PRIMARY KEY"));
-        assert!(stmts[1].contains("idx_bundle_tokens_exec_id"));
-        assert!(stmts[2].contains("idx_bundle_tokens_expires_at"));
-    }
-
-    #[test]
-    fn pg_v8_up_creates_continuation_cookies_table() {
-        let schema = SchemaConfig::default();
-        let stmts = pg_v8_up(&schema);
-        assert_eq!(stmts.len(), 3);
-        assert!(stmts[0].contains("CREATE TABLE IF NOT EXISTS continuation_cookies"));
-        assert!(stmts[0].contains("cookie_hash VARCHAR(64) PRIMARY KEY"));
-        assert!(stmts[1].contains("idx_continuation_cookies_exec_id"));
-        assert!(stmts[2].contains("idx_continuation_cookies_expires_at"));
     }
 
     // ── v9: extend responses with background-mode columns ─────────────────

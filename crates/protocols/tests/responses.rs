@@ -2292,7 +2292,7 @@ fn shell_tool_no_environment_round_trip() {
 fn shell_tool_container_auto_environment_round_trip() {
     // Spec (openai-responses-api-spec.md §tools, L465-468):
     // `ContainerAuto { type: "container_auto", file_ids?, memory_limit?,
-    //  network_policy?, skills? }`.
+    //  network_policy? }`.
     let payload = json!({
         "type": "shell",
         "environment": {
@@ -2305,10 +2305,7 @@ fn shell_tool_container_auto_environment_round_trip() {
                 "domain_secrets": [
                     {"domain": "api.github.com", "name": "GH_TOKEN", "value": "sk-abc"}
                 ]
-            },
-            "skills": [
-                {"type": "skill_reference", "skill_id": "skill_123", "version": "latest"}
-            ]
+            }
         }
     });
 
@@ -2339,8 +2336,6 @@ fn shell_tool_container_auto_environment_round_trip() {
                         panic!("expected Allowlist policy, got Disabled")
                     }
                 }
-                let skills = auto.skills.as_ref().expect("skills present");
-                assert_eq!(skills.len(), 1);
             }
             other => panic!("expected ContainerAuto, got {other:?}"),
         },
@@ -2381,20 +2376,11 @@ fn shell_tool_container_auto_disabled_network_policy_round_trip() {
 #[test]
 fn shell_tool_local_environment_round_trip() {
     // Spec (openai-responses-api-spec.md §tools, L469):
-    // `LocalEnvironment { type: "local", skills? }` with `LocalSkill`
-    // members `{ description, name, path }`.
+    // `LocalEnvironment { type: "local" }`.
     let payload = json!({
         "type": "shell",
         "environment": {
-            "type": "local",
-            "skills": [
-                {
-                    "type": "local",
-                    "name": "fmt",
-                    "description": "Run rustfmt",
-                    "path": "/usr/local/bin/rustfmt"
-                }
-            ]
+            "type": "local"
         }
     });
 
@@ -2402,10 +2388,7 @@ fn shell_tool_local_environment_round_trip() {
         .expect("shell tool w/ local env should deserialize");
     match &tool {
         ResponseTool::Shell(s) => match &s.environment {
-            Some(ShellEnvironment::Local(local)) => {
-                let skills = local.skills.as_ref().expect("skills present");
-                assert_eq!(skills.len(), 1);
-            }
+            Some(ShellEnvironment::Local(_)) => {}
             other => panic!("expected Local env, got {other:?}"),
         },
         other => panic!("expected ResponseTool::Shell, got {other:?}"),
@@ -3018,37 +3001,25 @@ fn shell_call_environment_rejects_container_auto_on_response_side() {
 }
 
 #[test]
-fn shell_call_environment_local_accepts_skills_on_input_side() {
+fn shell_call_environment_local_round_trips_on_input_side() {
     // Spec (openai-responses-api-spec.md §ShellCall L228-230): the
     // input-side `shell_call.environment.local` arm accepts the tool-side
-    // `LocalEnvironment { type: "local", skills? }` shape verbatim.
-    // Clients that replay prior input items with skill attachments must
-    // round-trip losslessly through [`ResponseInputOutputItem`].
+    // `LocalEnvironment { type: "local" }` shape verbatim, round-tripping
+    // losslessly through [`ResponseInputOutputItem`].
     let payload = json!({
         "type": "shell_call",
-        "call_id": "call_shell_skills",
+        "call_id": "call_shell_local",
         "action": {"commands": ["ls"]},
         "environment": {
-            "type": "local",
-            "skills": [
-                {
-                    "type": "local",
-                    "name": "fmt",
-                    "description": "Run rustfmt",
-                    "path": "/usr/local/bin/rustfmt"
-                }
-            ]
+            "type": "local"
         }
     });
     let item: ResponseInputOutputItem = serde_json::from_value(payload.clone())
-        .expect("input-side shell_call with local skills should deserialize");
+        .expect("input-side shell_call with local env should deserialize");
     match &item {
         ResponseInputOutputItem::ShellCall { environment, .. } => {
             match environment.as_ref().expect("env present") {
-                ShellCallEnvironment::Local(local) => {
-                    let skills = local.skills.as_ref().expect("skills present");
-                    assert_eq!(skills.len(), 1);
-                }
+                ShellCallEnvironment::Local(_) => {}
                 ShellCallEnvironment::ContainerReference(_) => {
                     panic!("expected Local env, got ContainerReference")
                 }
@@ -3057,33 +3028,6 @@ fn shell_call_environment_local_accepts_skills_on_input_side() {
         other => panic!("expected ShellCall, got {other:?}"),
     }
     assert_eq!(serde_json::to_value(&item).expect("serialize"), payload);
-}
-
-#[test]
-fn shell_call_environment_local_rejects_skills_on_response_side() {
-    // Spec (openai-responses-api-spec.md §returns L512-513): the
-    // response-side `local` environment is `ResponseLocalEnvironment {
-    // type: "local" }` — `skills` is an input/tool-side attachment and is
-    // not echoed back on the resolved call. `deny_unknown_fields` on
-    // [`ResponseLocalShellEnvironment`] (carried by
-    // [`ResponseShellCallEnvironment::Local`]) must reject a payload that
-    // tries to carry `skills` across the boundary so the input-only field
-    // cannot silently round-trip on the response union.
-    let payload = json!({
-        "type": "shell_call",
-        "id": "sc_reject",
-        "call_id": "call_shell_reject",
-        "action": {"commands": ["ls"]},
-        "environment": {
-            "type": "local",
-            "skills": []
-        },
-        "status": "completed"
-    });
-    assert!(
-        serde_json::from_value::<ResponseOutputItem>(payload).is_err(),
-        "skills must be rejected on response-side shell_call.environment.local"
-    );
 }
 
 #[test]

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-use crate::{common::GenerationRequest, skills::MessagesSkillRef, validated::Normalizable};
+use crate::{common::GenerationRequest, validated::Normalizable};
 
 // ============================================================================
 // Request Types
@@ -1143,9 +1143,6 @@ pub struct ListModelsResponse {
 pub struct ContainerConfig {
     /// Container ID for reuse across requests
     pub id: Option<String>,
-
-    /// Skills to be loaded in the container
-    pub skills: Option<Vec<MessagesSkillRef>>,
 }
 
 /// MCP server configuration (beta)

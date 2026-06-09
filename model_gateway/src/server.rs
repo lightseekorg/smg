@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::{
-    extract::{Extension, Multipart, Path, Query, Request, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{header::InvalidHeaderName, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -30,10 +30,6 @@ use openai_protocol::{
     },
     rerank::{RerankRequest, V1RerankReqInput},
     responses::ResponsesRequest,
-    skills::{
-        SkillGetQuery, SkillPatchRequest, SkillVersionPatchRequest, SkillVersionsListQuery,
-        SkillsListQuery,
-    },
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
     worker::{WorkerSpec, WorkerUpdateRequest},
@@ -59,8 +55,7 @@ use crate::{
     },
     routers::{
         conversations, openai::realtime::ws::RealtimeQueryParams, parse,
-        responses as response_handlers, router_manager::RouterManager, skills, tokenize,
-        RouterTrait,
+        responses as response_handlers, router_manager::RouterManager, tokenize, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
@@ -715,87 +710,6 @@ async fn v1_tokenizers_remove(
     tokenize::remove_tokenizer(&state.context, &tokenizer_id).await
 }
 
-async fn v1_skills_create(State(state): State<Arc<AppState>>, multipart: Multipart) -> Response {
-    skills::create_skill(State(state), multipart).await
-}
-
-async fn v1_skills_list(
-    State(state): State<Arc<AppState>>,
-    query: Query<SkillsListQuery>,
-    headers: HeaderMap,
-) -> Response {
-    skills::list_skills(State(state), query, headers).await
-}
-
-async fn v1_skills_get(
-    State(state): State<Arc<AppState>>,
-    Path(skill_id): Path<String>,
-    query: Query<SkillGetQuery>,
-    headers: HeaderMap,
-) -> Response {
-    skills::get_skill(State(state), Path(skill_id), query, headers).await
-}
-
-async fn v1_skills_patch(
-    State(state): State<Arc<AppState>>,
-    Path(skill_id): Path<String>,
-    query: Query<SkillGetQuery>,
-    ValidatedJson(body): ValidatedJson<SkillPatchRequest>,
-) -> Response {
-    skills::patch_skill(State(state), Path(skill_id), query, Json(body)).await
-}
-
-async fn v1_skills_create_version(
-    State(state): State<Arc<AppState>>,
-    Path(skill_id): Path<String>,
-    multipart: Multipart,
-) -> Response {
-    skills::create_skill_version(State(state), Path(skill_id), multipart).await
-}
-
-async fn v1_skills_list_versions(
-    State(state): State<Arc<AppState>>,
-    Path(skill_id): Path<String>,
-    query: Query<SkillVersionsListQuery>,
-    headers: HeaderMap,
-) -> Response {
-    skills::list_skill_versions(State(state), Path(skill_id), query, headers).await
-}
-
-async fn v1_skills_get_version(
-    State(state): State<Arc<AppState>>,
-    Path((skill_id, version)): Path<(String, String)>,
-    query: Query<SkillGetQuery>,
-    headers: HeaderMap,
-) -> Response {
-    skills::get_skill_version(State(state), Path((skill_id, version)), query, headers).await
-}
-
-async fn v1_skills_patch_version(
-    State(state): State<Arc<AppState>>,
-    Path((skill_id, version)): Path<(String, String)>,
-    query: Query<SkillGetQuery>,
-    ValidatedJson(body): ValidatedJson<SkillVersionPatchRequest>,
-) -> Response {
-    skills::patch_skill_version(State(state), Path((skill_id, version)), query, Json(body)).await
-}
-
-async fn v1_skills_delete(
-    State(state): State<Arc<AppState>>,
-    Path(skill_id): Path<String>,
-    query: Query<SkillGetQuery>,
-) -> Response {
-    skills::delete_skill(State(state), Path(skill_id), query).await
-}
-
-async fn v1_skills_delete_version(
-    State(state): State<Arc<AppState>>,
-    Path((skill_id, version)): Path<(String, String)>,
-    query: Query<SkillGetQuery>,
-) -> Response {
-    skills::delete_skill_version(State(state), Path((skill_id, version)), query).await
-}
-
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -865,14 +779,7 @@ pub fn build_app(
     );
 
     let tenant_resolution_state =
-        middleware::TenantResolutionState::new(&app_state.context.router_config)?
-            .with_tenant_alias_store(
-                app_state
-                    .context
-                    .skill_service
-                    .as_ref()
-                    .and_then(|skill_service| skill_service.tenant_alias_store()),
-            );
+        middleware::TenantResolutionState::new(&app_state.context.router_config)?;
 
     // Choose the admission path once at startup: priority scheduler when
     // enabled (and it starts cleanly), otherwise the legacy concurrency limit.
@@ -1001,7 +908,7 @@ pub fn build_app(
         .route("/get_server_info", get(get_server_info));
 
     // Build admin routes with control plane auth if configured, otherwise use simple API key auth
-    let mut admin_routes = Router::new()
+    let admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
         .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
@@ -1022,35 +929,6 @@ pub fn build_app(
             "/v1/tokenizers/{tokenizer_id}/status",
             get(v1_tokenizers_status),
         );
-
-    if app_state.context.router_config.skills_enabled
-        && app_state
-            .context
-            .router_config
-            .skills
-            .as_ref()
-            .is_some_and(|skills_config| skills_config.admin.enabled)
-        && app_state.context.skill_service.is_some()
-    {
-        admin_routes = admin_routes
-            .route("/v1/skills", post(v1_skills_create).get(v1_skills_list))
-            .route(
-                "/v1/skills/{skill_id}",
-                get(v1_skills_get)
-                    .patch(v1_skills_patch)
-                    .delete(v1_skills_delete),
-            )
-            .route(
-                "/v1/skills/{skill_id}/versions",
-                post(v1_skills_create_version).get(v1_skills_list_versions),
-            )
-            .route(
-                "/v1/skills/{skill_id}/versions/{version}",
-                get(v1_skills_get_version)
-                    .patch(v1_skills_patch_version)
-                    .delete(v1_skills_delete_version),
-            );
-    }
 
     // Build worker routes
     let worker_routes = Router::new()
