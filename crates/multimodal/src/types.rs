@@ -195,16 +195,16 @@ pub type MultiModalUUIDs = HashMap<Modality, Vec<Option<String>>>;
 
 pub type TokenId = i32;
 
-/// Declares how a multimodal tensor's first dimension maps to items (images).
+/// Declares how a multimodal tensor's first dimension maps to media items.
 ///
 /// Used by [`ModelProcessorSpec::field_layouts`] to tell the backend how to
 /// split tensors for per-item scheduling (vLLM `MultiModalFieldConfig`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldLayout {
-    /// First dimension equals num_images (one slice per image).
+    /// First dimension equals number of media items (one slice per item).
     Batched,
-    /// Variable-length slices per image.  The sizes are stored in the
-    /// tensor named by `sizes_key` (e.g. `"patches_per_image"`).
+    /// Variable-length slices per item. The sizes are stored in the tensor
+    /// named by `sizes_key` (e.g. `"patches_per_image"` or `"patches_per_video"`).
     Flat { sizes_key: String },
 }
 

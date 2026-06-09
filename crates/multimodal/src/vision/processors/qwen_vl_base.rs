@@ -25,8 +25,8 @@ use image::{DynamicImage, GenericImageView};
 use ndarray::{Array2, Array3};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::{pil_to_filter, resize, to_tensor, to_tensor_and_normalize, TransformError},
 };
 
@@ -421,9 +421,12 @@ impl QwenVLProcessorBase {
 
                     for mh in 0..merge_size {
                         for mw in 0..merge_size {
-                            for c in 0..channel {
-                                for tp in 0..temporal_patch_size {
-                                    let plane = frame_planes[frame_start + tp][c];
+                            let frame_window =
+                                &frame_planes[frame_start..frame_start + temporal_patch_size];
+                            for channel_frames in (0..channel).map(|channel_idx| {
+                                frame_window.iter().map(move |planes| planes[channel_idx])
+                            }) {
+                                for plane in channel_frames {
                                     for py in 0..patch_size {
                                         let row = (y0 + mh * patch_size + py) * width
                                             + x0
@@ -444,7 +447,7 @@ impl QwenVLProcessorBase {
     }
 }
 
-impl ImagePreProcessor for QwenVLProcessorBase {
+impl VisionPreProcessor for QwenVLProcessorBase {
     fn default_mean(&self) -> [f64; 3] {
         self.config.mean
     }
@@ -457,13 +460,13 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
 
         // Store original sizes
-        let image_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
+        let item_sizes: Vec<(u32, u32)> = images.iter().map(|img| img.dimensions()).collect();
 
         let mean = config.get_image_mean();
         let std = config.get_image_std();
@@ -486,7 +489,7 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         let mut all_patches: Vec<f32> = Vec::with_capacity(estimated_total);
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
-        let mut num_img_tokens = Vec::with_capacity(images.len());
+        let mut feature_token_counts = Vec::with_capacity(images.len());
 
         for image in images {
             let (w, h) = image.dimensions();
@@ -511,7 +514,7 @@ impl ImagePreProcessor for QwenVLProcessorBase {
 
             let num_patches = grid_t * grid_h * grid_w;
             let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
-            num_img_tokens.push(tokens);
+            feature_token_counts.push(tokens);
 
             // Convert to tensor [C, H, W] and normalize in one fused pass
             let tensor = if config.do_normalize.unwrap_or(true) {
@@ -526,23 +529,26 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         }
 
         let total_patches: usize = patches_per_image.iter().map(|&n| n as usize).sum();
-        let pixel_values =
+        let encoder_input =
             Array2::from_shape_vec((total_patches, patch_features), all_patches).map_err(|e| {
                 TransformError::ShapeError(format!(
-                    "Failed to create patchified pixel_values [{total_patches}, {patch_features}]: {e}"
+                    "Failed to create patchified encoder_input [{total_patches}, {patch_features}]: {e}"
                 ))
             })?;
 
-        let result =
-            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), num_img_tokens, image_sizes)
-                .with_extra(
-                    "image_grid_thw",
-                    ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
-                )
-                .with_extra(
-                    "patches_per_image",
-                    ModelSpecificValue::int_1d(patches_per_image),
-                );
+        let result = PreprocessedEncoderInputs::new_dynamic(
+            encoder_input.into_dyn(),
+            feature_token_counts,
+            item_sizes,
+        )
+        .with_extra(
+            "image_grid_thw",
+            ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
+        )
+        .with_extra(
+            "patches_per_image",
+            ModelSpecificValue::int_1d(patches_per_image),
+        );
 
         Ok(result)
     }
@@ -551,13 +557,13 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         &self,
         frames: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if frames.is_empty() {
             return Err(TransformError::EmptyBatch);
         }
 
         let (w, h) = frames[0].dimensions();
-        let image_sizes = vec![(w, h)];
+        let item_sizes = vec![(w, h)];
         let mean = config.get_image_mean();
         let std = config.get_image_std();
         let filter = pil_to_filter(config.resampling);
@@ -595,31 +601,30 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         let mut all_patches = Vec::with_capacity(num_patches * patch_features);
         self.patchify_video_into(&tensors, grid_t, grid_h, grid_w, &mut all_patches)?;
 
-        let pixel_values = Array2::from_shape_vec((num_patches, patch_features), all_patches)
+        let encoder_input = Array2::from_shape_vec((num_patches, patch_features), all_patches)
             .map_err(|e| {
                 TransformError::ShapeError(format!(
-                    "Failed to create video pixel_values [{num_patches}, {patch_features}]: {e}"
+                    "Failed to create video encoder_input [{num_patches}, {patch_features}]: {e}"
                 ))
             })?;
 
-        let result =
-            PreprocessedImages::new_dynamic(pixel_values.into_dyn(), vec![tokens], image_sizes)
-                .with_extra(
-                    "video_grid_thw",
-                    ModelSpecificValue::int_2d(
-                        vec![grid_t as i64, grid_h as i64, grid_w as i64],
-                        1,
-                        3,
-                    ),
-                )
-                .with_extra(
-                    "patches_per_video",
-                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
-                )
-                .with_extra(
-                    "patches_per_image",
-                    ModelSpecificValue::int_1d(vec![num_patches as i64]),
-                );
+        let result = PreprocessedEncoderInputs::new_dynamic(
+            encoder_input.into_dyn(),
+            vec![tokens],
+            item_sizes,
+        )
+        .with_extra(
+            "video_grid_thw",
+            ModelSpecificValue::int_2d(vec![grid_t as i64, grid_h as i64, grid_w as i64], 1, 3),
+        )
+        .with_extra(
+            "patches_per_video",
+            ModelSpecificValue::int_1d(vec![num_patches as i64]),
+        )
+        .with_extra(
+            "patches_per_image",
+            ModelSpecificValue::int_1d(vec![num_patches as i64]),
+        );
 
         Ok(result)
     }

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::PreprocessedImages,
+    vision::processor::PreprocessedEncoderInputs,
 };
 
 pub(super) struct KimiK25VisionSpec;
@@ -57,12 +57,12 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
         Ok(preprocessed
-            .num_img_tokens
+            .feature_token_counts
             .iter()
             .map(|&num_tokens| {
                 PromptReplacement::repeated(
@@ -77,7 +77,7 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
         // Kimi-K2.5 uses NaViT-style patchification:
-        // pixel_values is [total_patches, patch_features], split by patches_per_image.
+        // encoder_input is [total_patches, patch_features], split by patches_per_image.
         // grid_thws is [num_images, 3] with (temporal, height, width) grid dimensions.
         HashMap::from([
             (

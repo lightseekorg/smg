@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::PreprocessedImages,
+    vision::processor::PreprocessedEncoderInputs,
 };
 
 pub(super) struct Phi3VisionSpec;
@@ -52,12 +52,12 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
         Ok(preprocessed
-            .num_img_tokens
+            .feature_token_counts
             .iter()
             .map(|&count| PromptReplacement::repeated(Modality::Image, &token, token_id, count))
             .collect())

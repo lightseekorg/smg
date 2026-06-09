@@ -20,6 +20,6 @@ pub use types::{
 };
 // Re-export vision processing components
 pub use vision::{
-    ImagePreProcessor, ImageProcessorRegistry, LlavaNextProcessor, LlavaProcessor,
-    ModelSpecificValue, PreProcessorConfig, PreprocessedImages, TransformError,
+    LlavaNextProcessor, LlavaProcessor, ModelSpecificValue, PreProcessorConfig,
+    PreprocessedEncoderInputs, TransformError, VisionPreProcessor, VisionProcessorRegistry,
 };

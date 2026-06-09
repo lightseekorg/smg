@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, ModelRegistryError, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::{ModelSpecificValue, PreprocessedImages},
+    vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
 };
 
 pub(super) struct Qwen3VLVisionSpec;
@@ -63,7 +63,7 @@ impl Qwen3VLVisionSpec {
             || model_type.is_some_and(|mt| mt == "qwen3_5" || mt == "qwen3_5_moe")
     }
 
-    fn video_grid_t(preprocessed: &PreprocessedImages) -> Option<usize> {
+    fn video_grid_t(preprocessed: &PreprocessedEncoderInputs) -> Option<usize> {
         match preprocessed.model_specific.get("video_grid_thw") {
             Some(ModelSpecificValue::IntTensor { data, shape })
                 if shape == &[1, 3] && !data.is_empty() =>
@@ -98,21 +98,33 @@ impl Qwen3VLVisionSpec {
         num_tokens: usize,
         grid_t: usize,
     ) -> Option<Vec<TokenId>> {
-        if grid_t <= 1 || num_tokens == 0 || num_tokens % grid_t != 0 {
+        if grid_t <= 1 || num_tokens == 0 || !num_tokens.is_multiple_of(grid_t) {
             return None;
         }
         let vision_start = Self::vision_start_token_id(metadata)?;
         let vision_end = Self::vision_end_token_id(metadata)?;
         let tokens_per_grid = num_tokens / grid_t;
         let mut tokens = Vec::with_capacity(num_tokens + (grid_t.saturating_sub(1)) * 8);
+        let temporal_patch_size = metadata
+            .config_u32(&["vision_config", "temporal_patch_size"])
+            .unwrap_or(2) as f64;
+        // SMG currently samples Qwen videos at the HF default 2 fps. Match HF's
+        // prompt timestamp convention: timestamp each temporal patch by the
+        // average frame time and format it with one decimal place.
+        let sample_fps = 2.0_f64;
 
         for grid_idx in 0..grid_t {
+            let seconds = (grid_idx as f64 * temporal_patch_size
+                + (temporal_patch_size - 1.0) / 2.0)
+                / sample_fps;
             if grid_idx > 0 {
                 tokens.push(vision_end);
-                tokens.extend(Self::encode_plain_text(
-                    metadata,
-                    &format!("<{grid_idx}.0 seconds>"),
-                ));
+            }
+            tokens.extend(Self::encode_plain_text(
+                metadata,
+                &format!("<{seconds:.1} seconds>"),
+            ));
+            if grid_idx > 0 {
                 tokens.push(vision_start);
             }
             tokens.extend(std::iter::repeat_n(pad_token_id, tokens_per_grid));
@@ -202,14 +214,14 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let pad_token_id = Self::image_pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
         // The chat template already wraps each image with <|vision_start|> ... <|vision_end|>,
         // so we only expand the single <|image_pad|> placeholder to N pad tokens.
         Ok(preprocessed
-            .num_img_tokens
+            .feature_token_counts
             .iter()
             .map(|&num_tokens| {
                 let tokens = vec![pad_token_id; num_tokens];
@@ -221,7 +233,7 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     fn prompt_replacements_for(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
         modality: Modality,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         match modality {
@@ -231,7 +243,7 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
                 let placeholder_token = self.placeholder_token_for(metadata, Modality::Video)?;
                 let video_grid_t = Self::video_grid_t(preprocessed);
                 Ok(preprocessed
-                    .num_img_tokens
+                    .feature_token_counts
                     .iter()
                     .map(|&num_tokens| {
                         let tokens = if Self::is_qwen3_5(metadata) {
@@ -260,7 +272,7 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     }
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
-        // pixel_values is patchified: [total_patches, patch_features].
+        // encoder_input is patchified: [total_patches, patch_features].
         // patches_per_image tells how many patches belong to each image.
         // image_grid_thw is [num_images, 3].
         HashMap::from([
@@ -287,6 +299,7 @@ mod tests {
     use crate::{
         registry::{test_helpers::*, ModelMetadata, ModelRegistry},
         types::ImageSize,
+        vision::processor::ModelSpecificValue,
     };
 
     #[test]
@@ -372,7 +385,7 @@ mod tests {
         let preprocessed = test_preprocessed_with_tokens(&[ImageSize::new(320, 256)], &[160])
             .with_extra(
                 "video_grid_thw",
-                crate::vision::image_processor::ModelSpecificValue::int_2d(vec![2, 16, 20], 1, 3),
+                ModelSpecificValue::int_2d(vec![2, 16, 20], 1, 3),
             );
         let replacements = spec
             .prompt_replacements_for(&metadata, &preprocessed, crate::types::Modality::Video)

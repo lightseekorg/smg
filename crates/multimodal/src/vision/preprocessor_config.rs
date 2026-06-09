@@ -192,7 +192,7 @@ pub struct PreProcessorConfig {
     #[serde(default)]
     pub max_image_tiles: Option<usize>,
 
-    /// Fixed number of image tokens (some models use this)
+    /// Fixed number of image tokens (some model configs use this HF field name).
     #[serde(default)]
     pub num_img_tokens: Option<usize>,
 

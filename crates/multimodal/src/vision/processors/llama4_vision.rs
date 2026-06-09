@@ -34,8 +34,8 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use ndarray::{s, Array3, Array4};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{ModelSpecificValue, PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::{self, TransformError},
 };
 
@@ -417,7 +417,7 @@ impl Llama4VisionProcessor {
     }
 }
 
-impl ImagePreProcessor for Llama4VisionProcessor {
+impl VisionPreProcessor for Llama4VisionProcessor {
     fn default_mean(&self) -> [f64; 3] {
         self.mean
     }
@@ -430,7 +430,7 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         if images.is_empty() {
             return Err(TransformError::InvalidShape {
                 expected: "non-empty image batch".to_string(),
@@ -452,8 +452,8 @@ impl ImagePreProcessor for Llama4VisionProcessor {
 
         let mut all_outputs = Vec::new();
         let mut all_aspect_ratios = Vec::new();
-        let mut image_sizes = Vec::new();
-        let mut num_img_tokens = Vec::new();
+        let mut item_sizes = Vec::new();
+        let mut feature_token_counts = Vec::new();
 
         for image in images {
             let (output, aspect_ratio) = processor.process_single_image(image);
@@ -461,8 +461,8 @@ impl ImagePreProcessor for Llama4VisionProcessor {
 
             all_outputs.push(output);
             all_aspect_ratios.push(aspect_ratio);
-            image_sizes.push((image.height(), image.width()));
-            num_img_tokens.push(tokens);
+            item_sizes.push((image.height(), image.width()));
+            feature_token_counts.push(tokens);
         }
 
         // Per-image tile counts (must be computed before remove/concatenate)
@@ -471,7 +471,7 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         // Concatenate all tiles from all images into a single 4D tensor
         // [total_tiles, C, H, W] — no batch dimension, no zero-padding.
         // This matches what sglang and vLLM vision models expect.
-        let pixel_values = if all_outputs.len() == 1 {
+        let encoder_input = if all_outputs.len() == 1 {
             all_outputs.remove(0)
         } else {
             let tile_views: Vec<ndarray::ArrayView4<f32>> =
@@ -501,10 +501,10 @@ impl ImagePreProcessor for Llama4VisionProcessor {
             ModelSpecificValue::int_1d(patches_per_image),
         );
 
-        Ok(PreprocessedImages {
-            pixel_values: pixel_values.into_dyn(),
-            num_img_tokens,
-            image_sizes,
+        Ok(PreprocessedEncoderInputs {
+            encoder_input: encoder_input.into_dyn(),
+            feature_token_counts,
+            item_sizes,
             model_specific,
         })
     }
@@ -622,12 +622,12 @@ mod tests {
         let result = processor.preprocess(&[image], &config).unwrap();
 
         // 4D output: [total_tiles, C, H, W]
-        assert_eq!(result.pixel_values.ndim(), 4);
-        assert_eq!(result.num_img_tokens.len(), 1);
-        assert!(result.num_img_tokens[0] > 0);
+        assert_eq!(result.encoder_input.ndim(), 4);
+        assert_eq!(result.feature_token_counts.len(), 1);
+        assert!(result.feature_token_counts[0] > 0);
 
         // Check pixel values are normalized
-        let flat = result.pixel_values_flat();
+        let flat = result.encoder_input_flat();
         assert!(flat.iter().all(|&v| (-1.5..=1.5).contains(&v)));
     }
 
@@ -640,8 +640,8 @@ mod tests {
         let result = processor.preprocess(&[image], &config).unwrap();
 
         // 4D output: [total_tiles, C, H, W]
-        assert_eq!(result.pixel_values.ndim(), 4);
-        assert_eq!(result.num_img_tokens.len(), 1);
+        assert_eq!(result.encoder_input.ndim(), 4);
+        assert_eq!(result.feature_token_counts.len(), 1);
         // Wide image should have more tiles in width direction
         let aspect_ratios = result.model_specific.get("aspect_ratios").unwrap();
         if let ModelSpecificValue::IntTensor { data, .. } = aspect_ratios {
@@ -664,11 +664,11 @@ mod tests {
         let result = processor.preprocess(&images, &config).unwrap();
 
         // 4D output: [total_tiles, C, H, W] — tiles from both images concatenated
-        assert_eq!(result.pixel_values.ndim(), 4);
-        assert_eq!(result.num_img_tokens.len(), 2);
-        assert_eq!(result.image_sizes.len(), 2);
+        assert_eq!(result.encoder_input.ndim(), 4);
+        assert_eq!(result.feature_token_counts.len(), 2);
+        assert_eq!(result.item_sizes.len(), 2);
         // Total tiles should be > 2 (at least 1 tile per image)
-        assert!(result.pixel_values.shape()[0] >= 2);
+        assert!(result.encoder_input.shape()[0] >= 2);
     }
 
     #[test]
@@ -689,7 +689,7 @@ mod tests {
             if num_tiles > 1 {
                 // 4D output: [total_tiles, C, H, W]
                 // total_tiles = num_tiles + 1 (global tile)
-                let shape = result.pixel_values.shape();
+                let shape = result.encoder_input.shape();
                 assert_eq!(shape[0], num_tiles + 1);
             }
         }

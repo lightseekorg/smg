@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::{
     registry::{ModelMetadata, ModelProcessorSpec, RegistryResult},
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::{ModelSpecificValue, PreprocessedImages},
+    vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
 };
 
 pub(super) struct Llama4Spec;
@@ -50,7 +50,7 @@ impl Llama4Spec {
     /// `aspect_ratios` tensor.  Falls back to deriving tile counts from
     /// the original image sizes when aspect_ratios are unavailable.
     fn extract_aspect_ratios(
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
         tile_size: usize,
     ) -> Vec<(usize, usize)> {
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
@@ -65,7 +65,7 @@ impl Llama4Spec {
         }
         // Fallback: derive from original image sizes (height, width).
         preprocessed
-            .image_sizes
+            .item_sizes
             .iter()
             .map(|&(h, w)| {
                 let h_tiles = (h as usize).div_ceil(tile_size);
@@ -115,7 +115,7 @@ impl ModelProcessorSpec for Llama4Spec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let patch_token_id = self.placeholder_token_id(metadata)?;
         let placeholder = self.placeholder_token(metadata)?;
@@ -170,7 +170,7 @@ impl ModelProcessorSpec for Llama4Spec {
     }
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
-        // pixel_values is [total_tiles, C, H, W] — variable tiles per image.
+        // encoder_input is [total_tiles, C, H, W] — variable tiles per image.
         // aspect_ratios and patches_per_image are [num_images, ...].
         HashMap::from([
             (

@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     types::{FieldLayout, Modality, PromptReplacement, TokenId},
-    vision::image_processor::PreprocessedImages,
+    vision::processor::PreprocessedEncoderInputs,
 };
 
 #[derive(Debug, Error)]
@@ -94,7 +94,7 @@ pub trait ModelProcessorSpec: Send + Sync {
     fn modality_limits(&self, metadata: &ModelMetadata)
         -> RegistryResult<HashMap<Modality, usize>>;
     fn processor_kwargs(&self, metadata: &ModelMetadata) -> RegistryResult<Value>;
-    /// Compute per-image prompt replacement token sequences.
+    /// Compute per-media prompt replacement token sequences.
     ///
     /// Receives the full preprocessed output so each model can extract whatever
     /// metadata it needs (e.g. aspect_ratios for tile-based models).  This
@@ -102,12 +102,12 @@ pub trait ModelProcessorSpec: Send + Sync {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
     ) -> RegistryResult<Vec<PromptReplacement>>;
     fn prompt_replacements_for(
         &self,
         metadata: &ModelMetadata,
-        preprocessed: &PreprocessedImages,
+        preprocessed: &PreprocessedEncoderInputs,
         modality: Modality,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         match modality {
@@ -119,12 +119,13 @@ pub trait ModelProcessorSpec: Send + Sync {
         }
     }
 
-    /// Declare how each tensor's first dimension maps to images.
+    /// Declare how each tensor's first dimension maps to media items.
     ///
-    /// Keys not listed are treated as shared (replicated across all images).
-    /// The `"pixel_values"` key should be included when it differs from batched.
+    /// Keys not listed are treated as shared (replicated across all media items).
+    /// The `"pixel_values"` key mirrors HF/vLLM vision kwargs and should be
+    /// included when the primary encoder input differs from batched layout.
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
-        // Default: pixel_values is batched (most models).
+        // Default: encoder_input is batched (most models).
         HashMap::from([("pixel_values".to_string(), FieldLayout::Batched)])
     }
 

@@ -459,7 +459,9 @@ fn probe_video_duration_seconds_with_ffmpeg(
     input_path: &std::path::Path,
 ) -> Result<f64, MediaConnectorError> {
     let mut command = Command::new("ffmpeg");
-    command.args(["-hide_banner", "-nostdin", "-i"]).arg(input_path);
+    command
+        .args(["-hide_banner", "-nostdin", "-i"])
+        .arg(input_path);
     let output = run_video_command_output(command, "ffmpeg")?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);

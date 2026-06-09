@@ -31,9 +31,9 @@
 use std::{fs::File, io::Read, path::Path};
 
 use llm_multimodal::vision::{
-    image_processor::ModelSpecificValue, ImagePreProcessor, Llama4VisionProcessor, LlavaProcessor,
-    Phi3VisionProcessor, Phi4VisionProcessor, PixtralProcessor, PreProcessorConfig,
-    Qwen2VLProcessor, Qwen3VLProcessor,
+    Llama4VisionProcessor, LlavaProcessor, ModelSpecificValue, Phi3VisionProcessor,
+    Phi4VisionProcessor, PixtralProcessor, PreProcessorConfig, Qwen2VLProcessor, Qwen3VLProcessor,
+    VisionPreProcessor,
 };
 use ndarray::{Array4, Array5};
 
@@ -143,7 +143,7 @@ fn run_golden_test(mode: &str, image_name: &str) {
 
     let image = image::open(&image_path).expect("Failed to open image");
 
-    let processor: Box<dyn ImagePreProcessor> = match mode {
+    let processor: Box<dyn VisionPreProcessor> = match mode {
         "llava" => Box::new(LlavaProcessor::new()),
         "llava_pad" => Box::new(LlavaProcessor::new_with_pad()),
         _ => panic!("Unknown test mode: {mode}"),
@@ -153,10 +153,10 @@ fn run_golden_test(mode: &str, image_name: &str) {
         .preprocess(&[image], &config)
         .expect("Processing failed");
 
-    let diff = max_diff(&golden, &result.pixel_values);
+    let diff = max_diff(&golden, &result.encoder_input);
     println!("{mode} - {image_name} image - Max difference: {diff:.6}");
     println!("Golden shape: {:?}", golden.shape());
-    println!("Rust shape: {:?}", result.pixel_values.shape());
+    println!("Rust shape: {:?}", result.encoder_input.shape());
 
     // Allow tolerance for floating point and interpolation algorithm differences
     // Different interpolation implementations (Rust vs Python/PIL) can produce
@@ -372,7 +372,7 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
     );
 
     // Compare token counts
-    let rust_num_tokens = result.num_img_tokens[0];
+    let rust_num_tokens = result.feature_token_counts[0];
     println!(
         "qwen2_vl - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
@@ -382,10 +382,10 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
     );
 
     // pixel_values is now already patchified: [total_patches, patch_features]
-    let rust_patches = result.pixel_values_flat();
+    let rust_patches = result.encoder_input_flat();
     let rust_shape = (
-        result.pixel_values.shape()[0],
-        result.pixel_values.shape()[1],
+        result.encoder_input.shape()[0],
+        result.encoder_input.shape()[1],
     );
 
     println!(
@@ -523,7 +523,7 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
     );
 
     // Compare token counts
-    let rust_num_tokens = result.num_img_tokens[0];
+    let rust_num_tokens = result.feature_token_counts[0];
     println!(
         "qwen3_vl - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
@@ -533,10 +533,10 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
     );
 
     // pixel_values is now already patchified: [total_patches, patch_features]
-    let rust_patches = result.pixel_values_flat();
+    let rust_patches = result.encoder_input_flat();
     let rust_shape = (
-        result.pixel_values.shape()[0],
-        result.pixel_values.shape()[1],
+        result.encoder_input.shape()[0],
+        result.encoder_input.shape()[1],
     );
 
     println!(
@@ -767,7 +767,7 @@ fn run_phi3_vision_golden_test(image_name: &str) {
         .expect("Processing failed");
 
     // Check output shape
-    let rust_shape = result.pixel_values.shape();
+    let rust_shape = result.encoder_input.shape();
     let golden_shape = golden_pixels.shape();
     println!(
         "phi3_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
@@ -800,17 +800,17 @@ fn run_phi3_vision_golden_test(image_name: &str) {
     // Check num_img_tokens
     println!(
         "phi3_vision - {image_name} image - Num tokens: golden={golden_num_tokens:?}, rust={:?}",
-        result.num_img_tokens
+        result.feature_token_counts
     );
     assert_eq!(
-        golden_num_tokens, result.num_img_tokens,
+        golden_num_tokens, result.feature_token_counts,
         "num_img_tokens mismatch for {image_name}"
     );
 
     // Compare pixel values
     // Convert rust ArrayD to Array5 for comparison
     let rust_pixels = result
-        .pixel_values
+        .encoder_input
         .clone()
         .into_dimensionality::<ndarray::Ix5>()
         .expect("Failed to convert to Ix5");
@@ -970,7 +970,7 @@ fn run_phi4_vision_golden_test(image_name: &str) {
         .expect("Processing failed");
 
     // Check output shape
-    let rust_shape = result.pixel_values.shape();
+    let rust_shape = result.encoder_input.shape();
     let golden_shape = golden_pixels.shape();
     println!(
         "phi4_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
@@ -1002,16 +1002,16 @@ fn run_phi4_vision_golden_test(image_name: &str) {
     // Check num_img_tokens
     println!(
         "phi4_vision - {image_name} image - Num tokens: golden={golden_num_tokens:?}, rust={:?}",
-        result.num_img_tokens
+        result.feature_token_counts
     );
     assert_eq!(
-        golden_num_tokens, result.num_img_tokens,
+        golden_num_tokens, result.feature_token_counts,
         "num_img_tokens mismatch for {image_name}"
     );
 
     // Compare pixel values
     let rust_pixels = result
-        .pixel_values
+        .encoder_input
         .clone()
         .into_dimensionality::<ndarray::Ix5>()
         .expect("Failed to convert to Ix5");
@@ -1195,7 +1195,7 @@ fn run_llama4_vision_golden_test(image_name: &str) {
     );
 
     // Check num_tokens
-    let rust_num_tokens = result.num_img_tokens[0];
+    let rust_num_tokens = result.feature_token_counts[0];
     println!(
         "llama4_vision - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
@@ -1205,7 +1205,7 @@ fn run_llama4_vision_golden_test(image_name: &str) {
     );
 
     // Check output shape - both HuggingFace and Rust output 4D (total_tiles, C, H, W)
-    let rust_shape = result.pixel_values.shape();
+    let rust_shape = result.encoder_input.shape();
     println!(
         "llama4_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
@@ -1223,7 +1223,7 @@ fn run_llama4_vision_golden_test(image_name: &str) {
     );
 
     // Compare pixel values
-    let rust_pixels = result.pixel_values_flat();
+    let rust_pixels = result.encoder_input_flat();
     let num_golden_elements: usize = golden_shape.iter().product();
 
     // Find the max difference for the actual tiles (not padding)
@@ -1381,7 +1381,7 @@ fn run_pixtral_golden_test(image_name: &str) {
     );
 
     // Check num_tokens
-    let rust_num_tokens = result.num_img_tokens[0];
+    let rust_num_tokens = result.feature_token_counts[0];
     println!(
         "pixtral - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
@@ -1391,7 +1391,7 @@ fn run_pixtral_golden_test(image_name: &str) {
     );
 
     // Check output shape
-    let rust_shape = result.pixel_values.shape();
+    let rust_shape = result.encoder_input.shape();
     println!("pixtral - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}");
 
     // Pixtral outputs [batch, C, H, W] with padding to max size in batch
@@ -1412,7 +1412,7 @@ fn run_pixtral_golden_test(image_name: &str) {
     );
 
     // Compare pixel values - only compare the actual image region, not padding
-    let rust_pixels = result.pixel_values_flat();
+    let rust_pixels = result.encoder_input_flat();
     let golden_pixels_flat: Vec<f32> = golden_pixels.iter().copied().collect();
 
     // Calculate indices for the actual image region (not padding)
