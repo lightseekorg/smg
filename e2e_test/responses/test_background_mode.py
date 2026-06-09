@@ -113,10 +113,14 @@ class TestBackgroundModeValidation:
     ``ValidatedJson`` before any upstream call.
     """
 
-    def test_background_plus_stream_rejected_400(self, setup_backend):
-        """``background=true`` + ``stream=true`` → ``background_conflicts_with_stream``.
+    def test_background_plus_stream_is_accepted(self, setup_backend):
+        """``background=true`` + ``stream=true`` is allowed by the validator.
 
-        Pinned at ``crates/protocols/src/responses.rs:3127-3132``.
+        ``validate_responses_cross_parameters`` (BGM-PR-01, #1609) intentionally
+        permits streaming background create — the SSE stream is sourced from the
+        persisted event log — so this combination must NOT trip the Layer-1
+        validator. We assert no validator 400 (a queued 200 or a handler-layer
+        error are both acceptable; only the validator envelope is forbidden).
         """
         _, model, _, gw = setup_backend
         resp = _post_responses(
@@ -128,13 +132,28 @@ class TestBackgroundModeValidation:
                 "stream": True,
             },
         )
-        # Message text pinned in crates/protocols/src/responses.rs:3130.
-        _assert_validator_400(resp, "Cannot use background mode with streaming")
+        # Server errors (5xx) must never be tolerated — they would let a broken
+        # gateway pass silently.
+        assert resp.status_code < 500, (
+            f"background+stream must not surface a 5xx; got {resp.status_code}: {resp.text!r}"
+        )
+        if resp.status_code == 400:
+            body = resp.json()
+            err = body.get("error", {})
+            is_layer1_validator_error = (
+                isinstance(err, dict)
+                and err.get("type") == "invalid_request_error"
+                and err.get("code") == 400
+            )
+            assert not is_layer1_validator_error, (
+                f"background+stream must not trip the Layer-1 validator; got {body!r}"
+            )
 
     def test_background_plus_store_false_rejected_400(self, setup_backend):
         """``background=true`` + explicit ``store=false`` → ``background_requires_store``.
 
-        Pinned at ``crates/protocols/src/responses.rs:3134-3140``.
+        Pinned at ``validate_responses_cross_parameters`` in
+        ``crates/protocols/src/responses.rs`` (rule 3, background-requires-store).
         """
         _, model, _, gw = setup_backend
         resp = _post_responses(
@@ -146,8 +165,9 @@ class TestBackgroundModeValidation:
                 "store": False,
             },
         )
-        # Message text pinned in crates/protocols/src/responses.rs:3138.
-        _assert_validator_400(resp, "Background mode requires 'store' to be true")
+        # Message text pinned to `ValidationError::message` for
+        # `background_requires_store` in responses.rs.
+        _assert_validator_400(resp, "Background mode requires store=true")
 
     def test_background_with_store_unset_is_accepted(self, setup_backend):
         """``store`` unset defaults to ``true`` per the OpenAI spec.
@@ -386,11 +406,13 @@ class TestBackgroundModeLocal:
         assert create.status_code == 200
         rid = create.json()["id"]
 
-        get = httpx.get(
-            f"{gw.base_url}/v1/responses/{rid}",
-            headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'sk-not-used')}"},
-            timeout=30.0,
-        )
+        with httpx.Client(timeout=30.0) as client:
+            get = client.get(
+                f"{gw.base_url}/v1/responses/{rid}",
+                headers={
+                    "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'sk-not-used')}"
+                },
+            )
         assert get.status_code == 200, f"expected 200, got {get.status_code}: body={get.text!r}"
         body = get.json()
         assert body["id"] == rid
@@ -440,11 +462,13 @@ class TestBackgroundModeGptOss:
         assert create.status_code == 200
         rid = create.json()["id"]
 
-        get = httpx.get(
-            f"{gw.base_url}/v1/responses/{rid}",
-            headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'sk-not-used')}"},
-            timeout=30.0,
-        )
+        with httpx.Client(timeout=30.0) as client:
+            get = client.get(
+                f"{gw.base_url}/v1/responses/{rid}",
+                headers={
+                    "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'sk-not-used')}"
+                },
+            )
         assert get.status_code == 200
         body = get.json()
         assert body["id"] == rid

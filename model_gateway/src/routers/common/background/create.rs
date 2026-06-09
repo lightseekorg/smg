@@ -66,10 +66,19 @@ pub async fn handle_background_create(
     let response_id = ResponseId::from(format!("resp_{}", Uuid::now_v7()).as_str());
     let now_unix = chrono::Utc::now().timestamp();
     let initial_raw = initial_queued_response(&response_id, model_id, now_unix, request);
-    let request_json = serde_json::to_value(request).unwrap_or_else(|e| {
-        warn!(error = %e, "failed to serialize ResponsesRequest for background enqueue");
-        Value::Null
-    });
+    // Falling back to `Value::Null` here would enqueue an unreplayable job (the
+    // worker reconstructs the accepted contract from `request_json`), so a
+    // serialize failure must fail the request rather than dead-letter silently.
+    let request_json = match serde_json::to_value(request) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize ResponsesRequest for background enqueue");
+            return error::internal_error(
+                "background_enqueue_failed",
+                format!("Failed to serialize background request: {e}"),
+            );
+        }
+    };
 
     let mut enqueue_req = EnqueueRequest::new(
         response_id.clone(),
@@ -77,7 +86,7 @@ pub async fn handle_background_create(
         request_json,
         Value::Array(snapshot),
         initial_raw.clone(),
-        false,
+        request.stream.unwrap_or(false),
         request.priority,
     );
     enqueue_req.conversation_id = request.conversation.as_ref().map(|c| c.as_id().to_string());
@@ -141,29 +150,26 @@ async fn resolve_snapshot(
         for item in arr {
             items.push(ensure_item_id(item.clone()));
         }
-    } else if !request_input_json.is_null() {
+    } else if let Some(text) = request_input_json.as_str() {
         // ResponseInput::String — wrap as a single user message the worker
-        // can execute. Stable `id` matches the synchronous-persistence
-        // normalisation so `GET /v1/responses/{id}/input_items` returns the
-        // same `first_id`/`last_id` across calls.
+        // can execute. Mirror the synchronous persistence normalisation
+        // (`persistence_utils::extract_input_items`): the raw string becomes an
+        // `input_text` content part (not stored verbatim) with `status` and a
+        // stable `msg_` id, so `GET /v1/responses/{id}/input_items` and the
+        // worker's later deserialization both see the canonical array shape.
         items.push(json!({
             "id": generate_id("msg"),
             "type": "message",
             "role": "user",
-            "content": request_input_json,
+            "content": [{"type": "input_text", "text": text}],
+            "status": "completed",
         }));
     }
 
+    // The chain/conversation appends short-circuit on the cap as they grow;
+    // this final guard covers the request's own input items appended above.
     if items.len() > MAX_SNAPSHOT_ITEMS {
-        return Err(error::create_error(
-            StatusCode::CONFLICT,
-            "resolved_snapshot_too_large",
-            format!(
-                "Resolved snapshot has {} items, exceeds the cap of {}.",
-                items.len(),
-                MAX_SNAPSHOT_ITEMS
-            ),
-        ));
+        return Err(snapshot_too_large_error(items.len()));
     }
 
     Ok(items)
@@ -197,11 +203,21 @@ async fn append_prev_chain_items(
         ));
     }
 
+    // `get_response_chain` returns responses in chronological order (oldest
+    // first) — both the default `ResponseStorage` impl and the in-memory
+    // override reverse the backward `previous_response_id` walk before
+    // returning (see `data_connector::core`/`memory`). Appending in iteration
+    // order therefore yields a chronological snapshot, so do NOT reverse here.
     for stored in &chain.responses {
         if let Err(boxed) = check_prev_response_usable(stored) {
             return Err(*boxed);
         }
-        append_stored_response_items(stored, items);
+        // Check the global cap before cloning each ancestor's items so an
+        // oversized chain short-circuits instead of cloning the whole history
+        // and rejecting afterwards.
+        if let Err(boxed) = append_stored_response_items(stored, items) {
+            return Err(*boxed);
+        }
     }
     Ok(())
 }
@@ -237,13 +253,43 @@ fn check_prev_response_usable(stored: &StoredResponse) -> Result<(), Box<Respons
     }
 }
 
-fn append_stored_response_items(stored: &StoredResponse, items: &mut Vec<Value>) {
+fn append_stored_response_items(
+    stored: &StoredResponse,
+    items: &mut Vec<Value>,
+) -> Result<(), Box<Response>> {
+    // Count this ancestor's contribution before cloning anything. If it would
+    // push the snapshot past the cap we bail immediately rather than cloning a
+    // chain we are about to reject — this short-circuits unbounded growth.
+    let input_len = stored.input.as_array().map_or(0, Vec::len);
+    let output_len = stored
+        .raw_response
+        .get("output")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if items.len() + input_len + output_len > MAX_SNAPSHOT_ITEMS {
+        return Err(Box::new(snapshot_too_large_error(
+            items.len() + input_len + output_len,
+        )));
+    }
+
     if let Some(arr) = stored.input.as_array() {
         items.extend(arr.iter().cloned());
     }
     if let Some(out_arr) = stored.raw_response.get("output").and_then(Value::as_array) {
         items.extend(out_arr.iter().cloned());
     }
+    Ok(())
+}
+
+/// Shared CONFLICT error for a resolved snapshot that exceeds the global cap.
+fn snapshot_too_large_error(item_count: usize) -> Response {
+    error::create_error(
+        StatusCode::CONFLICT,
+        "resolved_snapshot_too_large",
+        format!(
+            "Resolved snapshot has {item_count} items, exceeds the cap of {MAX_SNAPSHOT_ITEMS}."
+        ),
+    )
 }
 
 async fn append_conversation_items(
@@ -296,6 +342,9 @@ async fn append_conversation_items(
         if batch.is_empty() {
             break;
         }
+        // A short page means storage is exhausted — stop after processing it
+        // instead of issuing a redundant round-trip that would return empty.
+        let is_last_page = batch.len() < PAGE_SIZE;
         let next_after = batch.last().map(|i| i.id.0.clone());
         for ci in batch {
             match conversation_item_to_snapshot_value(ci, conv_id_str) {
@@ -314,6 +363,9 @@ async fn append_conversation_items(
                     ),
                 ));
             }
+        }
+        if is_last_page {
+            break;
         }
         after = next_after;
         if after.is_none() {
