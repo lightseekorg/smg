@@ -406,25 +406,24 @@ impl CacheAwarePolicy {
                 .get(model_id)
                 .map(|entry| entry.value().clone());
             if let Some(tree) = tree {
-                // Match BEFORE insert (mirrors the string-side
-                // imbalanced path below). After `insert_tokens`,
-                // the tree contains a full path for `tokens` so a
-                // match returns the entire input length and we'd
-                // store the full sequence — at 32K tokens × 4 bytes
-                // × max_tree_size that's multi-GB per model.
-                let matched_prefix = if self.should_populate_hash_index() {
-                    let result = tree.match_prefix_with_counts(tokens);
-                    Some(tokens[..result.matched_token_count].to_vec())
-                } else {
-                    None
-                };
-                tree.insert_tokens(tokens, worker_url);
-                if let Some(matched_prefix) = matched_prefix {
+                // We need the match result (the prior shared prefix) BEFORE the
+                // insert so the hash_index stores only that bounded prefix, not
+                // the full path that exists post-insert (32K tokens × 4 bytes ×
+                // max_tree_size = multi-GB/model). `match_and_insert` resolves
+                // the match against the pre-insert tree and inserts in the SAME
+                // descent, so `result.matched_token_count` is the same prior
+                // prefix length the standalone match returned. When we don't
+                // populate the index, a plain insert (no match) suffices.
+                if self.should_populate_hash_index() {
+                    let result = tree.match_and_insert(tokens, worker_url);
+                    let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
                     self.hash_index
                         .entry(model_id.to_string())
                         .or_default()
                         .token_tree
                         .insert(kv_index::hash_token_path(tokens), matched_prefix);
+                } else {
+                    tree.insert_tokens(tokens, worker_url);
                 }
             }
         } else if let Some(text) = info.request_text {
@@ -435,30 +434,24 @@ impl CacheAwarePolicy {
                 .map(|entry| entry.value().clone());
 
             if let Some(tree) = tree {
-                // Match BEFORE insert: after `insert_text`, the
-                // tree contains a full path for `text` so a match
-                // would return the entire input length and we'd
-                // store the full prompt — exactly the memory leak
-                // we're trying to avoid. The pre-insert match
-                // returns the prior shared prefix (~50-200 chars).
-                let matched_prefix = if self.should_populate_hash_index() {
-                    let result = tree.match_prefix_with_counts(text);
-                    Some(
-                        text.chars()
-                            .take(result.matched_char_count)
-                            .collect::<String>(),
-                    )
-                } else {
-                    None
-                };
-                tree.insert_text(text, worker_url);
-                if let Some(matched_prefix) = matched_prefix {
+                // Match BEFORE insert so the hash_index stores only the prior
+                // shared prefix (~50-200 chars), not the full prompt (20KB+)
+                // that exists post-insert. `match_and_insert` does both in a
+                // single descent; `result.matched_char_count` is the same prior
+                // prefix length the standalone match returned. When we don't
+                // populate the index, a plain insert (no match) suffices.
+                if self.should_populate_hash_index() {
+                    let result = tree.match_and_insert(text, worker_url);
+                    let matched_prefix: String =
+                        text.chars().take(result.matched_char_count).collect();
                     let path_hash = kv_index::hash_node_path(text);
                     self.hash_index
                         .entry(model_id.to_string())
                         .or_default()
                         .string_tree
                         .insert(path_hash, matched_prefix);
+                } else {
+                    tree.insert_text(text, worker_url);
                 }
             } else {
                 debug!(
@@ -879,29 +872,44 @@ impl CacheAwarePolicy {
             .map(|entry| entry.value().clone());
 
         if let Some(tree) = tree {
-            let result = tree.match_prefix_with_counts(tokens);
-            let match_rate = if result.input_token_count == 0 {
-                0.0
-            } else {
-                result.matched_token_count as f32 / result.input_token_count as f32
-            };
+            // Single tree descent: match, pick the worker from the match
+            // result, then insert for it — replacing the former
+            // match_prefix_with_counts + insert_tokens pair (two full descents
+            // over the same prefix). The selection closure runs once, after the
+            // match, mirroring the previous branch exactly:
+            //   * cache hit  (match_rate > threshold): route to the matched
+            //     worker if it is still healthy — insert for it;
+            //   * cache miss (match_rate <= threshold): route to the least-loaded
+            //     worker — insert for it;
+            //   * matched worker gone/unhealthy: select nothing and DON'T insert
+            //     (closure returns None), falling back to first-healthy below.
+            let mut selected_idx: Option<usize> = None;
+            let result = tree.match_and_insert_with(tokens, |result| {
+                let match_rate = if result.input_token_count == 0 {
+                    0.0
+                } else {
+                    result.matched_token_count as f32 / result.input_token_count as f32
+                };
 
-            let selected_idx = if match_rate > self.config.cache_threshold {
-                let tenant_url: &str = &result.tenant;
-                workers
-                    .iter()
-                    .position(|w| w.url() == tenant_url)
-                    .filter(|&idx| workers[idx].is_healthy())
-            } else {
-                healthy_indices
-                    .iter()
-                    .min_by_key(|&&idx| workers[idx].load())
-                    .copied()
-            };
+                selected_idx = if match_rate > self.config.cache_threshold {
+                    let tenant_url: &str = &result.tenant;
+                    workers
+                        .iter()
+                        .position(|w| w.url() == tenant_url)
+                        .filter(|&idx| workers[idx].is_healthy())
+                } else {
+                    healthy_indices
+                        .iter()
+                        .min_by_key(|&&idx| workers[idx].load())
+                        .copied()
+                };
+
+                // Insert for the selected worker (None => no insert, exactly
+                // like the old `if let Some(idx)` guard around insert_tokens).
+                selected_idx.map(|idx| workers[idx].url())
+            });
 
             if let Some(idx) = selected_idx {
-                tree.insert_tokens(tokens, workers[idx].url());
-
                 // Record hash(full_tokens)→matched_prefix tokens.
                 // The hash key matches what sync_tree_operation
                 // sends on the wire (hash of full sequence). The
@@ -912,7 +920,7 @@ impl CacheAwarePolicy {
                 // incoming token delta, so maintain it alongside
                 // the tree. Mirrors the string side at the
                 // analogous block; reuses the match `result`
-                // already computed at the top of this branch.
+                // returned by match_and_insert_with.
                 if self.should_populate_hash_index() {
                     let matched_prefix: Vec<u32> = tokens[..result.matched_token_count].to_vec();
                     self.hash_index
@@ -953,29 +961,37 @@ impl CacheAwarePolicy {
             .map(|entry| entry.value().clone());
 
         if let Some(tree) = tree {
-            let result = tree.match_prefix_with_counts(text);
-            let match_rate = if result.input_char_count == 0 {
-                0.0
-            } else {
-                result.matched_char_count as f32 / result.input_char_count as f32
-            };
+            // Single tree descent: match, pick the worker from the match result,
+            // then insert for it — replacing the former match_prefix_with_counts
+            // + insert_text pair. Selection logic is unchanged (see the token
+            // path for the per-branch rationale).
+            let mut selected_idx: Option<usize> = None;
+            let result = tree.match_and_insert_with(text, |result| {
+                let match_rate = if result.input_char_count == 0 {
+                    0.0
+                } else {
+                    result.matched_char_count as f32 / result.input_char_count as f32
+                };
 
-            let selected_idx = if match_rate > self.config.cache_threshold {
-                let tenant_url: &str = &result.tenant;
-                workers
-                    .iter()
-                    .position(|w| w.url() == tenant_url)
-                    .filter(|&idx| workers[idx].is_healthy())
-            } else {
-                healthy_indices
-                    .iter()
-                    .min_by_key(|&&idx| workers[idx].load())
-                    .copied()
-            };
+                selected_idx = if match_rate > self.config.cache_threshold {
+                    let tenant_url: &str = &result.tenant;
+                    workers
+                        .iter()
+                        .position(|w| w.url() == tenant_url)
+                        .filter(|&idx| workers[idx].is_healthy())
+                } else {
+                    healthy_indices
+                        .iter()
+                        .min_by_key(|&&idx| workers[idx].load())
+                        .copied()
+                };
+
+                // Insert for the selected worker (None => no insert, exactly
+                // like the old `if let Some(idx)` guard around insert_text).
+                selected_idx.map(|idx| workers[idx].url())
+            });
 
             if let Some(idx) = selected_idx {
-                tree.insert_text(text, workers[idx].url());
-
                 // Record hash(full_text)→matched_prefix for mesh tenant delta
                 // resolution. The hash key matches what sync_tree_operation sends
                 // on the wire (hash of full text). The VALUE is only the matched
