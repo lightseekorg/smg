@@ -498,8 +498,7 @@ impl QwenVLProcessorBase {
 
                 for mh in 0..merge_size {
                     for mw in 0..merge_size {
-                        for c in 0..3 {
-                            let lut_c = &lut[c];
+                        for (c, lut_c) in lut.iter().enumerate().take(3) {
                             for frame in frames {
                                 let raw = frame.data.as_ref();
                                 for py in 0..patch_size {
@@ -801,30 +800,7 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         }
 
         let mut out_idx = 0;
-        if !needs_resize_any {
-            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
-            for gt in 0..grid_t {
-                frame_rgbs.clear();
-                for tp in 0..temporal_patch_size {
-                    let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
-                    let frame = frames[idx];
-                    frame_rgbs.push(VideoFrameRgb {
-                        width: frame.width as usize,
-                        height: frame.height as usize,
-                        data: Cow::Borrowed(frame.data),
-                    });
-                }
-
-                self.patchify_video_rgb_chunk_into(
-                    &frame_rgbs,
-                    grid_h,
-                    grid_w,
-                    &mut all_patches,
-                    &mut out_idx,
-                    &lut,
-                )?;
-            }
-        } else {
+        if needs_resize_any {
             for gt in 0..grid_t {
                 let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
                 for tp in 0..temporal_patch_size {
@@ -852,6 +828,29 @@ impl VisionPreProcessor for QwenVLProcessorBase {
                             data: Cow::Borrowed(frame.data),
                         });
                     }
+                }
+
+                self.patchify_video_rgb_chunk_into(
+                    &frame_rgbs,
+                    grid_h,
+                    grid_w,
+                    &mut all_patches,
+                    &mut out_idx,
+                    &lut,
+                )?;
+            }
+        } else {
+            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+            for gt in 0..grid_t {
+                frame_rgbs.clear();
+                for tp in 0..temporal_patch_size {
+                    let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
+                    let frame = frames[idx];
+                    frame_rgbs.push(VideoFrameRgb {
+                        width: frame.width as usize,
+                        height: frame.height as usize,
+                        data: Cow::Borrowed(frame.data),
+                    });
                 }
 
                 self.patchify_video_rgb_chunk_into(

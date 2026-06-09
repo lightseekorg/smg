@@ -396,31 +396,27 @@ async fn decode_video_frames(
     source_path: Option<PathBuf>,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     match video_decode_backend_override().as_deref() {
-        Some("ffmpeg") => {
-            return decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref()).await;
-        }
+        Some("ffmpeg") => decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref()).await,
         Some("opencv") => {
             #[cfg(feature = "opencv-video")]
             {
                 let source_path = source_path.clone();
-                return task::spawn_blocking(move || {
+                task::spawn_blocking(move || {
                     decode_video_with_opencv_logged(&bytes, cfg, source_path.as_deref())
                 })
                 .await
-                .map_err(MediaConnectorError::Blocking)?;
+                .map_err(MediaConnectorError::Blocking)?
             }
             #[cfg(not(feature = "opencv-video"))]
             {
-                return Err(MediaConnectorError::VideoDecode(
+                Err(MediaConnectorError::VideoDecode(
                     "SMG_VIDEO_DECODE_BACKEND=opencv requires the opencv-video feature".to_string(),
-                ));
+                ))
             }
         }
-        Some(backend) => {
-            return Err(MediaConnectorError::VideoDecode(format!(
-                "unsupported SMG_VIDEO_DECODE_BACKEND={backend}; expected auto, opencv, or ffmpeg"
-            )));
-        }
+        Some(backend) => Err(MediaConnectorError::VideoDecode(format!(
+            "unsupported SMG_VIDEO_DECODE_BACKEND={backend}; expected auto, opencv, or ffmpeg"
+        ))),
         None => {
             #[cfg(feature = "opencv-video")]
             {
@@ -437,7 +433,7 @@ async fn decode_video_frames(
                 .map_err(MediaConnectorError::Blocking)?;
 
                 match opencv_result {
-                    Ok(frames) => return Ok(frames),
+                    Ok(frames) => Ok(frames),
                     Err(opencv_error) => {
                         if log_video_decode_timing_enabled() {
                             info!(
@@ -446,21 +442,21 @@ async fn decode_video_frames(
                             );
                         }
 
-                        return match decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref())
+                        match decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref())
                             .await
                         {
                             Ok(frames) => Ok(frames),
                             Err(ffmpeg_error) => Err(MediaConnectorError::VideoDecode(format!(
                                 "OpenCV decode failed: {opencv_error}; ffmpeg fallback failed: {ffmpeg_error}"
                             ))),
-                        };
+                        }
                     }
                 }
             }
 
             #[cfg(not(feature = "opencv-video"))]
             {
-                return decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref()).await;
+                decode_video_with_ffmpeg(&bytes, cfg, source_path.as_deref()).await
             }
         }
     }
@@ -477,7 +473,7 @@ fn decode_video_with_opencv_logged(
     match &result {
         Ok(_) => log_video_decode_backend_timing("opencv", started, bytes.len(), cfg, None),
         Err(error) => {
-            log_video_decode_backend_timing("opencv", started, bytes.len(), cfg, Some(error))
+            log_video_decode_backend_timing("opencv", started, bytes.len(), cfg, Some(error));
         }
     }
     result
