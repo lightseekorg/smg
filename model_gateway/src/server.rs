@@ -54,7 +54,10 @@ use crate::{
         otel_trace,
     },
     routers::{
-        common::background::create::{handle_background_create, BackgroundCreateDeps},
+        common::background::{
+            create::{handle_background_create, BackgroundCreateDeps},
+            start_background_scheduler,
+        },
         conversations,
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
@@ -1257,6 +1260,26 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         worker_monitor.start_event_loop();
         debug!("Started WorkerMonitor event loop");
     }
+
+    // Background-mode scheduler driver. Only spawned when a background
+    // repository is configured (capability-gated by the active history
+    // backend); a gateway with no background repo is entirely unaffected. The
+    // handle owns the supervised claim-tick + sweeper tasks and must outlive
+    // the server, so it is bound for the lifetime of `startup`. BGM-PR-07 swaps
+    // the default "execution unavailable" worker for the real executor.
+    let _background_scheduler = match app_context.background_repository.clone() {
+        Some(repository) => {
+            let handle =
+                start_background_scheduler(repository, config.router_config.background.clone())
+                    .await;
+            info!("Background scheduler started");
+            Some(handle)
+        }
+        None => {
+            debug!("No background repository configured; background scheduler not started");
+            None
+        }
+    };
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
         app_context.rate_limiter.clone(),
