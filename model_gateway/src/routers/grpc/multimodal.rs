@@ -798,12 +798,12 @@ async fn process_multimodal_parts(
     let image_count = images.len();
     let video_count = videos.len();
     let video_frame_count = videos.first().map_or(0, |video| {
-        if !video.frames().is_empty() {
-            video.frames().len()
-        } else {
+        if video.frames().is_empty() {
             video
                 .rgb_video()
                 .map_or(0, |rgb_video| rgb_video.frames.len())
+        } else {
+            video.frames().len()
         }
     });
     let original_tokens = token_ids.len();
@@ -1362,12 +1362,12 @@ fn serialize_array_as_tokenspeed_tensor(
         }
     };
     let shape = array_shape(encoder_input);
-    let nbytes = encoder_input.len()
-        * match dtype.as_str() {
-            "float32" => size_of::<f32>(),
-            "bfloat16" | "float16" => size_of::<u16>(),
-            _ => unreachable!("canonical dtype is constrained above"),
-        };
+    let element_size = if dtype == "bfloat16" || dtype == "float16" {
+        size_of::<u16>()
+    } else {
+        size_of::<f32>()
+    };
+    let nbytes = encoder_input.len() * element_size;
 
     if tokenspeed_shm_transport_enabled_for_bytes(nbytes) {
         let started = Instant::now();
@@ -1408,7 +1408,10 @@ fn write_array_as_dtype(
         "float32" => write_array_as_f32(writer, encoder_input),
         "bfloat16" => write_array_as_u16(writer, encoder_input, f32_to_bf16_bits),
         "float16" => write_array_as_u16(writer, encoder_input, f32_to_f16_bits),
-        _ => unreachable!("canonical dtype is constrained before direct SHM write"),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported TokenSpeed encoder input dtype: {other}"),
+        )),
     }
 }
 
@@ -1430,7 +1433,7 @@ fn write_array_as_f32(writer: &mut impl Write, encoder_input: &ArrayD<f32>) -> s
         }
     }
 
-    for value in encoder_input.iter() {
+    for value in encoder_input {
         writer.write_all(&value.to_le_bytes())?;
     }
     Ok(())
@@ -1473,7 +1476,7 @@ where
             }
         }
     } else {
-        for &value in encoder_input.iter() {
+        for &value in encoder_input {
             converted.push(convert(value));
             if converted.len() == CHUNK_VALUES {
                 flush(&mut converted)?;

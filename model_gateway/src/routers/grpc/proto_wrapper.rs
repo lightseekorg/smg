@@ -415,7 +415,7 @@ pub fn write_tokenspeed_shm_with(
         let _ = remove_file(&path);
         return Err(error);
     }
-    if let Err(error) = file.flush().and_then(|_| {
+    if let Err(error) = file.flush().and_then(|()| {
         if file.metadata()?.len() != nbytes as u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -442,7 +442,7 @@ pub fn collect_tokenspeed_multimodal_inputs_shm_handles(
 ) -> Vec<tokenspeed::ShmHandle> {
     let mut handles = Vec::new();
     for item in &inputs.items {
-        collect_optional_tokenspeed_tensor_shm_handles(&item.encoder_input, &mut handles);
+        collect_optional_tokenspeed_tensor_shm_handles(item.encoder_input.as_ref(), &mut handles);
         for tensor in item.model_specific_tensors.values() {
             collect_tokenspeed_tensor_shm_handles(tensor, &mut handles);
         }
@@ -485,7 +485,7 @@ pub fn cleanup_tokenspeed_shm_handles(handles: &[tokenspeed::ShmHandle]) {
 }
 
 fn collect_optional_tokenspeed_tensor_shm_handles(
-    tensor: &Option<tokenspeed::TensorData>,
+    tensor: Option<&tokenspeed::TensorData>,
     handles: &mut Vec<tokenspeed::ShmHandle>,
 ) {
     let Some(tensor) = tensor else {
@@ -505,8 +505,7 @@ fn collect_tokenspeed_tensor_shm_handles(
 
 fn validate_tokenspeed_shm_name_for_cleanup(name: &str) -> Option<&str> {
     let name = name.strip_prefix('/').unwrap_or(name);
-    if name.is_empty() || name.contains('/') || name == "." || name == ".." || name.contains('\0')
-    {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." || name.contains('\0') {
         return None;
     }
     Some(name)
