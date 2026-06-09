@@ -18,12 +18,13 @@ use std::{
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, ImageProcessorRegistry,
-    MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
-    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
-    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip,
+    AsyncMultiModalTracker, FieldLayout, ImageDetail, ImageFrame, MediaConnector,
+    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelRegistry,
+    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedEncoderInputs,
+    PromptReplacement, TrackedMedia, TrackerOutput, VideoClip, VisionProcessorRegistry,
 };
 use llm_tokenizer::TokenizerTrait;
+use ndarray::{ArrayD, Axis, Slice};
 use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
@@ -36,7 +37,7 @@ use crate::routers::grpc::{
     context::WorkerSelection,
     proto_wrapper::{
         SglangMultimodalData, TensorBytes, TokenSpeedModality, TokenSpeedMultimodalData,
-        TrtllmMultimodalData, VllmMultimodalData,
+        TokenSpeedMultimodalItem, TrtllmMultimodalData, VllmMultimodalData,
     },
     MultimodalData,
 };
@@ -117,7 +118,7 @@ impl MultimodalConfigRegistry {
                 })
             })?;
 
-        // preprocessor_config.json is optional — each image processor supplies
+        // preprocessor_config.json is optional — each vision processor supplies
         // its own model-specific defaults, so missing/unparsable files fall
         // back to `PreProcessorConfig::default()`. This matches the bundle
         // preload path in `try_load_multimodal_config`.
@@ -211,9 +212,7 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
         }
     };
 
-    let Some(video_processor) = processor_config.get("video_processor") else {
-        return None;
-    };
+    let video_processor = processor_config.get("video_processor")?;
     match PreProcessorConfig::from_value(video_processor.clone()) {
         Ok(config) => Some(config),
         Err(error) => {
@@ -230,7 +229,7 @@ pub(crate) fn load_video_preprocessor_config(base_dir: &Path) -> Option<PreProce
 /// Shared multimodal components injected at router creation time.
 pub(crate) struct MultimodalComponents {
     pub media_connector: Arc<MediaConnector>,
-    pub image_processor_registry: Arc<ImageProcessorRegistry>,
+    pub vision_processor_registry: Arc<VisionProcessorRegistry>,
     pub model_registry: Arc<ModelRegistry>,
     /// Shared reference to the app-level multimodal config cache.
     pub config_registry: Arc<MultimodalConfigRegistry>,
@@ -249,7 +248,7 @@ impl MultimodalComponents {
 
         Ok(Self {
             media_connector: Arc::new(media_connector),
-            image_processor_registry: Arc::new(ImageProcessorRegistry::with_defaults()),
+            vision_processor_registry: Arc::new(VisionProcessorRegistry::with_defaults()),
             model_registry: Arc::new(ModelRegistry::default()),
             config_registry,
         })
@@ -258,7 +257,7 @@ impl MultimodalComponents {
 
 /// Output of the multimodal processing pipeline.
 pub(crate) struct MultimodalOutput {
-    /// Token IDs with placeholder tokens expanded to the correct count per image.
+    /// Token IDs with placeholder tokens expanded to the correct count per media item.
     pub expanded_token_ids: Vec<u32>,
     /// Lightweight intermediate holding preprocessing results.
     /// Assembled into backend-specific `MultimodalData` in request_building.
@@ -279,8 +278,8 @@ pub(crate) enum MultimodalIntermediate {
 pub(crate) struct PrecomputedMultimodalIntermediate {
     /// Active modality for this preprocessed payload.
     pub modality: Modality,
-    /// Preprocessed pixel values and model-specific tensors (not yet serialized).
-    pub preprocessed: PreprocessedImages,
+    /// Preprocessed encoder input and model-specific tensors (not yet serialized).
+    pub preprocessed: PreprocessedEncoderInputs,
     /// Raw image frames (bytes + blake3 hashes).
     pub images: Vec<Arc<ImageFrame>>,
     /// Raw video clips (bytes + blake3 hashes + sampled frames).
@@ -613,7 +612,7 @@ async fn process_multimodal_parts(
         Modality::Image => {
             debug!(
                 image_count = images.len(),
-                image_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
+                item_sizes = ?images.iter().map(|f| (f.image.width(), f.image.height())).collect::<Vec<_>>(),
                 "Fetched images for multimodal processing"
             );
         }
@@ -646,7 +645,7 @@ async fn process_multimodal_parts(
         .lookup(&metadata)
         .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
 
-    // Run CPU-intensive image preprocessing on a blocking thread pool so it
+    // Run CPU-intensive vision preprocessing on a blocking thread pool so it
     // doesn't block the tokio async runtime under concurrent load.
     // TODO: consider making the thread pool size configurable.
     let pp_config = match modality {
@@ -656,17 +655,17 @@ async fn process_multimodal_parts(
             .unwrap_or_else(|| model_config.preprocessor_config.clone()),
         _ => model_config.preprocessor_config.clone(),
     };
-    let registry = components.image_processor_registry.clone();
+    let registry = components.vision_processor_registry.clone();
     let model_id_owned = model_id.to_string();
     let model_type_owned = model_type.map(String::from);
     let images_for_preprocess = images.clone(); // cheap Arc refcount bumps
     let videos_for_preprocess = videos.clone(); // cheap Arc refcount bumps
 
-    let preprocessed: PreprocessedImages = tokio::task::spawn_blocking(move || {
+    let preprocessed: PreprocessedEncoderInputs = tokio::task::spawn_blocking(move || {
         let processor = registry
             .find(&model_id_owned, model_type_owned.as_deref())
             .ok_or_else(|| {
-                anyhow::anyhow!("No image processor found for model: {model_id_owned}")
+                anyhow::anyhow!("No vision processor found for model: {model_id_owned}")
             })?;
 
         match modality {
@@ -699,8 +698,8 @@ async fn process_multimodal_parts(
 
     debug!(
         ?modality,
-        item_count = preprocessed.num_img_tokens.len(),
-        total_tokens = preprocessed.num_img_tokens.iter().sum::<usize>(),
+        item_count = preprocessed.feature_token_counts.len(),
+        total_tokens = preprocessed.feature_token_counts.iter().sum::<usize>(),
         "Multimodal preprocessing complete"
     );
 
@@ -885,12 +884,10 @@ pub(crate) fn assemble_multimodal_data(
                 ensure_image_only(&precomputed, "TRT-LLM")?;
                 Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
             }
-            GrpcClient::TokenSpeed(_) => {
-                Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
-                    precomputed,
-                    workers,
-                )))
-            }
+            GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
+                precomputed,
+                workers,
+            )?)),
             GrpcClient::Mlx(_) => unreachable!(
                 "caller rejects multimodal for MLX in build_chat_request/build_messages_request"
             ),
@@ -898,7 +895,10 @@ pub(crate) fn assemble_multimodal_data(
     }
 }
 
-fn ensure_image_only(intermediate: &PrecomputedMultimodalIntermediate, backend: &str) -> Result<()> {
+fn ensure_image_only(
+    intermediate: &PrecomputedMultimodalIntermediate,
+    backend: &str,
+) -> Result<()> {
     if intermediate.modality != Modality::Image {
         return Err(anyhow::anyhow!(
             "{backend} multimodal path currently supports image inputs only; got {}",
@@ -909,7 +909,7 @@ fn ensure_image_only(intermediate: &PrecomputedMultimodalIntermediate, backend: 
 }
 
 fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMultimodalData {
-    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let image_data = intermediate
         .images
@@ -939,7 +939,7 @@ fn assemble_sglang(intermediate: PrecomputedMultimodalIntermediate) -> SglangMul
 }
 
 fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimodalData {
-    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    let (pixel_values, pixel_values_shape) = serialize_encoder_input(&intermediate.preprocessed);
     let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
     let mm_placeholders = intermediate
@@ -947,8 +947,8 @@ fn assemble_vllm(intermediate: PrecomputedMultimodalIntermediate) -> VllmMultimo
         .iter()
         .map(|p| (p.offset as u32, p.length as u32))
         .collect();
-    let batched_keys = PreprocessedImages::batched_keys(&intermediate.field_layouts);
-    let flat_keys = PreprocessedImages::flat_keys(&intermediate.field_layouts);
+    let batched_keys = PreprocessedEncoderInputs::batched_keys(&intermediate.field_layouts);
+    let flat_keys = PreprocessedEncoderInputs::flat_keys(&intermediate.field_layouts);
 
     VllmMultimodalData {
         pixel_values,
@@ -975,22 +975,14 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
 fn assemble_tokenspeed(
     intermediate: PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
-) -> TokenSpeedMultimodalData {
+) -> Result<TokenSpeedMultimodalData> {
     // Use patch-only offsets when available and non-empty; fall back to full structural ranges.
     let encoder_input_dtype = tokenspeed_encoder_input_dtype(intermediate.modality, workers);
-    let (pixel_values, pixel_values_shape, encoder_input_dtype) =
-        serialize_pixel_values_as_dtype(&intermediate.preprocessed, &encoder_input_dtype);
-    let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
-    let mm_placeholders = intermediate
+    let patch_offsets = intermediate
         .patch_offsets
+        .clone()
         .filter(|offsets| !offsets.is_empty())
-        .unwrap_or_else(|| {
-            intermediate
-                .placeholders
-                .iter()
-                .map(|p| (p.offset as u32, p.length as u32))
-                .collect()
-        });
+        .unwrap_or_default();
 
     let modality = match intermediate.modality {
         Modality::Image => TokenSpeedModality::Image,
@@ -998,22 +990,297 @@ fn assemble_tokenspeed(
         Modality::Audio => TokenSpeedModality::Audio,
         Modality::ImageEmbeds => TokenSpeedModality::Image,
     };
-    let content_hash = match intermediate.modality {
-        Modality::Image => hash_hex_strings(intermediate.images.iter().map(|f| f.hash.as_str())),
-        Modality::Video => hash_hex_strings(intermediate.videos.iter().map(|v| v.hash.as_str())),
-        _ => Vec::new(),
-    };
 
-    TokenSpeedMultimodalData {
-        modality,
-        pixel_values,
-        pixel_values_shape,
-        encoder_input_dtype,
-        model_specific_tensors,
-        placeholder_token_id: intermediate.placeholder_token_id,
-        mm_placeholders,
-        content_hash,
+    let item_count = tokenspeed_item_count(&intermediate)?;
+    let items = (0..item_count)
+        .map(|item_index| {
+            let item_encoder_input = encoder_input_for_item(
+                &intermediate.preprocessed,
+                &intermediate.field_layouts,
+                item_index,
+            )?;
+            let (encoder_input, encoder_input_shape, encoder_input_dtype) =
+                serialize_array_as_dtype(&item_encoder_input, &encoder_input_dtype);
+            let model_specific_tensors = serialize_model_specific_for_item(
+                &intermediate.preprocessed.model_specific,
+                &intermediate.field_layouts,
+                item_index,
+            )?;
+            let mm_placeholders =
+                placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
+            let content_hash =
+                content_hash_for_item(intermediate.modality, &intermediate, item_index);
+
+            Ok(TokenSpeedMultimodalItem {
+                modality,
+                encoder_input,
+                encoder_input_shape,
+                encoder_input_dtype,
+                model_specific_tensors,
+                placeholder_token_id: intermediate.placeholder_token_id,
+                mm_placeholders,
+                content_hash,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(TokenSpeedMultimodalData { items })
+}
+
+fn tokenspeed_item_count(intermediate: &PrecomputedMultimodalIntermediate) -> Result<usize> {
+    let media_count = match intermediate.modality {
+        Modality::Image | Modality::ImageEmbeds => intermediate.images.len(),
+        Modality::Video => intermediate.videos.len(),
+        Modality::Audio => 0,
+    };
+    let token_count = intermediate.preprocessed.feature_token_counts.len();
+    let placeholder_count = intermediate.placeholders.len();
+    let item_count = token_count.max(media_count).max(placeholder_count);
+    anyhow::ensure!(
+        item_count > 0,
+        "TokenSpeed multimodal assembly requires at least one item"
+    );
+    if media_count > 0 {
+        anyhow::ensure!(
+            media_count == item_count,
+            "TokenSpeed multimodal assembly media count mismatch: modality={}, media_count={media_count}, item_count={item_count}",
+            intermediate.modality
+        );
     }
+    anyhow::ensure!(
+        token_count == item_count,
+        "TokenSpeed multimodal assembly token count mismatch: modality={}, token_count={token_count}, item_count={item_count}",
+        intermediate.modality
+    );
+    anyhow::ensure!(
+        placeholder_count == item_count,
+        "TokenSpeed multimodal assembly placeholder count mismatch: modality={}, placeholder_count={placeholder_count}, item_count={item_count}",
+        intermediate.modality
+    );
+    Ok(item_count)
+}
+
+fn encoder_input_for_item(
+    preprocessed: &PreprocessedEncoderInputs,
+    field_layouts: &HashMap<String, FieldLayout>,
+    item_index: usize,
+) -> Result<ArrayD<f32>> {
+    // The field layout key remains "pixel_values" because it mirrors the
+    // HuggingFace/vLLM vision kwargs contract. Internally this tensor is the
+    // modality encoder input we pass to TokenSpeed.
+    let layout = field_layouts
+        .get("pixel_values")
+        .unwrap_or(&FieldLayout::Batched);
+    match layout {
+        FieldLayout::Batched => slice_array_axis0(&preprocessed.encoder_input, item_index, 1),
+        FieldLayout::Flat { sizes_key } => {
+            let sizes = tensor_sizes_from_model_specific(&preprocessed.model_specific, sizes_key)?;
+            let (start, len) = item_span(&sizes, item_index)?;
+            slice_array_axis0(&preprocessed.encoder_input, start, len)
+        }
+    }
+}
+
+fn serialize_model_specific_for_item(
+    model_specific: &HashMap<String, ModelSpecificValue>,
+    field_layouts: &HashMap<String, FieldLayout>,
+    item_index: usize,
+) -> Result<HashMap<String, TensorBytes>> {
+    let mut serialized = HashMap::with_capacity(model_specific.len());
+    for (key, value) in model_specific {
+        let item_value = match field_layouts.get(key) {
+            Some(FieldLayout::Batched) => slice_model_specific_first_dim(value, item_index, 1)
+                .with_context(|| format!("failed to slice model_specific tensor {key}"))?,
+            Some(FieldLayout::Flat { sizes_key }) => {
+                let sizes = tensor_sizes_from_model_specific(model_specific, sizes_key)?;
+                let (start, len) = item_span(&sizes, item_index)?;
+                slice_model_specific_first_dim(value, start, len)
+                    .with_context(|| format!("failed to slice flat model_specific tensor {key}"))?
+            }
+            None => value.clone(),
+        };
+        if let Some(tensor) = model_specific_to_tensor_bytes(&item_value) {
+            serialized.insert(key.clone(), tensor);
+        } else {
+            warn!(tensor_key = %key, "Dropping unsupported model_specific value during multimodal serialization");
+        }
+    }
+    Ok(serialized)
+}
+
+fn placeholders_for_item(
+    item_index: usize,
+    placeholders: &[PlaceholderRange],
+    patch_offsets: &[(u32, u32)],
+) -> Vec<(u32, u32)> {
+    let Some(placeholder) = placeholders.get(item_index) else {
+        return Vec::new();
+    };
+    let start = placeholder.offset as u32;
+    let end = start + placeholder.length as u32;
+    let item_patch_offsets = patch_offsets
+        .iter()
+        .copied()
+        .filter(|(offset, length)| *offset >= start && offset.saturating_add(*length) <= end)
+        .collect::<Vec<_>>();
+    if item_patch_offsets.is_empty() {
+        vec![(start, end - start)]
+    } else {
+        item_patch_offsets
+    }
+}
+
+fn content_hash_for_item(
+    modality: Modality,
+    intermediate: &PrecomputedMultimodalIntermediate,
+    item_index: usize,
+) -> Vec<u8> {
+    match modality {
+        Modality::Image | Modality::ImageEmbeds => intermediate
+            .images
+            .get(item_index)
+            .map(|image| hash_hex_strings(std::iter::once(image.hash.as_str())))
+            .unwrap_or_default(),
+        Modality::Video => intermediate
+            .videos
+            .get(item_index)
+            .map(|video| hash_hex_strings(std::iter::once(video.hash.as_str())))
+            .unwrap_or_default(),
+        Modality::Audio => Vec::new(),
+    }
+}
+
+fn slice_array_axis0(array: &ArrayD<f32>, start: usize, len: usize) -> Result<ArrayD<f32>> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("array slice range overflow"))?;
+    let rows = array.shape().first().copied().unwrap_or(0);
+    anyhow::ensure!(
+        end <= rows,
+        "array first-dimension slice {start}..{end} exceeds {rows}"
+    );
+    Ok(array
+        .slice_axis(Axis(0), Slice::from(start..end))
+        .to_owned())
+}
+
+fn tensor_sizes_from_model_specific(
+    model_specific: &HashMap<String, ModelSpecificValue>,
+    key: &str,
+) -> Result<Vec<usize>> {
+    let value = model_specific
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("missing flat sizes tensor {key}"))?;
+    match value {
+        ModelSpecificValue::IntTensor { data, .. } => data
+            .iter()
+            .map(|&v| usize::try_from(v).context("negative flat size"))
+            .collect(),
+        ModelSpecificValue::UintTensor { data, .. } => {
+            Ok(data.iter().map(|&v| v as usize).collect())
+        }
+        ModelSpecificValue::IntVec(values) => values
+            .iter()
+            .map(|&v| usize::try_from(v).context("negative flat size"))
+            .collect(),
+        ModelSpecificValue::UintVec(values) => Ok(values.iter().map(|&v| v as usize).collect()),
+        _ => Err(anyhow::anyhow!(
+            "flat sizes tensor {key} has unsupported value type"
+        )),
+    }
+}
+
+fn item_span(sizes: &[usize], item_index: usize) -> Result<(usize, usize)> {
+    let len = *sizes
+        .get(item_index)
+        .ok_or_else(|| anyhow::anyhow!("missing flat size for item {item_index}"))?;
+    let start = sizes[..item_index]
+        .iter()
+        .try_fold(0usize, |acc, &size| acc.checked_add(size))
+        .ok_or_else(|| anyhow::anyhow!("flat size offset overflow"))?;
+    Ok((start, len))
+}
+
+fn slice_model_specific_first_dim(
+    value: &ModelSpecificValue,
+    start: usize,
+    len: usize,
+) -> Result<ModelSpecificValue> {
+    match value {
+        ModelSpecificValue::Tensor { data, shape } => {
+            let (data, shape) = slice_first_dim(data, shape, start, len)?;
+            Ok(ModelSpecificValue::Tensor { data, shape })
+        }
+        ModelSpecificValue::IntTensor { data, shape } => {
+            let (data, shape) = slice_first_dim(data, shape, start, len)?;
+            Ok(ModelSpecificValue::IntTensor { data, shape })
+        }
+        ModelSpecificValue::UintTensor { data, shape } => {
+            let (data, shape) = slice_first_dim(data, shape, start, len)?;
+            Ok(ModelSpecificValue::UintTensor { data, shape })
+        }
+        ModelSpecificValue::IntVec(values) => Ok(ModelSpecificValue::IntVec(
+            slice_1d(values, start, len)?.to_vec(),
+        )),
+        ModelSpecificValue::UintVec(values) => Ok(ModelSpecificValue::UintVec(
+            slice_1d(values, start, len)?.to_vec(),
+        )),
+        ModelSpecificValue::FloatVec(values) => Ok(ModelSpecificValue::FloatVec(
+            slice_1d(values, start, len)?.to_vec(),
+        )),
+        ModelSpecificValue::TupleVec(values) => Ok(ModelSpecificValue::TupleVec(
+            slice_1d(values, start, len)?.to_vec(),
+        )),
+        _ => Ok(value.clone()),
+    }
+}
+
+fn slice_first_dim<T: Clone>(
+    data: &[T],
+    shape: &[usize],
+    start: usize,
+    len: usize,
+) -> Result<(Vec<T>, Vec<usize>)> {
+    let first_dim = *shape
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cannot slice scalar tensor"))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("tensor slice range overflow"))?;
+    anyhow::ensure!(
+        end <= first_dim,
+        "tensor first-dimension slice {start}..{end} exceeds {first_dim}"
+    );
+    let row_width = shape[1..]
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| anyhow::anyhow!("tensor row width overflow"))?;
+    let data_start = start
+        .checked_mul(row_width)
+        .ok_or_else(|| anyhow::anyhow!("tensor data start overflow"))?;
+    let data_len = len
+        .checked_mul(row_width)
+        .ok_or_else(|| anyhow::anyhow!("tensor data length overflow"))?;
+    let data_end = data_start
+        .checked_add(data_len)
+        .ok_or_else(|| anyhow::anyhow!("tensor data end overflow"))?;
+    anyhow::ensure!(
+        data_end <= data.len(),
+        "tensor slice data range {data_start}..{data_end} exceeds {}",
+        data.len()
+    );
+    let mut new_shape = shape.to_vec();
+    new_shape[0] = len;
+    Ok((data[data_start..data_end].to_vec(), new_shape))
+}
+
+fn slice_1d<T>(values: &[T], start: usize, len: usize) -> Result<&[T]> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("slice range overflow"))?;
+    values
+        .get(start..end)
+        .ok_or_else(|| anyhow::anyhow!("slice range {start}..{end} exceeds {}", values.len()))
 }
 
 fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
@@ -1028,64 +1295,60 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
 // Serialization helpers
 // ---------------------------------------------------------------------------
 
-/// Serialize pixel values ndarray to raw little-endian f32 bytes + shape.
-fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u32>) {
-    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
-        .pixel_values
+/// Serialize the primary encoder input ndarray to raw little-endian f32 bytes + shape.
+fn serialize_encoder_input(preprocessed: &PreprocessedEncoderInputs) -> (Vec<u8>, Vec<u32>) {
+    serialize_array(&preprocessed.encoder_input)
+}
+
+fn serialize_array(encoder_input: &ArrayD<f32>) -> (Vec<u8>, Vec<u32>) {
+    let encoder_bytes: Vec<u8> = if let Some(encoder_slice) = encoder_input
         .as_slice()
-        .or_else(|| preprocessed.pixel_values.as_slice_memory_order())
+        .or_else(|| encoder_input.as_slice_memory_order())
     {
         // Zero-copy reinterpret: &[f32] → &[u8] on little-endian (x86).
         // This replaces the per-element flat_map(to_le_bytes) which was the
         // #1 CPU hotspot (13% of SMG CPU in profiling).
         #[cfg(target_endian = "little")]
         {
-            let byte_slice: &[u8] = bytemuck::cast_slice(pixel_slice);
+            let byte_slice: &[u8] = bytemuck::cast_slice(encoder_slice);
             byte_slice.to_vec()
         }
         #[cfg(not(target_endian = "little"))]
         {
-            pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
+            encoder_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
         }
     } else {
         // Non-C-contiguous array: .iter() walks in logical (row-major) order,
         // which matches the shape — unlike as_slice_memory_order() which would
         // silently serialize in wrong dimension order for Fortran-contiguous arrays.
-        preprocessed
-            .pixel_values
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect()
+        encoder_input.iter().flat_map(|v| v.to_le_bytes()).collect()
     };
-    (pixel_bytes, pixel_values_shape(preprocessed))
+    (encoder_bytes, array_shape(encoder_input))
 }
 
-/// Serialize pixel values to the requested wire dtype.
-fn serialize_pixel_values_as_dtype(
-    preprocessed: &PreprocessedImages,
+fn serialize_array_as_dtype(
+    encoder_input: &ArrayD<f32>,
     dtype: &str,
 ) -> (Vec<u8>, Vec<u32>, String) {
     match canonical_float_dtype(dtype).as_deref() {
         Some("float32") => {
-            let (data, shape) = serialize_pixel_values(preprocessed);
+            let (data, shape) = serialize_array(encoder_input);
             (data, shape, "float32".to_string())
         }
         Some("bfloat16") => (
-            preprocessed
-                .pixel_values
+            encoder_input
                 .iter()
                 .flat_map(|value| f32_to_bf16_bits(*value).to_le_bytes())
                 .collect(),
-            pixel_values_shape(preprocessed),
+            array_shape(encoder_input),
             "bfloat16".to_string(),
         ),
         Some("float16") => (
-            preprocessed
-                .pixel_values
+            encoder_input
                 .iter()
                 .flat_map(|value| f32_to_f16_bits(*value).to_le_bytes())
                 .collect(),
-            pixel_values_shape(preprocessed),
+            array_shape(encoder_input),
             "float16".to_string(),
         ),
         _ => {
@@ -1093,16 +1356,13 @@ fn serialize_pixel_values_as_dtype(
                 dtype,
                 "Unsupported TokenSpeed encoder input dtype; falling back to float32"
             );
-            let (data, shape) = serialize_pixel_values(preprocessed);
+            let (data, shape) = serialize_array(encoder_input);
             (data, shape, "float32".to_string())
         }
     }
 }
 
-fn tokenspeed_encoder_input_dtype(
-    modality: Modality,
-    workers: Option<&WorkerSelection>,
-) -> String {
+fn tokenspeed_encoder_input_dtype(modality: Modality, workers: Option<&WorkerSelection>) -> String {
     if let Some(dtype) = tokenspeed_encoder_input_dtype_from_env(modality) {
         return dtype;
     }
@@ -1119,25 +1379,18 @@ fn tokenspeed_encoder_input_dtype_from_env(modality: Modality) -> Option<String>
     static DEFAULT_DTYPE: OnceLock<Option<String>> = OnceLock::new();
 
     let modality_dtype = match modality {
-        Modality::Image | Modality::ImageEmbeds => cached_env_dtype(
-            &IMAGE_DTYPE,
-            "SMG_TOKENSPEED_IMAGE_ENCODER_INPUT_DTYPE",
-        ),
-        Modality::Video => cached_env_dtype(
-            &VIDEO_DTYPE,
-            "SMG_TOKENSPEED_VIDEO_ENCODER_INPUT_DTYPE",
-        ),
-        Modality::Audio => cached_env_dtype(
-            &AUDIO_DTYPE,
-            "SMG_TOKENSPEED_AUDIO_ENCODER_INPUT_DTYPE",
-        ),
+        Modality::Image | Modality::ImageEmbeds => {
+            cached_env_dtype(&IMAGE_DTYPE, "SMG_TOKENSPEED_IMAGE_ENCODER_INPUT_DTYPE")
+        }
+        Modality::Video => {
+            cached_env_dtype(&VIDEO_DTYPE, "SMG_TOKENSPEED_VIDEO_ENCODER_INPUT_DTYPE")
+        }
+        Modality::Audio => {
+            cached_env_dtype(&AUDIO_DTYPE, "SMG_TOKENSPEED_AUDIO_ENCODER_INPUT_DTYPE")
+        }
     };
-    modality_dtype.or_else(|| {
-        cached_env_dtype(
-            &DEFAULT_DTYPE,
-            "SMG_TOKENSPEED_ENCODER_INPUT_DTYPE",
-        )
-    })
+    modality_dtype
+        .or_else(|| cached_env_dtype(&DEFAULT_DTYPE, "SMG_TOKENSPEED_ENCODER_INPUT_DTYPE"))
 }
 
 fn cached_env_dtype(cell: &'static OnceLock<Option<String>>, name: &str) -> Option<String> {
@@ -1168,13 +1421,8 @@ fn canonical_float_dtype(dtype: &str) -> Option<String> {
     }
 }
 
-fn pixel_values_shape(preprocessed: &PreprocessedImages) -> Vec<u32> {
-    preprocessed
-        .pixel_values
-        .shape()
-        .iter()
-        .map(|&d| d as u32)
-        .collect()
+fn array_shape(encoder_input: &ArrayD<f32>) -> Vec<u32> {
+    encoder_input.shape().iter().map(|&d| d as u32).collect()
 }
 
 fn f32_to_bf16_bits(value: f32) -> u16 {
@@ -1280,8 +1528,9 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, mem::size_of};
 
+    use ndarray::IxDyn;
     use openai_protocol::common::{ImageUrl, VideoUrl};
     use tempfile::TempDir;
 
@@ -1491,6 +1740,114 @@ mod tests {
         assert_eq!(parse_detail("LOW"), Some(ImageDetail::Low));
         assert_eq!(parse_detail("high"), Some(ImageDetail::High));
         assert_eq!(parse_detail("unknown"), None);
+    }
+
+    #[test]
+    fn assemble_tokenspeed_splits_image_items() {
+        let mut model_specific = HashMap::new();
+        model_specific.insert(
+            "patches_per_image".to_string(),
+            ModelSpecificValue::UintTensor {
+                data: vec![2, 2],
+                shape: vec![2],
+            },
+        );
+        model_specific.insert(
+            "image_grid_thw".to_string(),
+            ModelSpecificValue::UintTensor {
+                data: vec![1, 2, 3, 4, 5, 6],
+                shape: vec![2, 3],
+            },
+        );
+
+        let preprocessed = PreprocessedEncoderInputs {
+            encoder_input: ArrayD::from_shape_vec(
+                IxDyn(&[4, 2]),
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            )
+            .unwrap(),
+            feature_token_counts: vec![2, 2],
+            item_sizes: vec![(1, 1), (1, 1)],
+            model_specific,
+        };
+
+        let images = vec![
+            Arc::new(ImageFrame::new(
+                image::DynamicImage::new_rgb8(1, 1),
+                bytes::Bytes::from_static(b"a"),
+                ImageDetail::Auto,
+                llm_multimodal::ImageSource::InlineBytes,
+                "hash-a".to_string(),
+            )),
+            Arc::new(ImageFrame::new(
+                image::DynamicImage::new_rgb8(1, 1),
+                bytes::Bytes::from_static(b"b"),
+                ImageDetail::Auto,
+                llm_multimodal::ImageSource::InlineBytes,
+                "hash-b".to_string(),
+            )),
+        ];
+
+        let intermediate = PrecomputedMultimodalIntermediate {
+            modality: Modality::Image,
+            preprocessed,
+            images,
+            videos: vec![],
+            placeholders: vec![
+                PlaceholderRange {
+                    offset: 10,
+                    length: 2,
+                },
+                PlaceholderRange {
+                    offset: 20,
+                    length: 2,
+                },
+            ],
+            patch_offsets: Some(vec![(10, 2), (20, 2)]),
+            placeholder_token_id: Some(151655),
+            field_layouts: HashMap::from([
+                (
+                    "pixel_values".to_string(),
+                    FieldLayout::flat("patches_per_image"),
+                ),
+                ("patches_per_image".to_string(), FieldLayout::Batched),
+                ("image_grid_thw".to_string(), FieldLayout::Batched),
+            ]),
+            keep_on_cpu_keys: vec![],
+        };
+
+        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        assert_eq!(assembled.items.len(), 2);
+
+        let first = &assembled.items[0];
+        assert_eq!(first.modality, TokenSpeedModality::Image);
+        assert_eq!(first.encoder_input_shape, vec![2, 2]);
+        assert_eq!(first.encoder_input.len(), 4 * size_of::<f32>());
+        assert_eq!(first.mm_placeholders, vec![(10, 2)]);
+        assert_eq!(
+            first.content_hash,
+            hash_hex_strings(std::iter::once("hash-a"))
+        );
+        assert_eq!(
+            first.model_specific_tensors["image_grid_thw"].shape,
+            vec![1, 3]
+        );
+        assert_eq!(
+            first.model_specific_tensors["patches_per_image"].shape,
+            vec![1]
+        );
+
+        let second = &assembled.items[1];
+        assert_eq!(second.encoder_input_shape, vec![2, 2]);
+        assert_eq!(second.mm_placeholders, vec![(20, 2)]);
+        assert_eq!(
+            second.content_hash,
+            hash_hex_strings(std::iter::once("hash-b"))
+        );
+        assert_eq!(
+            second.model_specific_tensors["image_grid_thw"].shape,
+            vec![1, 3]
+        );
     }
 
     // ------------------------------------------------------------------

@@ -29,10 +29,10 @@ use smg_grpc_client::{
 /// Backend-specific multimodal data produced by the assembly stage.
 ///
 /// Each variant carries only the fields its backend needs:
-/// - SGLang: pixel_values + model_specific_tensors + patch-only placeholders
-/// - vLLM: pixel_values + model_specific_tensors + structural placeholders + hashes + field keys
+/// - SGLang: preprocessed vision tensor + model-specific tensors + patch-only placeholders
+/// - vLLM: preprocessed vision tensor + model-specific tensors + structural placeholders + hashes + field keys
 /// - TRT-LLM: raw image bytes only (preprocessing handled server-side)
-/// - TokenSpeed: pixel_values + model_specific_tensors + patch-only placeholders
+/// - TokenSpeed: encoder_input + model_specific_tensors + patch-only placeholders
 #[derive(Debug)]
 pub enum MultimodalData {
     Sglang(SglangMultimodalData),
@@ -78,9 +78,14 @@ pub struct TrtllmMultimodalData {
 /// TokenSpeed multimodal data: preprocessed tensors with patch-only placeholders.
 #[derive(Debug)]
 pub struct TokenSpeedMultimodalData {
+    pub items: Vec<TokenSpeedMultimodalItem>,
+}
+
+#[derive(Debug)]
+pub struct TokenSpeedMultimodalItem {
     pub modality: TokenSpeedModality,
-    pub pixel_values: Vec<u8>,
-    pub pixel_values_shape: Vec<u32>,
+    pub encoder_input: Vec<u8>,
+    pub encoder_input_shape: Vec<u32>,
     pub encoder_input_dtype: String,
     pub model_specific_tensors: HashMap<String, TensorBytes>,
     pub placeholder_token_id: Option<u32>,
@@ -200,7 +205,18 @@ impl TrtllmMultimodalData {
 impl TokenSpeedMultimodalData {
     /// Convert to TokenSpeed proto MultimodalInputs.
     pub fn into_proto(self) -> tokenspeed::MultimodalInputs {
-        let mm_placeholders = self
+        let items = self
+            .items
+            .into_iter()
+            .map(TokenSpeedMultimodalItem::into_proto)
+            .collect();
+        tokenspeed::MultimodalInputs { items }
+    }
+}
+
+impl TokenSpeedMultimodalItem {
+    fn into_proto(self) -> tokenspeed::MultimodalItem {
+        let placeholders = self
             .mm_placeholders
             .into_iter()
             .map(|(offset, length)| tokenspeed::PlaceholderRange { offset, length })
@@ -212,7 +228,7 @@ impl TokenSpeedMultimodalData {
             .map(|(k, v)| (k, tensor_bytes_to_tokenspeed(v)))
             .collect::<HashMap<_, _>>();
 
-        let item = tokenspeed::MultimodalItem {
+        tokenspeed::MultimodalItem {
             modality: match self.modality {
                 TokenSpeedModality::Image => tokenspeed::Modality::Image as i32,
                 TokenSpeedModality::Audio => tokenspeed::Modality::Audio as i32,
@@ -220,16 +236,14 @@ impl TokenSpeedMultimodalData {
             },
             content_hash: self.content_hash,
             encoder_input: Some(tensor_bytes_to_tokenspeed(TensorBytes {
-                data: self.pixel_values,
-                shape: self.pixel_values_shape,
+                data: self.encoder_input,
+                shape: self.encoder_input_shape,
                 dtype: self.encoder_input_dtype,
             })),
             model_specific_tensors,
-            placeholders: mm_placeholders,
+            placeholders,
             placeholder_token_id: self.placeholder_token_id,
-        };
-
-        tokenspeed::MultimodalInputs { items: vec![item] }
+        }
     }
 }
 
@@ -1265,14 +1279,16 @@ mod tests {
         );
 
         let proto = TokenSpeedMultimodalData {
-            modality: TokenSpeedModality::Image,
-            pixel_values: vec![42; 8],
-            pixel_values_shape: vec![1, 2],
-            encoder_input_dtype: "float32".to_string(),
-            model_specific_tensors,
-            placeholder_token_id: Some(151655),
-            mm_placeholders: vec![(4, 2)],
-            content_hash: vec![7; 32],
+            items: vec![TokenSpeedMultimodalItem {
+                modality: TokenSpeedModality::Image,
+                encoder_input: vec![42; 8],
+                encoder_input_shape: vec![1, 2],
+                encoder_input_dtype: "float32".to_string(),
+                model_specific_tensors,
+                placeholder_token_id: Some(151655),
+                mm_placeholders: vec![(4, 2)],
+                content_hash: vec![7; 32],
+            }],
         }
         .into_proto();
 
@@ -1302,14 +1318,16 @@ mod tests {
         );
 
         let proto = TokenSpeedMultimodalData {
-            modality: TokenSpeedModality::Video,
-            pixel_values: vec![0; 8],
-            pixel_values_shape: vec![1, 2],
-            encoder_input_dtype: "float32".to_string(),
-            model_specific_tensors,
-            placeholder_token_id: Some(151656),
-            mm_placeholders: vec![(4, 2)],
-            content_hash: vec![7; 32],
+            items: vec![TokenSpeedMultimodalItem {
+                modality: TokenSpeedModality::Video,
+                encoder_input: vec![0; 8],
+                encoder_input_shape: vec![1, 2],
+                encoder_input_dtype: "float32".to_string(),
+                model_specific_tensors,
+                placeholder_token_id: Some(151656),
+                mm_placeholders: vec![(4, 2)],
+                content_hash: vec![7; 32],
+            }],
         }
         .into_proto();
 
