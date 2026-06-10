@@ -32,6 +32,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
+from smg_grpc_servicer.vllm.kv_transfer import params_from_request, params_to_response_fields
 
 logger = init_logger(__name__)
 SAMPLING_DEFAULT_KEYS = (
@@ -126,8 +127,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             has_preprocessed_mm,
         )
 
+        kv_transfer_params: dict | None = None
+        engine_started = False
         try:
             arrival_time = time.time()
+            kv_transfer_params = params_from_request(request)
 
             if has_preprocessed_mm and input_type == "tokenized":
                 # Preprocessed multimodal from Rust router.
@@ -147,9 +151,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params,
                 stream=request.stream,
-                kv_transfer_params=request.kv_transfer_params
-                if request.HasField("kv_transfer_params")
-                else None,
+                kv_transfer_params=kv_transfer_params,
             )
             tokenization_kwargs = self._tokenization_kwargs_from_proto(request.sampling_params)
 
@@ -166,6 +168,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
             ):
+                engine_started = True
                 # For streaming, send chunks for EACH completion output (n outputs)
                 if request.stream:
                     for completion in output.outputs:
@@ -203,10 +206,40 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
         except ValueError as e:
             # Invalid request error (equiv to 400).
+            await self._notify_kv_transfer_rejected(request_id, kv_transfer_params, engine_started)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
         except Exception as e:
             logger.exception("Error in Generate for request %s", request_id)
+            await self._notify_kv_transfer_rejected(request_id, kv_transfer_params, engine_started)
             await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
+    async def _notify_kv_transfer_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict | None,
+        engine_started: bool,
+    ) -> None:
+        """Free remote prefill blocks early when a decode request dies pre-admission.
+
+        Without this, the prefill engine keeps the blocks pinned until the NIXL
+        lease expires (30s default).
+        """
+        if engine_started or not kv_transfer_params:
+            return
+        if not kv_transfer_params.get("do_remote_prefill"):
+            return
+        # Older vLLM releases lack this hook; the lease expiry covers them
+        notify = getattr(self.engine, "notify_kv_transfer_request_rejected", None)
+        if notify is None:
+            return
+        try:
+            await notify(request_id, kv_transfer_params)
+        except Exception:
+            logger.warning(
+                "Failed to notify KV connector about rejected request %s",
+                request_id,
+                exc_info=True,
+            )
 
     async def Embed(
         self,
@@ -543,7 +576,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     def _sampling_params_from_proto(
         params: vllm_engine_pb2.SamplingParams,
         stream: bool = True,
-        kv_transfer_params: vllm_engine_pb2.KvTransferParams | None = None,
+        kv_transfer_params: dict | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
@@ -551,7 +584,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Args:
             params: Protobuf SamplingParams message
             stream: Whether streaming is enabled
-            kv_transfer_params: KV transfer params proto for Mooncake PD
+            kv_transfer_params: Connector KV-transfer params dict (PD disaggregation)
 
         Returns:
             vLLM SamplingParams with detokenize=False and structured_outputs
@@ -577,26 +610,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             elif constraint_field == "choice":
                 structured_outputs = StructuredOutputsParams(choice=list(params.choice.choices))
 
-        # Build extra_args for kv_transfer_params (Mooncake PD)
-        extra_args = None
-        if kv_transfer_params:
-            remote_host = kv_transfer_params.remote_host
-            remote_port = kv_transfer_params.remote_port
-            if not remote_host or not (1 <= remote_port <= 65535):
-                raise ValueError(
-                    "Invalid kv_transfer_params: remote_host must be set and remote_port must be in [1, 65535]."
-                )
-            logger.debug(
-                "kv_transfer_params={remote_host=%s, remote_port=%d}",
-                remote_host,
-                remote_port,
-            )
-            extra_args = {
-                "kv_transfer_params": {
-                    "remote_host": remote_host,
-                    "remote_port": remote_port,
-                }
-            }
+        # Opaque connector params, passed to the engine verbatim (NIXL/Mooncake)
+        extra_args = {"kv_transfer_params": kv_transfer_params} if kv_transfer_params else None
 
         # Create SamplingParams
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
@@ -849,13 +864,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             num_prompt_logprobs,
         )
 
-        # Build kv_transfer_params if present (Mooncake PD)
-        kv_transfer_params = None
-        if output.kv_transfer_params:
-            kv_transfer_params = vllm_engine_pb2.KvTransferParams(
-                remote_host=output.kv_transfer_params.get("remote_host", ""),
-                remote_port=output.kv_transfer_params.get("remote_port", 0),
-            )
+        # Connector KV-transfer params returned by the engine (PD prefill leg)
+        kv_transfer_params, kv_transfer_params_json = params_to_response_fields(
+            output.kv_transfer_params
+        )
 
         # Build matched_stop kwargs from stop_reason (int token ID or str stop sequence)
         stop_kwargs = {}
@@ -880,6 +892,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 input_logprobs=input_logprobs,
                 index=completion.index,
                 kv_transfer_params=kv_transfer_params,
+                kv_transfer_params_json=kv_transfer_params_json,
                 **stop_kwargs,
             ),
         )
