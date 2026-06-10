@@ -20,13 +20,18 @@ _I64_SIGN_BIT = 0x8000000000000000
 _U64_MODULUS = 0x10000000000000000
 
 
-def to_int64(value: int) -> int:
-    """Reduce an arbitrary-width int (e.g. a vLLM block hash) to a signed int64.
+def to_int64(value: int | bytes) -> int:
+    """Reduce a vLLM block hash to a signed int64.
 
-    The proto block_hash field is int64; vLLM hashes can be wider. SMG uses the
-    hash only as a node identity and re-derives a content hash from token_ids
+    vLLM's ExternalBlockHash is ``bytes | int``: int when
+    VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES is set (the default), else sha256 bytes.
+    Bytes are interpreted big-endian (matching vLLM's own conversion) before the
+    64-bit reduction. The proto block_hash field is int64; SMG uses the hash only
+    as a node identity and re-derives a content hash from token_ids
     (kv_event_monitor.rs:592-597), so a deterministic 64-bit reduction is safe.
     """
+    if isinstance(value, (bytes, bytearray)):
+        value = int.from_bytes(value, "big")
     masked = value & _U64_MASK
     if masked >= _I64_SIGN_BIT:
         masked -= _U64_MODULUS

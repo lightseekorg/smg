@@ -60,6 +60,16 @@ class TestToInt64:
         low = h & 0xFFFFFFFFFFFFFFFF
         assert out == (low - 2**64 if low >= 2**63 else low)
 
+    def test_bytes_hash_interpreted_big_endian(self):
+        assert kv_events.to_int64((1).to_bytes(8, "big")) == 1
+        assert kv_events.to_int64(b"\x00" * 8) == 0
+
+    def test_bytes_hash_wraps_to_int64_like_int_path(self):
+        # bytes path must produce the same identity as the equivalent int.
+        wide = 0xDEADBEEFCAFEBABE
+        assert kv_events.to_int64(wide.to_bytes(8, "big")) == kv_events.to_int64(wide)
+        assert kv_events.to_int64((2**63).to_bytes(8, "big")) == -(2**63)
+
 
 class TestEndpointForRank:
     def test_bind_star_becomes_loopback(self):
@@ -154,6 +164,16 @@ class TestConvertEvent:
         assert out.stored.blocks[0].block_hash == -(2**63)
         assert out.stored.parent_block_hash == -(2**63)
         assert out.stored.blocks[0].lora_id == -(2**63)
+
+    def test_block_stored_bytes_block_hash(self):
+        ev = BlockStored(
+            block_hashes=[(5).to_bytes(8, "big")],
+            parent_block_hash=None,
+            token_ids=[1, 2],
+            block_size=2,
+        )
+        out = kv_events.convert_event(ev, event_id=1)
+        assert out.stored.blocks[0].block_hash == 5
 
     def test_block_removed(self):
         out = kv_events.convert_event(BlockRemoved(block_hashes=[1, 2, 3]), event_id=2)
