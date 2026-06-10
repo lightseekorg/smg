@@ -17,6 +17,7 @@
 #   GPU_MEM_UTIL=0.9       GPU memory utilization (default: 0.9)
 #   TP_SIZE=1              Tensor parallel size (default: 1)
 #   KV_BACKEND=nixl        KV transfer backend for vLLM: nixl or mooncake (default: nixl)
+#   EXTRA_VLLM_ARGS        Extra args appended to each vLLM worker (e.g. --trust-remote-code)
 #
 # Mooncake environment variables:
 #   MOONCAKE_BOOTSTRAP_PORT  Bootstrap port for Mooncake prefill workers (default: 8998)
@@ -71,6 +72,11 @@ KV_BACKEND="${KV_BACKEND:-nixl}"
 # Each prefill worker needs a unique bootstrap port
 MOONCAKE_BOOTSTRAP_PORT="${MOONCAKE_BOOTSTRAP_PORT:-8998}"
 
+# Extra args appended to every vLLM worker command (space-separated).
+# Useful for model-specific flags, e.g.:
+#   EXTRA_VLLM_ARGS="--trust-remote-code --max-num-seqs 256"
+read -ra EXTRA_VLLM_ARGS <<< "${EXTRA_VLLM_ARGS:-}"
+
 info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -91,7 +97,7 @@ print_usage() {
     echo ""
     echo "Arguments:"
     echo "  runtime     Runtime type: 'sglang' or 'vllm'"
-    echo "  model_path  Path to the model directory"
+    echo "  model_path  Local model directory or HuggingFace repo ID"
     echo ""
     echo "Environment variables:"
     echo "  PREFILL_GPU           GPU ID for prefill worker (default: 0)"
@@ -106,6 +112,7 @@ print_usage() {
     echo "vLLM-specific environment variables:"
     echo "  KV_BACKEND              KV transfer backend: 'nixl' or 'mooncake' (default: nixl)"
     echo "  MOONCAKE_BOOTSTRAP_PORT Bootstrap port for Mooncake prefill (default: 8998)"
+    echo "  EXTRA_VLLM_ARGS         Extra args for each vLLM worker (e.g. --trust-remote-code)"
     echo ""
     echo "Examples:"
     echo "  # SGLang PD"
@@ -208,7 +215,8 @@ launch_vllm_pd_nixl() {
         --tensor-parallel-size "$TP_SIZE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
-        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' &
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
+        "${EXTRA_VLLM_ARGS[@]}" &
 
     local prefill_pid=$!
     info "Prefill worker started (PID: $prefill_pid)"
@@ -227,7 +235,8 @@ launch_vllm_pd_nixl() {
         --tensor-parallel-size "$TP_SIZE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
-        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
+        "${EXTRA_VLLM_ARGS[@]}" &
 
     local decode_pid=$!
     info "Decode worker started (PID: $decode_pid)"
@@ -270,7 +279,8 @@ launch_vllm_pd_mooncake() {
         --tensor-parallel-size "$TP_SIZE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
-        --kv-transfer-config "$prefill_kv_config" &
+        --kv-transfer-config "$prefill_kv_config" \
+        "${EXTRA_VLLM_ARGS[@]}" &
 
     local prefill_pid=$!
     info "Prefill worker started (PID: $prefill_pid)"
@@ -288,7 +298,8 @@ launch_vllm_pd_mooncake() {
         --tensor-parallel-size "$TP_SIZE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --gpu-memory-utilization "$GPU_MEM_UTIL" \
-        --kv-transfer-config "$decode_kv_config" &
+        --kv-transfer-config "$decode_kv_config" \
+        "${EXTRA_VLLM_ARGS[@]}" &
 
     local decode_pid=$!
     info "Decode worker started (PID: $decode_pid)"
@@ -316,9 +327,18 @@ main() {
     local runtime="$1"
     local model_path="$2"
 
-    # Validate model path
-    if [[ ! -d "$model_path" ]]; then
+    # Validate model path: accept either a local directory or a HuggingFace
+    # repo ID. vLLM/SGLang accept a repo ID via --model/--model-path and
+    # download it on first use, so only reject paths that are clearly meant
+    # to be local (absolute, or ./ ../ ~) but do not exist on disk.
+    if [[ -d "$model_path" ]]; then
+        :  # local model directory
+    elif [[ "$model_path" == /* || "$model_path" == .* || "$model_path" == "~"* ]]; then
         error "Model path does not exist: $model_path"
+    elif [[ "$model_path" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+        info "Treating '$model_path' as a HuggingFace repo ID (downloaded if not cached)"
+    else
+        error "Model '$model_path' is neither an existing directory nor a valid HuggingFace repo ID"
     fi
 
     # Validate GPU IDs are different
