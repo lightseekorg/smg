@@ -52,13 +52,12 @@ impl MeshAdapters {
         Arc::new(Self { worker, rate_limit })
     }
 
-    /// Worker sync adapter — outbound publish seam and tests.
+    /// Worker sync adapter.
     pub fn worker(&self) -> &Arc<WorkerSyncAdapter> {
         &self.worker
     }
 
-    /// Rate-limit sync adapter — counter sync and aggregate reads for the
-    /// distributed rate-limit middleware.
+    /// Rate-limit sync adapter.
     pub fn rate_limit(&self) -> &Arc<RateLimitSyncAdapter> {
         &self.rate_limit
     }

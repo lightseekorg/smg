@@ -1303,10 +1303,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // v2 mesh adapters are constructed and started by `MeshAdapters::start`
-    // above (inbound sync live). Outbound publish (WorkerEvent -> mesh) lands
-    // in a follow-up PR.
-
     // Get mesh cluster state and port before moving mesh_handler into app_state
     let mesh_cluster_state = mesh_handler.as_ref().map(|h| h.state.clone());
     let mesh_port = config
