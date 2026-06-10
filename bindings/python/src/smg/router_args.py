@@ -15,6 +15,7 @@ COMMON_POLICY_CHOICES = [
     "round_robin",
     "cache_aware",
     "power_of_two",
+    "least_load",
     "manual",
     "consistent_hashing",
     "prefix_hash",

@@ -75,12 +75,13 @@ class TestPolicyFromStr:
     def test_policy_conversion_in_startup(self):
         """Test policy conversion during startup sequence."""
         # Test all valid policies
-        policies = ["random", "round_robin", "cache_aware", "power_of_two"]
+        policies = ["random", "round_robin", "cache_aware", "power_of_two", "least_load"]
         expected_enums = [
             PolicyType.Random,
             PolicyType.RoundRobin,
             PolicyType.CacheAware,
             PolicyType.PowerOfTwo,
+            PolicyType.LeastLoad,
         ]
 
         for policy_str, expected_enum in zip(policies, expected_enums):

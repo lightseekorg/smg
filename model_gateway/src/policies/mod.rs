@@ -14,6 +14,7 @@ mod cache_aware;
 mod consistent_hashing;
 mod dp_min_token;
 mod factory;
+mod least_load;
 mod manual;
 mod power_of_two;
 mod prefix_hash;
@@ -29,6 +30,7 @@ pub use dp_min_token::MinimumTokensPolicy;
 pub use factory::PolicyFactory;
 // Re-export PrefixMatchResult from kv_index for production use
 pub use kv_index::PrefixMatchResult;
+pub use least_load::LeastLoadPolicy;
 pub use manual::{ManualConfig, ManualPolicy};
 pub use power_of_two::PowerOfTwoPolicy;
 pub use prefix_hash::{PrefixHashConfig, PrefixHashPolicy};
@@ -72,6 +74,15 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
     /// This is called periodically with current load information for load-aware policies.
     fn update_loads(&self, _loads: &std::collections::HashMap<String, WorkerLoadResponse>) {
         // Default: no-op for policies that don't use load information
+    }
+
+    /// Drop any cached per-worker state for a removed worker.
+    ///
+    /// Called when a worker leaves the registry so load-aware policies don't
+    /// accumulate stale load reports under worker churn (autoscaling, rolling
+    /// updates). Default is a no-op for stateless policies.
+    fn remove_worker(&self, _url: &str) {
+        // Default: no-op for policies that don't cache per-worker state
     }
 
     /// Reset any internal state

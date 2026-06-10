@@ -373,6 +373,19 @@ pub enum PolicyConfig {
     #[serde(rename = "power_of_two")]
     PowerOfTwo { load_check_interval_secs: u64 },
 
+    /// Least-load policy: routes to the worker minimizing
+    /// `in_flight + lambda * k/(1-k)` — the real-time in-flight request count plus
+    /// a convex KV-cache pressure term from the load monitor.
+    /// See `policies/least_load.rs`.
+    #[serde(rename = "least_load")]
+    LeastLoad {
+        #[serde(default = "default_least_load_interval")]
+        load_check_interval_secs: u64,
+        /// KV-pressure weight (request-equivalents per unit of M/M/1 congestion).
+        #[serde(default = "default_least_load_lambda")]
+        lambda: f64,
+    },
+
     #[serde(rename = "bucket")]
     Bucket {
         /// Absolute load difference threshold for load balancing
@@ -445,6 +458,14 @@ fn default_manual_max_idle_secs() -> u64 {
     4 * 3600
 }
 
+fn default_least_load_interval() -> u64 {
+    10
+}
+
+fn default_least_load_lambda() -> f64 {
+    1.5
+}
+
 impl PolicyConfig {
     pub fn name(&self) -> &'static str {
         match self {
@@ -452,6 +473,7 @@ impl PolicyConfig {
             PolicyConfig::RoundRobin => "round_robin",
             PolicyConfig::CacheAware { .. } => "cache_aware",
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
+            PolicyConfig::LeastLoad { .. } => "least_load",
             PolicyConfig::Bucket { .. } => "bucket",
             PolicyConfig::Manual { .. } => "manual",
             PolicyConfig::ConsistentHashing => "consistent_hashing",

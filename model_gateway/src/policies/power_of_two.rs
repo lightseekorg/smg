@@ -119,6 +119,12 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         }
     }
 
+    fn remove_worker(&self, url: &str) {
+        if let Ok(mut cached) = self.cached_loads.write() {
+            cached.remove(url);
+        }
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

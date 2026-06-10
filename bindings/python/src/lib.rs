@@ -13,6 +13,7 @@ pub enum PolicyType {
     RoundRobin,
     CacheAware,
     PowerOfTwo,
+    LeastLoad,
     Bucket,
     Manual,
     ConsistentHashing,
@@ -514,6 +515,10 @@ impl Router {
                 },
                 PolicyType::PowerOfTwo => ConfigPolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 5,
+                },
+                PolicyType::LeastLoad => ConfigPolicyConfig::LeastLoad {
+                    load_check_interval_secs: 5,
+                    lambda: 1.5,
                 },
                 PolicyType::Bucket => ConfigPolicyConfig::Bucket {
                     balance_abs_threshold: self.balance_abs_threshold,

@@ -290,12 +290,19 @@ impl PolicyRegistry {
             .unwrap_or_else(|| self.get_default_policy())
     }
 
-    /// Get all PowerOfTwo policies that need load updates (lock-free)
-    pub fn get_all_power_of_two_policies(&self) -> Vec<Arc<dyn LoadBalancingPolicy>> {
-        let mut power_of_two_policies = Vec::new();
+    /// Get all load-aware policies that need periodic load updates (lock-free).
+    ///
+    /// These are policies whose routing depends on the worker load monitor:
+    /// `power_of_two` and `least_load`.
+    pub fn get_all_load_aware_policies(&self) -> Vec<Arc<dyn LoadBalancingPolicy>> {
+        fn is_load_aware(name: &str) -> bool {
+            name == "power_of_two" || name == "least_load"
+        }
 
-        if self.default_policy.name() == "power_of_two" {
-            power_of_two_policies.push(Arc::clone(&self.default_policy));
+        let mut policies = Vec::new();
+
+        if is_load_aware(self.default_policy.name()) {
+            policies.push(Arc::clone(&self.default_policy));
         }
 
         // Get prefill and decode policies (lock-free via OnceLock::get)
@@ -303,31 +310,31 @@ impl PolicyRegistry {
         let decode_policy_opt = self.decode_policy.get();
 
         if let Some(policy) = prefill_policy_opt {
-            if policy.name() == "power_of_two" && !Arc::ptr_eq(policy, &self.default_policy) {
-                power_of_two_policies.push(Arc::clone(policy));
+            if is_load_aware(policy.name()) && !Arc::ptr_eq(policy, &self.default_policy) {
+                policies.push(Arc::clone(policy));
             }
         }
 
         if let Some(policy) = decode_policy_opt {
-            if policy.name() == "power_of_two"
+            if is_load_aware(policy.name())
                 && !Arc::ptr_eq(policy, &self.default_policy)
                 && !prefill_policy_opt.is_some_and(|p| Arc::ptr_eq(p, policy))
             {
-                power_of_two_policies.push(Arc::clone(policy));
+                policies.push(Arc::clone(policy));
             }
         }
 
         for entry in self.model_policies.iter() {
             let policy = entry.value();
-            if policy.name() == "power_of_two" {
-                let already_added = power_of_two_policies.iter().any(|p| Arc::ptr_eq(p, policy));
+            if is_load_aware(policy.name()) {
+                let already_added = policies.iter().any(|p| Arc::ptr_eq(p, policy));
                 if !already_added {
-                    power_of_two_policies.push(Arc::clone(policy));
+                    policies.push(Arc::clone(policy));
                 }
             }
         }
 
-        power_of_two_policies
+        policies
     }
 
     /// Initialize cache-aware policy with workers if applicable
@@ -383,6 +390,18 @@ impl PolicyRegistry {
                     }
                 }
             }
+        }
+    }
+
+    /// Drop a removed worker's cached load report from all load-aware policies
+    /// (`power_of_two`, `least_load`).
+    ///
+    /// These policies cache per-worker load reports keyed by URL; without this
+    /// their caches would grow unbounded under worker churn. Called on worker
+    /// removal alongside the cache-aware cleanup above.
+    pub fn remove_worker_from_load_aware(&self, worker_url: &str) {
+        for policy in self.get_all_load_aware_policies() {
+            policy.remove_worker(worker_url);
         }
     }
 

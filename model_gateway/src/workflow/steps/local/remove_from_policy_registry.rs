@@ -51,6 +51,12 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromPolicyRegistryStep {
                 .policy_registry
                 .remove_worker_from_pd_cache_aware(worker_url);
 
+            // Drop the worker's cached load report from load-aware policies
+            // (power_of_two, least_load) so their caches don't leak under churn.
+            app_context
+                .policy_registry
+                .remove_worker_from_load_aware(worker_url);
+
             // Notify policy registry
             app_context.policy_registry.on_worker_removed(&model_id);
         }

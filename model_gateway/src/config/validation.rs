@@ -323,6 +323,26 @@ impl ConfigValidator {
                     });
                 }
             }
+            PolicyConfig::LeastLoad {
+                load_check_interval_secs,
+                lambda,
+            } => {
+                if *load_check_interval_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "load_check_interval_secs".to_string(),
+                        value: load_check_interval_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if !lambda.is_finite() || *lambda < 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "lambda".to_string(),
+                        value: lambda.to_string(),
+                        reason: "Must be finite and >= 0.0".to_string(),
+                    });
+                }
+            }
             PolicyConfig::Bucket {
                 balance_abs_threshold: _,
                 balance_rel_threshold,
