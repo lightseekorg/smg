@@ -128,7 +128,7 @@ def get_hf_st_embeddings(texts: str | list[str], model_path: str) -> np.ndarray:
     """Get embeddings using sentence-transformers library.
 
     This handles the correct pooling strategy for each model automatically.
-    For e5-mistral, it uses last-token pooling (not mean pooling).
+    For Qwen3-Embedding, it uses last-token pooling (not mean pooling).
 
     Uses CPU to compute reference embeddings to avoid GPU memory conflicts
     with the worker being tested.
@@ -174,7 +174,7 @@ def hf_reference_embeddings(request):
     from infra.model_specs import MODEL_SPECS
 
     # Get model path from MODEL_SPECS for the embedding model
-    model_path = MODEL_SPECS.get("intfloat/e5-mistral-7b-instruct", {}).get("model")
+    model_path = MODEL_SPECS.get("Qwen/Qwen3-Embedding-0.6B", {}).get("model")
     if model_path is None:
         pytest.skip("Embedding model not found in MODEL_SPECS")
 
@@ -211,7 +211,7 @@ def hf_reference_embeddings(request):
 @pytest.mark.engine("sglang", "vllm")
 @pytest.mark.skip_for_runtime("sglang", reason="sglang embedding output diverges from HF reference")
 @pytest.mark.gpu(1)
-@pytest.mark.model("intfloat/e5-mistral-7b-instruct")
+@pytest.mark.model("Qwen/Qwen3-Embedding-0.6B")
 @pytest.mark.e2e
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
 class TestEmbeddingCorrectness:
@@ -265,7 +265,7 @@ class TestEmbeddingCorrectness:
         backend, model_path, _, _ = setup_backend
         tolerance = 0.05
 
-        # Format query with instruction (for e5-mistral)
+        # Format query with instruction (Qwen3-Embedding convention; docs stay unprefixed)
         query = (
             f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
             f"Query: {RELEVANCE_TEST_DATA['sample_query']}"

@@ -91,9 +91,9 @@ MODEL_SPECS: dict[str, dict] = {
             '{"disable_any_whitespace": true, "backend": "xgrammar"}',
         ],
     },
-    # Embedding model
-    "intfloat/e5-mistral-7b-instruct": {
-        "model": _resolve_model_path("intfloat/e5-mistral-7b-instruct"),
+    # Embedding model (last-token pooling; upstream-tested under transformers v5)
+    "Qwen/Qwen3-Embedding-0.6B": {
+        "model": _resolve_model_path("Qwen/Qwen3-Embedding-0.6B"),
         "tp": 1,
         "features": ["embedding"],
     },
@@ -261,7 +261,7 @@ DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistralai/Mistral-7B-
     "model"
 ]
 DEFAULT_GPT_OSS_MODEL_PATH = MODEL_SPECS["openai/gpt-oss-20b"]["model"]
-DEFAULT_EMBEDDING_MODEL_PATH = MODEL_SPECS["intfloat/e5-mistral-7b-instruct"]["model"]
+DEFAULT_EMBEDDING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3-Embedding-0.6B"]["model"]
 
 
 # =============================================================================
