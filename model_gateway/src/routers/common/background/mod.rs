@@ -1,13 +1,13 @@
 //! Background-mode shared handlers and execution driver.
 
 pub mod create;
-pub mod scheduler;
+pub mod driver;
 pub mod supervisor;
 pub mod worker;
 
 use std::sync::Arc;
 
-pub use scheduler::{BackgroundScheduler, BackgroundSchedulerHandle};
+pub use driver::{BackgroundDriver, BackgroundDriverHandle};
 use smg_data_connector::BackgroundResponseRepository;
 pub use worker::{BackgroundWorker, UnavailableBackgroundWorker, BACKGROUND_EXECUTION_UNAVAILABLE};
 
@@ -39,22 +39,14 @@ impl BackgroundServices {
     }
 }
 
-/// Construct and spawn the background scheduler driver over `repository`.
-///
-/// Wires the default [`UnavailableBackgroundWorker`] (BGM-PR-07 swaps in the
-/// real worker), runs the startup claim pass, and starts the supervised
-/// claim-tick and sweeper loops. The returned [`BackgroundSchedulerHandle`] owns
-/// the spawned tasks and the scheduler `Arc`; the caller must hold it for the
-/// process lifetime, otherwise the loops stop when it drops.
-///
-/// Callers gate this on `background_repository` being present; when no durable
-/// (or memory) background repository is configured, nothing is spawned.
-pub async fn start_background_scheduler(
-    repository: Arc<dyn BackgroundResponseRepository>,
-    config: BackgroundConfig,
-) -> BackgroundSchedulerHandle {
-    let worker: Arc<dyn BackgroundWorker> =
-        Arc::new(UnavailableBackgroundWorker::new(Arc::clone(&repository)));
-    let scheduler = BackgroundScheduler::new(repository, worker, config);
-    scheduler.spawn().await
-}
+// NOTE: BGM-PR-06 deliberately does *not* start the [`driver::BackgroundDriver`]
+// at process startup. The only [`BackgroundWorker`] that exists today is
+// [`UnavailableBackgroundWorker`], which finalizes every claimed job as
+// `failed`; running the driver with it would regress #1614's durable `queued`
+// contract (a `background=true` response that clients can poll) into immediate
+// failure for every gateway with a background repository — including the default
+// `history_backend=memory`. So PR-06 lands the driver + its tests but leaves it
+// unspawned; `background=true` requests stay durably `queued` (per #1614).
+//
+// BGM-PR-07 (#1221) wires `BackgroundDriver::spawn(...)` with the real
+// `BackgroundWorker` and gates it on `background_repository` being present.

@@ -8,7 +8,7 @@
 //! [`crate::worker::capacity::WorkerCapacity::spawn`] (catch-unwind +
 //! restart-with-backoff + `Weak` references so the spawned task never keeps the
 //! owning state alive), but factored out as a reusable primitive so the
-//! background scheduler's claim-tick and sweeper loops share one
+//! background driver's claim-tick and sweeper loops share one
 //! implementation instead of hand-rolling a third and fourth copy.
 
 use std::{future::Future, sync::Weak, time::Duration};
@@ -54,6 +54,11 @@ where
         reason = "supervised long-lived task: panics are caught and the loop restarts; holds Weak refs so it cannot keep the owning state alive"
     )]
     tokio::spawn(async move {
+        // The very first run consumes the interval's eager first tick (the
+        // startup pass, if any, already drained the queue). After a panic we
+        // restart having already slept the backoff, so we must NOT swallow
+        // another full interval — let the restarted loop fire immediately.
+        let mut skip_first_tick = true;
         loop {
             let result = std::panic::AssertUnwindSafe(run_loop(
                 name,
@@ -61,9 +66,11 @@ where
                 interval,
                 wakeup.clone(),
                 &tick,
+                skip_first_tick,
             ))
             .catch_unwind()
             .await;
+            skip_first_tick = false;
 
             match result {
                 Ok(()) => break,
@@ -83,12 +90,20 @@ where
 }
 
 /// The inner loop, separated so the supervisor can `catch_unwind` around it.
+///
+/// `skip_first_tick` controls the interval's eager first tick: on normal
+/// startup it is `true`, so the immediate tick is consumed and the first
+/// scheduled wake waits a full period (the startup pass already drained the
+/// queue). On a panic-restart it is `false`: the supervisor already slept
+/// [`PANIC_RESTART_BACKOFF`], so the loop fires right away instead of waiting an
+/// extra full interval before the next callback.
 async fn run_loop<S, F, Fut>(
     name: &'static str,
     state: Weak<S>,
     interval: Duration,
     wakeup: Option<Weak<Notify>>,
     tick: &F,
+    skip_first_tick: bool,
 ) where
     S: Send + Sync + 'static,
     F: Fn(std::sync::Arc<S>) -> Fut + Send + Sync + 'static,
@@ -98,25 +113,40 @@ async fn run_loop<S, F, Fut>(
     // A panic-restart or a slow tick must not produce a burst of catch-up
     // ticks; one wake per missed period is enough for a poll loop.
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // The first `tick()` on a fresh interval returns immediately; the caller's
-    // startup pass (if any) already drained the queue, so consume that eager
-    // tick up front and wait a full period before the first scheduled wake.
-    ticker.tick().await;
+    // The first `tick()` on a fresh interval returns immediately. On normal
+    // startup the caller's startup pass (if any) already drained the queue, so
+    // consume that eager tick and wait a full period before the first scheduled
+    // wake. After a panic we skip this so the restarted loop fires immediately
+    // (the backoff already elapsed in the supervisor).
+    if skip_first_tick {
+        ticker.tick().await;
+    }
 
-    loop {
-        // Upgrade the wakeup each iteration so a dropped owner lets it go.
-        let notified = async {
+    // Pin the wakeup future once and only rebuild it when it resolves, so a
+    // notification that arrives while the tick callback runs (or while the
+    // other `select!` branch is polled) stays registered instead of being
+    // dropped with a freshly-created future each iteration. `make_notified`
+    // re-upgrades the `Weak` on every rebuild, preserving "a dropped wakeup
+    // owner lets it go" (it then parks on `pending`, leaving the interval as
+    // the sole driver). Loop exit is governed by `state.upgrade()` below, not
+    // by the wakeup, so the owner-dropped contract is unaffected.
+    let make_notified = || {
+        let wakeup = wakeup.clone();
+        async move {
             match wakeup.as_ref().and_then(Weak::upgrade) {
                 Some(n) => n.notified().await,
-                // No wakeup configured (or it was dropped): fall back to the
-                // interval alone by never resolving this branch.
                 None => std::future::pending::<()>().await,
             }
-        };
+        }
+    };
+    let mut notified = Box::pin(make_notified());
 
+    loop {
         tokio::select! {
             _ = ticker.tick() => {}
-            () = notified => {}
+            () = &mut notified => {
+                notified = Box::pin(make_notified());
+            }
         }
 
         let Some(state) = state.upgrade() else {

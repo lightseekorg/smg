@@ -1,4 +1,4 @@
-//! Background scheduler driver.
+//! Background-job driver.
 //!
 //! A thin loop over the [`BackgroundResponseRepository`] trait — *not* a bespoke
 //! queue or scheduling algorithm. The durable claim / lease / retry logic lives
@@ -44,7 +44,7 @@ const CLAIM_JITTER_FRACTION: f64 = 0.2;
 /// an `Arc<dyn BackgroundWorker>` (per-job execution), the [`BackgroundConfig`]
 /// that tunes the loops, a stable `worker_id` used for leases, a [`Semaphore`]
 /// sized to the configured worker concurrency, and a claim-wakeup [`Notify`].
-pub struct BackgroundScheduler {
+pub struct BackgroundDriver {
     repository: Arc<dyn BackgroundResponseRepository>,
     worker: Arc<dyn BackgroundWorker>,
     config: BackgroundConfig,
@@ -53,19 +53,19 @@ pub struct BackgroundScheduler {
     claim_wakeup: Arc<Notify>,
 }
 
-/// Handles for the supervised loops a [`BackgroundScheduler`] spawns. Hold this
-/// for the lifetime of the process; dropping the contained [`BackgroundScheduler`]
+/// Handles for the supervised loops a [`BackgroundDriver`] spawns. Hold this
+/// for the lifetime of the process; dropping the contained [`BackgroundDriver`]
 /// `Arc` (and these handles) stops the loops.
-pub struct BackgroundSchedulerHandle {
+pub struct BackgroundDriverHandle {
     /// Kept alive so the loops' `Weak` upgrades keep succeeding.
-    _scheduler: Arc<BackgroundScheduler>,
+    _driver: Arc<BackgroundDriver>,
     _claim_tick: JoinHandle<()>,
     _sweeper: JoinHandle<()>,
 }
 
-impl BackgroundScheduler {
-    /// Construct a scheduler. `worker_id` is generated here and is stable for
-    /// the life of this scheduler instance — it identifies this replica's
+impl BackgroundDriver {
+    /// Construct a driver. `worker_id` is generated here and is stable for
+    /// the life of this driver instance — it identifies this replica's
     /// leases to the repository.
     pub fn new(
         repository: Arc<dyn BackgroundResponseRepository>,
@@ -84,7 +84,7 @@ impl BackgroundScheduler {
         }
     }
 
-    /// The stable lease identity for this scheduler instance.
+    /// The stable lease identity for this driver instance.
     pub fn worker_id(&self) -> &str {
         &self.worker_id
     }
@@ -95,50 +95,54 @@ impl BackgroundScheduler {
         self.claim_wakeup.notify_one();
     }
 
-    /// Consume the scheduler, run the startup claim pass, and spawn the
+    /// Consume the driver, run the startup claim pass, and spawn the
     /// supervised claim-tick and sweeper loops.
     ///
-    /// Returns a [`BackgroundSchedulerHandle`] that owns the scheduler `Arc` and
+    /// Returns a [`BackgroundDriverHandle`] that owns the driver `Arc` and
     /// both task handles; keep it alive for the process lifetime.
-    pub async fn spawn(self) -> BackgroundSchedulerHandle {
-        let scheduler = Arc::new(self);
+    ///
+    /// Not called at startup in BGM-PR-06: the driver is wired and started by
+    /// BGM-PR-07 (#1221) once a real [`BackgroundWorker`] exists. Until then a
+    /// `background=true` request stays durably `queued` (per #1614).
+    pub async fn spawn(self) -> BackgroundDriverHandle {
+        let driver = Arc::new(self);
 
         info!(
-            worker_id = %scheduler.worker_id,
-            concurrency = scheduler.config.worker_concurrency,
-            poll_interval_ms = scheduler.config.poll_interval_ms,
-            sweep_interval_secs = scheduler.config.sweep_interval_secs,
-            "starting background scheduler"
+            worker_id = %driver.worker_id,
+            concurrency = driver.config.worker_concurrency,
+            poll_interval_ms = driver.config.poll_interval_ms,
+            sweep_interval_secs = driver.config.sweep_interval_secs,
+            "starting background driver"
         );
 
         // Startup claim pass: drain everything claimable right now so a fresh
         // replica picks up pending work without waiting for the first tick.
-        scheduler.claim_drain().await;
+        driver.claim_drain().await;
 
-        let claim_interval = scheduler.jittered_claim_interval();
+        let claim_interval = driver.jittered_claim_interval();
         let claim_tick = spawn_supervised_periodic(
             "background-claim-tick",
-            Arc::downgrade(&scheduler),
+            Arc::downgrade(&driver),
             claim_interval,
-            Some(Arc::downgrade(&scheduler.claim_wakeup)),
-            |s: Arc<BackgroundScheduler>| async move {
+            Some(Arc::downgrade(&driver.claim_wakeup)),
+            |s: Arc<BackgroundDriver>| async move {
                 s.claim_drain().await;
             },
         );
 
         let sweeper = spawn_supervised_periodic(
             "background-sweeper",
-            Arc::downgrade(&scheduler),
-            scheduler.config.sweep_interval(),
+            Arc::downgrade(&driver),
+            driver.config.sweep_interval(),
             // The sweeper is purely time-driven; it has no early wakeup.
             None,
-            |s: Arc<BackgroundScheduler>| async move {
+            |s: Arc<BackgroundDriver>| async move {
                 s.sweep_once().await;
             },
         );
 
-        BackgroundSchedulerHandle {
-            _scheduler: scheduler,
+        BackgroundDriverHandle {
+            _driver: driver,
             _claim_tick: claim_tick,
             _sweeper: sweeper,
         }
@@ -206,6 +210,10 @@ impl BackgroundScheduler {
         permit: OwnedSemaphorePermit,
     ) {
         let worker = Arc::clone(&self.worker);
+        // Cloned into the task so we can nudge the claim loop the instant this
+        // job's permit frees, instead of leaving the freed slot idle until the
+        // next poll tick (which would cap throughput at one batch per interval).
+        let claim_wakeup = Arc::clone(&self.claim_wakeup);
         let response_id = job.response_id.0.clone();
         debug!(
             worker_id = %self.worker_id,
@@ -218,8 +226,11 @@ impl BackgroundScheduler {
         )]
         tokio::spawn(async move {
             worker.execute(job).await;
-            // Permit is released here when it drops, freeing the slot.
+            // Release the permit, then wake the claim loop so it immediately
+            // re-claims into the freed slot rather than idling until the next
+            // poll tick.
             drop(permit);
+            claim_wakeup.notify_one();
             debug!(response_id = %response_id, "background job execution finished");
         });
     }
@@ -362,8 +373,8 @@ mod tests {
             worker_concurrency: 4,
             ..Default::default()
         };
-        let scheduler = BackgroundScheduler::new(Arc::clone(&repo), worker_dyn, config);
-        let _handle = scheduler.spawn().await;
+        let driver = BackgroundDriver::new(Arc::clone(&repo), worker_dyn, config);
+        let _handle = driver.spawn().await;
 
         // All five enqueued jobs must be seen and terminalized.
         let done = timeout(Duration::from_secs(5), async {
@@ -413,8 +424,8 @@ mod tests {
             worker_concurrency: 2,
             ..Default::default()
         };
-        let scheduler = BackgroundScheduler::new(Arc::clone(&repo), worker_dyn, config);
-        let _handle = scheduler.spawn().await;
+        let driver = BackgroundDriver::new(Arc::clone(&repo), worker_dyn, config);
+        let _handle = driver.spawn().await;
 
         // Wait until 2 jobs are in flight (the cap), then confirm it never
         // exceeds 2 while they're held.
@@ -462,14 +473,14 @@ mod tests {
     #[tokio::test]
     async fn sweeper_reclaims_expired_lease() {
         // Claim a job out-of-band with a short lease, let it expire, and assert
-        // the scheduler's sweeper reclaims it (queue becomes claimable again).
+        // the driver's sweeper reclaims it (queue becomes claimable again).
         let rs = Arc::new(MemoryResponseStorage::new());
         let repo: Arc<dyn BackgroundResponseRepository> =
             Arc::new(MemoryBackgroundRepository::new(Arc::clone(&rs)));
         repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
 
         // Out-of-band claim with a 1s lease by a different worker so the
-        // scheduler's own claim loop can't grab it first.
+        // driver's own claim loop can't grab it first.
         let claimed = repo
             .claim_next("external", Utc::now(), Duration::from_secs(1))
             .await
@@ -478,7 +489,7 @@ mod tests {
         assert_eq!(claimed.response_id, ResponseId::from("r1"));
 
         // A no-op worker: we only care about the sweeper reclaiming, not
-        // execution. (It will finalize whatever the scheduler later claims.)
+        // execution. (It will finalize whatever the driver later claims.)
         struct NoopFinalizeWorker {
             repository: Arc<dyn BackgroundResponseRepository>,
         }
@@ -505,7 +516,7 @@ mod tests {
         let worker: Arc<dyn BackgroundWorker> = Arc::new(NoopFinalizeWorker {
             repository: Arc::clone(&repo),
         });
-        // Fast sweep so the test doesn't wait long; long poll so the scheduler's
+        // Fast sweep so the test doesn't wait long; long poll so the driver's
         // claim loop doesn't race the assertion before the lease expires.
         let config = BackgroundConfig {
             worker_concurrency: 4,
@@ -514,11 +525,11 @@ mod tests {
             poll_interval_ms: 50,
             ..Default::default()
         };
-        let scheduler = BackgroundScheduler::new(Arc::clone(&repo), worker, config);
-        let _handle = scheduler.spawn().await;
+        let driver = BackgroundDriver::new(Arc::clone(&repo), worker, config);
+        let _handle = driver.spawn().await;
 
         // After the lease (1s) expires and the sweeper (1s) runs, the row is
-        // requeued and the scheduler re-claims + finalizes it. Eventually the
+        // requeued and the driver re-claims + finalizes it. Eventually the
         // queue is empty (job terminalized via the re-claim path).
         let terminalized = timeout(Duration::from_secs(8), async {
             loop {
@@ -526,8 +537,8 @@ mod tests {
                     .claim_next("probe", Utc::now(), Duration::from_secs(30))
                     .await
                     .unwrap();
-                // `probe` claims only if the scheduler hasn't already taken it.
-                // Once terminal, neither probe nor scheduler can claim, so put
+                // `probe` claims only if the driver hasn't already taken it.
+                // Once terminal, neither probe nor driver can claim, so put
                 // any probe-claim back by finalizing it (keeps the loop honest).
                 match probe {
                     Some(job) => {
@@ -547,7 +558,7 @@ mod tests {
                         break;
                     }
                     None => {
-                        // Could be in-progress (scheduler holds it) or terminal.
+                        // Could be in-progress (driver holds it) or terminal.
                         // Check the stored payload: terminal means done.
                         use smg_data_connector::ResponseStorage;
                         let stored = rs.get_response(&ResponseId::from("r1")).await.unwrap();

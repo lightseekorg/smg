@@ -1,6 +1,6 @@
 //! Background worker seam.
 //!
-//! The scheduler claims jobs from the [`BackgroundResponseRepository`] and hands
+//! The driver claims jobs from the [`BackgroundResponseRepository`] and hands
 //! each one to a [`BackgroundWorker`] for execution. This module defines that
 //! seam plus a default implementation used until the real executor lands in
 //! BGM-PR-07.
@@ -22,7 +22,7 @@ pub const BACKGROUND_EXECUTION_UNAVAILABLE: &str = "background_execution_unavail
 
 /// Executes a single leased background job end to end.
 ///
-/// The scheduler owns the concurrency permit and the claim/sweep loops; an
+/// The driver owns the concurrency permit and the claim/sweep loops; an
 /// implementation of this trait owns everything from "I have a leased job" to
 /// "the response row is terminal" (running the model, persisting stream events,
 /// honoring cancel/retry, and calling
@@ -31,7 +31,7 @@ pub const BACKGROUND_EXECUTION_UNAVAILABLE: &str = "background_execution_unavail
 #[async_trait]
 pub trait BackgroundWorker: Send + Sync {
     /// Execute one claimed job. The implementation is responsible for driving
-    /// the job to a terminal state (typically via `finalize`); the scheduler
+    /// the job to a terminal state (typically via `finalize`); the driver
     /// holds the concurrency permit until this future resolves.
     async fn execute(&self, job: LeasedJob);
 }

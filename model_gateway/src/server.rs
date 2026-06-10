@@ -54,10 +54,7 @@ use crate::{
         otel_trace,
     },
     routers::{
-        common::background::{
-            create::{handle_background_create, BackgroundCreateDeps},
-            start_background_scheduler,
-        },
+        common::background::create::{handle_background_create, BackgroundCreateDeps},
         conversations,
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
@@ -1261,25 +1258,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         debug!("Started WorkerMonitor event loop");
     }
 
-    // Background-mode scheduler driver. Only spawned when a background
-    // repository is configured (capability-gated by the active history
-    // backend); a gateway with no background repo is entirely unaffected. The
-    // handle owns the supervised claim-tick + sweeper tasks and must outlive
-    // the server, so it is bound for the lifetime of `startup`. BGM-PR-07 swaps
-    // the default "execution unavailable" worker for the real executor.
-    let _background_scheduler = match app_context.background_repository.clone() {
-        Some(repository) => {
-            let handle =
-                start_background_scheduler(repository, config.router_config.background.clone())
-                    .await;
-            info!("Background scheduler started");
-            Some(handle)
-        }
-        None => {
-            debug!("No background repository configured; background scheduler not started");
-            None
-        }
-    };
+    // Background-mode driver (claim-tick + sweeper over the background
+    // repository) is intentionally NOT started here in BGM-PR-06. The only
+    // BackgroundWorker that exists yet is the placeholder
+    // UnavailableBackgroundWorker, which finalizes every claimed job as `failed`;
+    // spawning the driver with it would regress #1614's durable `queued`
+    // contract into immediate failure for every gateway with a background
+    // repository (including the default history_backend=memory). So
+    // `background=true` requests keep returning `queued` until BGM-PR-07 (#1221)
+    // wires `BackgroundDriver::spawn(...)` with the real worker. See
+    // `routers::common::background` for the driver + its tests.
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
         app_context.rate_limiter.clone(),
