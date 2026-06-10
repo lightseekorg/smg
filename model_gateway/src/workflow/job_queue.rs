@@ -280,12 +280,6 @@ impl JobQueue {
 
         debug!("Processing job: type={}, worker={}", job_type, worker_url);
 
-        // Release concurrency slot immediately. The semaphore bounds how many
-        // jobs can be dequeued concurrently (preventing thundering herd), but
-        // long-running waits (e.g. 30-min worker health checks) must not hold
-        // a slot or they starve the queue for all other job types.
-        drop(permit);
-
         // Execute job
         match context.upgrade() {
             Some(ctx) => {
@@ -305,6 +299,10 @@ impl JobQueue {
                 );
             }
         }
+
+        // Hold the permit across execute_job so max_concurrent_jobs bounds the
+        // number of workflows running at once, not just the dequeue rate.
+        drop(permit);
     }
 
     /// Execute a specific job
@@ -697,6 +695,15 @@ impl JobQueue {
         }
     }
 
+    /// Whether a status sampled at `timestamp` is still within `ttl` of `now`.
+    ///
+    /// Saturating: a status timestamp may be `>= now` (it is read from a separate
+    /// clock sample than the cleanup tick, or after a backward clock step), so a
+    /// plain `now - timestamp` would underflow.
+    fn status_within_ttl(now: u64, timestamp: u64, ttl: u64) -> bool {
+        now.saturating_sub(timestamp) < ttl
+    }
+
     /// Cleanup old job statuses (TTL 5 minutes)
     async fn cleanup_old_statuses(status_map: Arc<DashMap<String, JobStatus>>) {
         const CLEANUP_INTERVAL: Duration = Duration::from_secs(60); // Run every minute
@@ -710,8 +717,8 @@ impl JobQueue {
                 .unwrap_or_default()
                 .as_secs();
 
-            // Remove statuses older than TTL
-            status_map.retain(|_key, value| now - value.timestamp < STATUS_TTL);
+            status_map
+                .retain(|_key, value| Self::status_within_ttl(now, value.timestamp, STATUS_TTL));
 
             debug!(
                 "Cleaned up old job statuses, remaining: {}",
@@ -775,4 +782,68 @@ fn build_external_worker_config(
     // set spec.health here since these workers have no overrides.
     spec.max_connection_attempts = router_config.health_check.success_threshold.max(1) * 10;
     spec
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::Semaphore;
+
+    use super::*;
+
+    #[test]
+    fn status_within_ttl_does_not_underflow_on_future_timestamp() {
+        // timestamp ahead of `now` (separate clock sample / backward clock step):
+        // must be treated as fresh, never panic.
+        assert!(JobQueue::status_within_ttl(100, 101, 300));
+        assert!(JobQueue::status_within_ttl(0, u64::MAX, 300));
+        // normal cases
+        assert!(JobQueue::status_within_ttl(400, 200, 300));
+        assert!(!JobQueue::status_within_ttl(600, 200, 300));
+        assert!(!JobQueue::status_within_ttl(500, 200, 300));
+    }
+
+    /// Regression guard for the permit-lifetime bug: the dispatcher acquires an
+    /// owned permit, moves it into the spawned task, and the permit must live
+    /// across the awaited work so `max_concurrent_jobs` actually caps how many
+    /// jobs run at once. Dropping the permit before the work (the old behavior)
+    /// would let peak concurrency exceed the limit and fail this test.
+    #[tokio::test]
+    async fn permit_held_across_work_bounds_concurrency() {
+        const LIMIT: usize = 3;
+        const JOBS: usize = 30;
+
+        let sem = Arc::new(Semaphore::new(LIMIT));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..JOBS {
+            let permit = sem.clone().acquire_owned().await.unwrap();
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test task: every handle is awaited below before the test returns"
+            )]
+            handles.push(tokio::spawn(async move {
+                let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(cur, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                drop(permit);
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert!(
+            peak.load(Ordering::SeqCst) <= LIMIT,
+            "peak concurrency {} exceeded limit {LIMIT}",
+            peak.load(Ordering::SeqCst)
+        );
+    }
 }
