@@ -75,8 +75,7 @@ pub trait HeadlessResponses: Send + Sync {
 /// implementation of this trait owns everything from "I have a leased job" to
 /// "the response row is terminal" (running the model, persisting stream events,
 /// honoring cancel/retry, and calling
-/// [`BackgroundResponseRepository::finalize`]). The real implementation lands in
-/// BGM-PR-07; [`UnavailableBackgroundWorker`] is the placeholder until then.
+/// [`BackgroundResponseRepository::finalize`]).
 #[async_trait]
 pub trait BackgroundWorker: Send + Sync {
     /// Execute one claimed job. The implementation is responsible for driving
@@ -164,7 +163,6 @@ impl RealBackgroundWorker {
             .config
             .retry_max_delay_secs
             .max(self.config.retry_base_delay_secs);
-        // Saturating exponential: base * 2^attempt, clamped to the cap.
         let scaled = base.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
         let capped = scaled.min(cap);
         let jitter = if capped > 0 {
@@ -389,7 +387,7 @@ impl RealBackgroundWorker {
 #[async_trait]
 impl BackgroundWorker for RealBackgroundWorker {
     async fn execute(&self, job: LeasedJob) {
-        // 1. Streaming background is Slice B — not supported here.
+        // Streaming background is Slice B — not supported here.
         if job.stream_enabled {
             warn!(
                 response_id = %job.response_id.0,
@@ -404,7 +402,6 @@ impl BackgroundWorker for RealBackgroundWorker {
             return;
         }
 
-        // 2. Reconstruct the request from the stored snapshot.
         let mut req = match Self::reconstruct_request(&job) {
             Ok(req) => req,
             Err(e) => {
@@ -427,7 +424,7 @@ impl BackgroundWorker for RealBackgroundWorker {
             req.model = job.model.clone();
         }
 
-        // 3. Load the stored request context (storage-hook replay).
+        // Load the stored request context (storage-hook replay).
         let request_context = match self.repository.load_request_context(&job.response_id).await {
             Ok(ctx) => ctx,
             Err(e) => {
@@ -444,14 +441,14 @@ impl BackgroundWorker for RealBackgroundWorker {
         };
         let tenant_meta = Self::tenant_meta(request_context.as_ref());
 
-        // 4 + 5. Spawn the heartbeat and cancel poller, scoped to this run.
+        // Spawn the heartbeat and cancel poller, scoped to this run.
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
         let heartbeat = self.spawn_heartbeat(&job, stop.clone());
         let cancel_poller = self.spawn_cancel_poller(&job, cancel.clone(), stop.clone());
 
-        // 6. Run inside the storage context so hooked storage sees the replayed
-        // request context, exactly like the live request path.
+        // Run inside the storage context so hooked storage sees the replayed
+        // request context.
         let ctx_for_scope = request_context.clone().unwrap_or_default();
         let outcome = with_request_context(
             ctx_for_scope,
@@ -470,7 +467,7 @@ impl BackgroundWorker for RealBackgroundWorker {
         let _ = heartbeat.await;
         let _ = cancel_poller.await;
 
-        // 7. Map outcome → finalize / retry.
+        // Map outcome → finalize / retry.
         let cancelled = cancel.is_cancelled();
         match outcome {
             _ if cancelled => {

@@ -73,7 +73,6 @@ pub(crate) async fn route_responses(
             model_id,
             response_id: None,
             tenant_request_meta,
-            // Live path: a never-cancelled token (no background cooperative cancel).
             cancel: CancellationToken::new(),
         };
         route_responses_streaming(ctx, request, params).await
@@ -83,7 +82,6 @@ pub(crate) async fn route_responses(
             model_id,
             response_id: Some(format!("resp_{}", Uuid::now_v7())),
             tenant_request_meta,
-            // Live path: a never-cancelled token (no background cooperative cancel).
             cancel: CancellationToken::new(),
         };
         route_responses_sync(ctx, request, params).await
@@ -100,13 +98,9 @@ async fn route_responses_sync(
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
 ) -> Response {
-    // Keep a handle to the original (pre-execute) request for the persist call;
-    // the execute-core consumes the `Arc` it receives.
     let original_request = Arc::clone(&request);
     match non_streaming::route_responses_internal(ctx, request, params).await {
         Ok(responses_response) => {
-            // Live path persists exactly as before — now from the caller, using
-            // the original request (matching the prior in-function behavior).
             persist_response_if_needed(
                 ctx.conversation_storage.clone(),
                 ctx.conversation_item_storage.clone(),
@@ -122,17 +116,9 @@ async fn route_responses_sync(
     }
 }
 
-/// Headless (background) non-streaming execution for the regular pipeline.
-///
-/// Runs the same core path as [`route_responses_sync`] but:
-/// - returns a typed `Result<ResponsesResponse, Response>` (the background
-///   worker maps it to a `finalize`, rather than serializing an HTTP response),
-/// - does NOT persist the response row — the worker's `finalize` is the
-///   authoritative terminal write under the durable id (execute-core never
-///   persists),
-/// - uses the caller-supplied `response_id` (the durable background id) instead
-///   of minting a fresh one,
-/// - threads the cooperative-cancel token into the MCP tool loop.
+/// Headless (background) non-streaming execution: runs the execute-core with the
+/// caller-supplied durable `response_id` and cancel token, returning the typed
+/// response for the worker to finalize (no HTTP serialization, no persist).
 pub(crate) async fn execute_responses_headless(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,

@@ -52,14 +52,7 @@ use crate::{
 ///    - Repeat from step 1 (full pipeline re-execution)
 /// 4. If no tool calls, return final response
 ///
-/// This is execute-core only: persistence is NOT performed here, it is the
-/// caller's job. The live (request-driven) caller persists via
-/// `persist_response_if_needed` after this returns; the background headless
-/// caller does not persist (the worker's `finalize` is the authoritative
-/// terminal write under the durable `response_id`).
-///
-/// `cancel` is a cooperative-cancel signal checked at each tool-loop boundary;
-/// the live path passes a never-cancelled token.
+/// Does not persist — the caller does. `cancel` stops the tool loop at a boundary.
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
@@ -149,10 +142,7 @@ async fn execute_with_mcp_loop(
     );
 
     loop {
-        // Cooperative cancel checkpoint (background headless path only; the live
-        // path's token is never cancelled). The loop boundary between model
-        // turns is a natural checkpoint; on cancel we stop and return a
-        // `cancelled` outcome, which the background worker finalizes `cancelled`.
+        // Cooperative cancel: stop at the loop boundary if cancellation was signalled.
         if cancel.is_cancelled() {
             debug!("Harmony tool loop cancelled cooperatively at iteration boundary");
             // Restore the caller's original tools (hide internal MCP tools).
@@ -434,11 +424,7 @@ async fn execute_without_mcp_loop(
     }
 }
 
-/// Build a minimal `cancelled` response for a cooperative mid-run cancel.
-///
-/// Only reachable on the background headless path (the live path's cancel token
-/// is never fired). The background worker forces the durable `response_id` and
-/// finalizes `cancelled`, so the id minted here is a best-effort placeholder.
+/// Minimal `cancelled` response returned when the cancel token fires mid-loop.
 fn cancelled_response(request: &ResponsesRequest) -> ResponsesResponse {
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -356,10 +356,6 @@ impl GrpcRouter {
                 serve_harmony_responses_stream(&harmony_ctx, body.clone(), tenant_meta.clone())
                     .await
             } else {
-                // Live path: never-cancelled token. Persistence is performed here
-                // (the caller), mirroring what `serve_harmony_responses` used to
-                // do internally: persist the original request body via the
-                // harmony ctx's storages + request_context.
                 match serve_harmony_responses(
                     &harmony_ctx,
                     body.clone(),
@@ -395,25 +391,9 @@ impl GrpcRouter {
         }
     }
 
-    /// Headless (background) non-streaming execution.
-    ///
-    /// Runs the SMG-local responses pipeline for a background-claimed job and
-    /// returns a typed `Result<ResponsesResponse, Response>` — WITHOUT the
-    /// internal response-row persist (the background worker's `finalize` is the
-    /// authoritative terminal write under the durable `response_id`) and WITHOUT
-    /// minting a fresh response id (the caller passes the durable id).
-    ///
-    /// Mirrors [`Self::route_responses_impl`]'s harmony detection and context
-    /// construction, but:
-    /// - builds the [`ResponsesContext`] with the **passed** `request_context`
-    ///   (the background worker loads it from the repository and threads it in),
-    ///   not the router-construction task-local,
-    /// - runs the non-streaming regular / harmony execute-core, which never
-    ///   persists (the live callers persist; the worker's `finalize` does here),
-    /// - threads the cooperative-cancel token into the MCP tool loop.
-    ///
-    /// The produced response carries an internally minted id; the background
-    /// worker overwrites it with the durable `job.response_id` before finalize.
+    /// Headless (background) non-streaming execution: runs the responses pipeline
+    /// for a claimed job with the worker-supplied `request_context` and cancel
+    /// token, returning the typed response for the worker to finalize.
     async fn execute_responses_headless_impl(
         &self,
         request: ResponsesRequest,
@@ -421,7 +401,7 @@ impl GrpcRouter {
         request_context: Option<smg_data_connector::RequestContext>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ResponsesResponse, Response> {
-        // Fail-fast worker validation, mirroring the live path.
+        // Fail-fast worker validation.
         if let Some(error_response) =
             validate_worker_availability(&self.worker_registry, &request.model)
         {

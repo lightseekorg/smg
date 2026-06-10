@@ -35,18 +35,8 @@ use crate::{
     },
 };
 
-/// Internal implementation for non-streaming responses (execute-core only)
-///
-/// This is the core execution path that:
-/// 1. Loads conversation history / response chain
-/// 2. Checks for MCP tools
-/// 3. Executes with or without MCP tool loop
-///
-/// Persistence is intentionally NOT performed here: it is the caller's job. The
-/// live (request-driven) callers persist via `persist_response_if_needed` after
-/// this returns; the background headless caller does not persist (the background
-/// worker's `finalize` is the authoritative terminal write under the durable
-/// `response_id`).
+/// Core non-streaming execution: load history, run the pipeline (with or without
+/// the MCP tool loop), and return the response. Does not persist — the caller does.
 pub(crate) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
@@ -76,11 +66,7 @@ pub(crate) async fn route_responses_internal(
     Ok(responses_response)
 }
 
-/// Build a minimal `cancelled` response for a cooperative mid-run cancel.
-///
-/// Only reachable on the background headless path (the live path's cancel token
-/// is never fired). The background worker forces the durable `response_id` and
-/// finalizes `cancelled`, so the exact id here is a best-effort placeholder.
+/// Minimal `cancelled` response returned when the cancel token fires mid-loop.
 fn cancelled_response(
     original_request: &ResponsesRequest,
     response_id: Option<String>,
@@ -183,10 +169,7 @@ pub(super) async fn execute_tool_loop(
     );
 
     loop {
-        // Cooperative cancel checkpoint (background headless path only; the live
-        // path's token is never cancelled). Each loop boundary is a natural,
-        // cheap checkpoint between model turns. On cancel we stop and return a
-        // `cancelled` outcome; the background worker finalizes it `cancelled`.
+        // Cooperative cancel: stop at the loop boundary if cancellation was signalled.
         if params.cancel.is_cancelled() {
             debug!("Tool loop cancelled cooperatively at iteration boundary");
             return Ok(cancelled_response(
