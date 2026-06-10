@@ -1,31 +1,33 @@
 //! `worker:` CRDT adapter: gateway ↔ mesh bridge for `WorkerState`.
 //!
-//! Outbound: `on_worker_changed` bincode-serialises a `WorkerState`
-//! and writes it under `worker:{worker_id}`. `on_worker_removed`
-//! writes a tombstone.
+//! Outbound: `start` spawns a loop over the registry's `WorkerEvent`
+//! stream that publishes every locally-owned worker's state under
+//! `worker:{worker_id}` (and a tombstone on removal). Mesh-imported
+//! workers are filtered out by their registration origin so a peer's
+//! state is never re-published. On broadcast lag the loop re-publishes
+//! all local workers and tombstones any it published that no longer
+//! exist.
 //!
-//! Inbound: `start` spawns a task that subscribes to the namespace
-//! and routes each non-tombstone update through
-//! `WorkerRegistry::on_remote_worker_state`, which performs the
-//! registry-side URL-dedupe, health promotion, and `Registered`
-//! event fan-out. Tombstones are logged at debug; the registry
-//! does not yet expose a remote-remove hook, and wiring one
-//! belongs in a later PR.
+//! Inbound: `start` also spawns a task that subscribes to the
+//! namespace and routes each non-tombstone update through
+//! `WorkerRegistry::on_remote_worker_state` (registry-side URL-dedupe,
+//! health promotion, `Registered` event fan-out). Tombstones are
+//! logged at debug.
 //!
 //! The adapter writes through `CrdtNamespace::put`, which fires
 //! local subscribers in addition to gossiping. A local write
-//! therefore echoes back through `start`'s loop and lands in
-//! `on_remote_worker_state`. That path is idempotent — the URL
-//! lookup short-circuits to a health refresh — so the loop is
-//! self-limiting.
+//! therefore echoes back through the inbound loop and lands in
+//! `on_remote_worker_state`, which ignores state for locally-owned
+//! workers — so the echo is inert.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use bytes::Bytes;
 use smg_mesh::{CrdtNamespace, WorkerState};
-use tracing::{debug, warn};
+use tokio::sync::broadcast;
+use tracing::{debug, info, warn};
 
-use crate::worker::WorkerRegistry;
+use crate::worker::{event::WorkerEvent, registry::WorkerId, Worker, WorkerOrigin, WorkerRegistry};
 
 const PREFIX: &str = "worker:";
 
@@ -62,7 +64,9 @@ impl WorkerSyncAdapter {
         })
     }
 
-    /// Start the inbound path. Subscribes first so no live event is
+    /// Start both sync directions.
+    ///
+    /// Inbound: subscribes to the namespace first so no live event is
     /// lost, spawns the recv loop so it can start draining
     /// immediately, and then backfills from the calling thread — any
     /// entry already in the CRDT would otherwise have to wait for the
@@ -72,7 +76,21 @@ impl WorkerSyncAdapter {
     /// a blocked recv while backfill is running could drop updates on
     /// a busy startup. `on_remote_worker_state` is idempotent on URL,
     /// so a key seen by both paths only refreshes health.
+    ///
+    /// Outbound: subscribes to registry events before anything else so
+    /// no registration between the initial resync and the loop is
+    /// missed, then spawns the publish loop.
     pub fn start(self: &Arc<Self>) {
+        let events = self.worker_registry.subscribe_events();
+        let outbound = Arc::clone(self);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "publish loop ends automatically when the registry drops and closes the broadcast channel; no handle needed"
+        )]
+        tokio::spawn(async move {
+            outbound.run_outbound(events).await;
+        });
+
         let this = Arc::clone(self);
         let mut sub = self.workers.subscribe("");
         #[expect(
@@ -128,6 +146,79 @@ impl WorkerSyncAdapter {
         }
     }
 
+    /// Publish loop: forward every locally-owned worker mutation to the
+    /// mesh. `published` tracks the keys this loop has written so removals
+    /// can be tombstoned even after the registry has dropped the worker's
+    /// origin entry, and so lag recovery can tombstone removals missed in
+    /// the lag window.
+    async fn run_outbound(self: Arc<Self>, mut events: broadcast::Receiver<WorkerEvent>) {
+        let mut published: HashSet<WorkerId> = HashSet::new();
+        self.resync_local(&mut published);
+        loop {
+            match events.recv().await {
+                Ok(WorkerEvent::Registered { worker_id, worker }) => {
+                    if self.worker_registry.origin_of(&worker_id) == Some(WorkerOrigin::Local) {
+                        self.on_worker_changed(
+                            worker_id.as_str(),
+                            &worker_state_of(&worker_id, &worker),
+                        );
+                        published.insert(worker_id);
+                    }
+                }
+                Ok(WorkerEvent::Replaced { worker_id, new, .. }) => {
+                    if published.contains(&worker_id) {
+                        self.on_worker_changed(
+                            worker_id.as_str(),
+                            &worker_state_of(&worker_id, &new),
+                        );
+                    }
+                }
+                Ok(WorkerEvent::StatusChanged {
+                    worker_id, worker, ..
+                }) => {
+                    if published.contains(&worker_id) {
+                        self.on_worker_changed(
+                            worker_id.as_str(),
+                            &worker_state_of(&worker_id, &worker),
+                        );
+                    }
+                }
+                Ok(WorkerEvent::Removed { worker_id, .. }) => {
+                    if published.remove(&worker_id) {
+                        self.on_worker_removed(worker_id.as_str());
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "outbound worker sync lagged; resyncing");
+                    self.resync_local(&mut published);
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    debug!("WorkerSyncAdapter outbound loop closed");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Re-publish every locally-owned worker and tombstone any key this
+    /// loop published whose worker no longer exists. Doubles as the
+    /// bootstrap (empty prior set) and the lag-recovery path; re-publishing
+    /// identical state is harmless (peers' URL-dedupe refreshes health).
+    fn resync_local(&self, published: &mut HashSet<WorkerId>) {
+        let mut current = HashSet::new();
+        for (id, worker) in self.worker_registry.get_all_with_ids() {
+            if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
+                self.on_worker_changed(id.as_str(), &worker_state_of(&id, &worker));
+                current.insert(id);
+            }
+        }
+        for stale in published.difference(&current) {
+            info!(worker_id = %stale.as_str(), "tombstoning worker removed during lag");
+            self.on_worker_removed(stale.as_str());
+        }
+        *published = current;
+    }
+
     /// Publish a worker update to the cluster. Callers pass the
     /// registry's current state; the adapter owns (de)serialisation
     /// and key formatting.
@@ -144,14 +235,32 @@ impl WorkerSyncAdapter {
     }
 }
 
+/// Snapshot a live worker into the mesh wire shape. `spec` carries the full
+/// `WorkerSpec` so the importing side can rebuild the worker faithfully;
+/// `version` is the registry revision (informational — CRDT ordering is
+/// owned by the Lamport clock).
+fn worker_state_of(worker_id: &WorkerId, worker: &Arc<dyn Worker>) -> WorkerState {
+    WorkerState {
+        worker_id: worker_id.as_str().to_string(),
+        model_id: worker.model_id().to_string(),
+        url: worker.url().to_string(),
+        health: worker.is_healthy(),
+        load: worker.load() as f64,
+        version: worker.revision(),
+        spec: bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use openai_protocol::model_card::ModelCard;
     use smg_mesh::{MergeStrategy, MeshKV};
     use tokio::time::sleep;
 
     use super::*;
+    use crate::worker::BasicWorkerBuilder;
 
     fn worker_namespace(mesh: &MeshKV) -> Arc<CrdtNamespace> {
         mesh.configure_crdt_prefix(PREFIX, MergeStrategy::LastWriterWins)
@@ -167,6 +276,25 @@ mod tests {
             version: 1,
             spec: vec![],
         }
+    }
+
+    fn local_worker(url: &str) -> Arc<dyn Worker> {
+        Arc::new(
+            BasicWorkerBuilder::new(url)
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        )
+    }
+
+    /// Poll until `cond` is true or ~1s elapses.
+    async fn wait_for(mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if cond() {
+                return true;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        false
     }
 
     #[tokio::test]
@@ -293,5 +421,121 @@ mod tests {
         let ns = mesh.configure_crdt_prefix("policy:", MergeStrategy::LastWriterWins);
         let registry = Arc::new(WorkerRegistry::new());
         let _ = WorkerSyncAdapter::new(ns, registry);
+    }
+
+    #[tokio::test]
+    async fn outbound_publishes_local_registration() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        let id = registry
+            .register(local_worker("http://local:8080"))
+            .unwrap();
+
+        let key = format!("worker:{}", id.as_str());
+        assert!(
+            wait_for(|| ns.get(&key).is_some()).await,
+            "local registration was not published to mesh"
+        );
+        let decoded: WorkerState =
+            bincode::deserialize(&ns.get(&key).unwrap()).expect("published state decodes");
+        assert_eq!(decoded.worker_id, id.as_str());
+        assert_eq!(decoded.url, "http://local:8080");
+        assert_eq!(decoded.model_id, "llama-3");
+        assert!(
+            !decoded.spec.is_empty(),
+            "spec rides along for faithful import"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_never_republishes_mesh_imported_worker() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        // A peer's state arrives (direct put models the gossiped write).
+        let original = sample_state("peer-w1", "http://remote:8080");
+        ns.put(
+            "worker:peer-w1",
+            bincode::serialize(&original).expect("state serializes"),
+        );
+        assert!(
+            wait_for(|| registry.get_by_url("http://remote:8080").is_some()).await,
+            "import did not land in the registry"
+        );
+
+        // The import fired a Registered event; give the outbound loop time
+        // to (wrongly) act on it, then prove the stored state is untouched.
+        sleep(Duration::from_millis(50)).await;
+        let stored: WorkerState =
+            bincode::deserialize(&ns.get("worker:peer-w1").unwrap()).expect("state decodes");
+        assert_eq!(
+            stored, original,
+            "a mesh-imported worker must never be re-published"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_tombstones_local_removal() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        let id = registry
+            .register(local_worker("http://local:8080"))
+            .unwrap();
+        let key = format!("worker:{}", id.as_str());
+        assert!(wait_for(|| ns.get(&key).is_some()).await, "publish landed");
+
+        registry.remove(&id);
+        assert!(
+            wait_for(|| ns.get(&key).is_none()).await,
+            "local removal was not tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_publishes_local_skips_mesh_and_tombstones_stale() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+
+        // One local worker, one mesh import, one phantom previously
+        // published id whose worker is gone.
+        let local_id = registry
+            .register(local_worker("http://local:8080"))
+            .unwrap();
+        registry.on_remote_worker_state(&sample_state("peer-w1", "http://remote:8080"));
+        let phantom = WorkerId::from_string("gone-w9".to_string());
+        ns.put(
+            "worker:gone-w9",
+            bincode::serialize(&sample_state("gone-w9", "http://gone:8080")).unwrap(),
+        );
+
+        let mut published: HashSet<WorkerId> = [phantom].into_iter().collect();
+        adapter.resync_local(&mut published);
+
+        assert!(
+            ns.get(&format!("worker:{}", local_id.as_str())).is_some(),
+            "local worker is re-published"
+        );
+        assert!(
+            ns.get("worker:gone-w9").is_none(),
+            "stale published key is tombstoned"
+        );
+        assert_eq!(
+            published,
+            [local_id].into_iter().collect(),
+            "published set tracks exactly the local workers"
+        );
     }
 }
