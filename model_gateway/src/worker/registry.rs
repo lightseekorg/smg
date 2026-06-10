@@ -627,7 +627,15 @@ impl WorkerRegistry {
 
         // URL exists with an active worker — replace it
         if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
-            if !self.replace(&existing_id, worker) {
+            if self.replace(&existing_id, worker) {
+                // This is the "node claims this URL" path (startup workflows,
+                // K8s discovery): if a mesh import won the race for the URL,
+                // the local registration must take ownership back, else the
+                // worker is never published and a peer tombstone could delete
+                // a locally-configured worker.
+                self.worker_origins
+                    .insert(existing_id.clone(), WorkerOrigin::Local);
+            } else {
                 // replace() returned false — worker was removed concurrently.
                 // The mutation lock prevents stale indexes, so this is safe to ignore.
                 tracing::warn!(
@@ -1619,6 +1627,35 @@ mod tests {
         assert!(
             registry.get(&local_id).is_some(),
             "a locally-owned worker survives a remote tombstone"
+        );
+    }
+
+    #[test]
+    fn register_or_replace_promotes_mesh_origin_to_local() {
+        // Restart race: a mesh import wins the URL before the local
+        // workflow registers it. The local claim must take ownership back,
+        // else the node never publishes its own worker and a peer tombstone
+        // could delete it.
+        let registry = WorkerRegistry::new();
+        registry.on_remote_worker_state(&remote_state("peer-w1", "http://w:8080", true, vec![]));
+        let id = registry.get_id_by_url("http://w:8080").unwrap();
+        assert_eq!(registry.origin_of(&id), Some(WorkerOrigin::Mesh));
+
+        let local: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        );
+        let claimed_id = registry.register_or_replace(local);
+        assert_eq!(claimed_id, id, "claim reuses the adopted id");
+        assert_eq!(
+            registry.origin_of(&id),
+            Some(WorkerOrigin::Local),
+            "local registration over a mesh import takes ownership"
+        );
+        assert!(
+            registry.remove_remote(&id).is_none(),
+            "a peer tombstone can no longer delete the claimed worker"
         );
     }
 

@@ -173,22 +173,28 @@ impl WorkerSyncAdapter {
                         published.insert(worker_id);
                     }
                 }
+                // Gated on live origin (not the published set) so a worker
+                // promoted to Local ownership mid-life — e.g. a mesh import
+                // claimed by register_or_replace — starts publishing from its
+                // next mutation.
                 Ok(WorkerEvent::Replaced { worker_id, new, .. }) => {
-                    if published.contains(&worker_id) {
+                    if self.worker_registry.origin_of(&worker_id) == Some(WorkerOrigin::Local) {
                         self.on_worker_changed(
                             worker_id.as_str(),
                             &worker_state_of(&worker_id, &new),
                         );
+                        published.insert(worker_id);
                     }
                 }
                 Ok(WorkerEvent::StatusChanged {
                     worker_id, worker, ..
                 }) => {
-                    if published.contains(&worker_id) {
+                    if self.worker_registry.origin_of(&worker_id) == Some(WorkerOrigin::Local) {
                         self.on_worker_changed(
                             worker_id.as_str(),
                             &worker_state_of(&worker_id, &worker),
                         );
+                        published.insert(worker_id);
                     }
                 }
                 Ok(WorkerEvent::Removed { worker_id, .. }) => {
@@ -556,6 +562,43 @@ mod tests {
         assert!(
             wait_for(|| ns.get(&key).is_none()).await,
             "local removal was not tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_import_publishes_from_next_mutation() {
+        // The restart race end-to-end: a mesh import wins the URL, the local
+        // workflow claims it via register_or_replace, and the worker must be
+        // published from its next mutation onward.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        // Ghost state from a previous incarnation arrives first.
+        ns.put(
+            "worker:old-id",
+            bincode::serialize(&sample_state("old-id", "http://local:8080")).unwrap(),
+        );
+        assert!(
+            wait_for(|| registry.get_by_url("http://local:8080").is_some()).await,
+            "import landed"
+        );
+
+        // The local workflow claims the URL (register_or_replace path).
+        let claimed = registry.register_or_replace(local_worker("http://local:8080"));
+
+        // The Replaced event publishes the claimed worker (live origin gate).
+        let key = format!("worker:{}", claimed.as_str());
+        assert!(
+            wait_for(|| {
+                ns.get(&key)
+                    .and_then(|bytes| bincode::deserialize::<WorkerState>(&bytes).ok())
+                    .is_some_and(|s| !s.spec.is_empty())
+            })
+            .await,
+            "claimed worker must be published with its local spec"
         );
     }
 
