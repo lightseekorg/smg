@@ -9,8 +9,10 @@ servicer only acks (the embeddings never flow back through the gateway).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -237,20 +239,76 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # room also tags the RDMA free-notif, so resolve it before reading pixels.
         bootstrap_room = request.items[0].bootstrap_room if request.items else 0
 
+        _tl = os.environ.get("EPD_TL")
+        if _tl:
+            print(
+                f"EPD-TL stage=svc_rpc_start rid={request.request_id} room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
+                flush=True,
+            )
+
+        if os.environ.get("EPD_INGEST_OFFLOOP"):
+            # Per-image ingest (~63ms: proto->tensor ~40ms + pickle ~20ms)
+            # BLOCKS the lone asyncio event loop, so grpc.aio cannot deliver the
+            # next Encode message until the previous one is fully ingested --
+            # measured as the per-worker ~78ms serial pixel lane (the light cap).
+            # Split it: parse + pickle on a worker thread (overlapping across
+            # images; the GIL is released in the tensor copy/cast), then the
+            # cheap zmq send back ON the loop -- send_to_scheduler is a
+            # zmq.asyncio socket whose send() needs the running loop (and this
+            # keeps it single-writer). Fire-and-forget like the legacy
+            # send_pyobj (the returned Future is intentionally dropped).
+            payload = await asyncio.to_thread(
+                self._parse_and_pickle, request, bootstrap_room, _tl
+            )
+            self.async_llm.engine_core_client.send_to_scheduler.send(payload)
+            if _tl:
+                print(
+                    f"EPD-TL stage=svc_submit_done room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
+                    flush=True,
+                )
+        else:
+            self._ingest(request, bootstrap_room, _tl)
+        return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
+
+    def _build_encode_request(self, request, bootstrap_room, _tl=None):
+        """Proto -> engine EncodeRequest (the expensive per-image parse)."""
         items = []
         if request.HasField("mm_inputs"):
             items = self._items_from_proto(request.mm_inputs, bootstrap_room)
 
+        if _tl:
+            print(
+                f"EPD-TL stage=svc_parse_done room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
+                flush=True,
+            )
+
         EncodeRequest = _lazy_encode_request()
-        encode_request = EncodeRequest(
+        return EncodeRequest(
             request_id=request.request_id or uuid.uuid4().hex,
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,
             bootstrap_room=bootstrap_room,
             items=items,
         )
+
+    def _parse_and_pickle(self, request, bootstrap_room, _tl=None) -> bytes:
+        """Worker-thread half of the off-loop ingest: parse + pickle. The
+        pickled bytes match what send_pyobj would produce, so the scheduler's
+        recv_pyobj is unchanged."""
+        import pickle
+
+        encode_request = self._build_encode_request(request, bootstrap_room, _tl)
+        return pickle.dumps(encode_request, protocol=pickle.DEFAULT_PROTOCOL)
+
+    def _ingest(self, request, bootstrap_room, _tl=None) -> None:
+        """Legacy on-loop ingest (parse + submit on the event loop)."""
+        encode_request = self._build_encode_request(request, bootstrap_room, _tl)
         self.async_llm.submit_encode(encode_request)
-        return tokenspeed_encoder_pb2.EncodeResponse(accepted=True)
+        if _tl:
+            print(
+                f"EPD-TL stage=svc_submit_done room={bootstrap_room} ts_ms={time.time()*1000:.3f}",
+                flush=True,
+            )
 
     async def shutdown(self) -> None:
         """No persistent per-request state to drain (encode is fire-and-forget)."""
