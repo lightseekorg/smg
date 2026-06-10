@@ -1261,41 +1261,22 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         debug!("Started WorkerMonitor event loop");
     }
 
-    // Background-mode driver (claim-tick + sweeper over the background
-    // repository). BGM-PR-07 wires the real worker and gates startup on both a
-    // background repository AND a gRPC router being present — the SMG-local
-    // responses pipeline (and therefore headless background execution) only
-    // exists for the gRPC connection modes. The handle is bound for the server
-    // lifetime (like `_worker_manager`); dropping it stops the loops.
-    //
-    // - repo + gRPC router → spawn the driver with `RealBackgroundWorker`.
-    // - repo but no gRPC router (HTTP-only deployment) → do NOT spawn; leave
-    //   jobs durably `queued` (per #1614) and log once.
-    // - no repo → nothing to do.
-    let _background_driver = match (
-        app_context.background_repository.clone(),
-        router_manager.grpc_router(),
-    ) {
-        (Some(repository), Some(grpc_router)) => {
-            let headless: Arc<dyn HeadlessResponses> = grpc_router;
-            let worker = Arc::new(RealBackgroundWorker::new(
-                repository.clone(),
-                headless,
-                config.router_config.background.clone(),
-            ));
-            let driver =
-                BackgroundDriver::new(repository, worker, config.router_config.background.clone());
-            info!("Starting background-mode driver (gRPC headless execution enabled)");
-            Some(driver.spawn().await)
-        }
-        (Some(_), None) => {
-            info!(
-                "Background repository present but no gRPC router; background jobs will stay \
-                 queued (headless execution requires a gRPC connection mode)"
-            );
-            None
-        }
-        (None, _) => None,
+    // Background-mode driver (claim-tick + sweeper). Runs whenever background
+    // mode is enabled (a background repository is configured); per-job execution
+    // dispatches through the router manager. Bound for the server lifetime.
+    let _background_driver = if let Some(repository) = app_context.background_repository.clone() {
+        let headless: Arc<dyn HeadlessResponses> = router_manager.clone();
+        let worker = Arc::new(RealBackgroundWorker::new(
+            repository.clone(),
+            headless,
+            config.router_config.background.clone(),
+        ));
+        let driver =
+            BackgroundDriver::new(repository, worker, config.router_config.background.clone());
+        info!("Starting background-mode driver");
+        Some(driver.spawn().await)
+    } else {
+        None
     };
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(

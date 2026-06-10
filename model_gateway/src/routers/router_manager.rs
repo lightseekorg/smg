@@ -31,7 +31,7 @@ use openai_protocol::{
         RealtimeTranscriptionSessionCreateRequest,
     },
     rerank::RerankRequest,
-    responses::ResponsesRequest,
+    responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     transcription::{AudioFile, TranscriptionRequest},
     UNKNOWN_MODEL_ID,
 };
@@ -43,7 +43,7 @@ use crate::{
     config::RoutingMode,
     middleware::TenantRequestMeta,
     routers::{
-        common::header_utils::apply_provider_headers,
+        common::{background::HeadlessResponses, header_utils::apply_provider_headers},
         error as route_error,
         factory::{router_ids, RouterId},
         grpc::router::GrpcRouter,
@@ -182,29 +182,6 @@ impl RouterManager {
 
     pub fn router_count(&self) -> usize {
         self.routers.len()
-    }
-
-    /// Return the concrete [`GrpcRouter`] backing the GRPC_REGULAR (or GRPC_PD)
-    /// entry, if one is registered.
-    ///
-    /// The SMG-local responses pipeline — and therefore background headless
-    /// execution — only exists for the gRPC connection modes. The background
-    /// driver wiring (BGM-PR-07) uses this to decide whether it can run jobs:
-    /// `Some` → construct the real worker; `None` (HTTP-only deployment) → leave
-    /// jobs durably `queued`.
-    ///
-    /// `GrpcRouter` is cheaply `Clone` (all fields are `Arc`/shared), so this
-    /// downcasts the trait object via [`RouterTrait::as_any`] and clones it into
-    /// a fresh `Arc`.
-    pub fn grpc_router(&self) -> Option<Arc<GrpcRouter>> {
-        for id in [&router_ids::GRPC_REGULAR, &router_ids::GRPC_PD] {
-            if let Some(entry) = self.routers.get(id) {
-                if let Some(grpc) = entry.as_any().downcast_ref::<GrpcRouter>() {
-                    return Some(Arc::new(grpc.clone()));
-                }
-            }
-        }
-        None
     }
 
     /// Selects a router by weighting all four router types (grpc-pd, http-pd, grpc-regular,
@@ -875,6 +852,46 @@ impl std::fmt::Debug for RouterManager {
             .field("default_router", &*default_router)
             .finish()
     }
+}
+
+/// Per-model dispatch for headless (background) responses execution: routes to
+/// the model's router and runs it via [`GrpcRouter`]. A model on any non-gRPC
+/// backend yields a terminal `failed` response (the worker must not retry it).
+#[async_trait]
+impl HeadlessResponses for RouterManager {
+    async fn execute_responses_headless(
+        &self,
+        request: ResponsesRequest,
+        tenant_meta: TenantRequestMeta,
+        request_context: Option<smg_data_connector::RequestContext>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ResponsesResponse, Response> {
+        let Some(router) = self.select_router_for_request(Some(request.model.as_str())) else {
+            return Ok(background_unsupported_response(&request));
+        };
+        match router.as_any().downcast_ref::<GrpcRouter>() {
+            Some(grpc) => {
+                grpc.execute_responses_headless(request, tenant_meta, request_context, cancel)
+                    .await
+            }
+            None => Ok(background_unsupported_response(&request)),
+        }
+    }
+}
+
+/// Terminal `failed` response for a background job whose model has no
+/// headless-capable (gRPC) backend.
+fn background_unsupported_response(request: &ResponsesRequest) -> ResponsesResponse {
+    let mut resp =
+        ResponsesResponse::builder(format!("resp_{}", uuid::Uuid::now_v7()), &request.model)
+            .copy_from_request(request)
+            .status(ResponseStatus::Failed)
+            .build();
+    resp.error = Some(serde_json::json!({
+        "code": "background_execution_unavailable",
+        "message": "Background execution is not available for this model's connection mode.",
+    }));
+    resp
 }
 
 #[cfg(test)]

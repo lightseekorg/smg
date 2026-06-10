@@ -9,10 +9,7 @@ use std::sync::Arc;
 
 pub use driver::{BackgroundDriver, BackgroundDriverHandle};
 use smg_data_connector::BackgroundResponseRepository;
-pub use worker::{
-    BackgroundWorker, HeadlessResponses, RealBackgroundWorker, UnavailableBackgroundWorker,
-    BACKGROUND_EXECUTION_UNAVAILABLE,
-};
+pub use worker::{BackgroundWorker, HeadlessResponses, RealBackgroundWorker};
 
 use crate::config::BackgroundConfig;
 
@@ -42,14 +39,7 @@ impl BackgroundServices {
     }
 }
 
-// NOTE: BGM-PR-06 deliberately does *not* start the [`driver::BackgroundDriver`]
-// at process startup. The only [`BackgroundWorker`] that exists today is
-// [`UnavailableBackgroundWorker`], which finalizes every claimed job as
-// `failed`; running the driver with it would regress #1614's durable `queued`
-// contract (a `background=true` response that clients can poll) into immediate
-// failure for every gateway with a background repository — including the default
-// `history_backend=memory`. So PR-06 lands the driver + its tests but leaves it
-// unspawned; `background=true` requests stay durably `queued` (per #1614).
-//
-// BGM-PR-07 (#1221) wires `BackgroundDriver::spawn(...)` with the real
-// `BackgroundWorker` and gates it on `background_repository` being present.
+// The [`driver::BackgroundDriver`] is started at process startup whenever
+// background mode is enabled (a background repository is configured); it runs
+// claimed jobs via [`RealBackgroundWorker`], dispatching per-model through the
+// router manager. See `server.rs`.
