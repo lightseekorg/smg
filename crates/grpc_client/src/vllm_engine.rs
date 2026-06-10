@@ -201,6 +201,10 @@ impl VllmEngineClient {
     }
 
     /// Build gRPC SamplingParams from ChatCompletionRequest
+    #[expect(
+        deprecated,
+        reason = "ChatCompletionRequest.seed is marked Legacy by openai-protocol, but vLLM still honors it"
+    )]
     fn build_grpc_sampling_params_from_chat(
         request: &ChatCompletionRequest,
         tool_call_constraint: Option<(String, String)>,
@@ -237,6 +241,13 @@ impl VllmEngineClient {
             ignore_eos: request.ignore_eos,
             n: request.n.unwrap_or(1),
             logprobs,
+            // Proto seed is i32 (line 48 of generated vllm.grpc.engine.rs);
+            // OpenAI request seed is i64. Saturating cast keeps "set" vs
+            // "unset" distinction (None stays None — vLLM will pick a random
+            // seed itself, matching prior behaviour).
+            seed: request
+                .seed
+                .map(|s| s.clamp(i32::MIN as i64, i32::MAX as i64) as i32),
             constraint: Self::build_constraint_for_chat(request, tool_call_constraint)?,
             ..Default::default()
         })
@@ -533,6 +544,9 @@ impl VllmEngineClient {
             include_stop_str_in_output: request.no_stop_trim,
             n: request.n.unwrap_or(1),
             logprobs,
+            seed: request
+                .seed
+                .map(|s| s.clamp(i32::MIN as i64, i32::MAX as i64) as i32),
             constraint,
             ..Default::default()
         })
@@ -673,6 +687,48 @@ impl VllmEngineClient {
 mod tests {
     use super::*;
 
+    /// Minimal valid CompletionRequest for tests that only care about
+    /// sampling-param passthrough. CompletionRequest doesn't derive Default,
+    /// so we provide the required fields here.
+    fn minimal_completion_request() -> CompletionRequest {
+        CompletionRequest {
+            model: String::new(),
+            prompt: StringOrArray::String(String::new()),
+            best_of: None,
+            echo: false,
+            frequency_penalty: None,
+            logit_bias: None,
+            logprobs: None,
+            max_tokens: None,
+            n: None,
+            presence_penalty: None,
+            seed: None,
+            stop: None,
+            stream: false,
+            stream_options: None,
+            suffix: None,
+            temperature: None,
+            top_p: None,
+            user: None,
+            top_k: None,
+            min_p: None,
+            min_tokens: None,
+            repetition_penalty: None,
+            regex: None,
+            ebnf: None,
+            json_schema: None,
+            stop_token_ids: None,
+            no_stop_trim: false,
+            ignore_eos: false,
+            skip_special_tokens: true,
+            lora_path: None,
+            session_params: None,
+            return_hidden_states: false,
+            sampling_seed: None,
+            other: Default::default(),
+        }
+    }
+
     #[test]
     fn test_proto_types_compilation() {
         let _health_req = proto::HealthCheckRequest {};
@@ -761,6 +817,44 @@ mod tests {
     // TODO: SessionParams not in current proto - skip test
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "ChatCompletionRequest.seed is marked Legacy by openai-protocol, but vLLM still honors it"
+    )]
+    fn test_chat_sampling_params_seed_is_passed_through() {
+        // Regression guard: build_grpc_sampling_params_from_chat() previously
+        // omitted the seed field, so `..Default::default()` filled proto seed
+        // with None even when the request set it. At temp=0 this was inert
+        // (vLLM's gumbel sampler gates seed use on temp != 0), but at temp>0
+        // it silently broke reproducibility.
+        let request = ChatCompletionRequest {
+            seed: Some(42),
+            ..Default::default()
+        };
+        let params = VllmEngineClient::build_grpc_sampling_params_from_chat(&request, None)
+            .expect("build sampling params");
+        assert_eq!(params.seed, Some(42));
+
+        // No seed in the request → proto seed stays None (vLLM picks one).
+        let unset = ChatCompletionRequest {
+            seed: None,
+            ..Default::default()
+        };
+        let unset_params = VllmEngineClient::build_grpc_sampling_params_from_chat(&unset, None)
+            .expect("build sampling params");
+        assert_eq!(unset_params.seed, None);
+
+        // Saturating cast: request.seed is i64, proto seed is i32.
+        let huge = ChatCompletionRequest {
+            seed: Some(i64::MAX),
+            ..Default::default()
+        };
+        let huge_params = VllmEngineClient::build_grpc_sampling_params_from_chat(&huge, None)
+            .expect("build sampling params");
+        assert_eq!(huge_params.seed, Some(i32::MAX));
+    }
+
+    #[test]
     fn test_responses_sampling_params_are_passed_through() {
         use openai_protocol::responses::ResponsesRequest;
 
@@ -794,6 +888,38 @@ mod tests {
             VllmEngineClient::build_grpc_sampling_params_from_responses(&disabled, None)
                 .expect("build sampling params");
         assert_eq!(disabled_params.top_k, 0);
+    }
+
+    #[test]
+    fn test_completion_sampling_params_seed_is_passed_through() {
+        // Regression guard: build_grpc_sampling_params_from_completion()
+        // previously omitted the seed field, so `..Default::default()`
+        // filled proto seed with None even when the request set it.
+        let request = CompletionRequest {
+            seed: Some(42),
+            ..minimal_completion_request()
+        };
+        let params = VllmEngineClient::build_grpc_sampling_params_from_completion(&request)
+            .expect("build sampling params");
+        assert_eq!(params.seed, Some(42));
+
+        // No seed → proto seed stays None.
+        let unset = CompletionRequest {
+            seed: None,
+            ..minimal_completion_request()
+        };
+        let unset_params = VllmEngineClient::build_grpc_sampling_params_from_completion(&unset)
+            .expect("build sampling params");
+        assert_eq!(unset_params.seed, None);
+
+        // Saturating cast: request.seed is i64, proto seed is i32.
+        let huge = CompletionRequest {
+            seed: Some(i64::MAX),
+            ..minimal_completion_request()
+        };
+        let huge_params = VllmEngineClient::build_grpc_sampling_params_from_completion(&huge)
+            .expect("build sampling params");
+        assert_eq!(huge_params.seed, Some(i32::MAX));
     }
 
     #[test]
