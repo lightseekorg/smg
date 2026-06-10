@@ -228,9 +228,6 @@ impl WasmModuleManager {
 
     /// Execute a WASM module for a given attach point
     /// Returns the Action if successful, or None if execution failed
-    ///
-    /// This is a convenience method that wraps execute_module_interface and handles
-    /// error logging automatically.
     pub async fn execute_module_for_attach_point(
         &self,
         module: &WasmModule,

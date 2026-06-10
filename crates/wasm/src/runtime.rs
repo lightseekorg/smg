@@ -268,7 +268,7 @@ impl WasmThreadPool {
 
         wasmtime_config.async_stack_size(config.max_stack_size);
         wasmtime_config.async_support(true);
-        wasmtime_config.wasm_component_model(true); // Enable component model
+        wasmtime_config.wasm_component_model(true);
         wasmtime_config.epoch_interruption(true); // Enable epoch-based timeout interruption
 
         let engine = match Engine::new(&wasmtime_config) {
@@ -294,7 +294,6 @@ impl WasmThreadPool {
             return;
         }
 
-        // SAFETY: 10 is a non-zero literal, so NonZeroUsize::new(10) always returns Some.
         let default_capacity = NonZeroUsize::new(10).unwrap_or(NonZeroUsize::MIN);
         let cache_capacity =
             NonZeroUsize::new(config.module_cache_size).unwrap_or(default_capacity);
