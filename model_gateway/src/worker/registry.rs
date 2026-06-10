@@ -1336,16 +1336,31 @@ impl WorkerRegistry {
                 .or_insert_with(|| WorkerId::from_string(state.worker_id.clone()));
         }
 
-        // New worker — build from the full WorkerSpec if available,
-        // otherwise fall back to minimal builder.
-        let worker = match bincode::deserialize::<openai_protocol::worker::WorkerSpec>(&state.spec)
-        {
-            Ok(spec) if !state.spec.is_empty() => {
-                super::builder::BasicWorkerBuilder::from_spec(spec).build()
-            }
-            _ => super::builder::BasicWorkerBuilder::new(&state.url)
+        // New worker — build from the full WorkerSpec (JSON) if available,
+        // otherwise fall back to the minimal builder.
+        let minimal = || {
+            super::builder::BasicWorkerBuilder::new(&state.url)
                 .model(ModelCard::new(&state.model_id))
-                .build(),
+                .build()
+        };
+        let mut spec_applied = false;
+        let worker = if state.spec.is_empty() {
+            minimal()
+        } else {
+            match serde_json::from_slice::<openai_protocol::worker::WorkerSpec>(&state.spec) {
+                Ok(spec) => {
+                    spec_applied = true;
+                    super::builder::BasicWorkerBuilder::from_spec(spec).build()
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        url = %state.url,
+                        %err,
+                        "undecodable WorkerSpec in mesh state; importing minimal worker"
+                    );
+                    minimal()
+                }
+            }
         };
 
         // An explicitly-unhealthy import must not be routable: the builder
@@ -1370,7 +1385,7 @@ impl WorkerRegistry {
                 url = %state.url,
                 model = %state.model_id,
                 healthy = state.health,
-                has_spec = !state.spec.is_empty(),
+                spec_applied,
                 "Registered mesh-synced worker into local registry"
             );
         }
@@ -1593,7 +1608,7 @@ mod tests {
             "peer-w1",
             "http://remote:8080",
             false,
-            bincode::serialize(&spec).unwrap(),
+            serde_json::to_vec(&spec).unwrap(),
         ));
         let worker = registry.get_by_url("http://remote:8080").expect("imported");
         assert_ne!(

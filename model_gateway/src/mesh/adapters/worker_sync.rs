@@ -253,7 +253,16 @@ impl WorkerSyncAdapter {
 /// `WorkerSpec` so the importing side can rebuild the worker faithfully;
 /// `version` is the registry revision (informational — CRDT ordering is
 /// owned by the Lamport clock).
+///
+/// The spec is JSON, not bincode: `WorkerSpec` uses `skip_serializing_*`
+/// serde attributes, which a positional format cannot round-trip — bincode
+/// deserialization fails for every spec, silently downgrading imports to
+/// the minimal builder. JSON is self-describing and round-trips them.
 fn worker_state_of(worker_id: &WorkerId, worker: &Arc<dyn Worker>) -> WorkerState {
+    let spec = serde_json::to_vec(&worker.metadata().spec).unwrap_or_else(|err| {
+        warn!(url = %worker.url(), %err, "failed to encode WorkerSpec; publishing without spec");
+        Vec::new()
+    });
     WorkerState {
         worker_id: worker_id.as_str().to_string(),
         model_id: worker.model_id().to_string(),
@@ -261,7 +270,7 @@ fn worker_state_of(worker_id: &WorkerId, worker: &Arc<dyn Worker>) -> WorkerStat
         health: worker.is_healthy(),
         load: worker.load() as f64,
         version: worker.revision(),
-        spec: bincode::serialize(&worker.metadata().spec).unwrap_or_default(),
+        spec,
     }
 }
 
@@ -562,6 +571,49 @@ mod tests {
         assert!(
             wait_for(|| ns.get(&key).is_none()).await,
             "local removal was not tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_spec_round_trips_into_importing_registry() {
+        // The faithful-import contract: a gRPC decode worker published by
+        // one node must import as a gRPC decode worker, not fall back to
+        // the minimal HTTP/Regular builder. (bincode could not round-trip
+        // WorkerSpec's serde-skip attributes; JSON does.)
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+
+        let pub_registry = Arc::new(WorkerRegistry::new());
+        let publisher = WorkerSyncAdapter::new(ns.clone(), pub_registry.clone());
+        publisher.start();
+
+        let sub_registry = Arc::new(WorkerRegistry::new());
+        let subscriber = WorkerSyncAdapter::new(ns, sub_registry.clone());
+        subscriber.start();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("grpc://remote:9000")
+                .model(ModelCard::new("llama-3"))
+                .connection_mode(crate::worker::ConnectionMode::Grpc)
+                .worker_type(crate::worker::WorkerType::Decode)
+                .build(),
+        );
+        pub_registry.register(worker).unwrap();
+
+        assert!(
+            wait_for(|| sub_registry.get_by_url("grpc://remote:9000").is_some()).await,
+            "import did not land"
+        );
+        let imported = sub_registry.get_by_url("grpc://remote:9000").unwrap();
+        assert_eq!(
+            *imported.connection_mode(),
+            crate::worker::ConnectionMode::Grpc,
+            "connection mode must survive the spec round trip"
+        );
+        assert_eq!(
+            *imported.worker_type(),
+            crate::worker::WorkerType::Decode,
+            "worker type must survive the spec round trip"
         );
     }
 
