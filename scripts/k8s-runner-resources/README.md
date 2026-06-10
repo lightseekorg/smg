@@ -119,6 +119,16 @@ kubectl get pods -n actions-runner-system
 
 Each runner set should have a listener pod in `Running` state. Runner pods will be created on-demand when workflows target the corresponding `runs-on` label (matching `runnerScaleSetName` in each values file).
 
+## H100 Runner NVMe Storage
+
+The H100 runner scale-set values mount `/raid/actions-runner` from the host into each runner pod. Workspace, cache, temp, and Docker storage paths use `subPathExpr: $(POD_NAME)/...` so concurrent pods on the same node do not share mutable state.
+
+Because Kubernetes does not garbage collect `hostPath` contents when a pod is deleted, the H100 values also mount the parent NVMe path into the dind sidecar-style init container and use a `preStop` hook to remove `/runner-nvme/${POD_NAME:?}` during normal pod termination. This cleanup is best-effort; force deletion or node failure can still leave orphaned directories. Add host-level pruning if the cluster needs stronger cleanup guarantees.
+
+Do not copy this exact `/raid/actions-runner` setup to non-H100 runner values unless the target node pool has the same NVMe layout and enough free space. During Moirai validation, A10 nodes did not safely support this path.
+
+For the legacy `actions.summerwind.dev` `RunnerDeployment` controller, the generated dind lifecycle is controller-managed, so dind `preStop` hooks from the template may not survive into pods. Use the official GitHub ARC scale-set values above for this configuration, or validate any Summerwind-specific cleanup separately.
+
 ## Upgrading
 
 To update a runner set (e.g. after changing values):
