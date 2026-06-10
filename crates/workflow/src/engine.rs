@@ -6,7 +6,6 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    marker::PhantomData,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -187,7 +186,6 @@ pub struct WorkflowEngine<D: WorkflowData, S: StateStore<D> = InMemoryStore<D>> 
     shutdown_tx: Arc<watch::Sender<bool>>,
     /// Count of active workflow executions
     active_workflows: Arc<AtomicUsize>,
-    _phantom: PhantomData<D>,
 }
 
 impl<D: WorkflowData> WorkflowEngine<D, InMemoryStore<D>> {
@@ -206,7 +204,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             event_bus: Arc::new(EventBus::new()),
             shutdown_tx: Arc::new(shutdown_tx),
             active_workflows: Arc::new(AtomicUsize::new(0)),
-            _phantom: PhantomData,
         }
     }
 
@@ -520,7 +517,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             }
 
             // Phase 1: Check waiting steps + deps-ready steps + blocked detection
-            // Single lock acquisition for all read operations
             let (
                 newly_ready_from_wait,
                 deps_ready_indices,
@@ -556,7 +552,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             };
 
             // Phase 2: Process waiting and deps-ready steps, update waiting_until
-            // Single write lock for all mutations
             // Returns (ready_to_launch, steps_added_to_waiting)
             let (ready_to_launch, steps_added_to_waiting) = {
                 let now = std::time::Instant::now();
@@ -605,7 +600,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 (ready, added_to_waiting)
             };
 
-            // Check if we're done
             if total_processed == step_count {
                 break;
             }
@@ -645,7 +639,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 return Ok(());
             }
 
-            // Launch ready steps in parallel
             let tasks_launched = ready_to_launch.len();
             if tasks_launched > 0 {
                 let mut t = tracker.write();
@@ -811,7 +804,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 });
             }
 
-            // Single lock read for both checks
             let (has_running, has_waiting) = {
                 let t = tracker.read();
                 (
@@ -821,7 +813,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             };
 
             if has_running {
-                // Wait for a step to complete; Phase 0 will drain any others
                 if let Some((completed_step_id, result)) = rx.recv().await {
                     tracing::debug!(
                         step_id = %completed_step_id,
@@ -1176,7 +1167,6 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             event_bus: Arc::clone(&self.event_bus),
             shutdown_tx: Arc::clone(&self.shutdown_tx),
             active_workflows: Arc::clone(&self.active_workflows),
-            _phantom: PhantomData,
         }
     }
 }

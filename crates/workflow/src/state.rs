@@ -1,6 +1,6 @@
 //! Workflow state management
 
-use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -57,14 +57,12 @@ pub trait StateStore<D: WorkflowData>: Send + Sync + Clone {
 #[derive(Clone)]
 pub struct InMemoryStore<D: WorkflowData> {
     states: Arc<RwLock<HashMap<WorkflowInstanceId, WorkflowState<D>>>>,
-    _phantom: PhantomData<D>,
 }
 
 impl<D: WorkflowData> InMemoryStore<D> {
     pub fn new() -> Self {
         Self {
             states: Arc::new(RwLock::new(HashMap::new())),
-            _phantom: PhantomData,
         }
     }
 
