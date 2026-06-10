@@ -91,6 +91,26 @@ All fields and defaults match SGLang's `KVEventsConfig` (see `python/sglang/srt/
 
 For data-parallel deployments, the actual TCP port becomes `endpoint_port + dp_rank` (rank 0 keeps the configured port).
 
+### Alternative: launch a vLLM worker
+
+vLLM emits KV cache events the same way (ZMQ publisher); enable them with `--kv-events-config` and run the worker in SMG gRPC mode:
+
+```bash
+pip install "smg-grpc-servicer[vllm]"
+
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv-events"}'
+# ...launched in SMG gRPC mode, the same way you run vLLM gRPC workers today.
+```
+
+| Field | Why |
+|---|---|
+| `enable_kv_cache_events: true` | vLLM-specific master switch. Without it no events are published even if a publisher is set. |
+| `publisher: "zmq"` | Selects the ZMQ publisher the servicer bridges. |
+| `endpoint` / `topic` | Same meaning as SGLang. For data-parallel, the port is `endpoint_port + dp_rank`; SMG currently consumes rank 0. |
+
+Everything downstream (SMG flags, block-size learning, verification logs) is identical to the SGLang flow — `KvEventMonitor` is engine-agnostic.
+
 ---
 
 ## Step 2 — Launch SMG
