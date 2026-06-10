@@ -21,7 +21,7 @@
 //! `on_remote_worker_state`, which ignores state for locally-owned
 //! workers — so the echo is inert.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use smg_mesh::{CrdtNamespace, WorkerState};
 use tokio::sync::broadcast;
@@ -30,6 +30,9 @@ use tracing::{debug, info, warn};
 use crate::worker::{event::WorkerEvent, registry::WorkerId, Worker, WorkerOrigin, WorkerRegistry};
 
 const PREFIX: &str = "worker:";
+
+/// Cadence of the inbound store↔registry reconcile pass.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Bridge between the `worker:` CRDT namespace and the gateway's
 /// in-process `WorkerRegistry`.
@@ -85,10 +88,23 @@ impl WorkerSyncAdapter {
         let outbound = Arc::clone(self);
         #[expect(
             clippy::disallowed_methods,
-            reason = "publish loop ends automatically when the registry drops and closes the broadcast channel; no handle needed"
+            reason = "publish loop runs for the adapter's lifetime, which is the process lifetime; the task holds the registry alive, so the Closed arm is defensive only"
         )]
         tokio::spawn(async move {
             outbound.run_outbound(events).await;
+        });
+
+        let reconcile = Arc::clone(self);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "reconcile task runs for the adapter's lifetime, which is the process lifetime"
+        )]
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+            loop {
+                interval.tick().await;
+                reconcile.reconcile_once();
+            }
         });
 
         let this = Arc::clone(self);
@@ -129,6 +145,37 @@ impl WorkerSyncAdapter {
         }
     }
 
+    /// One reconcile pass aligning the registry with the store. Subscription
+    /// notifications are delivered via a bounded `try_send` and a dropped one
+    /// is never re-fired (re-merged ops are idempotent no-ops), so this
+    /// periodic pass is the recovery path for missed puts — including a
+    /// cold-start merge burst larger than the channel — and missed
+    /// tombstones. Removal runs first so a same-URL key from another
+    /// publisher can re-import in the same pass.
+    fn reconcile_once(&self) {
+        for (id, worker) in self.worker_registry.get_all_with_ids() {
+            let key = format!("{PREFIX}{}", id.as_str());
+            if self.workers.get(&key).is_some() {
+                continue;
+            }
+            match self.worker_registry.origin_of(&id) {
+                Some(WorkerOrigin::Mesh) => {
+                    let removed = self.worker_registry.remove_remote(&id);
+                    if removed.is_some() {
+                        info!(worker_id = %id.as_str(), "reconcile removed worker with tombstoned key");
+                    }
+                }
+                // A local worker with no backing key: its publish (or its
+                // re-assert after a foreign tombstone) was lost. Re-publish.
+                Some(WorkerOrigin::Local) => {
+                    self.on_worker_changed(id.as_str(), &worker_state_of(&id, &worker));
+                }
+                None => {}
+            }
+        }
+        self.backfill_existing();
+    }
+
     /// Bring the registry in line with the store's current state for one
     /// key: a live value routes through `on_remote_worker_state`, a missing
     /// (tombstoned) one through `remove_remote`. Tombstones resolve via the
@@ -141,7 +188,25 @@ impl WorkerSyncAdapter {
                 let id = WorkerId::from_string(worker_id.to_string());
                 match self.worker_registry.remove_remote(&id) {
                     Some(_) => info!(worker_id, "removed worker on remote tombstone"),
-                    None => debug!(worker_id, "ignored tombstone (unknown or local)"),
+                    None => {
+                        // A tombstone for a key this node owns is anomalous
+                        // (buggy peer or bad tooling). The delete already
+                        // removed the key cluster-wide and peers dropped
+                        // their imports, so re-assert the state — otherwise
+                        // the worker stays delisted everywhere until its
+                        // next local status change.
+                        if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
+                            if let Some(worker) = self.worker_registry.get(&id) {
+                                warn!(
+                                    worker_id,
+                                    "re-publishing locally-owned worker after foreign tombstone"
+                                );
+                                self.on_worker_changed(worker_id, &worker_state_of(&id, &worker));
+                                return;
+                            }
+                        }
+                        debug!(worker_id, "ignored tombstone (unknown id)");
+                    }
                 }
             }
         }
@@ -486,9 +551,13 @@ mod tests {
         assert!(wait_for(|| ns.get(&key).is_some()).await, "publish landed");
 
         // A hostile/buggy peer tombstones OUR key: the registry must
-        // refuse, and the worker stays registered.
+        // refuse, the worker stays registered, and the key is re-asserted
+        // so peers that dropped their imports re-learn it.
         ns.delete(&key);
-        sleep(Duration::from_millis(50)).await;
+        assert!(
+            wait_for(|| ns.get(&key).is_some()).await,
+            "owned key must be re-published after a foreign tombstone"
+        );
         assert!(
             registry.get(&id).is_some(),
             "a remote tombstone must never remove a locally-owned worker"
@@ -571,6 +640,32 @@ mod tests {
         assert!(
             wait_for(|| ns.get(&key).is_none()).await,
             "local removal was not tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_recovers_missed_put_and_missed_tombstone() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        // No start(): models every notification being dropped.
+
+        ns.put(
+            "worker:peer-w1",
+            bincode::serialize(&sample_state("peer-w1", "http://remote:8080")).unwrap(),
+        );
+        adapter.reconcile_once();
+        assert!(
+            registry.get_by_url("http://remote:8080").is_some(),
+            "reconcile recovers a missed put"
+        );
+
+        ns.delete("worker:peer-w1");
+        adapter.reconcile_once();
+        assert!(
+            registry.get_by_url("http://remote:8080").is_none(),
+            "reconcile recovers a missed tombstone"
         );
     }
 
