@@ -1139,6 +1139,12 @@ impl WorkerRegistry {
             return None;
         }
 
+        // Record origin BEFORE the worker becomes visible in `workers`:
+        // lock-free readers resolve workers by URL the moment the insert
+        // lands, and a visible worker with no origin would be treated as
+        // mesh-imported (peer state could mutate a local worker's status).
+        self.worker_origins.insert(worker_id.clone(), origin);
+
         self.workers.insert(worker_id.clone(), worker.clone());
 
         // Update model index for O(1) lookups using copy-on-write.
@@ -1159,10 +1165,6 @@ impl WorkerRegistry {
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
-
-        // Record origin under the lock, before the event, so any consumer
-        // that sees `Registered` can query the origin race-free.
-        self.worker_origins.insert(worker_id.clone(), origin);
 
         // Broadcast under the lock so event order per worker_id is
         // strictly: Registered → (Replaced | StatusChanged | Removed).
