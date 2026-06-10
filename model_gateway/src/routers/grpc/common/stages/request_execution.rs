@@ -12,14 +12,47 @@ use crate::{
             context::{
                 ClientSelection, ExecutionResult, LoadGuards, RequestContext, WorkerSelection,
             },
-            proto_wrapper::{ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoStream},
+            proto_wrapper::{
+                ProtoEmbedRequest, ProtoGenerateRequest, ProtoRequest, ProtoResponseVariant,
+                ProtoStream,
+            },
             utils::tonic_ext::{TonicResultExt, TonicStatusExt},
         },
     },
-    worker::{RuntimeType, DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR},
+    worker::{RuntimeType, DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR, NIXL_CONNECTOR},
 };
 
 type StreamResult = Result<ProtoStream, tonic::Status>;
+
+/// KV-transfer params tagged onto the NIXL prefill leg so the engine pins its
+/// KV blocks and returns the handoff params for the decode worker.
+const NIXL_PREFILL_KV_PARAMS: &str = r#"{"do_remote_decode":true,"do_remote_prefill":false}"#;
+
+/// PD KV-transfer behavior derived from prefill worker metadata.
+#[derive(Debug, Clone, PartialEq)]
+enum KvConnectorMode {
+    /// MooncakeConnector: inject bootstrap host/port into the decode request.
+    Mooncake { host: String, port: u32 },
+    /// NixlConnector: tag prefill with do_remote_decode, relay returned params to decode.
+    Nixl,
+    /// Unknown/absent connector: relay returned params opportunistically.
+    Passthrough,
+}
+
+fn kv_connector_mode(
+    kv_connector: Option<&str>,
+    bootstrap_host: &str,
+    bootstrap_port: Option<u16>,
+) -> KvConnectorMode {
+    match kv_connector {
+        Some(MOONCAKE_CONNECTOR) => KvConnectorMode::Mooncake {
+            host: bootstrap_host.to_string(),
+            port: u32::from(bootstrap_port.unwrap_or(DEFAULT_BOOTSTRAP_PORT)),
+        },
+        Some(NIXL_CONNECTOR) => KvConnectorMode::Nixl,
+        _ => KvConnectorMode::Passthrough,
+    }
+}
 
 /// Request execution stage: Execute gRPC requests (single or dual dispatch)
 pub(crate) struct RequestExecutionStage {
@@ -103,7 +136,7 @@ impl PipelineStage for RequestExecutionStage {
                     ExecutionMode::DualDispatch => {
                         // Dispatch based on runtime type:
                         // - SGLang: parallel dual dispatch with bootstrap metadata
-                        // - vLLM: sequential prefill-then-decode (NIXL handles KV transfer)
+                        // - vLLM: sequential prefill-then-decode with kv_transfer_params relay
                         let runtime_type = workers.pd_runtime_type();
                         match runtime_type {
                             Some(RuntimeType::Vllm) => {
@@ -275,11 +308,11 @@ impl RequestExecutionStage {
     }
 
     /// Execute vLLM PD: send to prefill with max_tokens=1 first, wait for completion,
-    /// then send original request to decode. NIXL/Mooncake handles KV cache transfer.
+    /// then send original request to decode.
     ///
-    /// For Mooncake: uses bootstrap_host/port from prefill worker metadata to inject
-    /// kv_transfer_params into decode request so decode knows where to fetch KV cache.
-    /// For NIXL: no kv_transfer_params needed (uses prompt prefix matching).
+    /// For Mooncake: injects bootstrap_host/port from prefill worker metadata into
+    /// the decode request. For NIXL: tags the prefill request with do_remote_decode,
+    /// then relays the kv_transfer_params returned by the prefill engine to decode.
     async fn execute_sequential_pd(
         &self,
         proto_request: ProtoGenerateRequest,
@@ -297,46 +330,59 @@ impl RequestExecutionStage {
             )
         })?;
 
-        // Get bootstrap info from prefill worker metadata (only for Mooncake PD)
-        // NIXL uses prefix matching and doesn't need kv_transfer_params
-        let kv_transfer_params: Option<(String, u32)> = workers
+        let mode = workers
             .prefill_worker()
-            .map(|w| w.metadata())
-            .filter(|meta| meta.spec.kv_connector.as_deref() == Some(MOONCAKE_CONNECTOR))
-            .map(|meta| {
-                let port = meta.spec.bootstrap_port.unwrap_or(DEFAULT_BOOTSTRAP_PORT);
-                (meta.spec.bootstrap_host.clone(), port as u32)
-            });
+            .map(|w| {
+                let meta = w.metadata();
+                kv_connector_mode(
+                    meta.spec.kv_connector.as_deref(),
+                    &meta.spec.bootstrap_host,
+                    meta.spec.bootstrap_port,
+                )
+            })
+            .unwrap_or(KvConnectorMode::Passthrough);
 
-        if let Some((ref host, port)) = kv_transfer_params {
-            debug!(
+        match &mode {
+            KvConnectorMode::Mooncake { host, port } => debug!(
                 bootstrap_host = %host,
                 bootstrap_port = port,
                 "vLLM PD (Mooncake): will inject kv_transfer_params into decode request"
-            );
-        } else {
-            // Log at info level since this could indicate misconfiguration if user expects Mooncake
-            // NIXL doesn't need kv_transfer_params (uses automatic prefix matching)
-            // If user expects Mooncake but kv_connector wasn't discovered, they can manually set
-            // labels: { "kv_connector": "MooncakeConnector" } in worker config
-            let has_kv_connector = workers
-                .prefill_worker()
-                .map(|w| w.metadata().spec.kv_connector.is_some())
-                .unwrap_or(false);
-            if has_kv_connector {
-                debug!("vLLM PD (NIXL): using automatic prefix matching for KV transfer");
-            } else {
-                debug!(
-                    "vLLM PD: no kv_connector detected (server may not support GetServerInfo kv fields). \
-                     Assuming NIXL mode. For Mooncake, set labels.kv_connector=MooncakeConnector in worker config"
-                );
+            ),
+            KvConnectorMode::Nixl => debug!(
+                "vLLM PD (NIXL): will tag prefill with do_remote_decode and relay returned kv_transfer_params to decode"
+            ),
+            KvConnectorMode::Passthrough => {
+                // Warn once: PD without a discovered connector usually means GetServerInfo
+                // lacks kv fields or labels.kv_connector is missing in worker config
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    tracing::warn!(
+                        "vLLM PD: no kv_connector detected on prefill worker; KV transfer params \
+                         will only be relayed if the engine returns them"
+                    );
+                });
             }
         }
 
-        // Clone request and set max_tokens=1, stream=false for prefill
+        // NIXL handoff is single-consumer: with n>1 each fan-out child on decode would
+        // pull, and the first completion frees the prefill blocks under its siblings
+        let relay_kv_params = proto_request.sampling_n() <= 1;
+
+        // Clone request and sanitize sampling (max_tokens=1, n=1), stream=false for prefill
         let mut prefill_request = proto_request.clone_inner();
-        prefill_request.set_max_tokens_for_prefill(1);
+        prefill_request.sanitize_sampling_for_prefill(1);
         prefill_request.set_stream(false);
+        if mode == KvConnectorMode::Nixl {
+            if relay_kv_params {
+                prefill_request.set_kv_transfer_params_json(NIXL_PREFILL_KV_PARAMS.to_string());
+            } else {
+                debug!(
+                    request_id = %prefill_request.request_id(),
+                    "vLLM PD (NIXL): n>1 request, skipping kv_transfer_params relay \
+                     (decode recomputes the prompt locally)"
+                );
+            }
+        }
 
         debug!(
             request_id = %prefill_request.request_id(),
@@ -353,11 +399,16 @@ impl RequestExecutionStage {
                 e.to_http_error("prefill_worker_failed_to_start", format!("Prefill worker failed to start: {}", e.message()))
             })?;
 
-        // Drain prefill response (we just need to wait for completion)
+        // Drain prefill response, harvesting connector params from the Complete frame
+        let mut prefill_kv_params: Option<String> = None;
         while let Some(result) = prefill_stream.next().await {
             match result {
-                Ok(_response) => {
-                    // Just consume the response, we use bootstrap info from worker metadata
+                Ok(response) => {
+                    if let ProtoResponseVariant::Complete(complete) = response.into_response() {
+                        if let Some(json) = complete.kv_transfer_params_json() {
+                            prefill_kv_params = Some(json.to_owned());
+                        }
+                    }
                 }
                 Err(e) => {
                     workers.record_outcome_prefill(e.http_status().as_u16());
@@ -374,15 +425,38 @@ impl RequestExecutionStage {
 
         debug!("vLLM PD: prefill completed, sending decode request");
 
-        // Clone original request and inject kv_transfer_params if present (Mooncake)
+        // Decode reuses proto_request as-is; same request_id as the prefill leg is
+        // load-bearing for NIXL P/D correlation on vLLM < 0.13
         let mut decode_request = proto_request;
-        if let Some((remote_host, remote_port)) = kv_transfer_params {
-            debug!(
-                remote_host = %remote_host,
-                remote_port = remote_port,
-                "vLLM PD: injecting kv_transfer_params into decode request"
-            );
-            decode_request.set_kv_transfer_params(remote_host, remote_port);
+        match (&mode, prefill_kv_params) {
+            // Mooncake is n>1-safe: host/port is connection info, not a single-consumer handoff
+            (KvConnectorMode::Mooncake { host, port }, _) => {
+                debug!(
+                    remote_host = %host,
+                    remote_port = port,
+                    "vLLM PD: injecting kv_transfer_params into decode request"
+                );
+                decode_request.set_kv_transfer_params(host.clone(), *port);
+            }
+            (KvConnectorMode::Nixl | KvConnectorMode::Passthrough, Some(json))
+                if relay_kv_params =>
+            {
+                debug!(
+                    request_id = %decode_request.request_id(),
+                    params_len = json.len(),
+                    "vLLM PD: relaying prefill kv_transfer_params to decode request"
+                );
+                decode_request.set_kv_transfer_params_json(json);
+            }
+            (KvConnectorMode::Nixl, None) if relay_kv_params => {
+                tracing::warn!(
+                    request_id = %decode_request.request_id(),
+                    "vLLM PD (NIXL): prefill returned no kv_transfer_params; decode will \
+                     recompute the prompt locally (outdated smg-grpc-servicer or missing \
+                     kv-transfer-config?)"
+                );
+            }
+            _ => {}
         }
 
         // Send request to decode
@@ -400,5 +474,151 @@ impl RequestExecutionStage {
         Ok(ExecutionResult::Single {
             stream: decode_stream,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smg_grpc_client::vllm_proto as vllm;
+
+    use super::*;
+
+    #[test]
+    fn kv_connector_mode_mooncake_uses_bootstrap_metadata() {
+        let mode = kv_connector_mode(Some(MOONCAKE_CONNECTOR), "prefill-host", Some(9090));
+        assert_eq!(
+            mode,
+            KvConnectorMode::Mooncake {
+                host: "prefill-host".to_string(),
+                port: 9090,
+            }
+        );
+    }
+
+    #[test]
+    fn kv_connector_mode_mooncake_defaults_port() {
+        let mode = kv_connector_mode(Some(MOONCAKE_CONNECTOR), "prefill-host", None);
+        assert_eq!(
+            mode,
+            KvConnectorMode::Mooncake {
+                host: "prefill-host".to_string(),
+                port: u32::from(DEFAULT_BOOTSTRAP_PORT),
+            }
+        );
+    }
+
+    #[test]
+    fn kv_connector_mode_nixl() {
+        assert_eq!(
+            kv_connector_mode(Some(NIXL_CONNECTOR), "ignored", Some(9090)),
+            KvConnectorMode::Nixl
+        );
+    }
+
+    #[test]
+    fn kv_connector_mode_unknown_or_missing_is_passthrough() {
+        assert_eq!(
+            kv_connector_mode(Some("LMCacheConnector"), "host", None),
+            KvConnectorMode::Passthrough
+        );
+        assert_eq!(
+            kv_connector_mode(None, "host", None),
+            KvConnectorMode::Passthrough
+        );
+    }
+
+    #[test]
+    fn nixl_prefill_kv_params_is_valid_json() {
+        let value: serde_json::Value = serde_json::from_str(NIXL_PREFILL_KV_PARAMS).unwrap();
+        assert_eq!(value["do_remote_decode"], true);
+        assert_eq!(value["do_remote_prefill"], false);
+        assert_eq!(value.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sanitize_sampling_for_prefill_forces_length_capped_finish() {
+        let mut request = ProtoGenerateRequest::Vllm(Box::new(vllm::GenerateRequest {
+            sampling_params: Some(vllm::SamplingParams {
+                max_tokens: Some(128),
+                min_tokens: 16,
+                n: 4,
+                stop: vec!["</s>".to_string()],
+                stop_token_ids: vec![2],
+                ignore_eos: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        request.sanitize_sampling_for_prefill(1);
+        let ProtoGenerateRequest::Vllm(req) = request else {
+            panic!("expected vLLM request");
+        };
+        let params = req.sampling_params.unwrap();
+        assert_eq!(params.max_tokens, Some(1));
+        assert_eq!(params.min_tokens, 0);
+        assert_eq!(params.n, 1);
+        assert!(params.stop.is_empty());
+        assert!(params.stop_token_ids.is_empty());
+        assert!(params.ignore_eos);
+    }
+
+    #[test]
+    fn sampling_n_defaults_to_one() {
+        let unset = ProtoGenerateRequest::Vllm(Box::default());
+        assert_eq!(unset.sampling_n(), 1);
+
+        let zero = ProtoGenerateRequest::Vllm(Box::new(vllm::GenerateRequest {
+            sampling_params: Some(vllm::SamplingParams {
+                n: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        assert_eq!(zero.sampling_n(), 1);
+
+        let four = ProtoGenerateRequest::Vllm(Box::new(vllm::GenerateRequest {
+            sampling_params: Some(vllm::SamplingParams {
+                n: 4,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        assert_eq!(four.sampling_n(), 4);
+    }
+
+    #[test]
+    fn kv_transfer_params_json_request_roundtrip() {
+        let mut request = ProtoGenerateRequest::Vllm(Box::default());
+        request.set_kv_transfer_params_json(NIXL_PREFILL_KV_PARAMS.to_string());
+        let ProtoGenerateRequest::Vllm(req) = request else {
+            panic!("expected vLLM request");
+        };
+        assert_eq!(
+            req.kv_transfer_params_json.as_deref(),
+            Some(NIXL_PREFILL_KV_PARAMS)
+        );
+    }
+
+    #[test]
+    fn kv_transfer_params_json_complete_accessor_filters_empty() {
+        use crate::routers::grpc::proto_wrapper::ProtoGenerateComplete;
+
+        let complete = ProtoGenerateComplete::Vllm(vllm::GenerateComplete {
+            kv_transfer_params_json: Some(r#"{"do_remote_prefill":true}"#.to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            complete.kv_transfer_params_json(),
+            Some(r#"{"do_remote_prefill":true}"#)
+        );
+
+        let empty = ProtoGenerateComplete::Vllm(vllm::GenerateComplete {
+            kv_transfer_params_json: Some(String::new()),
+            ..Default::default()
+        });
+        assert_eq!(empty.kv_transfer_params_json(), None);
+
+        let unset = ProtoGenerateComplete::Vllm(vllm::GenerateComplete::default());
+        assert_eq!(unset.kv_transfer_params_json(), None);
     }
 }

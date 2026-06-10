@@ -35,6 +35,9 @@ pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
 /// vLLM Mooncake KV connector name
 pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
 
+/// vLLM NIXL KV connector name
+pub const NIXL_CONNECTOR: &str = "NixlConnector";
+
 pub struct WorkerRoutingKeyLoad {
     url: String,
     active_routing_keys: dashmap::DashMap<String, usize>,

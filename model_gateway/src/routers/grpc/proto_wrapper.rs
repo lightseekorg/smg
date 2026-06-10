@@ -454,23 +454,26 @@ impl ProtoGenerateRequest {
         matches!(self, Self::TokenSpeed(_))
     }
 
-    /// Set max_tokens for prefill-only execution (vLLM PD mode).
-    /// The prefill request uses max_tokens=1 to trigger KV cache computation
-    /// without generating unnecessary tokens.
-    pub fn set_max_tokens_for_prefill(&mut self, max_tokens: u32) {
+    /// Sanitize sampling params for the prefill-only leg (vLLM PD mode).
+    /// max_tokens=1 computes KV without generating; min_tokens is cleared so the
+    /// engine accepts it; n=1 so the prefill returns a single kv_transfer_params dict.
+    /// Stop criteria are cleared and EOS ignored so the leg always finishes
+    /// length-capped — vLLM < 0.20 returns the NIXL handoff only for that status.
+    pub fn sanitize_sampling_for_prefill(&mut self, max_tokens: u32) {
         match self {
             Self::Vllm(req) => {
-                if let Some(ref mut params) = req.sampling_params {
-                    params.max_tokens = Some(max_tokens);
-                } else {
-                    req.sampling_params = Some(vllm::SamplingParams {
-                        max_tokens: Some(max_tokens),
-                        ..Default::default()
-                    });
-                }
+                let params = req.sampling_params.get_or_insert_with(Default::default);
+                params.max_tokens = Some(max_tokens);
+                params.min_tokens = 0;
+                params.n = 1;
+                params.stop.clear();
+                params.stop_token_ids.clear();
+                params.ignore_eos = true;
             }
             Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
-                tracing::warn!("set_max_tokens_for_prefill called on non-vLLM request, ignoring");
+                tracing::warn!(
+                    "sanitize_sampling_for_prefill called on non-vLLM request, ignoring"
+                );
             }
         }
     }
@@ -529,6 +532,30 @@ impl ProtoGenerateRequest {
             }
             Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
                 tracing::warn!("set_kv_transfer_params called on non-vLLM request, ignoring");
+            }
+        }
+    }
+
+    /// Number of parallel samples requested (vLLM only; 1 when unset).
+    pub fn sampling_n(&self) -> u32 {
+        match self {
+            Self::Vllm(req) => req
+                .sampling_params
+                .as_ref()
+                .map(|p| p.n)
+                .filter(|&n| n > 0)
+                .unwrap_or(1),
+            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => 1,
+        }
+    }
+
+    /// Set opaque connector KV-transfer params as JSON (vLLM only).
+    /// Passed verbatim to the engine (NIXL handoff, etc.).
+    pub fn set_kv_transfer_params_json(&mut self, json: String) {
+        match self {
+            Self::Vllm(req) => req.kv_transfer_params_json = Some(json),
+            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {
+                tracing::warn!("set_kv_transfer_params_json called on non-vLLM request, ignoring");
             }
         }
     }
@@ -1048,6 +1075,17 @@ impl ProtoGenerateComplete {
                 .kv_transfer_params
                 .as_ref()
                 .map(|params| (params.remote_host.clone(), params.remote_port)),
+            Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => None,
+        }
+    }
+
+    /// Get opaque connector KV-transfer params JSON returned by the engine (vLLM only).
+    pub fn kv_transfer_params_json(&self) -> Option<&str> {
+        match self {
+            Self::Vllm(c) => c
+                .kv_transfer_params_json
+                .as_deref()
+                .filter(|s| !s.is_empty()),
             Self::Sglang(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => None,
         }
     }
