@@ -68,7 +68,6 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        // Convert method to static string to avoid allocation
         let method = method_to_static_str(req.method().as_str());
         let path = normalize_path_for_metrics(req.uri().path());
         let start = Instant::now();

@@ -7,18 +7,8 @@ use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gau
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use once_cell::sync::Lazy;
 
-// =============================================================================
-// STRING INTERNING
-// =============================================================================
-//
-// Dynamic strings (model_id, worker URLs, paths) are interned to avoid repeated
-// heap allocations. The interner uses Arc<str> which is cheap to clone and
-// allows the metrics crate to store references without repeated allocations.
-//
-// Performance characteristics:
-// - First occurrence: One allocation + DashMap insert
-// - Subsequent occurrences: DashMap lookup + Arc::clone (very cheap)
-// - Memory: Strings are never freed (acceptable for bounded label cardinality)
+// Interned strings are never freed; only intern low-cardinality, server-controlled
+// labels (model IDs, worker URLs, normalized paths), never user-controlled input.
 
 /// Global string interner for metric labels.
 /// Uses DashMap for lock-free concurrent access.
@@ -110,8 +100,6 @@ pub fn method_to_static_str(method: &str) -> &'static str {
         "PATCH" => http_methods::PATCH,
         "HEAD" => http_methods::HEAD,
         "OPTIONS" => http_methods::OPTIONS,
-        // For unknown methods, we return a static "OTHER" to avoid allocation
-        // This is acceptable since unknown methods are rare in practice
         _ => "OTHER",
     }
 }
