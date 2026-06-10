@@ -263,7 +263,9 @@ class TestEmbeddingCorrectness:
         and HuggingFace implementations within tolerance.
         """
         backend, model_path, _, _ = setup_backend
-        tolerance = 0.05
+        # 0.5 on the x100 scale = cosine 5e-3; covers cross-implementation noise
+        # (vLLM-vs-ST, bf16) while staying 2x tighter than upstream's per-vector 1e-2
+        tolerance = 0.5
 
         # Format query with instruction (Qwen3-Embedding convention; docs stay unprefixed)
         query = (
