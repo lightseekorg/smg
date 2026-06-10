@@ -5,6 +5,7 @@ vLLM gRPC Servicer
 Implements the VllmEngine gRPC service on top of vLLM's EngineClient.
 """
 
+import asyncio
 import hashlib
 import itertools
 import json
@@ -33,6 +34,11 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
+from smg_grpc_servicer.vllm.kv_events import (
+    endpoint_for_rank,
+    resolve_kv_events_config,
+    stream_kv_events,
+)
 from smg_grpc_servicer.vllm.kv_transfer import params_from_request, params_to_response_fields
 
 logger = init_logger(__name__)
@@ -136,6 +142,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         self.engine = async_llm
         self.start_time = start_time
+        # Resolve KV-event publishing config from the engine. Non-None only when
+        # vLLM was started with --kv-events-config enabling the ZMQ publisher.
+        self._kv_events_config = resolve_kv_events_config(async_llm)
         logger.info("VllmEngineServicer initialized")
 
     async def Generate(
@@ -993,3 +1002,57 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 **stop_kwargs,
             ),
         )
+
+    async def SubscribeKvEvents(
+        self,
+        request: common_pb2.SubscribeKvEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[common_pb2.KvEventBatch]:
+        """Bridge vLLM's in-process ZMQ KV cache events to gRPC server-streaming.
+
+        Mirrors sglang/servicer.py:SubscribeKvEvents. Uses the ZMQ publisher's
+        native sequence numbers directly as gRPC sequence numbers.
+        """
+        if self._kv_events_config is None:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "KV cache events not enabled. Start vLLM with "
+                "--kv-events-config "
+                '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
+            )
+            return
+
+        import msgspec
+        import zmq
+        import zmq.asyncio
+        from vllm.distributed.kv_events import KVEventBatch
+
+        config = self._kv_events_config
+
+        # For DP attention each rank publishes on port + rank with independent
+        # sequence counters; subscribing to several on one socket interleaves
+        # them and breaks gap detection. Subscribe to rank 0 only for now.
+        # TODO(phase3): per-rank virtual workers or merged renumbering.
+        pub_endpoint = endpoint_for_rank(config.endpoint, 0)
+
+        zmq_ctx = zmq.asyncio.Context.instance()
+        sub_socket = zmq_ctx.socket(zmq.SUB)
+        sub_socket.subscribe(config.topic.encode("utf-8"))
+        sub_socket.connect(pub_endpoint)
+        logger.info("SubscribeKvEvents: connected to ZMQ endpoint %s", pub_endpoint)
+
+        decoder = msgspec.msgpack.Decoder(KVEventBatch)
+
+        try:
+            async for proto_batch in stream_kv_events(
+                sub_socket,
+                decoder.decode,
+                lambda: context.send_initial_metadata(()),
+                context.cancelled,
+            ):
+                yield proto_batch
+        except asyncio.CancelledError:
+            pass
+        finally:
+            sub_socket.close(linger=0)
+            logger.info("SubscribeKvEvents: stream closed")

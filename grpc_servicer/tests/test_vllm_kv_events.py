@@ -204,3 +204,22 @@ class TestConvertBatch:
         assert len(proto.events) == 1
         assert proto.events[0].event_id == 12
         assert next_id == 12
+
+
+class TestServicerWiring:
+    def test_servicer_resolves_config_from_engine(self):
+        pytest.importorskip("vllm")
+        from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
+
+        class _Cfg:
+            enable_kv_cache_events = True
+            publisher = "zmq"
+            endpoint = "tcp://*:5557"
+            topic = ""
+
+        class _Engine:
+            vllm_config = type("VC", (), {"kv_events_config": _Cfg()})()
+
+        servicer = VllmEngineServicer(_Engine(), start_time=0.0)
+        assert servicer._kv_events_config is not None
+        assert hasattr(servicer, "SubscribeKvEvents")
