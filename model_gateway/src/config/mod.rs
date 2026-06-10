@@ -4,6 +4,7 @@ pub(crate) mod validation;
 
 pub use builder::*;
 pub use types::*;
+pub use validation::validate_mesh_server_name;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

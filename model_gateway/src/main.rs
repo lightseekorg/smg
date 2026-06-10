@@ -4,10 +4,10 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use rand::{distr::Alphanumeric, Rng};
 use smg::{
     config::{
-        CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-        HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
-        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
-        TokenizerCacheConfig, TraceConfig,
+        validate_mesh_server_name, CircuitBreakerConfig, ConfigError, ConfigResult,
+        DiscoveryConfig, HealthCheckConfig, HistoryBackend, ManualAssignmentMode, MetricsConfig,
+        OracleConfig, PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig,
+        RoutingMode, SchemaConfig, TokenizerCacheConfig, TraceConfig,
     },
     observability::{
         metrics::PrometheusConfig,
@@ -861,17 +861,7 @@ impl CliArgs {
         }
 
         let self_name = if let Some(name) = &self.mesh_server_name {
-            // The name keys rate-limit shards as `rl:{counter}:{name}`, so an
-            // empty name or one containing the separator would corrupt shard
-            // keys; reject at config time instead of panicking at adapter
-            // construction.
-            if name.is_empty() || name.contains(':') {
-                return Err(ConfigError::InvalidValue {
-                    field: "mesh_server_name".to_string(),
-                    value: name.clone(),
-                    reason: "must be non-empty and must not contain ':'".to_string(),
-                });
-            }
+            validate_mesh_server_name(name)?;
             name.to_string()
         } else {
             let mut rng = rand::rng();
@@ -1480,48 +1470,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_otel();
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mesh_args(extra: &[&str]) -> CliArgs {
-        let mut argv = vec!["smg", "--enable-mesh", "--mesh-host", "127.0.0.1"];
-        argv.extend_from_slice(extra);
-        CliArgs::try_parse_from(argv).expect("cli args parse")
-    }
-
-    #[test]
-    fn mesh_server_name_with_colon_is_rejected_at_config_time() {
-        let result = mesh_args(&["--mesh-server-name", "node:a"]).build_mesh_server_config();
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue { ref field, .. }) if field == "mesh_server_name"
-            ),
-            "':' in the name must be a config error, not a startup panic"
-        );
-    }
-
-    #[test]
-    fn empty_mesh_server_name_is_rejected_at_config_time() {
-        let result = mesh_args(&["--mesh-server-name", ""]).build_mesh_server_config();
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue { ref field, .. }) if field == "mesh_server_name"
-            ),
-            "empty name must be a config error"
-        );
-    }
-
-    #[test]
-    fn valid_mesh_server_name_is_accepted() {
-        let config = mesh_args(&["--mesh-server-name", "node-a"])
-            .build_mesh_server_config()
-            .expect("valid name passes config validation")
-            .expect("mesh is enabled");
-        assert_eq!(config.self_name, "node-a");
-    }
 }

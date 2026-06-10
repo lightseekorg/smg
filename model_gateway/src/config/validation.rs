@@ -2,6 +2,21 @@ use axum::http::HeaderName;
 
 use super::*;
 
+/// Validate a user-supplied mesh server name. The name keys rate-limit
+/// shards as `rl:{counter}:{name}`, so an empty name or one containing the
+/// separator would corrupt shard keys; rejecting at config time avoids a
+/// panic at mesh adapter construction during startup.
+pub fn validate_mesh_server_name(name: &str) -> ConfigResult<()> {
+    if name.is_empty() || name.contains(':') {
+        return Err(ConfigError::InvalidValue {
+            field: "mesh_server_name".to_string(),
+            value: name.to_string(),
+            reason: "must be non-empty and must not contain ':'".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Configuration validator
 pub(crate) struct ConfigValidator;
 
@@ -783,6 +798,27 @@ impl ConfigValidator {
 mod tests {
     use super::*;
     use crate::worker::ConnectionMode;
+
+    #[test]
+    fn mesh_server_name_with_colon_is_rejected() {
+        assert!(matches!(
+            validate_mesh_server_name("node:a"),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "mesh_server_name"
+        ));
+    }
+
+    #[test]
+    fn empty_mesh_server_name_is_rejected() {
+        assert!(matches!(
+            validate_mesh_server_name(""),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "mesh_server_name"
+        ));
+    }
+
+    #[test]
+    fn valid_mesh_server_name_is_accepted() {
+        assert!(validate_mesh_server_name("node-a").is_ok());
+    }
 
     #[test]
     fn test_validate_regular_mode() {
