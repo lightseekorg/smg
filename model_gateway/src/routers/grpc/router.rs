@@ -18,7 +18,8 @@ use tracing::debug;
 
 use super::{
     common::responses::{
-        handlers::cancel_response_impl, utils::validate_worker_availability, ResponsesContext,
+        handlers::cancel_response_impl, persist_response_if_needed,
+        utils::validate_worker_availability, ResponsesContext,
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
@@ -355,17 +356,30 @@ impl GrpcRouter {
                 serve_harmony_responses_stream(&harmony_ctx, body.clone(), tenant_meta.clone())
                     .await
             } else {
-                // Live path: persist as before, never-cancelled token.
+                // Live path: never-cancelled token. Persistence is performed here
+                // (the caller), mirroring what `serve_harmony_responses` used to
+                // do internally: persist the original request body via the
+                // harmony ctx's storages + request_context.
                 match serve_harmony_responses(
                     &harmony_ctx,
                     body.clone(),
                     tenant_meta.clone(),
-                    true,
                     &tokio_util::sync::CancellationToken::new(),
                 )
                 .await
                 {
-                    Ok(response) => axum::Json(response).into_response(),
+                    Ok(response) => {
+                        persist_response_if_needed(
+                            harmony_ctx.conversation_storage.clone(),
+                            harmony_ctx.conversation_item_storage.clone(),
+                            harmony_ctx.response_storage.clone(),
+                            &response,
+                            body,
+                            harmony_ctx.request_context.clone(),
+                        )
+                        .await;
+                        axum::Json(response).into_response()
+                    }
                     Err(error_response) => error_response,
                 }
             }
@@ -394,7 +408,8 @@ impl GrpcRouter {
     /// - builds the [`ResponsesContext`] with the **passed** `request_context`
     ///   (the background worker loads it from the repository and threads it in),
     ///   not the router-construction task-local,
-    /// - runs the non-streaming regular / harmony path with `persist = false`,
+    /// - runs the non-streaming regular / harmony execute-core, which never
+    ///   persists (the live callers persist; the worker's `finalize` does here),
     /// - threads the cooperative-cancel token into the MCP tool loop.
     ///
     /// The produced response carries an internally minted id; the background
@@ -433,7 +448,7 @@ impl GrpcRouter {
                 self.harmony_responses_context.mcp_format_registry.clone(),
                 request_context,
             );
-            serve_harmony_responses(&harmony_ctx, request, tenant_meta, false, &cancel).await
+            serve_harmony_responses(&harmony_ctx, request, tenant_meta, &cancel).await
         } else {
             debug!(
                 "Headless regular responses execution for model: {}",

@@ -34,8 +34,7 @@ use crate::{
         error,
         grpc::{
             common::responses::{
-                collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
-                ResponsesContext,
+                collect_user_function_names, ensure_mcp_connection, ResponsesContext,
             },
             harmony::processor::ResponsesIterationResult,
         },
@@ -52,10 +51,12 @@ use crate::{
 ///    - Build next request with tool results
 ///    - Repeat from step 1 (full pipeline re-execution)
 /// 4. If no tool calls, return final response
-/// `persist` controls the final `persist_response_if_needed` call: the live
-/// (request-driven) path passes `true` (behavior unchanged); the background
-/// headless path passes `false` because the worker's `finalize` is the
-/// authoritative terminal write under the durable `response_id`.
+///
+/// This is execute-core only: persistence is NOT performed here, it is the
+/// caller's job. The live (request-driven) caller persists via
+/// `persist_response_if_needed` after this returns; the background headless
+/// caller does not persist (the worker's `finalize` is the authoritative
+/// terminal write under the durable `response_id`).
 ///
 /// `cancel` is a cooperative-cancel signal checked at each tool-loop boundary;
 /// the live path passes a never-cancelled token.
@@ -63,12 +64,8 @@ pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
-    persist: bool,
     cancel: &CancellationToken,
 ) -> Result<ResponsesResponse, Response> {
-    // Clone request for persistence
-    let original_request = request.clone();
-
     // Load previous conversation history if previous_response_id is set
     let current_request = load_previous_messages(ctx, request).await?;
 
@@ -93,20 +90,6 @@ pub(crate) async fn serve_harmony_responses(
         // No MCP tools - execute pipeline once (may have function tools or no tools)
         execute_without_mcp_loop(ctx, current_request, tenant_request_meta).await?
     };
-
-    // Persist response to storage if store=true (live path only; the background
-    // worker owns the terminal write on the headless path).
-    if persist {
-        persist_response_if_needed(
-            ctx.conversation_storage.clone(),
-            ctx.conversation_item_storage.clone(),
-            ctx.response_storage.clone(),
-            &response,
-            &original_request,
-            ctx.request_context.clone(),
-        )
-        .await;
-    }
 
     Ok(response)
 }

@@ -41,7 +41,9 @@ use crate::{
     middleware::TenantRequestMeta,
     routers::{
         error,
-        grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
+        grpc::common::responses::{
+            ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+        },
     },
 };
 
@@ -98,9 +100,24 @@ async fn route_responses_sync(
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
 ) -> Response {
-    // Live path persists exactly as before (`persist = true`).
-    match non_streaming::route_responses_internal(ctx, request, params, true).await {
-        Ok(responses_response) => axum::Json(responses_response).into_response(),
+    // Keep a handle to the original (pre-execute) request for the persist call;
+    // the execute-core consumes the `Arc` it receives.
+    let original_request = Arc::clone(&request);
+    match non_streaming::route_responses_internal(ctx, request, params).await {
+        Ok(responses_response) => {
+            // Live path persists exactly as before — now from the caller, using
+            // the original request (matching the prior in-function behavior).
+            persist_response_if_needed(
+                ctx.conversation_storage.clone(),
+                ctx.conversation_item_storage.clone(),
+                ctx.response_storage.clone(),
+                &responses_response,
+                &original_request,
+                ctx.request_context.clone(),
+            )
+            .await;
+            axum::Json(responses_response).into_response()
+        }
         Err(response) => response, // Already a Response with proper status code
     }
 }
@@ -110,8 +127,9 @@ async fn route_responses_sync(
 /// Runs the same core path as [`route_responses_sync`] but:
 /// - returns a typed `Result<ResponsesResponse, Response>` (the background
 ///   worker maps it to a `finalize`, rather than serializing an HTTP response),
-/// - skips the internal response-row persist (`persist = false`) — the worker's
-///   `finalize` is the authoritative terminal write under the durable id,
+/// - does NOT persist the response row — the worker's `finalize` is the
+///   authoritative terminal write under the durable id (execute-core never
+///   persists),
 /// - uses the caller-supplied `response_id` (the durable background id) instead
 ///   of minting a fresh one,
 /// - threads the cooperative-cancel token into the MCP tool loop.
@@ -129,7 +147,7 @@ pub(crate) async fn execute_responses_headless(
         tenant_request_meta,
         cancel,
     };
-    non_streaming::route_responses_internal(ctx, request, params, false).await
+    non_streaming::route_responses_internal(ctx, request, params).await
 }
 
 // ============================================================================

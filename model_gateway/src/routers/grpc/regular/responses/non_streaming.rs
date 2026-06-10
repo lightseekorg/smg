@@ -30,30 +30,27 @@ use crate::{
         },
         error,
         grpc::common::responses::{
-            collect_user_function_names, ensure_mcp_connection, persist_response_if_needed,
-            ResponsesContext,
+            collect_user_function_names, ensure_mcp_connection, ResponsesContext,
         },
     },
 };
 
-/// Internal implementation for non-streaming responses
+/// Internal implementation for non-streaming responses (execute-core only)
 ///
 /// This is the core execution path that:
 /// 1. Loads conversation history / response chain
 /// 2. Checks for MCP tools
 /// 3. Executes with or without MCP tool loop
-/// 4. Persists to storage (when `persist` is `true`)
 ///
-/// `persist` controls the final `persist_response_if_needed` call. The live
-/// (request-driven) path passes `true` so behavior is unchanged. The background
-/// headless path passes `false`: the background worker's `finalize` is the
-/// authoritative terminal write (with the durable `response_id`), so persisting
-/// here too would write the row twice — once with a freshly minted id.
+/// Persistence is intentionally NOT performed here: it is the caller's job. The
+/// live (request-driven) callers persist via `persist_response_if_needed` after
+/// this returns; the background headless caller does not persist (the background
+/// worker's `finalize` is the authoritative terminal write under the durable
+/// `response_id`).
 pub(crate) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
-    persist: bool,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
@@ -75,20 +72,6 @@ pub(crate) async fn route_responses_internal(
         // No MCP tools - execute without MCP (may have function tools or no tools)
         execute_without_mcp(ctx, &modified_request, &request, params).await?
     };
-
-    // 5. Persist response to storage if store=true (live path only; the
-    // background worker owns the terminal write on the headless path).
-    if persist {
-        persist_response_if_needed(
-            ctx.conversation_storage.clone(),
-            ctx.conversation_item_storage.clone(),
-            ctx.response_storage.clone(),
-            &responses_response,
-            &request,
-            ctx.request_context.clone(),
-        )
-        .await;
-    }
 
     Ok(responses_response)
 }
