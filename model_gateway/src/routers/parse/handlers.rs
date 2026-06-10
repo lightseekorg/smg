@@ -73,14 +73,15 @@ pub async fn parse_reasoning(ctx: &Arc<AppContext>, req: &SeparateReasoningReque
         );
     };
 
-    let Some(pooled_parser) = factory.registry().get_pooled_parser(&req.reasoning_parser) else {
+    // Fresh parser per request: non-streaming extraction keeps no state across
+    // requests, so avoid serializing on the shared pooled mutex.
+    let Some(mut parser) = factory.registry().create_parser(&req.reasoning_parser) else {
         return error_response(
             StatusCode::BAD_REQUEST,
             &format!("Unknown reasoning parser: {}", req.reasoning_parser),
         );
     };
 
-    let mut parser = pooled_parser.lock().await;
     match parser.detect_and_parse_reasoning(&req.text) {
         Ok(result) => (
             StatusCode::OK,

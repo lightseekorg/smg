@@ -97,37 +97,35 @@ impl ResponseProcessor {
         let mut processed_text = final_text;
 
         if original_request.separate_reasoning && reasoning_parser_available {
-            let pooled_parser = utils::get_reasoning_parser(
+            // Fresh parser per request: non-streaming extraction keeps no state
+            // across requests, so avoid serializing on the shared pooled mutex.
+            if let Some(mut parser) = utils::create_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
                 &original_request.model,
-            );
-
-            let mut parser = pooled_parser.lock().await;
-            // Reset pooled parser to clean state before each request
-            parser.reset();
-
-            // If the template injected `<think>` in the prefill (thinking toggle
-            // is supported and effectively ON), start in reasoning mode.
-            if utils::should_mark_reasoning_started(
-                utils::extract_thinking_from_kwargs(
-                    original_request.chat_template_kwargs.as_ref(),
-                    tokenizer.as_ref(),
-                ),
-                tokenizer.as_ref(),
             ) {
-                parser.mark_reasoning_started();
-            }
-
-            match parser.detect_and_parse_reasoning(&processed_text) {
-                Ok(result) => {
-                    if !result.reasoning_text.is_empty() {
-                        reasoning_text = Some(result.reasoning_text);
-                    }
-                    processed_text = result.normal_text;
+                // If the template injected `<think>` in the prefill (thinking toggle
+                // is supported and effectively ON), start in reasoning mode.
+                if utils::should_mark_reasoning_started(
+                    utils::extract_thinking_from_kwargs(
+                        original_request.chat_template_kwargs.as_ref(),
+                        tokenizer.as_ref(),
+                    ),
+                    tokenizer.as_ref(),
+                ) {
+                    parser.mark_reasoning_started();
                 }
-                Err(e) => {
-                    warn!("Reasoning parsing error, skipping parsing: {e}");
+
+                match parser.detect_and_parse_reasoning(&processed_text) {
+                    Ok(result) => {
+                        if !result.reasoning_text.is_empty() {
+                            reasoning_text = Some(result.reasoning_text);
+                        }
+                        processed_text = result.normal_text;
+                    }
+                    Err(e) => {
+                        warn!("Reasoning parsing error, skipping parsing: {e}");
+                    }
                 }
             }
         }
@@ -588,39 +586,38 @@ impl ResponseProcessor {
         let mut processed_text = final_text;
 
         if reasoning_parser_available {
-            let pooled_parser = utils::get_reasoning_parser(
+            // Fresh parser per request: non-streaming extraction keeps no state
+            // across requests, so avoid serializing on the shared pooled mutex.
+            if let Some(mut parser) = utils::create_reasoning_parser(
                 &self.reasoning_parser_factory,
                 self.configured_reasoning_parser.as_deref(),
                 &messages_request.model,
-            );
-            let mut parser = pooled_parser.lock().await;
-            // Reset pooled parser to clean state before each request
-            parser.reset();
-
-            // If thinking is effectively ON and template has a toggle, start in reasoning mode.
-            {
-                let user_thinking = match &messages_request.thinking {
-                    Some(
-                        messages::ThinkingConfig::Enabled { .. }
-                        | messages::ThinkingConfig::Adaptive { .. },
-                    ) => Some(true),
-                    Some(messages::ThinkingConfig::Disabled) => Some(false),
-                    None => None,
-                };
-                if utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref()) {
-                    parser.mark_reasoning_started();
-                }
-            }
-
-            match parser.detect_and_parse_reasoning(&processed_text) {
-                Ok(result) => {
-                    if !result.reasoning_text.is_empty() {
-                        reasoning_text = Some(result.reasoning_text);
+            ) {
+                // If thinking is effectively ON and template has a toggle, start in reasoning mode.
+                {
+                    let user_thinking = match &messages_request.thinking {
+                        Some(
+                            messages::ThinkingConfig::Enabled { .. }
+                            | messages::ThinkingConfig::Adaptive { .. },
+                        ) => Some(true),
+                        Some(messages::ThinkingConfig::Disabled) => Some(false),
+                        None => None,
+                    };
+                    if utils::should_mark_reasoning_started(user_thinking, tokenizer.as_ref()) {
+                        parser.mark_reasoning_started();
                     }
-                    processed_text = result.normal_text;
                 }
-                Err(e) => {
-                    warn!("Reasoning parsing error, skipping parsing: {e}");
+
+                match parser.detect_and_parse_reasoning(&processed_text) {
+                    Ok(result) => {
+                        if !result.reasoning_text.is_empty() {
+                            reasoning_text = Some(result.reasoning_text);
+                        }
+                        processed_text = result.normal_text;
+                    }
+                    Err(e) => {
+                        warn!("Reasoning parsing error, skipping parsing: {e}");
+                    }
                 }
             }
         }
