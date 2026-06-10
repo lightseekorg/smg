@@ -126,6 +126,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream,
             kv_transfer_params: None,
+            kv_transfer_params_json: None,
             mm_inputs,
         };
 
@@ -158,6 +159,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream,
             kv_transfer_params: None,
+            kv_transfer_params_json: None,
             mm_inputs: None,
         };
 
@@ -194,6 +196,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream.unwrap_or(false),
             kv_transfer_params: None,
+            kv_transfer_params_json: None,
             mm_inputs: None,
         };
 
@@ -398,6 +401,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream.unwrap_or(false),
             kv_transfer_params: None,
+            kv_transfer_params_json: None,
             mm_inputs: multimodal_inputs,
         };
 
@@ -460,6 +464,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream,
             kv_transfer_params: None,
+            kv_transfer_params_json: None,
             mm_inputs: None,
         };
 
@@ -701,6 +706,7 @@ mod tests {
             sampling_params: Some(sampling_params),
             stream: false,
             kv_transfer_params: None,
+            kv_transfer_params_json: None,
             mm_inputs: None,
         };
 
