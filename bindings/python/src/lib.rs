@@ -1098,7 +1098,7 @@ impl Router {
         })
     }
 
-    fn start(&self) -> PyResult<()> {
+    fn start(&self, py: Python<'_>) -> PyResult<()> {
         use observability::metrics::PrometheusConfig;
 
         let router_config = self.to_router_config().map_err(|e| {
@@ -1152,7 +1152,9 @@ impl Router {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        runtime.block_on(async move {
+        // Release the GIL while the server runs so Python threads can make progress.
+        py.detach(|| {
+            runtime.block_on(async move {
             Box::pin(server::startup(server::ServerConfig {
                 host: self.host.clone(),
                 port: self.port,
@@ -1222,6 +1224,7 @@ impl Router {
             }))
             .await
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            })
         })
     }
 }
