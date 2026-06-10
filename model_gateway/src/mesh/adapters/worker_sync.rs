@@ -23,7 +23,6 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use bytes::Bytes;
 use smg_mesh::{CrdtNamespace, WorkerState};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -99,32 +98,17 @@ impl WorkerSyncAdapter {
             reason = "subscription task ends automatically when the mesh KV drops and closes the channel; no handle needed"
         )]
         tokio::spawn(async move {
-            while let Some((key, value)) = sub.receiver.recv().await {
+            while let Some((key, _snapshot)) = sub.receiver.recv().await {
                 let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
                     warn!(key, "worker: subscription yielded unexpected key shape");
                     continue;
                 };
-                match value {
-                    Some(fragments) => {
-                        let total = fragments.iter().map(Bytes::len).sum();
-                        let mut bytes = Vec::with_capacity(total);
-                        for frag in fragments {
-                            bytes.extend_from_slice(&frag);
-                        }
-                        this.apply_incoming(worker_id, &bytes);
-                    }
-                    None => {
-                        // Tombstones resolve via the publisher's id, which the
-                        // import adopted. Only mesh-imported workers are
-                        // removed; a tombstone for a locally-owned or unknown
-                        // id is a no-op.
-                        let id = WorkerId::from_string(worker_id.to_string());
-                        match this.worker_registry.remove_remote(&id) {
-                            Some(_) => info!(worker_id, "removed worker on remote tombstone"),
-                            None => debug!(worker_id, "ignored tombstone (unknown or local)"),
-                        }
-                    }
-                }
+                // Act on store truth, not the event's value snapshot: a
+                // queued event can be stale by the time it is drained (a put
+                // echo dequeued after the key was tombstoned would resurrect
+                // a removed worker; a stale state would regress health).
+                // Re-reading the namespace makes delivery order irrelevant.
+                this.sync_key_from_store(&key, worker_id);
             }
             debug!("WorkerSyncAdapter subscription closed");
         });
@@ -141,8 +125,24 @@ impl WorkerSyncAdapter {
                 warn!(key, "worker: backfill yielded unexpected key shape");
                 continue;
             };
-            if let Some(bytes) = self.workers.get(&key) {
-                self.apply_incoming(worker_id, &bytes);
+            self.sync_key_from_store(&key, worker_id);
+        }
+    }
+
+    /// Bring the registry in line with the store's current state for one
+    /// key: a live value routes through `on_remote_worker_state`, a missing
+    /// (tombstoned) one through `remove_remote`. Tombstones resolve via the
+    /// publisher's id, which the import adopted; a tombstone for a
+    /// locally-owned or unknown id is a no-op.
+    fn sync_key_from_store(&self, key: &str, worker_id: &str) {
+        match self.workers.get(key) {
+            Some(bytes) => self.apply_incoming(worker_id, &bytes),
+            None => {
+                let id = WorkerId::from_string(worker_id.to_string());
+                match self.worker_registry.remove_remote(&id) {
+                    Some(_) => info!(worker_id, "removed worker on remote tombstone"),
+                    None => debug!(worker_id, "ignored tombstone (unknown or local)"),
+                }
             }
         }
     }
@@ -571,6 +571,30 @@ mod tests {
         assert!(
             wait_for(|| ns.get(&key).is_none()).await,
             "local removal was not tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn rapid_put_then_delete_converges_to_absent() {
+        // Both queued events resolve against the store (which holds the
+        // tombstone by the time they drain), so a stale put echo can never
+        // resurrect a removed worker regardless of drain timing.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        ns.put(
+            "worker:peer-w1",
+            bincode::serialize(&sample_state("peer-w1", "http://remote:8080")).unwrap(),
+        );
+        ns.delete("worker:peer-w1");
+
+        sleep(Duration::from_millis(100)).await;
+        assert!(
+            registry.get_by_url("http://remote:8080").is_none(),
+            "store truth wins: the tombstoned worker must not survive"
         );
     }
 
