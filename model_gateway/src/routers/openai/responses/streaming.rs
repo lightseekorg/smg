@@ -49,6 +49,7 @@ use crate::{
             },
             mcp_utils::DEFAULT_MAX_ITERATIONS,
             persistence_utils::persist_conversation_items,
+            sse::SseEncoder,
         },
         error,
         openai::{
@@ -214,11 +215,17 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
 #[inline]
 fn send_sse_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     event_name: &str,
     data: &Value,
 ) -> bool {
-    let block = format!("event: {event_name}\ndata: {data}\n\n");
-    tx.send(Ok(Bytes::from(block))).is_ok()
+    match enc.encode_event(event_name, data) {
+        Ok(bytes) => tx.send(Ok(bytes)).is_ok(),
+        // `event_name` is always a static constant and `data` is a JSON value,
+        // so encoding only fails in practice on an impossible serialization
+        // error; treat that as a fatal stream condition.
+        Err(_) => false,
+    }
 }
 
 /// Map function_call event names to mcp_call event names
@@ -237,6 +244,7 @@ fn send_buffered_arguments(
     parsed_data: &mut Value,
     handler: &StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     sequence_number: &mut u64,
     mapped_output_index: &mut Option<usize>,
 ) -> bool {
@@ -295,7 +303,7 @@ fn send_buffered_arguments(
         }
     }
 
-    if !send_sse_event(tx, McpEvent::CALL_ARGUMENTS_DELTA, &delta_event) {
+    if !send_sse_event(tx, enc, McpEvent::CALL_ARGUMENTS_DELTA, &delta_event) {
         return false;
     }
 
@@ -318,6 +326,7 @@ pub(super) fn forward_streaming_event(
     event: SseEventData<'_>,
     handler: &mut StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     ctx: &StreamingEventContext<'_>,
     sequence_number: &mut u64,
 ) -> bool {
@@ -356,6 +365,7 @@ pub(super) fn forward_streaming_event(
             &mut parsed_data,
             handler,
             tx,
+            enc,
             sequence_number,
             &mut mapped_output_index,
         )
@@ -388,25 +398,24 @@ pub(super) fn forward_streaming_event(
         *sequence_number += 1;
     }
 
-    let final_data = match serde_json::to_string(&parsed_data) {
-        Ok(s) => s,
-        Err(_) => {
-            let chunk = format!("{raw_block}\n\n");
-            return tx.send(Ok(Bytes::from(chunk))).is_ok();
-        }
+    // Serialize directly into the reusable encoder buffer (no intermediate
+    // `String`). On the (practically impossible) serialization error, fall
+    // back to forwarding the original raw block unchanged.
+    let final_bytes = match event_name {
+        Some(evt) => enc.encode_event(map_event_name(evt), &parsed_data),
+        None => enc.encode_data(&parsed_data),
+    };
+    let final_bytes = match final_bytes {
+        Ok(bytes) => bytes,
+        Err(_) => Bytes::from(format!("{raw_block}\n\n")),
     };
 
-    let final_block = match event_name {
-        Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
-        None => format!("data: {final_data}\n\n"),
-    };
-
-    if tx.send(Ok(Bytes::from(final_block))).is_err() {
+    if tx.send(Ok(final_bytes)).is_err() {
         return false;
     }
 
     if event_name == Some(OutputItemEvent::ADDED)
-        && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
+        && !maybe_inject_tool_in_progress(&parsed_data, tx, enc, sequence_number)
     {
         return false;
     }
@@ -421,6 +430,7 @@ pub(super) fn forward_streaming_event(
 fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     sequence_number: &mut u64,
 ) -> bool {
     let Some(item) = parsed_data.get("item") else {
@@ -449,7 +459,7 @@ fn maybe_inject_tool_in_progress(
     });
     *sequence_number += 1;
 
-    send_sse_event(tx, event_type, &event)
+    send_sse_event(tx, enc, event_type, &event)
 }
 
 /// Send final response.completed event to client
@@ -457,6 +467,7 @@ fn maybe_inject_tool_in_progress(
 pub(super) fn send_final_response_event(
     handler: &StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    enc: &mut SseEncoder,
     sequence_number: &mut u64,
     state: &ToolLoopState,
     ctx: &StreamingEventContext<'_>,
@@ -497,12 +508,17 @@ pub(super) fn send_final_response_event(
     });
     *sequence_number += 1;
 
-    let completed_event = format!(
-        "event: {}\ndata: {}\n\n",
-        ResponseEvent::COMPLETED,
-        completed_payload
-    );
-    tx.send(Ok(Bytes::from(completed_event))).is_ok()
+    match enc.encode_event(ResponseEvent::COMPLETED, &completed_payload) {
+        Ok(bytes) => tx.send(Ok(bytes)).is_ok(),
+        Err(_) => {
+            let completed_event = format!(
+                "event: {}\ndata: {}\n\n",
+                ResponseEvent::COMPLETED,
+                completed_payload
+            );
+            tx.send(Ok(Bytes::from(completed_event))).is_ok()
+        }
+    }
 }
 
 /// Simple pass-through streaming without MCP interception
@@ -712,6 +728,8 @@ pub(super) fn handle_streaming_with_tool_interception(
         let mut mcp_list_tools_sent = false;
         let mut is_first_iteration = true;
         let mut sequence_number: u64 = 0;
+        // Reusable SSE encoder shared across every event emitted for this stream.
+        let mut sse_encoder = SseEncoder::new();
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
         let list_tools_bindings = mcp_list_tools_bindings_to_emit(
@@ -738,8 +756,12 @@ pub(super) fn handle_streaming_with_tool_interception(
             let response = match request_builder.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ =
-                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
+                    let _ = send_sse_event(
+                        &tx,
+                        &mut sse_encoder,
+                        "error",
+                        &json!({"error": {"message": e.to_string()}}),
+                    );
                     return;
                 }
             };
@@ -750,6 +772,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
+                    &mut sse_encoder,
                     "error",
                     &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
                 );
@@ -817,6 +840,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                                             },
                                             &mut handler,
                                             &tx,
+                                            &mut sse_encoder,
                                             &streaming_ctx,
                                             &mut sequence_number,
                                         ) {
@@ -887,6 +911,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                                             },
                                             &mut handler,
                                             &tx,
+                                            &mut sse_encoder,
                                             &streaming_ctx,
                                             &mut sequence_number,
                                         )
@@ -906,6 +931,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                     Err(e) => {
                         let _ = send_sse_event(
                             &tx,
+                            &mut sse_encoder,
                             "error",
                             &json!({"error": {"message": format!("Stream error: {}", e)}}),
                         );
@@ -924,6 +950,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 if !send_final_response_event(
                     &handler,
                     &tx,
+                    &mut sse_encoder,
                     &mut sequence_number,
                     &state,
                     &streaming_ctx,
@@ -996,6 +1023,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 );
                 send_sse_event(
                     &tx,
+                    &mut sse_encoder,
                     "error",
                     &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
                 );
@@ -1038,6 +1066,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                 Err(e) => {
                     send_sse_event(
                         &tx,
+                        &mut sse_encoder,
                         "error",
                         &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
                     );
