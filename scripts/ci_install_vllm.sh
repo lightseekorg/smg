@@ -36,7 +36,8 @@ uv pip install "nixl-cu${CUDA_MAJOR}>=1.2.0"
 
 # Remove nixl_ep (MoE all-to-all, unused in CI): vLLM imports it eagerly when
 # present, tying every worker startup to its extra native deps
-rm -rf "$(python3 -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")/nixl_ep"
+SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['platlib'])")
+rm -rf "${SITE_PACKAGES}/nixl_ep"
 
 # Import canary: fail here (not mid-e2e) if the nixl install is broken
 # (torch first so its bundled CUDA libraries are loaded)

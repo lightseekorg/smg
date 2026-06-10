@@ -96,6 +96,9 @@ MODEL_SPECS: dict[str, dict] = {
         "model": _resolve_model_path("Qwen/Qwen3-Embedding-0.6B"),
         "tp": 1,
         "features": ["embedding"],
+        # fp32 so correctness tests can compare against the fp32 CPU reference
+        # without bf16 kernel noise (test_correctness atol is 5e-4 in cosine terms)
+        "vllm_args": ["--dtype", "float32"],
     },
     # GPT-OSS models (Harmony)
     "openai/gpt-oss-20b": {
