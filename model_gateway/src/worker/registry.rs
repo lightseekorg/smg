@@ -61,6 +61,15 @@ impl Default for WorkerId {
     }
 }
 
+/// Where a worker's registration came from. `Local` workers are owned by
+/// this node (their state is published to the mesh); `Mesh` workers were
+/// imported from a peer's published state and must never be re-published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerOrigin {
+    Local,
+    Mesh,
+}
+
 /// Side-effect-free worker snapshot for subscriber bootstrap or lag recovery.
 #[derive(Debug, Clone)]
 pub struct WorkerDescriptor {
@@ -108,6 +117,11 @@ pub struct WorkerRegistry {
     /// When retries are disabled, max_retries is set to 1.
     model_retry_configs: Arc<DashMap<String, RetryConfig>>,
 
+    /// Registration origin per worker (local vs mesh-imported). Written
+    /// under the per-worker mutation lock before the `Registered` event,
+    /// removed in `remove()` teardown.
+    worker_origins: Arc<DashMap<WorkerId, WorkerOrigin>>,
+
     /// Broadcast channel for worker state change events.
     event_tx: broadcast::Sender<WorkerEvent>,
 }
@@ -131,8 +145,16 @@ impl WorkerRegistry {
             url_to_id: Arc::new(DashMap::new()),
             worker_mutation_locks: Arc::new(DashMap::new()),
             model_retry_configs: Arc::new(DashMap::new()),
+            worker_origins: Arc::new(DashMap::new()),
             event_tx: broadcast::Sender::new(64),
         }
+    }
+
+    /// Registration origin for a worker, if it is currently registered.
+    /// `Local` workers are owned by this node; `Mesh` workers were
+    /// imported from a peer's published state.
+    pub fn origin_of(&self, worker_id: &WorkerId) -> Option<WorkerOrigin> {
+        self.worker_origins.get(worker_id).map(|entry| *entry)
     }
 
     /// Subscribe to the `WorkerEvent` broadcast stream.
@@ -582,7 +604,7 @@ impl WorkerRegistry {
     /// `StatusChanged` events before the `Registered` event for a
     /// concurrent same-ID operation.
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
-        self.register_inner(worker)
+        self.register_inner(worker, WorkerOrigin::Local)
     }
 
     /// Register or replace a worker (upsert).
@@ -896,6 +918,7 @@ impl WorkerRegistry {
             self.url_to_id.remove(worker.url());
             // We hold _guard; drop the DashMap entry but the Mutex stays alive via Arc.
             self.worker_mutation_locks.remove(worker_id);
+            self.worker_origins.remove(worker_id);
 
             for model_id in Self::worker_model_ids(&worker) {
                 self.remove_worker_from_model_index(&model_id, worker.url());
@@ -1052,7 +1075,11 @@ impl WorkerRegistry {
     /// lock only after the event is sent guarantees subscribers cannot
     /// observe a mutation event for this `WorkerId` before the
     /// `Registered` event that created it.
-    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
+    ///
+    /// `origin` records whether this is a local workflow registration or a
+    /// mesh import; the outbound mesh sync consults it so imported workers
+    /// are never re-published (which would version-bump the CRDT in a loop).
+    fn register_inner(&self, worker: Arc<dyn Worker>, origin: WorkerOrigin) -> Option<WorkerId> {
         // Resolve (or reserve) the worker_id from url_to_id. The entry
         // API is atomic per bucket, so concurrent callers either reuse
         // the same existing_id or serialize on vacant insertion.
@@ -1102,6 +1129,10 @@ impl WorkerRegistry {
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
+
+        // Record origin under the lock, before the event, so any consumer
+        // that sees `Registered` can query the origin race-free.
+        self.worker_origins.insert(worker_id.clone(), origin);
 
         // Broadcast under the lock so event order per worker_id is
         // strictly: Registered → (Replaced | StatusChanged | Removed).
@@ -1267,12 +1298,14 @@ impl WorkerRegistry {
             worker.set_status(WorkerStatus::Ready);
         }
 
-        // Publishes the local `Registered` event under the per-worker
-        // mutation lock so in-process subscribers (WorkerManager's health
-        // scheduler, etc.) pick up mesh-imported workers via the same
-        // event path as any other registration.
+        // A `Mesh` origin keeps the outbound sync from re-publishing the
+        // imported state (which would version-bump the CRDT in a loop),
+        // but still publishes the local `Registered` event under the
+        // per-worker mutation lock so in-process subscribers
+        // (WorkerManager's health scheduler, etc.) pick up mesh-imported
+        // workers via the same event path as any other registration.
         let worker: Arc<dyn Worker> = Arc::new(worker);
-        if let Some(id) = self.register_inner(worker) {
+        if let Some(id) = self.register_inner(worker, WorkerOrigin::Mesh) {
             tracing::info!(
                 worker_id = %id.as_str(),
                 url = %state.url,
@@ -1403,6 +1436,57 @@ mod tests {
 
         registry.remove(&worker_id);
         assert!(registry.get(&worker_id).is_none());
+    }
+
+    #[test]
+    fn origin_tracks_local_and_mesh_registrations() {
+        let registry = WorkerRegistry::new();
+
+        let local: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://local:8080")
+                .model(ModelCard::new("llama-3"))
+                .build(),
+        );
+        let local_id = registry.register(local).unwrap();
+        assert_eq!(registry.origin_of(&local_id), Some(WorkerOrigin::Local));
+
+        registry.on_remote_worker_state(&smg_mesh::WorkerState {
+            worker_id: "peer-w1".to_string(),
+            model_id: "llama-3".to_string(),
+            url: "http://remote:8080".to_string(),
+            health: true,
+            load: 0.0,
+            version: 1,
+            spec: vec![],
+        });
+        let mesh_id = registry.get_id_by_url("http://remote:8080").unwrap();
+        assert_eq!(registry.origin_of(&mesh_id), Some(WorkerOrigin::Mesh));
+    }
+
+    #[test]
+    fn origin_survives_replace_and_clears_on_remove() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let id = registry.register(worker).unwrap();
+
+        let replacement: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m2"))
+                .build(),
+        );
+        assert!(registry.replace(&id, replacement));
+        assert_eq!(
+            registry.origin_of(&id),
+            Some(WorkerOrigin::Local),
+            "replace keeps the same id, so origin is untouched"
+        );
+
+        registry.remove(&id);
+        assert_eq!(registry.origin_of(&id), None, "remove clears the origin");
     }
 
     #[test]
