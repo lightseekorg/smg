@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
+import threading
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -53,6 +55,12 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         health_servicer=None,
     ):
         self.async_llm = async_llm
+        # EPD_PIXEL_SHM: ship pixels to the scheduler process as POSIX-SHM
+        # handles instead of pickling the raw tensor over ZMQ (the dominant
+        # per-image ingest cost: ~25ms at 1080p, ~580ms at 4K). The decision is
+        # made once per item in _items_from_proto; the encode worker
+        # materializes (or unlinks, on a cache hit) the segment on its side.
+        self._pixel_shm = bool(os.environ.get("EPD_PIXEL_SHM"))
         self.server_args = server_args
         self.scheduler_info = scheduler_info
         self.health_servicer = health_servicer
@@ -73,13 +81,25 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         # buffer from the gateway's exported memory instead of receiving it inline.
         # Lazy + gated so non-RDMA deploys never import NIXL.
         self._nixl_agent = None
-        self._rdma_md_sent = set()  # (ip, port) we've already send_local_metadata'd
+        # Gateways whose metadata is fetched + loaded (the gateway's arena is
+        # registered ONCE at its init, so its metadata is fixed -> handshake once,
+        # never per image). Guarded so concurrent first-images don't double-fetch.
+        self._rdma_md_ready = set()  # (ip, port)
+        self._rdma_md_lock = threading.Lock()
+        # Pre-registered landing pool (one MR for the worker's life): a ring of fixed
+        # slots the one-sided READ lands into, so no register/deregister per image.
+        self._landing = None
+        self._landing_np = None
+        self._landing_base = 0
+        self._landing_slot_bytes = 0
+        self._landing_free = None
         if os.environ.get("SMG_MM_PIXEL_RDMA") in ("1", "true"):
             try:
                 try:
                     from nixl_cu13._api import nixl_agent, nixl_agent_config
                 except ImportError:
                     from nixl._api import nixl_agent, nixl_agent_config
+                import torch
 
                 # Initiator side: a listen thread (ephemeral port) is needed so the
                 # bidirectional metadata exchange with the gateway's listener works.
@@ -89,54 +109,60 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                         enable_listen_thread=True, listen_port=0, backends=["UCX"]
                     ),
                 )
-                logger.info("EPD RDMA: encode NIXL puller agent up")
+                # Register the landing pool ONCE; per image we only lease a slot.
+                slot_bytes = int(
+                    os.environ.get("SMG_RDMA_SLOT_BYTES", 32 * 1024 * 1024)
+                )
+                n_slots = int(os.environ.get("SMG_RDMA_LANDING_SLOTS", 16))
+                self._landing = torch.empty(
+                    n_slots * slot_bytes, dtype=torch.uint8, pin_memory=True
+                )
+                self._landing_np = self._landing.numpy()
+                self._landing_base = self._landing.data_ptr()
+                self._landing_slot_bytes = slot_bytes
+                reg = self._nixl_agent.get_reg_descs(
+                    [(self._landing_base, n_slots * slot_bytes, 0, "")], "DRAM"
+                )
+                self._nixl_agent.register_memory(reg)
+                self._landing_free = queue.Queue()
+                for i in range(n_slots):
+                    self._landing_free.put(i)
+                logger.info(
+                    "EPD RDMA: encode puller up (landing %d slots x %d B)",
+                    n_slots,
+                    slot_bytes,
+                )
             except Exception as e:  # noqa: BLE001
-                logger.error("EPD RDMA: NIXL agent init failed (%s); inline only", e)
+                logger.error("EPD RDMA: NIXL init failed (%s); inline only", e)
+                self._nixl_agent = None
 
         self.async_llm.auto_create_handle_loop()
         logger.info("TokenSpeedEncoderServicer initialized")
 
-    def _feature_from_remote(self, td, room: int, cast_to):
-        """PULL the pixel tensor from the gateway's exported NIXL memory (one-sided
-        READ), then reconstruct it exactly like the inline path.
-
-        Descriptor wire format (gateway rdma.rs): [addr u64 LE][port u16 LE][ip utf8].
-        Cross-node NIXL needs the bidirectional metadata exchange against the
-        gateway's listener (fetch_remote_metadata + send_local_metadata) BEFORE the
-        one-sided READ -- a one-way add_remote_agent hits the gateway's non-listening
-        ephemeral worker port ("Connection refused"). Then READ nbytes from addr,
-        tag the transfer with the room so the gateway frees the MR, length-assert.
-        """
+    def _ensure_remote_ready(self, gw_name, ip, port, remote, room):
+        """One-time bidirectional metadata handshake per gateway. The gateway's
+        pixel arena is registered ONCE at its init, so its metadata is fixed: we
+        fetch_remote_metadata + send_local_metadata + wait for it to load exactly
+        ONCE per (ip, port), then every later image reuses the loaded remote agent
+        (no per-image fetch -- that, plus the per-image register below, was the v1
+        control overhead that made RDMA slower than inline)."""
         import time
 
-        import numpy as np
-        import torch
-
-        agent = self._nixl_agent
-        desc = bytes(td.remote.descriptor)
-        nbytes = int(td.remote.nbytes)
-        if len(desc) < 10:
-            raise ValueError("remote descriptor too short")
-        remote_addr = int.from_bytes(desc[:8], "little")
-        port = int.from_bytes(desc[8:10], "little")
-        ip = desc[10:].decode()
-        gw_name = "smg-gateway-encode"
-
-        # Bidirectional metadata exchange via the gateway's listener. Re-fetch each
-        # call so a newly-registered region becomes visible; send our own md once per
-        # endpoint so the gateway can complete the connection wireup.
-        agent.fetch_remote_metadata(gw_name, ip, port)
-        if (ip, port) not in self._rdma_md_sent:
-            agent.send_local_metadata(ip, port)
-            self._rdma_md_sent.add((ip, port))
-
-        landing = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
-        laddr = landing.data_ptr()
-        reg = agent.get_reg_descs([(laddr, nbytes, 0, "")], "DRAM")
-        agent.register_memory(reg)
-        try:
-            remote = agent.get_xfer_descs([(remote_addr, nbytes, 0)], "DRAM")
-            # Wait for this region's metadata to load before building the xfer.
+        key = (ip, port)
+        if key in self._rdma_md_ready:
+            return
+        with self._rdma_md_lock:
+            if key in self._rdma_md_ready:
+                return
+            agent = self._nixl_agent
+            agent.fetch_remote_metadata(gw_name, ip, port)
+            # For a one-sided READ the initiator only needs the target's md (fetched
+            # above). Pushing our md to the gateway makes its listener thread
+            # loadRemoteMD our md, which over rc returns NIXL_ERR_NOT_ALLOWED (the
+            # gateway can't load a peer md for rc) and stalls the reverse QP. Gate it:
+            # skip the push over rc (SMG_RDMA_NO_SEND_MD); keep it for tcp.
+            if os.environ.get("SMG_RDMA_NO_SEND_MD") not in ("1", "true"):
+                agent.send_local_metadata(ip, port)
             ready = False
             for _ in range(5000):
                 if agent.check_remote_metadata(gw_name, remote):
@@ -145,6 +171,49 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                 time.sleep(0.001)
             if not ready:
                 raise RuntimeError(f"NIXL remote metadata not ready room={room}")
+            self._rdma_md_ready.add(key)
+
+    def _feature_from_remote(self, td, room: int, cast_to):
+        """PULL the pixel tensor from the gateway's pre-registered arena (one-sided
+        READ into our pre-registered landing pool), then reconstruct it like inline.
+
+        Returns ``(feature, content_hash)``: a plain CPU tensor with ``None`` hash
+        by default, or, under ``EPD_PIXEL_SHM``, a published ``ShmTensorHandle``
+        plus the content hash computed off the slot bytes (the item carries the
+        hash so ``set_pad_value`` never needs the raw tensor again).
+
+        Descriptor wire format (gateway rdma.rs): [slot_addr u64 LE][port u16 LE][ip].
+        Hot path per image: handshake-once (see _ensure_remote_ready) + lease a free
+        landing slot + READ slot_addr -> our slot (no register/deregister, no metadata
+        re-fetch) + length-assert + copy out before freeing the slot. The transfer
+        notif is tagged with the room so the gateway returns its slot.
+        """
+        import numpy as np
+        import torch
+
+        agent = self._nixl_agent
+        if self._landing_free is None:
+            raise RuntimeError("EPD RDMA: remote payload but landing pool unavailable")
+        desc = bytes(td.remote.descriptor)
+        nbytes = int(td.remote.nbytes)
+        if len(desc) < 10:
+            raise ValueError("remote descriptor too short")
+        remote_addr = int.from_bytes(desc[:8], "little")
+        port = int.from_bytes(desc[8:10], "little")
+        ip = desc[10:].decode()
+        gw_name = "smg-gateway-encode"
+        if nbytes > self._landing_slot_bytes:
+            raise ValueError(
+                f"remote pixel {nbytes}B exceeds landing slot {self._landing_slot_bytes}B"
+            )
+
+        remote = agent.get_xfer_descs([(remote_addr, nbytes, 0)], "DRAM")
+        self._ensure_remote_ready(gw_name, ip, port, remote, room)
+
+        slot = self._landing_free.get(timeout=30)
+        try:
+            off = slot * self._landing_slot_bytes
+            laddr = self._landing_base + off
             local = agent.get_xfer_descs([(laddr, nbytes, 0)], "DRAM")
             h = agent.initialize_xfer("READ", local, remote, gw_name, str(room).encode())
             state = agent.transfer(h)
@@ -164,21 +233,33 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
                     f"remote pixel size mismatch: nbytes={nbytes} expected={expected} "
                     f"(shape={shape} dtype={td.dtype})"
                 )
-            raw = landing.numpy().tobytes()
-        finally:
-            agent.deregister_memory(reg)
+            # Reinterpret the slot bytes as the tensor; copy OUT (clone/.to) before
+            # the finally returns the slot, since the slot is then reused.
+            slot_np = self._landing_np[off : off + nbytes]
+            if td.dtype == "bfloat16":
+                t = torch.from_numpy(
+                    slot_np.view(np.uint16).reshape(shape)
+                ).view(torch.bfloat16)
+            else:
+                t = torch.from_numpy(slot_np.view(np.dtype(td.dtype)).reshape(shape))
+            copied = False
+            if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
+                t = t.to(cast_to)
+                copied = True
+            if self._pixel_shm:
+                # Fused landing->SHM: hash + publish straight off the slot view.
+                # publish() itself is the single copy out of the slot, so the
+                # plain path's intermediate tensor materialization is skipped
+                # entirely (hash_feature only reads the bytes).
+                from tokenspeed.runtime.multimodal.hash import hash_feature
+                from tokenspeed.runtime.multimodal.shm_transport import ShmTensorHandle
 
-        if td.dtype == "bfloat16":
-            t = torch.from_numpy(
-                np.frombuffer(raw, dtype=np.uint16).reshape(shape)
-            ).view(torch.bfloat16)
-        else:
-            t = torch.from_numpy(
-                np.frombuffer(raw, dtype=np.dtype(td.dtype)).reshape(shape)
-            )
-        if cast_to is not None and t.dtype != cast_to and t.is_floating_point():
-            return t.to(cast_to)
-        return t.clone()
+                feat_hash = hash_feature(t)
+                return ShmTensorHandle.publish(t), feat_hash
+            # Copy out before the finally returns the slot for reuse.
+            return (t if copied else t.clone()), None
+        finally:
+            self._landing_free.put(slot)
 
     def _resolve_merge_size(self) -> int:
         hf_config = getattr(self.async_llm.model_config, "hf_config", None)
@@ -198,14 +279,31 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         Modality, MultimodalDataItem = _lazy_mm_item()
         model_dtype = getattr(self.async_llm.model_config, "dtype", None)
 
+        # The feature's CROSS-PROCESS representation is decided here, once, for
+        # both payload arms: a plain CPU tensor by default, or (EPD_PIXEL_SHM) a
+        # POSIX-SHM handle so the ZMQ hop to the scheduler pickles ~KB instead of
+        # the 19-77MB pixels. The content hash is computed on the real bytes
+        # before the swap and pre-set on the item.
         td = mm_inputs.pixel_values
         if td.WhichOneof("payload") == "remote":
-            # EPD RDMA: PULL the pixels from the gateway's exported NIXL memory.
-            feature = self._feature_from_remote(td, bootstrap_room, model_dtype)
+            # EPD RDMA: PULL the pixels from the gateway's exported NIXL memory
+            # (under EPD_PIXEL_SHM the slot bytes go straight to SHM, one copy).
+            feature, feat_hash = self._feature_from_remote(
+                td, bootstrap_room, model_dtype
+            )
         else:
             feature = TokenSpeedSchedulerServicer._tensor_from_proto(
                 td, cast_to=model_dtype
             )
+            feat_hash = None
+            if self._pixel_shm:
+                from tokenspeed.runtime.multimodal.hash import hash_feature
+                from tokenspeed.runtime.multimodal.shm_transport import (
+                    ShmTensorHandle,
+                )
+
+                feat_hash = hash_feature(feature)
+                feature = ShmTensorHandle.publish(feature)
         model_specific = {
             name: TokenSpeedSchedulerServicer._tensor_from_proto(td, cast_to=model_dtype)
             for name, td in mm_inputs.model_specific_tensors.items()
@@ -226,6 +324,7 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
 
         item = MultimodalDataItem(
             modality=Modality.IMAGE,
+            hash=feat_hash,
             feature=feature,
             model_specific_data=model_specific,
             offsets=offsets,
