@@ -45,6 +45,7 @@ use wfaas::LoggingSubscriber;
 use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
+    mesh::MeshAdapters,
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
         logging::{self, LoggingConfig},
@@ -80,6 +81,7 @@ pub struct AppState {
     pub concurrency_queue_tx: Option<mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
+    pub mesh_adapters: Option<Arc<MeshAdapters>>,
 }
 
 async fn parse_function_call(
@@ -1051,24 +1053,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             (None, None)
         };
 
-    // Initialize mesh server if configured, it will return a handler for mesh management
-    let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
-        // Create mesh server builder and build with stores
-        let (mesh_server, handler) = MeshServerBuilder::from(mesh_server_config).build();
-
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "mesh server runs for the lifetime of the process; shutdown is handled by the mesh handler"
-        )]
-        spawn(async move {
-            if let Err(e) = mesh_server.start().await {
-                tracing::error!("Mesh server failed: {}", e);
-            }
-        });
-
-        Some(Arc::new(handler))
-    } else {
-        None
+    // Build the mesh server if configured. Starting gossip is deferred until
+    // MeshAdapters has registered the `worker:`/`rl:` CRDT namespaces below —
+    // a remote op arriving for an unregistered prefix would merge through the
+    // default last-writer-wins engine with the wrong semantics.
+    let (mesh_server, mesh_handler) = match &config.mesh_server_config {
+        Some(mesh_server_config) => {
+            let (server, handler) = MeshServerBuilder::from(mesh_server_config).build();
+            (Some(server), Some(Arc::new(handler)))
+        }
+        None => (None, None),
     };
 
     info!(
@@ -1089,6 +1083,27 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         )
         .await?,
     );
+
+    // Register the CRDT namespaces and start the inbound sync adapters, then
+    // start gossip. Order matters: see the note at the mesh build above.
+    let mesh_adapters = mesh_handler.as_ref().map(|handler| {
+        MeshAdapters::start(
+            handler.mesh_kv(),
+            handler.self_name.clone(),
+            app_context.worker_registry.clone(),
+        )
+    });
+    if let Some(mesh_server) = mesh_server {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "mesh server runs for the lifetime of the process; shutdown is handled by the mesh handler"
+        )]
+        spawn(async move {
+            if let Err(e) = mesh_server.start().await {
+                tracing::error!("Mesh server failed: {}", e);
+            }
+        });
+    }
 
     if config.prometheus_config.is_some() {
         app_context.inflight_tracker.start_sampler(20);
@@ -1288,11 +1303,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // v1 mesh sync (set_mesh_sync, WorkerStateSubscriber, TreeStateSubscriber)
-    // is removed in this PR. State sync across mesh peers is not wired in this
-    // branch — v2 adapters in `model_gateway/src/mesh/adapters/` are built and
-    // tested but not yet started from `server.rs`. That wiring lands in a
-    // follow-up PR.
+    // v2 mesh adapters are constructed and started by `MeshAdapters::start`
+    // above (inbound sync live). Outbound publish (WorkerEvent -> mesh) lands
+    // in a follow-up PR.
 
     // Get mesh cluster state and port before moving mesh_handler into app_state
     let mesh_cluster_state = mesh_handler.as_ref().map(|h| h.state.clone());
@@ -1307,6 +1320,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         concurrency_queue_tx: limiter.queue_tx.clone(),
         router_manager: Some(router_manager),
         mesh_handler,
+        mesh_adapters,
     });
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {
