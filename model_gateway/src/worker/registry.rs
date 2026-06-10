@@ -979,6 +979,28 @@ impl WorkerRegistry {
         self.remove(&worker_id)
     }
 
+    /// Remove a mesh-imported worker in response to a remote tombstone.
+    ///
+    /// Delegates to [`Self::remove`] only when the worker's origin is
+    /// [`WorkerOrigin::Mesh`]. A locally-owned worker is never removed by
+    /// a peer's tombstone — only the owning node retires its own key, so
+    /// a remote tombstone for a local worker is anomalous and is refused
+    /// with a warning. Returns the removed worker, or `None` if the id is
+    /// unknown or locally owned.
+    pub fn remove_remote(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
+        match self.origin_of(worker_id) {
+            Some(WorkerOrigin::Mesh) => self.remove(worker_id),
+            Some(WorkerOrigin::Local) => {
+                tracing::warn!(
+                    worker_id = %worker_id.as_str(),
+                    "Refusing remote tombstone for locally-owned worker"
+                );
+                None
+            }
+            None => None,
+        }
+    }
+
     // ───────────────────────────────────────────────────────────────────
     // 8. Internal helpers
     // ───────────────────────────────────────────────────────────────────
@@ -1268,18 +1290,42 @@ impl WorkerRegistry {
         // `Ready` to `NotReady` and leaves `Pending` / `Failed` alone
         // (those are owned by the local state machine, not by mesh
         // hints).
-        if let Some(existing) = self.get_by_url(&state.url) {
-            if state.health {
-                existing.set_status(WorkerStatus::Ready);
-            } else if existing.status() == WorkerStatus::Ready {
-                existing.set_status(WorkerStatus::NotReady);
+        if let Some(existing_id) = self.get_id_by_url(&state.url) {
+            // A locally-owned worker's state is published BY this node;
+            // a peer's echo of it must never mutate local status — the
+            // local health state machine is the single writer.
+            if self.origin_of(&existing_id) == Some(WorkerOrigin::Local) {
+                tracing::debug!(
+                    url = %state.url,
+                    "Ignoring mesh state for locally-owned worker"
+                );
+                return;
             }
-            tracing::debug!(
-                url = %state.url,
-                healthy = state.health,
-                "Updated health for existing mesh-synced worker"
-            );
-            return;
+            if let Some(existing) = self.get(&existing_id) {
+                if state.health {
+                    existing.set_status(WorkerStatus::Ready);
+                } else if existing.status() == WorkerStatus::Ready {
+                    existing.set_status(WorkerStatus::NotReady);
+                }
+                tracing::debug!(
+                    url = %state.url,
+                    healthy = state.health,
+                    "Updated health for existing mesh-synced worker"
+                );
+                return;
+            }
+        }
+
+        // Adopt the publisher's worker id for the import so a later
+        // tombstone for `worker:{id}` (which carries no value, only the
+        // key) resolves to this worker. A pre-existing reservation for
+        // the URL wins; the import then lives under the local id and a
+        // remote tombstone for it will not resolve (rare; local probes
+        // eventually demote it instead).
+        if !state.worker_id.is_empty() {
+            self.url_to_id
+                .entry(state.url.clone())
+                .or_insert_with(|| WorkerId::from_string(state.worker_id.clone()));
         }
 
         // New worker — build from the full WorkerSpec if available,
@@ -1294,8 +1340,13 @@ impl WorkerRegistry {
                 .build(),
         };
 
+        // An explicitly-unhealthy import must not be routable: the builder
+        // defaults `disable_health_check` workers to `Ready`, so the
+        // `false` case needs a forced demotion, not just no promotion.
         if state.health {
             worker.set_status(WorkerStatus::Ready);
+        } else {
+            worker.set_status(WorkerStatus::NotReady);
         }
 
         // A `Mesh` origin keeps the outbound sync from re-publishing the
@@ -1461,6 +1512,114 @@ mod tests {
         });
         let mesh_id = registry.get_id_by_url("http://remote:8080").unwrap();
         assert_eq!(registry.origin_of(&mesh_id), Some(WorkerOrigin::Mesh));
+    }
+
+    fn remote_state(
+        worker_id: &str,
+        url: &str,
+        health: bool,
+        spec: Vec<u8>,
+    ) -> smg_mesh::WorkerState {
+        smg_mesh::WorkerState {
+            worker_id: worker_id.to_string(),
+            model_id: "llama-3".to_string(),
+            url: url.to_string(),
+            health,
+            load: 0.0,
+            version: 1,
+            spec,
+        }
+    }
+
+    #[test]
+    fn mesh_import_adopts_publisher_worker_id() {
+        let registry = WorkerRegistry::new();
+        registry.on_remote_worker_state(&remote_state(
+            "peer-w1",
+            "http://remote:8080",
+            true,
+            vec![],
+        ));
+        assert_eq!(
+            registry.get_id_by_url("http://remote:8080"),
+            Some(WorkerId::from_string("peer-w1".to_string())),
+            "import keys under the publisher's id so its tombstone resolves"
+        );
+    }
+
+    #[test]
+    fn mesh_state_never_mutates_locally_owned_worker() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://local:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let id = registry.register(worker.clone()).unwrap();
+        worker.set_status(WorkerStatus::Ready);
+
+        registry.on_remote_worker_state(&remote_state(
+            "peer-x",
+            "http://local:8080",
+            false,
+            vec![],
+        ));
+        assert_eq!(
+            registry.get(&id).unwrap().status(),
+            WorkerStatus::Ready,
+            "a peer's echo must not demote a locally-owned worker"
+        );
+    }
+
+    #[test]
+    fn unhealthy_import_with_disabled_health_check_is_not_ready() {
+        // The builder defaults disable_health_check workers to Ready; an
+        // explicitly-unhealthy import must still land unroutable.
+        let spec: openai_protocol::worker::WorkerSpec = serde_json::from_value(serde_json::json!({
+            "url": "http://remote:8080",
+            "health": { "disable_health_check": true }
+        }))
+        .unwrap();
+        let registry = WorkerRegistry::new();
+        registry.on_remote_worker_state(&remote_state(
+            "peer-w1",
+            "http://remote:8080",
+            false,
+            bincode::serialize(&spec).unwrap(),
+        ));
+        let worker = registry.get_by_url("http://remote:8080").expect("imported");
+        assert_ne!(
+            worker.status(),
+            WorkerStatus::Ready,
+            "an explicitly-unhealthy import must not be routable"
+        );
+    }
+
+    #[test]
+    fn remove_remote_only_removes_mesh_origin_workers() {
+        let registry = WorkerRegistry::new();
+
+        registry.on_remote_worker_state(&remote_state(
+            "peer-w1",
+            "http://remote:8080",
+            true,
+            vec![],
+        ));
+        let mesh_id = registry.get_id_by_url("http://remote:8080").unwrap();
+        assert!(registry.remove_remote(&mesh_id).is_some());
+        assert!(registry.get_by_url("http://remote:8080").is_none());
+
+        let local: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://local:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let local_id = registry.register(local).unwrap();
+        assert!(registry.remove_remote(&local_id).is_none());
+        assert!(
+            registry.get(&local_id).is_some(),
+            "a locally-owned worker survives a remote tombstone"
+        );
     }
 
     #[test]
