@@ -328,85 +328,96 @@ impl GrpcRouter {
         body: &ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        // 0. Fast worker validation (fail-fast before expensive operations)
+        // Fast worker validation (fail-fast before expensive operations)
         if let Some(error_response) = validate_worker_availability(&self.worker_registry, model_id)
         {
             return error_response;
         }
 
-        // Choose implementation based on Harmony model detection (checks worker metadata)
         let is_harmony =
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &body.model);
 
-        if is_harmony {
-            debug!(
-                "Processing Harmony responses request for model: {}, streaming: {}",
-                model_id,
-                body.stream.unwrap_or(false)
-            );
-            let harmony_ctx = ResponsesContext::new(
-                Arc::new(self.harmony_pipeline.clone()),
-                self.shared_components.clone(),
-                self.harmony_responses_context.response_storage.clone(),
-                self.harmony_responses_context.conversation_storage.clone(),
-                self.harmony_responses_context
-                    .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context.mcp_orchestrator.clone(),
-                self.harmony_responses_context.mcp_format_registry.clone(),
-                smg_data_connector::current_request_context(),
-            );
-
-            if body.stream.unwrap_or(false) {
-                serve_harmony_responses_stream(&harmony_ctx, body.clone(), tenant_meta.clone())
-                    .await
-            } else {
-                match serve_harmony_responses(
-                    &harmony_ctx,
-                    body.clone(),
-                    tenant_meta.clone(),
-                    &tokio_util::sync::CancellationToken::new(),
-                )
-                .await
-                {
-                    Ok(response) => {
-                        persist_response_if_needed(
-                            harmony_ctx.conversation_storage.clone(),
-                            harmony_ctx.conversation_item_storage.clone(),
-                            harmony_ctx.response_storage.clone(),
-                            &response,
-                            body,
-                            harmony_ctx.request_context.clone(),
-                        )
-                        .await;
-                        axum::Json(response).into_response()
-                    }
-                    Err(error_response) => error_response,
-                }
-            }
-        } else {
-            responses::route_responses(
+        // Regular pipeline keeps its own entry (streaming + sync + persist).
+        if !is_harmony {
+            return responses::route_responses(
                 &self.responses_context,
                 Arc::new(body.clone()),
                 headers.cloned(),
                 tenant_meta.clone(),
                 model_id.to_string(),
             )
+            .await;
+        }
+
+        if body.stream.unwrap_or(false) {
+            let harmony_ctx = self.responses_ctx(
+                &self.harmony_responses_context,
+                &self.harmony_pipeline,
+                smg_data_connector::current_request_context(),
+            );
+            return serve_harmony_responses_stream(&harmony_ctx, body.clone(), tenant_meta.clone())
+                .await;
+        }
+
+        // Harmony non-streaming shares the responses core; the live handler persists.
+        let request_context = smg_data_connector::current_request_context();
+        match self
+            .run_responses(
+                body.clone(),
+                tenant_meta.clone(),
+                request_context.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
             .await
+        {
+            Ok(response) => {
+                persist_response_if_needed(
+                    self.harmony_responses_context.conversation_storage.clone(),
+                    self.harmony_responses_context
+                        .conversation_item_storage
+                        .clone(),
+                    self.harmony_responses_context.response_storage.clone(),
+                    &response,
+                    body,
+                    request_context,
+                )
+                .await;
+                axum::Json(response).into_response()
+            }
+            Err(error_response) => error_response,
         }
     }
 
-    /// Headless (background) non-streaming execution: runs the responses pipeline
-    /// for a claimed job with the worker-supplied `request_context` and cancel
-    /// token, returning the typed response for the worker to finalize.
-    async fn execute_responses_headless_impl(
+    /// Build a per-request [`ResponsesContext`] from a template context and
+    /// pipeline, injecting `request_context`.
+    fn responses_ctx(
+        &self,
+        template: &ResponsesContext,
+        pipeline: &RequestPipeline,
+        request_context: Option<smg_data_connector::RequestContext>,
+    ) -> ResponsesContext {
+        ResponsesContext::new(
+            Arc::new(pipeline.clone()),
+            self.shared_components.clone(),
+            template.response_storage.clone(),
+            template.conversation_storage.clone(),
+            template.conversation_item_storage.clone(),
+            template.mcp_orchestrator.clone(),
+            template.mcp_format_registry.clone(),
+            request_context,
+        )
+    }
+
+    /// Run the non-streaming responses pipeline and return the typed result
+    /// without persisting. The live handler wraps it with persist + serialization;
+    /// the background worker wraps it with `finalize`.
+    async fn run_responses(
         &self,
         request: ResponsesRequest,
         tenant_meta: TenantRequestMeta,
         request_context: Option<smg_data_connector::RequestContext>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ResponsesResponse, Response> {
-        // Fail-fast worker validation.
         if let Some(error_response) =
             validate_worker_availability(&self.worker_registry, &request.model)
         {
@@ -417,41 +428,17 @@ impl GrpcRouter {
             HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &request.model);
 
         if is_harmony {
-            debug!(
-                "Headless Harmony responses execution for model: {}",
-                request.model
-            );
-            let harmony_ctx = ResponsesContext::new(
-                Arc::new(self.harmony_pipeline.clone()),
-                self.shared_components.clone(),
-                self.harmony_responses_context.response_storage.clone(),
-                self.harmony_responses_context.conversation_storage.clone(),
-                self.harmony_responses_context
-                    .conversation_item_storage
-                    .clone(),
-                self.harmony_responses_context.mcp_orchestrator.clone(),
-                self.harmony_responses_context.mcp_format_registry.clone(),
+            let ctx = self.responses_ctx(
+                &self.harmony_responses_context,
+                &self.harmony_pipeline,
                 request_context,
             );
-            serve_harmony_responses(&harmony_ctx, request, tenant_meta, &cancel).await
+            serve_harmony_responses(&ctx, request, tenant_meta, &cancel).await
         } else {
-            debug!(
-                "Headless regular responses execution for model: {}",
-                request.model
-            );
-            let regular_ctx = ResponsesContext::new(
-                Arc::new(self.pipeline.clone()),
-                self.shared_components.clone(),
-                self.responses_context.response_storage.clone(),
-                self.responses_context.conversation_storage.clone(),
-                self.responses_context.conversation_item_storage.clone(),
-                self.responses_context.mcp_orchestrator.clone(),
-                self.responses_context.mcp_format_registry.clone(),
-                request_context,
-            );
+            let ctx = self.responses_ctx(&self.responses_context, &self.pipeline, request_context);
             let response_id = format!("resp_{}", uuid::Uuid::now_v7());
             responses::execute_responses_headless(
-                &regular_ctx,
+                &ctx,
                 Arc::new(request),
                 tenant_meta,
                 response_id,
@@ -751,9 +738,7 @@ impl BackgroundWorker for GrpcRouter {
             repository,
             &self.background_config,
             job,
-            |req, tenant_meta, ctx, cancel| {
-                self.execute_responses_headless_impl(req, tenant_meta, ctx, cancel)
-            },
+            |req, tenant_meta, ctx, cancel| self.run_responses(req, tenant_meta, ctx, cancel),
         ))
         .await;
     }
