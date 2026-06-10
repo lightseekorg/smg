@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -40,6 +41,7 @@ class Worker:
     mode: ConnectionMode = ConnectionMode.HTTP
     worker_type: WorkerType = WorkerType.REGULAR
     bootstrap_port: int | None = None
+    nixl_port: int | None = None
     ib_device: str | None = None
     log_dir: str | None = None
     process: subprocess.Popen | None = field(default=None, repr=False)
@@ -157,6 +159,9 @@ class Worker:
         release_port(self.port)
         if self.bootstrap_port is not None:
             release_port(self.bootstrap_port)
+        if self.nixl_port is not None:
+            release_port(self.nixl_port)
+            self.nixl_port = None
 
     def is_alive(self) -> bool:
         """Check if the worker process is still running."""
@@ -265,6 +270,17 @@ class Worker:
             "--gpu-memory-utilization",
             "0.9",
         ]
+
+        # PD disaggregation: NIXL KV transfer roles
+        if self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
+            kv_role = "kv_producer" if self.worker_type == WorkerType.PREFILL else "kv_consumer"
+            cmd.extend(
+                [
+                    "--kv-transfer-config",
+                    json.dumps({"kv_connector": "NixlConnector", "kv_role": kv_role}),
+                ]
+            )
+
         extra = spec.get("vllm_args", [])
         if extra:
             cmd.extend(extra)
@@ -364,6 +380,11 @@ class Worker:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_ids))
+
+        # vLLM PD workers need a unique NIXL side-channel port per worker
+        if self.engine == "vllm" and self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
+            self.nixl_port = get_open_port()
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_port)
 
         # TRT-LLM multi-GPU needs NCCL tuning for CI compatibility
         if self.engine == "trtllm" and len(self.gpu_ids) > 1:

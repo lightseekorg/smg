@@ -79,7 +79,10 @@ smg \
 
 ## vLLM PD
 
-SMG sends to prefill first with `max_tokens=1`, then sends the original request to decode. The KV backend (NIXL or Mooncake) transfers the cache transparently.
+SMG sends to prefill first with `max_tokens=1`, then sends the original request to decode, relaying KV-transfer metadata between the two legs:
+
+- **NIXL**: SMG tags the prefill request with `do_remote_decode=true`, harvests the `kv_transfer_params` the prefill engine returns (engine id, request id, block ids, side-channel address, TP size), and forwards them verbatim with the decode request so decode pulls the KV cache over NIXL.
+- **Mooncake**: SMG injects the prefill worker's bootstrap host/port into the decode request.
 
 ### Start vLLM Workers with NIXL
 
@@ -98,6 +101,18 @@ python -m vllm.entrypoints.grpc_server \
   --port 50052 \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
+
+`VLLM_NIXL_SIDE_CHANNEL_PORT` must be unique per worker on the same host (with
+data parallelism each rank uses `port + dp_rank`). When prefill and decode run
+on different machines, also set `VLLM_NIXL_SIDE_CHANNEL_HOST` to an address
+reachable from the decode worker — prefill embeds this host/port in the
+handoff params that decode uses to fetch the KV cache.
+
+To verify KV transfer is active, send a request and look for `Transfer plan:`
+in the decode worker log (vLLM >= 0.20). If the router logs
+`prefill returned no kv_transfer_params`, upgrade the servicer
+(smg-grpc-servicer >= 0.5.4, smg-grpc-proto >= 0.4.9) or check the
+`--kv-transfer-config` on the workers.
 
 ### Start SMG
 

@@ -232,6 +232,14 @@ jobs:
           python3 -m pip install pytest pytest-cov pytest-xdist
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
+      - name: Run grpc_servicer unit tests
+        run: |
+          rm -f crates/grpc_client/python/smg_grpc_proto/proto
+          mkdir -p crates/grpc_client/python/smg_grpc_proto/proto
+          cp crates/grpc_client/proto/*.proto crates/grpc_client/python/smg_grpc_proto/proto/
+          pip install ./crates/grpc_client/python
+          pytest -q grpc_servicer/tests
+
   unit-tests:
     needs: [detect-changes]
     if: >-
