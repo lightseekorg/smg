@@ -133,6 +133,7 @@ impl L1Cache {
         &self,
         input: &str,
         special_tokens: &[&str],
+        add_special_tokens: bool,
     ) -> Option<(Vec<TokenIdType>, usize)> {
         let boundaries = find_special_token_boundaries(input, special_tokens);
 
@@ -141,8 +142,11 @@ impl L1Cache {
             return None;
         }
 
-        // Build all prefix hashes incrementally O(N)
+        // Build all prefix hashes incrementally O(N).
+        // Seed with add_special_tokens so prefixes tokenized with/without a
+        // leading BOS map to distinct keys (the first segment honors this flag).
         let mut hasher = blake3::Hasher::new();
+        hasher.update(&[add_special_tokens as u8]);
         let mut prefix_hashes = Vec::with_capacity(boundaries.len());
         let mut last_pos = 0;
         let bytes = input.as_bytes();
@@ -190,6 +194,7 @@ impl L1Cache {
         }
 
         let mut hasher = blake3::Hasher::new();
+        hasher.update(&[add_special_tokens as u8]);
         let mut running_tokens = Vec::new();
         let mut last_pos = 0;
         let mut entries_to_insert = Vec::with_capacity(boundaries.len());
@@ -394,7 +399,7 @@ mod tests {
 
         // Search with same prefix but different user query
         let input2 = "<|im_start|>system\nYou are a helpful assistant that provides clear and detailed responses.<|im_end|><|im_start|>user\nWhat is 2+2?<|im_end|>";
-        let result = cache.longest_prefix_match(input2, special_tokens);
+        let result = cache.longest_prefix_match(input2, special_tokens, false);
 
         // Should find a match at the special token boundary (after system message)
         assert!(result.is_some());
@@ -420,7 +425,7 @@ mod tests {
         assert!(!cache.is_empty());
 
         // Should find a match
-        let result = cache.longest_prefix_match(input, special_tokens);
+        let result = cache.longest_prefix_match(input, special_tokens, false);
         assert!(result.is_some());
     }
 
@@ -442,7 +447,7 @@ mod tests {
 
         // Search with partial conversation - should match at a special token boundary
         let partial_input = "<|im_start|>system\nYou are a helpful AI assistant that provides detailed and accurate responses.<|im_end|><|im_start|>user\nHello there! How are you today? Can you help me understand how tokenization works in language models?<|im_end|>";
-        let result = cache.longest_prefix_match(partial_input, special_tokens);
+        let result = cache.longest_prefix_match(partial_input, special_tokens, false);
 
         // Should find a match at a special token boundary
         assert!(result.is_some());
@@ -465,7 +470,7 @@ mod tests {
             .unwrap();
 
         // Try to find match
-        let _ = cache.longest_prefix_match(input, special_tokens);
+        let _ = cache.longest_prefix_match(input, special_tokens, false);
 
         let stats = cache.stats();
         // Should have at least one hit (the longest special token boundary should match)
@@ -509,7 +514,7 @@ mod tests {
             .unwrap();
 
         // Access the first entry to update its timestamp
-        let result = cache.longest_prefix_match(input1, special_tokens);
+        let result = cache.longest_prefix_match(input1, special_tokens, false);
         assert!(result.is_some());
 
         // Insert second conversation
@@ -519,7 +524,7 @@ mod tests {
             .unwrap();
 
         // Access the second entry to make it more recent
-        let result = cache.longest_prefix_match(input2, special_tokens);
+        let result = cache.longest_prefix_match(input2, special_tokens, false);
         assert!(result.is_some());
 
         // Insert third conversation (should trigger eviction of oldest)
@@ -533,7 +538,7 @@ mod tests {
         assert!(stats.memory_bytes <= 5 * 1024);
 
         // The most recently accessed entries should still be present
-        let result = cache.longest_prefix_match(input3, special_tokens);
+        let result = cache.longest_prefix_match(input3, special_tokens, false);
         assert!(result.is_some());
     }
 
@@ -569,7 +574,7 @@ mod tests {
                     .unwrap();
 
                 // Query for the same input - should find a prefix match
-                let result = cache_clone.longest_prefix_match(&input, &special_tokens);
+                let result = cache_clone.longest_prefix_match(&input, &special_tokens, false);
                 assert!(
                     result.is_some(),
                     "Thread {i} expected a prefix match after insertion"
@@ -613,5 +618,74 @@ mod tests {
             "Expected at least 10 cache hits, got {}",
             stats.hits
         );
+    }
+
+    /// Encoder that prepends a sentinel BOS token when `add_special_tokens` is
+    /// set, so the same text yields different tokens per flag.
+    struct BosTokenizer;
+
+    const BOS_ID: TokenIdType = 99;
+
+    impl Encoder for BosTokenizer {
+        fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+            let mut ids: Vec<TokenIdType> = Vec::new();
+            if add_special_tokens {
+                ids.push(BOS_ID);
+            }
+            ids.extend(input.bytes().map(TokenIdType::from));
+            Ok(Encoding::Plain(ids))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|i| self.encode(i, add_special_tokens))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn test_add_special_tokens_separates_keys() {
+        let cache = L1Cache::new(1024 * 1024);
+        let special_tokens = &["<|im_start|>", "<|im_end|>"];
+        let tokenizer = BosTokenizer;
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nq<|im_end|>";
+
+        // Insert the same input under both flags.
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, true)
+            .unwrap();
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, false)
+            .unwrap();
+
+        // Each flag must return its own prefix: BOS present only for `true`.
+        let (with_bos, _) = cache
+            .longest_prefix_match(input, special_tokens, true)
+            .expect("match for add_special_tokens=true");
+        let (without_bos, _) = cache
+            .longest_prefix_match(input, special_tokens, false)
+            .expect("match for add_special_tokens=false");
+
+        assert_eq!(with_bos.first(), Some(&BOS_ID));
+        assert_ne!(without_bos.first(), Some(&BOS_ID));
+    }
+
+    #[test]
+    fn test_opposite_flag_does_not_collide() {
+        let cache = L1Cache::new(1024 * 1024);
+        let special_tokens = &["<|im_start|>", "<|im_end|>"];
+        let tokenizer = BosTokenizer;
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nq<|im_end|>";
+
+        // Only the `true` flag is populated.
+        cache
+            .insert_at_boundaries(input, &tokenizer, special_tokens, true)
+            .unwrap();
+
+        // A lookup with the opposite flag must miss rather than return BOS tokens.
+        assert!(cache
+            .longest_prefix_match(input, special_tokens, false)
+            .is_none());
     }
 }

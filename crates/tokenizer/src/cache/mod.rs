@@ -179,7 +179,9 @@ impl Encoder for CachedTokenizer {
                 .map(|s| s.as_str())
                 .collect();
 
-            if let Some((prefix_tokens, prefix_len)) = l1.longest_prefix_match(input, &tokens) {
+            if let Some((prefix_tokens, prefix_len)) =
+                l1.longest_prefix_match(input, &tokens, add_special_tokens)
+            {
                 let suffix = &input[prefix_len..];
                 if !suffix.is_empty() {
                     let suffix_encoding = self.inner.encode(suffix, add_special_tokens)?;
