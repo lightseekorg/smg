@@ -36,6 +36,7 @@ use crate::{
         common::{
             header_utils,
             retry::{is_retryable_status, RetryExecutor},
+            sse::SseEncoder,
         },
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},
@@ -910,14 +911,20 @@ impl PDRouter {
         )]
         tokio::spawn(async move {
             futures_util::pin_mut!(stream);
+            // Reusable SSE encoder for the logprob-merge re-encode path.
+            let mut encoder = SseEncoder::new();
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
                         let is_done = memmem::find(&chunk, b"data: [DONE]").is_some();
 
                         let result = if return_logprob && prefill_logprobs.is_some() {
-                            Self::merge_streaming_logprobs(prefill_logprobs.clone(), &chunk)
-                                .unwrap_or(chunk)
+                            Self::merge_streaming_logprobs(
+                                prefill_logprobs.as_ref(),
+                                &chunk,
+                                &mut encoder,
+                            )
+                            .unwrap_or(chunk)
                         } else {
                             chunk
                         };
@@ -1136,8 +1143,9 @@ impl PDRouter {
     // Simple helper to merge logprobs in streaming responses
     // Optimized to reduce allocations in the merge path
     fn merge_streaming_logprobs(
-        prefill_logprobs: Option<Value>,
+        prefill_logprobs: Option<&Value>,
         decode_chunk: &[u8],
+        encoder: &mut SseEncoder,
     ) -> Result<bytes::Bytes, ()> {
         // Skip non-data chunks
         let chunk_str = std::str::from_utf8(decode_chunk).map_err(|_| ())?;
@@ -1150,7 +1158,7 @@ impl PDRouter {
         let mut decode_json: Value = serde_json::from_str(json_str).map_err(|_| ())?;
 
         // Merge prefill logprobs if available
-        if let Some(ref p_logprobs) = prefill_logprobs {
+        if let Some(p_logprobs) = prefill_logprobs {
             if let Some(meta) = decode_json.get_mut("meta_info") {
                 if let Some(d_logprobs) = meta.get_mut("input_token_logprobs") {
                     if let Some(p_arr) = p_logprobs.as_array() {
@@ -1168,12 +1176,8 @@ impl PDRouter {
             }
         }
 
-        // Re-serialize
-        let merged_str = format!(
-            "data: {}\n\n",
-            serde_json::to_string(&decode_json).unwrap_or_default()
-        );
-        Ok(bytes::Bytes::from(merged_str))
+        // Re-serialize via the shared encoder (reuses its buffer across chunks).
+        encoder.encode_data(&decode_json).map_err(|_| ())
     }
 }
 
