@@ -90,6 +90,8 @@ def _convert_loads_to_protobuf(
         cache_hit_rate=result.cache_hit_rate,
         utilization=result.utilization,
         max_running_requests=result.max_running_requests,
+        # Queued token-work: waiting-queue tokens not served from cache.
+        num_waiting_uncached_tokens=result.num_waiting_uncached_tokens,
     )
 
     # Add optional sections using CopyFrom for proper protobuf assignment

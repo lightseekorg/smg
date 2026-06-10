@@ -312,17 +312,27 @@ pub enum PolicyConfig {
     #[serde(rename = "power_of_two")]
     PowerOfTwo { load_check_interval_secs: u64 },
 
-    /// Least-load policy: routes to the worker minimizing
-    /// `in_flight + kv_pressure_weight * k/(1-k)` — the real-time in-flight request count plus
-    /// a convex KV-cache pressure term from the load monitor.
-    /// See `policies/least_load.rs`.
+    /// Least-(token-)work policy: routes to the worker minimizing the expected
+    /// wait `(queued_tokens + inflight_tokens) / throughput + kv_pressure_weight * k/(1-k)`
+    /// — token-work drain time plus a convex KV-cache pressure barrier, computed
+    /// from the load monitor with in-flight correction. See `policies/least_load.rs`.
     #[serde(rename = "least_load")]
     LeastLoad {
         #[serde(default = "default_least_load_interval")]
         load_check_interval_secs: u64,
-        /// KV-pressure weight (request-equivalents per unit of M/M/1 congestion).
+        /// KV-pressure weight `λ_t` (seconds): the time-cost of KV contention,
+        /// commensurate with the expected-queue-wait term.
         #[serde(default = "default_least_load_kv_pressure_weight")]
         kv_pressure_weight: f64,
+        /// Mean prefill length (tokens) used to estimate in-flight token-work
+        /// when a request's token count is unknown at routing time.
+        #[serde(default = "default_least_load_mean_prefill")]
+        mean_prefill_tokens: u32,
+        /// Fallback generation throughput (tokens/s) for the expected-wait term
+        /// when a backend reports no live `gen_throughput`. Set to the fleet's
+        /// per-replica generation rate; co-tunes with `kv_pressure_weight`.
+        #[serde(default = "default_least_load_throughput")]
+        default_throughput: f64,
     },
 
     #[serde(rename = "bucket")]
@@ -402,7 +412,15 @@ fn default_least_load_interval() -> u64 {
 }
 
 fn default_least_load_kv_pressure_weight() -> f64 {
-    1.5
+    0.15
+}
+
+fn default_least_load_mean_prefill() -> u32 {
+    1024
+}
+
+fn default_least_load_throughput() -> f64 {
+    2000.0
 }
 
 impl PolicyConfig {

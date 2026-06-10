@@ -20,9 +20,14 @@ impl PolicyFactory {
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
             PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
             PolicyConfig::LeastLoad {
-                kv_pressure_weight, ..
-            } => Arc::new(LeastLoadPolicy::with_kv_pressure_weight(
+                kv_pressure_weight,
+                mean_prefill_tokens,
+                default_throughput,
+                ..
+            } => Arc::new(LeastLoadPolicy::with_params(
                 *kv_pressure_weight,
+                *mean_prefill_tokens,
+                *default_throughput,
             )),
             PolicyConfig::CacheAware {
                 cache_threshold,

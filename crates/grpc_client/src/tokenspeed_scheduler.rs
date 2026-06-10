@@ -666,6 +666,8 @@ impl From<tokenspeed_proto::SchedulerLoad> for openai_protocol::worker::Schedule
             dp_rank: load.dp_rank,
             num_running_reqs: load.num_running_reqs,
             num_waiting_reqs: load.num_waiting_reqs,
+            // TokenSpeed does not report queued token-work; degrade to 0.
+            num_waiting_uncached_tokens: 0,
             num_total_reqs: load.num_total_reqs,
             num_used_tokens: load.num_used_tokens,
             max_total_num_tokens: load.max_total_num_tokens,

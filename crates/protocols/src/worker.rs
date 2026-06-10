@@ -1017,6 +1017,9 @@ pub struct SchedulerLoadSnapshot {
     pub dp_rank: i32,
     pub num_running_reqs: i32,
     pub num_waiting_reqs: i32,
+    /// Queued token-work: waiting-queue tokens not yet served from cache. 0 when
+    /// the backend does not report it — callers degrade gracefully.
+    pub num_waiting_uncached_tokens: i32,
     pub num_total_reqs: i32,
     pub num_used_tokens: i32,
     pub max_total_num_tokens: i32,
@@ -1049,6 +1052,19 @@ impl WorkerLoadResponse {
     /// Total used tokens summed across all DP ranks.
     pub fn total_used_tokens(&self) -> i64 {
         self.loads.iter().map(|l| l.num_used_tokens as i64).sum()
+    }
+
+    /// Total queued (waiting, uncached) tokens summed across all DP ranks.
+    pub fn total_waiting_uncached_tokens(&self) -> i64 {
+        self.loads
+            .iter()
+            .map(|l| l.num_waiting_uncached_tokens as i64)
+            .sum()
+    }
+
+    /// Total generation throughput (tokens/s) summed across all DP ranks.
+    pub fn total_gen_throughput(&self) -> f64 {
+        self.loads.iter().map(|l| l.gen_throughput).sum()
     }
 
     pub fn dp_rank_loads(&self) -> HashMap<isize, isize> {

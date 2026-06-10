@@ -192,6 +192,20 @@ struct CliArgs {
     #[arg(long, default_value_t = 1.25, help_heading = "Routing Policy")]
     prefix_hash_load_factor: f64,
 
+    /// KV-pressure weight (seconds) for the least_load policy
+    #[arg(long, default_value_t = 0.15, help_heading = "Routing Policy")]
+    least_load_kv_pressure_weight: f64,
+
+    /// Fallback generation throughput (tokens/s) for least_load when a backend
+    /// reports no live throughput
+    #[arg(long, default_value_t = 2000.0, help_heading = "Routing Policy")]
+    least_load_default_throughput: f64,
+
+    /// Mean prefill tokens for least_load's in-flight estimate when a request's
+    /// token count is unknown at routing
+    #[arg(long, default_value_t = 1024, help_heading = "Routing Policy")]
+    least_load_mean_prefill_tokens: u32,
+
     /// Enable data parallelism aware scheduling
     #[arg(long, default_value_t = false, help_heading = "Routing Policy")]
     dp_aware: bool,
@@ -931,7 +945,9 @@ impl CliArgs {
             },
             "least_load" => PolicyConfig::LeastLoad {
                 load_check_interval_secs: 5,
-                kv_pressure_weight: 1.5,
+                kv_pressure_weight: self.least_load_kv_pressure_weight,
+                mean_prefill_tokens: self.least_load_mean_prefill_tokens,
+                default_throughput: self.least_load_default_throughput,
             },
             "prefix_hash" => PolicyConfig::PrefixHash {
                 prefix_token_count: self.prefix_token_count,

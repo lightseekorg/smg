@@ -51,6 +51,9 @@ class RouterArgs:
     eviction_interval_secs: int = 60
     max_tree_size: int = 2**26
     block_size: int = 16
+    least_load_kv_pressure_weight: float = 0.15
+    least_load_default_throughput: float = 2000.0
+    least_load_mean_prefill_tokens: int = 1024
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
@@ -331,6 +334,30 @@ class RouterArgs:
             type=float,
             default=RouterArgs.cache_threshold,
             help="Cache threshold (0.0-1.0) for cache-aware routing",
+        )
+        routing_group.add_argument(
+            f"--{prefix}least-load-kv-pressure-weight",
+            type=float,
+            default=RouterArgs.least_load_kv_pressure_weight,
+            help="KV-pressure weight (seconds) for the least_load policy",
+        )
+        routing_group.add_argument(
+            f"--{prefix}least-load-default-throughput",
+            type=float,
+            default=RouterArgs.least_load_default_throughput,
+            help=(
+                "Fallback generation throughput (tokens/s) for least_load when a"
+                " backend reports no live throughput"
+            ),
+        )
+        routing_group.add_argument(
+            f"--{prefix}least-load-mean-prefill-tokens",
+            type=int,
+            default=RouterArgs.least_load_mean_prefill_tokens,
+            help=(
+                "Mean prefill tokens for least_load's in-flight estimate when a"
+                " request's token count is unknown at routing"
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}balance-abs-threshold",

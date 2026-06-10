@@ -518,6 +518,12 @@ message SchedulerLoad {
   double utilization = 10;
   int32 max_running_requests = 11;
 
+  // Queued token-work: waiting-queue tokens not yet served from cache
+  // (SGLang num_waiting_uncached_tokens). Field 17 is intentionally out of
+  // order — appended after the optional-section field numbers to preserve
+  // wire compatibility with existing readers.
+  int32 num_waiting_uncached_tokens = 17;
+
   // Optional sections
   optional MemoryMetrics memory = 12;
   optional SpeculativeMetrics speculative = 13;

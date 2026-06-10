@@ -303,6 +303,8 @@ impl ConfigValidator {
             PolicyConfig::LeastLoad {
                 load_check_interval_secs,
                 kv_pressure_weight,
+                mean_prefill_tokens,
+                default_throughput,
             } => {
                 if *load_check_interval_secs == 0 {
                     return Err(ConfigError::InvalidValue {
@@ -317,6 +319,22 @@ impl ConfigValidator {
                         field: "kv_pressure_weight".to_string(),
                         value: kv_pressure_weight.to_string(),
                         reason: "Must be finite and >= 0.0".to_string(),
+                    });
+                }
+
+                if *mean_prefill_tokens == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "mean_prefill_tokens".to_string(),
+                        value: mean_prefill_tokens.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if !default_throughput.is_finite() || *default_throughput <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "default_throughput".to_string(),
+                        value: default_throughput.to_string(),
+                        reason: "Must be finite and > 0.0".to_string(),
                     });
                 }
             }
