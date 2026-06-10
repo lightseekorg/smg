@@ -7,8 +7,8 @@ use llm_tokenizer::registry::TokenizerRegistry;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_data_connector::{
-    create_storage, BackgroundResponseRepository, ConversationItemStorage, ConversationStorage,
-    ResponseStorage, StorageFactoryConfig,
+    create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
+    StorageFactoryConfig,
 };
 use smg_mcp::McpOrchestrator;
 use tool_parser::ParserFactory as ToolParserFactory;
@@ -61,7 +61,6 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
     pub worker_monitor: Option<Arc<WorkerMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
@@ -101,7 +100,6 @@ pub struct AppContextBuilder {
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
-    background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
     worker_monitor: Option<Arc<WorkerMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
@@ -155,7 +153,6 @@ impl AppContextBuilder {
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
-            background_repository: None,
             worker_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
@@ -234,14 +231,6 @@ impl AppContextBuilder {
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
     ) -> Self {
         self.conversation_item_storage = Some(conversation_item_storage);
-        self
-    }
-
-    pub fn background_repository(
-        mut self,
-        background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
-    ) -> Self {
-        self.background_repository = background_repository;
         self
     }
 
@@ -368,7 +357,6 @@ impl AppContextBuilder {
             conversation_item_storage: self.conversation_item_storage.ok_or(
                 AppContextBuildError::MissingField("conversation_item_storage"),
             )?,
-            background_repository: self.background_repository,
             worker_monitor: self.worker_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
@@ -575,7 +563,6 @@ impl AppContextBuilder {
         self.response_storage = Some(bundle.response_storage);
         self.conversation_storage = Some(bundle.conversation_storage);
         self.conversation_item_storage = Some(bundle.conversation_item_storage);
-        self.background_repository = bundle.background_repository;
 
         Ok(self)
     }

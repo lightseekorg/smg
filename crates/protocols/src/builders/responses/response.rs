@@ -18,7 +18,6 @@ pub struct ResponsesResponseBuilder {
     object: String,
     created_at: i64,
     completed_at: Option<i64>,
-    background: Option<bool>,
     conversation: Option<String>,
     status: ResponseStatus,
     error: Option<Value>,
@@ -55,7 +54,6 @@ impl ResponsesResponseBuilder {
             object: "response".to_string(),
             created_at: chrono::Utc::now().timestamp(),
             completed_at: None,
-            background: None,
             conversation: None,
             status: ResponseStatus::InProgress,
             error: None,
@@ -96,7 +94,6 @@ impl ResponsesResponseBuilder {
         self.previous_response_id
             .clone_from(&request.previous_response_id);
         self.store = request.store.unwrap_or(true);
-        self.background = request.background;
         // ResponsesResponse stores `conversation` as a plain `Option<String>`
         // (response side per spec is `optional { id }` only); flatten the
         // request's union-typed reference down to its underlying id string.
@@ -130,12 +127,6 @@ impl ResponsesResponseBuilder {
     /// terminal status (`completed`, `incomplete`, `failed`, `cancelled`).
     pub fn completed_at(mut self, timestamp: i64) -> Self {
         self.completed_at = Some(timestamp);
-        self
-    }
-
-    /// Mark the response as created in background mode.
-    pub fn background(mut self, background: bool) -> Self {
-        self.background = Some(background);
         self
     }
 
@@ -302,7 +293,7 @@ impl ResponsesResponseBuilder {
             object: self.object,
             created_at: self.created_at,
             completed_at: self.completed_at,
-            background: self.background,
+            background: None,
             conversation: self.conversation,
             status: self.status,
             error: self.error,

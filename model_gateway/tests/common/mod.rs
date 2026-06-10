@@ -37,8 +37,7 @@ use smg::{
     workflow::Job,
 };
 use smg_data_connector::{
-    MemoryBackgroundRepository, MemoryConversationItemStorage, MemoryConversationStorage,
-    MemoryResponseStorage,
+    MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
 };
 #[allow(unused_imports)]
 pub use test_config::{TestRouterConfig, TestWorkerConfig};
@@ -340,16 +339,10 @@ pub fn create_test_context(
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
 
-        // Initialize storage backends (Memory for tests). Mirror the production
-        // memory backend (`create_storage`): the background repository shares the
-        // same `MemoryResponseStorage` so background-mode writes are visible to
-        // GET /v1/responses/{id} and the create dispatch can enqueue.
+        // Initialize storage backends (Memory for tests).
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let background_repository = Arc::new(MemoryBackgroundRepository::new(Arc::clone(
-            &response_storage,
-        )));
 
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
@@ -377,7 +370,6 @@ pub fn create_test_context(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .background_repository(Some(background_repository))
                 .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
@@ -489,16 +481,10 @@ pub fn create_test_context_with_parsers(
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
 
-        // Initialize storage backends (Memory for tests). Mirror the production
-        // memory backend (`create_storage`): the background repository shares the
-        // same `MemoryResponseStorage` so background-mode writes are visible to
-        // GET /v1/responses/{id} and the create dispatch can enqueue.
+        // Initialize storage backends (Memory for tests).
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let background_repository = Arc::new(MemoryBackgroundRepository::new(Arc::clone(
-            &response_storage,
-        )));
 
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
@@ -530,7 +516,6 @@ pub fn create_test_context_with_parsers(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .background_repository(Some(background_repository))
                 .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)
@@ -645,16 +630,10 @@ pub fn create_test_context_with_mcp_config(
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(config.policy.clone()));
 
-        // Initialize storage backends (Memory for tests). Mirror the production
-        // memory backend (`create_storage`): the background repository shares the
-        // same `MemoryResponseStorage` so background-mode writes are visible to
-        // GET /v1/responses/{id} and the create dispatch can enqueue.
+        // Initialize storage backends (Memory for tests).
         let response_storage = Arc::new(MemoryResponseStorage::new());
         let conversation_storage = Arc::new(MemoryConversationStorage::new());
         let conversation_item_storage = Arc::new(MemoryConversationItemStorage::new());
-        let background_repository = Arc::new(MemoryBackgroundRepository::new(Arc::clone(
-            &response_storage,
-        )));
 
         // Initialize load monitor
         let worker_monitor = Some(Arc::new(WorkerMonitor::new(
@@ -682,7 +661,6 @@ pub fn create_test_context_with_mcp_config(
                 .response_storage(response_storage)
                 .conversation_storage(conversation_storage)
                 .conversation_item_storage(conversation_item_storage)
-                .background_repository(Some(background_repository))
                 .worker_monitor(worker_monitor)
                 .worker_job_queue(worker_job_queue)
                 .workflow_engines(workflow_engines)

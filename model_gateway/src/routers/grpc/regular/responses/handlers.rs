@@ -51,15 +51,7 @@ pub(crate) async fn route_responses(
     tenant_request_meta: crate::middleware::TenantRequestMeta,
     model_id: String,
 ) -> Response {
-    let is_background = request.background.unwrap_or(false);
-    if is_background {
-        return error::bad_request(
-            "unsupported_parameter",
-            "Background mode is not supported on the gRPC router; use the HTTP API.",
-        );
-    }
-
-    // 2. Route based on execution mode
+    // Route based on execution mode
     let is_streaming = request.stream.unwrap_or(false);
     if is_streaming {
         let params = ResponsesCallContext {

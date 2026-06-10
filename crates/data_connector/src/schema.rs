@@ -43,16 +43,6 @@ pub struct SchemaConfig {
     pub responses: TableConfig,
     pub conversation_items: TableConfig,
     pub conversation_item_links: TableConfig,
-
-    /// Background-mode work queue; one row per queued / in-progress response.
-    /// Populated by `BackgroundResponseRepository::enqueue` and drained by
-    /// `claim_next`. Created by migration v10.
-    pub background_queue: TableConfig,
-
-    /// Append-only per-response SSE event log for background-mode streaming
-    /// resume. Rows are GC'd after `background_stream_retention`. Created by
-    /// migration v11.
-    pub response_stream_chunks: TableConfig,
 }
 
 /// Per-table schema configuration.
@@ -113,8 +103,6 @@ impl Default for SchemaConfig {
             responses: TableConfig::with_table("responses"),
             conversation_items: TableConfig::with_table("conversation_items"),
             conversation_item_links: TableConfig::with_table("conversation_item_links"),
-            background_queue: TableConfig::with_table("background_queue"),
-            response_stream_chunks: TableConfig::with_table("response_stream_chunks"),
         }
     }
 }
@@ -179,8 +167,6 @@ impl SchemaConfig {
             &mut self.responses,
             &mut self.conversation_items,
             &mut self.conversation_item_links,
-            &mut self.background_queue,
-            &mut self.response_stream_chunks,
         ] {
             tc.table.make_ascii_uppercase();
             for val in tc.columns.values_mut() {
@@ -213,8 +199,6 @@ impl SchemaConfig {
         Self::validate_table("responses", &self.responses)?;
         Self::validate_table("conversation_items", &self.conversation_items)?;
         Self::validate_table("conversation_item_links", &self.conversation_item_links)?;
-        Self::validate_table("background_queue", &self.background_queue)?;
-        Self::validate_table("response_stream_chunks", &self.response_stream_chunks)?;
 
         Ok(())
     }
@@ -272,22 +256,6 @@ impl SchemaConfig {
             }
         }
 
-        // `background_queue` and `response_stream_chunks` are fully managed by
-        // BackgroundResponseRepository; their CREATE TABLE DDLs (v10/v11) emit a
-        // fixed column list rather than iterating over schema config, so
-        // honoring skip_columns here would silently diverge config from DDL.
-        // Reject non-empty skip_columns explicitly — operators who need to
-        // customize these tables should open an issue rather than get a
-        // half-applied config.
-        if matches!(label, "background_queue" | "response_stream_chunks")
-            && !tc.skip_columns.is_empty()
-        {
-            return Err(format!(
-                "{label}.skip_columns: not supported on this table \
-                 (its DDL emits a fixed column list; file an issue if needed)"
-            ));
-        }
-
         for name in &tc.skip_columns {
             validate_identifier(name).map_err(|e| format!("{label}.skip_columns '{name}': {e}"))?;
             if primary_key_columns_for(label).contains(&name.as_str()) {
@@ -307,12 +275,8 @@ impl SchemaConfig {
     }
 }
 
-fn primary_key_columns_for(label: &str) -> &'static [&'static str] {
-    match label {
-        "background_queue" => &["response_id"],
-        "response_stream_chunks" => &["response_id", "sequence"],
-        _ => &["id"],
-    }
+fn primary_key_columns_for(_label: &str) -> &'static [&'static str] {
+    &["id"]
 }
 
 /// Core logical column names for each table, used by validation to reject
@@ -329,16 +293,6 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "safety_identifier",
             "model",
             "raw_response",
-            // Background-mode columns (added by migration v9).
-            "status",
-            "background",
-            "stream_enabled",
-            "cancel_requested",
-            "request_json",
-            "request_context_json",
-            "started_at",
-            "completed_at",
-            "next_stream_sequence",
         ],
         "conversation_items" => &[
             "id",
@@ -350,22 +304,6 @@ fn core_columns_for(label: &str) -> &'static [&'static str] {
             "created_at",
         ],
         "conversation_item_links" => &["conversation_id", "item_id", "added_at"],
-        "background_queue" => &[
-            "response_id",
-            "priority",
-            "retry_attempt",
-            "next_attempt_at",
-            "lease_expires_at",
-            "worker_id",
-            "created_at",
-        ],
-        "response_stream_chunks" => &[
-            "response_id",
-            "sequence",
-            "event_type",
-            "data",
-            "created_at",
-        ],
         _ => &[],
     }
 }
@@ -430,13 +368,6 @@ mod tests {
     use super::*;
 
     // ── Default config ────────────────────────────────────────────────────
-
-    #[test]
-    fn default_config_includes_background_tables() {
-        let cfg = SchemaConfig::default();
-        assert_eq!(cfg.background_queue.table, "background_queue");
-        assert_eq!(cfg.response_stream_chunks.table, "response_stream_chunks");
-    }
 
     #[test]
     fn default_config_matches_hardcoded_names() {
@@ -762,34 +693,6 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         assert!(
             err.contains("cannot skip 'id'") && err.contains("primary key"),
-            "unexpected: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_skip_columns_on_background_queue() {
-        // `background_queue` DDL emits a fixed column list, so honoring
-        // skip_columns here would silently diverge config from schema.
-        let mut cfg = SchemaConfig::default();
-        cfg.background_queue
-            .skip_columns
-            .insert("worker_id".to_string());
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("background_queue.skip_columns") && err.contains("not supported"),
-            "unexpected: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_skip_columns_on_response_stream_chunks() {
-        let mut cfg = SchemaConfig::default();
-        cfg.response_stream_chunks
-            .skip_columns
-            .insert("event_type".to_string());
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("response_stream_chunks.skip_columns") && err.contains("not supported"),
             "unexpected: {err}"
         );
     }

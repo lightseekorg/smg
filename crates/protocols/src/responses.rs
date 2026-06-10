@@ -2826,10 +2826,6 @@ fn default_temperature() -> Option<f32> {
 #[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_responses_cross_parameters"))]
 pub struct ResponsesRequest {
-    /// Run the request in the background
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background: Option<bool>,
-
     /// Fields to include in the response
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<IncludeField>>,
@@ -3014,7 +3010,6 @@ pub enum ResponseInput {
 impl Default for ResponsesRequest {
     fn default() -> Self {
         Self {
-            background: None,
             include: None,
             input: ResponseInput::Text(String::new()),
             instructions: None,
@@ -3350,27 +3345,14 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         }
     }
 
-    // 3. Validate background requires store.
-    //
-    // `background=true` requires the response to be persisted so it can be
-    // polled/resumed/cancelled. `store` defaults to `true` (applied later in
-    // `apply_defaults`), so only an explicit `store=false` is a conflict.
-    // Note: `background=true` WITH `stream=true` is valid (streaming background
-    // create sources its SSE from the persisted event log), so it is allowed.
-    if request.background == Some(true) && request.store == Some(false) {
-        let mut e = ValidationError::new("background_requires_store");
-        e.message = Some("Background mode requires store=true".into());
-        return Err(e);
-    }
-
-    // 4. Validate conversation and previous_response_id are mutually exclusive
+    // 3. Validate conversation and previous_response_id are mutually exclusive
     if request.conversation.is_some() && request.previous_response_id.is_some() {
         let mut e = ValidationError::new("mutually_exclusive_parameters");
         e.message = Some("Mutually exclusive parameters. Ensure you are only providing one of: 'previous_response_id' or 'conversation'.".into());
         return Err(e);
     }
 
-    // 5. Validate input items structure
+    // 4. Validate input items structure
     if let ResponseInput::Items(items) = &request.input {
         // Check for at least one valid input message
         let has_valid_input = items.iter().any(|item| {
@@ -3388,7 +3370,7 @@ fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(),
         }
     }
 
-    // 6. Validate text format conflicts (for future structured output constraints)
+    // 5. Validate text format conflicts (for future structured output constraints)
     // Currently, Responses API doesn't have regex/ebnf like Chat API,
     // but this is here for completeness and future-proofing
 
