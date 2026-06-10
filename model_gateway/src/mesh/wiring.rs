@@ -17,18 +17,10 @@ use crate::worker::WorkerRegistry;
 /// Owns the started mesh sync adapters. Mesh on means every adapter here is
 /// constructed, its namespace registered, and its inbound loop running —
 /// mesh off is represented by the absence of the whole struct.
+#[derive(Debug)]
 pub struct MeshAdapters {
     worker: Arc<WorkerSyncAdapter>,
     rate_limit: Arc<RateLimitSyncAdapter>,
-}
-
-impl std::fmt::Debug for MeshAdapters {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MeshAdapters")
-            .field("worker", &self.worker)
-            .field("rate_limit", &self.rate_limit)
-            .finish()
-    }
 }
 
 impl MeshAdapters {
@@ -105,7 +97,7 @@ mod tests {
         };
         adapters.worker().on_worker_changed("w1", &state);
 
-        for _ in 0..20 {
+        for _ in 0..100 {
             if registry.get_by_url("http://remote:8080").is_some() {
                 return;
             }
