@@ -191,7 +191,7 @@ pub fn create_mcp_registration_workflow() -> WorkflowDefinition<McpWorkflowData>
             )
             .with_timeout(Duration::from_secs(1))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["connect_mcp_server"]),
+            .depends_on(["connect_mcp_server"]),
         )
 }
 

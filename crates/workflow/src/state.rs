@@ -150,7 +150,6 @@ impl<D: WorkflowData> StateStore<D> for InMemoryStore<D> {
         let initial_count = states.len();
 
         states.retain(|_, state| {
-            // Keep active workflows
             if matches!(
                 state.status,
                 WorkflowStatus::Running | WorkflowStatus::Pending | WorkflowStatus::Paused
@@ -158,11 +157,14 @@ impl<D: WorkflowData> StateStore<D> for InMemoryStore<D> {
                 return true;
             }
 
-            // For terminal workflows, check age
+            // A future `updated_at` (clock skew, manual fiddling) returns a
+            // negative duration that fails `to_std()`. Treat that as
+            // "max age" so the workflow is still eligible for cleanup
+            // instead of being kept forever.
             let age = now
                 .signed_duration_since(state.updated_at)
                 .to_std()
-                .unwrap_or_default();
+                .unwrap_or(Duration::MAX);
             age < ttl
         });
 
