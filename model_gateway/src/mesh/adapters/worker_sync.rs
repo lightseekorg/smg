@@ -9,10 +9,11 @@
 //! exist.
 //!
 //! Inbound: `start` also spawns a task that subscribes to the
-//! namespace and routes each non-tombstone update through
+//! namespace, routes each non-tombstone update through
 //! `WorkerRegistry::on_remote_worker_state` (registry-side URL-dedupe,
-//! health promotion, `Registered` event fan-out). Tombstones are
-//! logged at debug.
+//! health promotion, `Registered` event fan-out), and routes
+//! tombstones through `WorkerRegistry::remove_remote`, which removes
+//! only mesh-imported workers.
 //!
 //! The adapter writes through `CrdtNamespace::put`, which fires
 //! local subscribers in addition to gossiping. A local write
@@ -112,10 +113,17 @@ impl WorkerSyncAdapter {
                         }
                         this.apply_incoming(worker_id, &bytes);
                     }
-                    None => debug!(
-                        worker_id,
-                        "remote worker tombstone (no-op pending registry remove-by-mesh hook)"
-                    ),
+                    None => {
+                        // Tombstones resolve via the publisher's id, which the
+                        // import adopted. Only mesh-imported workers are
+                        // removed; a tombstone for a locally-owned or unknown
+                        // id is a no-op.
+                        let id = WorkerId::from_string(worker_id.to_string());
+                        match this.worker_registry.remove_remote(&id) {
+                            Some(_) => info!(worker_id, "removed worker on remote tombstone"),
+                            None => debug!(worker_id, "ignored tombstone (unknown or local)"),
+                        }
+                    }
                 }
             }
             debug!("WorkerSyncAdapter subscription closed");
@@ -421,6 +429,55 @@ mod tests {
         let ns = mesh.configure_crdt_prefix("policy:", MergeStrategy::LastWriterWins);
         let registry = Arc::new(WorkerRegistry::new());
         let _ = WorkerSyncAdapter::new(ns, registry);
+    }
+
+    #[tokio::test]
+    async fn remote_tombstone_removes_mesh_imported_worker() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        // Import a peer's worker, then deliver its tombstone.
+        ns.put(
+            "worker:peer-w1",
+            bincode::serialize(&sample_state("peer-w1", "http://remote:8080")).unwrap(),
+        );
+        assert!(
+            wait_for(|| registry.get_by_url("http://remote:8080").is_some()).await,
+            "import landed"
+        );
+
+        ns.delete("worker:peer-w1");
+        assert!(
+            wait_for(|| registry.get_by_url("http://remote:8080").is_none()).await,
+            "remote tombstone must remove the mesh-imported worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_tombstone_never_removes_local_worker() {
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+        adapter.start();
+
+        let id = registry
+            .register(local_worker("http://local:8080"))
+            .unwrap();
+        let key = format!("worker:{}", id.as_str());
+        assert!(wait_for(|| ns.get(&key).is_some()).await, "publish landed");
+
+        // A hostile/buggy peer tombstones OUR key: the registry must
+        // refuse, and the worker stays registered.
+        ns.delete(&key);
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            registry.get(&id).is_some(),
+            "a remote tombstone must never remove a locally-owned worker"
+        );
     }
 
     #[tokio::test]
