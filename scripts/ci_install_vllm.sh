@@ -43,6 +43,15 @@ rm -rf "$(python3 -c "import sysconfig; print(sysconfig.get_paths()['platlib'])"
 python3 -c "import torch, nixl"
 echo "nixl import canary OK"
 
+# FlashInfer JIT cache: vLLM JIT-compiles flashinfer kernels at engine startup
+# and the pods have no CUDA toolchain — install the precompiled cache instead,
+# same recipe as vLLM's own Dockerfile.
+echo "Installing flashinfer-jit-cache..."
+CUDA_TAG=$(python3 -c "import torch; print(torch.version.cuda.replace('.', ''))")
+FLASHINFER_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('flashinfer-python'))")
+uv pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" \
+    --index-url "https://flashinfer.ai/whl/cu${CUDA_TAG}"
+
 # Install gRPC packages from source (not PyPI) so PR changes are always tested
 echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."
 uv pip install -e crates/grpc_client/python/
