@@ -47,9 +47,6 @@ pub enum ModelSpecificValue {
     /// Simple integer value
     Int(i64),
 
-    /// Simple float value
-    Float(f64),
-
     /// List of integers
     IntVec(Vec<i64>),
 
@@ -58,12 +55,6 @@ pub enum ModelSpecificValue {
 
     /// List of floats
     FloatVec(Vec<f32>),
-
-    /// List of tuples (e.g., image sizes)
-    TupleVec(Vec<(u32, u32)>),
-
-    /// Boolean flag
-    Bool(bool),
 }
 
 impl ModelSpecificValue {
@@ -98,16 +89,6 @@ impl ModelSpecificValue {
         Self::IntTensor {
             data,
             shape: vec![rows, cols],
-        }
-    }
-
-    /// Get the first dimension of a tensor variant, if applicable.
-    pub fn first_dim(&self) -> Option<usize> {
-        match self {
-            Self::Tensor { shape, .. }
-            | Self::IntTensor { shape, .. }
-            | Self::UintTensor { shape, .. } => shape.first().copied(),
-            _ => None,
         }
     }
 }
@@ -353,11 +334,6 @@ impl ImageProcessorRegistry {
             }
         }
         None
-    }
-
-    /// Get list of supported model patterns.
-    pub fn supported_patterns(&self) -> Vec<&str> {
-        self.processors.keys().map(|s| s.as_str()).collect()
     }
 }
 

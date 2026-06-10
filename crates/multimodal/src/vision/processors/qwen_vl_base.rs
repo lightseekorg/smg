@@ -37,7 +37,7 @@ use crate::vision::{
 ///
 /// Examples:
 /// - round_half_to_even(12.5) = 12 (not 13)
-/// - round_half_to_even(13.5) = 14 (not 14)
+/// - round_half_to_even(13.5) = 14
 /// - round_half_to_even(12.4) = 12
 /// - round_half_to_even(12.6) = 13
 #[inline]

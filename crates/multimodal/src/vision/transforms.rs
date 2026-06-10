@@ -189,14 +189,6 @@ pub fn to_tensor_and_normalize(
     build_planar_tensor(&raw, w, h, scale, bias)
 }
 
-/// Rescale tensor by a constant factor.
-///
-/// Used when `do_rescale=True` in HuggingFace configs (typically 1/255).
-pub fn rescale(tensor: &mut Array3<f32>, factor: f64) {
-    let factor = factor as f32;
-    tensor.mapv_inplace(|v| v * factor);
-}
-
 /// Map `image` crate filter types to `fast_image_resize` algorithm.
 fn to_fir_algorithm(filter: FilterType) -> ResizeAlg {
     use fast_image_resize::FilterType as FirFilter;
@@ -260,23 +252,6 @@ fn fir_image_to_dynamic(
     .unwrap_or_else(|| source.resize_exact(width, height, filter))
 }
 
-/// Resize image preserving aspect ratio, fitting within max dimensions.
-pub fn resize_to_fit(
-    image: &DynamicImage,
-    max_width: u32,
-    max_height: u32,
-    filter: FilterType,
-) -> DynamicImage {
-    let (w, h) = image.dimensions();
-    let ratio = (max_width as f64 / w as f64).min(max_height as f64 / h as f64);
-    if ratio >= 1.0 {
-        return image.clone();
-    }
-    let new_w = ((w as f64 * ratio).round() as u32).max(1);
-    let new_h = ((h as f64 * ratio).round() as u32).max(1);
-    resize(image, new_w, new_h, filter)
-}
-
 /// Center crop image to specified dimensions.
 ///
 /// If the crop size is larger than the image, the image is returned unchanged.
@@ -313,26 +288,6 @@ pub fn expand_to_square(image: &DynamicImage, background: Rgb<u8>) -> DynamicIma
             new_image
         }
     }
-}
-
-/// Pad image to specified dimensions with background color.
-///
-/// Image is placed at top-left corner.
-pub fn pad_to_size(
-    image: &DynamicImage,
-    target_w: u32,
-    target_h: u32,
-    background: Rgb<u8>,
-) -> DynamicImage {
-    let (w, h) = image.dimensions();
-    if w >= target_w && h >= target_h {
-        return image.clone();
-    }
-    let new_w = w.max(target_w);
-    let new_h = h.max(target_h);
-    let mut new_image = DynamicImage::from(RgbImage::from_pixel(new_w, new_h, background));
-    image::imageops::overlay(&mut new_image, image, 0, 0);
-    new_image
 }
 
 /// Stack multiple [C, H, W] tensors into [B, C, H, W].
@@ -383,30 +338,6 @@ pub fn pil_to_filter(resampling: Option<usize>) -> FilterType {
         Some(4) | Some(5) => FilterType::Triangle,
         _ => FilterType::Triangle,
     }
-}
-
-/// Calculate mean color of an image as RGB.
-pub fn calculate_mean_color(image: &DynamicImage) -> Rgb<u8> {
-    let rgb = image.to_rgb8();
-    let (w, h) = (rgb.width() as u64, rgb.height() as u64);
-    let total_pixels = w * h;
-
-    if total_pixels == 0 {
-        return Rgb([128, 128, 128]);
-    }
-
-    let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
-    for pixel in rgb.pixels() {
-        r_sum += pixel[0] as u64;
-        g_sum += pixel[1] as u64;
-        b_sum += pixel[2] as u64;
-    }
-
-    Rgb([
-        (r_sum / total_pixels) as u8,
-        (g_sum / total_pixels) as u8,
-        (b_sum / total_pixels) as u8,
-    ])
 }
 
 /// Convert normalized mean values [0, 1] to RGB bytes.
@@ -566,16 +497,6 @@ mod tests {
         // (0.5 - 0.5) / 0.5 = 0.0
         for val in &tensor {
             assert!(val.abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn test_rescale() {
-        let mut tensor = Array3::<f32>::from_elem((3, 2, 2), 255.0);
-        rescale(&mut tensor, 1.0 / 255.0);
-
-        for val in &tensor {
-            assert!((val - 1.0).abs() < 1e-6);
         }
     }
 
