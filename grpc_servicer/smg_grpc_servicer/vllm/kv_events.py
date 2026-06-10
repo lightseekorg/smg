@@ -43,8 +43,9 @@ def endpoint_for_rank(endpoint: str, dp_rank: int) -> str:
     """
     resolved = endpoint.replace("*", "127.0.0.1")
     if resolved.startswith("tcp://") and dp_rank:
-        host, _, port = resolved.rpartition(":")
-        return f"{host}:{int(port) + dp_rank}"
+        host, sep, port = resolved.rpartition(":")
+        if sep and port.isdigit():
+            return f"{host}:{int(port) + dp_rank}"
     return resolved
 
 
@@ -146,7 +147,8 @@ async def stream_kv_events(
 
     Args:
         sub_socket: a connected ``zmq.asyncio`` SUB socket (duck-typed; only
-            ``recv_multipart()`` is used).
+            ``recv_multipart()`` is used). The caller owns the socket lifecycle
+            (this function never closes it).
         decode: bytes → decoded vLLM batch (e.g. ``msgspec.msgpack.Decoder(KVEventBatch).decode``).
         send_initial_metadata: awaitable called once before the first recv so the
             gRPC client's ``subscribe_kv_events().await`` resolves promptly.
@@ -160,7 +162,7 @@ async def stream_kv_events(
     while not is_cancelled():
         try:
             frames = await asyncio.wait_for(sub_socket.recv_multipart(), timeout=recv_timeout)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041 - distinct classes on py3.10
             continue
 
         # ZMQ multipart: [topic, 8-byte big-endian seq, msgpack payload].

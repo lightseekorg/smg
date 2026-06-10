@@ -74,6 +74,9 @@ class TestEndpointForRank:
     def test_ipc_endpoint_passthrough(self):
         assert kv_events.endpoint_for_rank("ipc:///tmp/kv", 0) == "ipc:///tmp/kv"
 
+    def test_portless_tcp_wildcard_no_crash(self):
+        assert kv_events.endpoint_for_rank("tcp://*", 2) == "tcp://127.0.0.1"
+
 
 class TestResolveKvEventsConfig:
     class _Cfg:
@@ -138,6 +141,19 @@ class TestConvertEvent:
         )
         out = kv_events.convert_event(ev, event_id=1)
         assert out.stored.blocks[0].lora_id == 5
+
+    def test_block_stored_wide_hashes_reduced_to_int64(self):
+        ev = BlockStored(
+            block_hashes=[2**63],
+            parent_block_hash=2**63,
+            token_ids=[1, 2],
+            block_size=2,
+            lora_id=2**63,
+        )
+        out = kv_events.convert_event(ev, event_id=1)
+        assert out.stored.blocks[0].block_hash == -(2**63)
+        assert out.stored.parent_block_hash == -(2**63)
+        assert out.stored.blocks[0].lora_id == -(2**63)
 
     def test_block_removed(self):
         out = kv_events.convert_event(BlockRemoved(block_hashes=[1, 2, 3]), event_id=2)
