@@ -505,23 +505,33 @@ impl PositionalIndexer {
     // -----------------------------------------------------------------------
 
     /// Intern a worker URL to an internal u32 ID.
+    ///
+    /// Returns `None` once `MAX_WORKERS` distinct workers have been interned. The id
+    /// is reserved only when under the limit, so an over-limit worker is never
+    /// recorded in `worker_to_id` and `next_worker_id` never exceeds `MAX_WORKERS`
+    /// (keeping every `tree_sizes` index in bounds).
+    ///
     /// Fast path: DashMap shard read (no lock). Slow path: DashMap entry API (once per worker).
-    pub fn intern_worker(&self, worker: &str) -> u32 {
+    pub fn intern_worker(&self, worker: &str) -> Option<u32> {
         // Fast path: already interned
         if let Some(entry) = self.worker_to_id.get(worker) {
-            return *entry.value();
+            return Some(*entry.value());
         }
-        // Slow path: DashMap entry API handles the race — or_insert_with runs at most once.
-        let id = *self
-            .worker_to_id
-            .entry(Arc::from(worker))
-            .or_insert_with(|| self.next_worker_id.fetch_add(1, Ordering::Relaxed))
-            .value();
-        assert!(
-            (id as usize) < MAX_WORKERS,
-            "worker count {id} exceeds MAX_WORKERS ({MAX_WORKERS})"
-        );
-        id
+        // Slow path: the entry API serializes concurrent first-inserts for this URL.
+        match self.worker_to_id.entry(Arc::from(worker)) {
+            Entry::Occupied(occ) => Some(*occ.get()),
+            Entry::Vacant(vac) => {
+                // Reserve an id only while under the limit; bail before mutating if full.
+                let reserved = self
+                    .next_worker_id
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                        ((id as usize) < MAX_WORKERS).then_some(id + 1)
+                    })
+                    .ok()?;
+                vac.insert(reserved);
+                Some(reserved)
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -810,7 +820,7 @@ mod tests {
     fn test_store_and_find_single_worker() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -823,7 +833,7 @@ mod tests {
     fn test_store_partial_prefix_match() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -836,7 +846,7 @@ mod tests {
     fn test_store_no_match() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -849,8 +859,8 @@ mod tests {
         let indexer = PositionalIndexer::new(64);
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -870,7 +880,7 @@ mod tests {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
         let seq_hash_of_30 = blocks[2].seq_hash;
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
         indexer.apply_removed(w1, &[seq_hash_of_30], &mut wb1);
@@ -886,8 +896,8 @@ mod tests {
         let indexer = PositionalIndexer::new(64);
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -909,8 +919,8 @@ mod tests {
         let indexer = PositionalIndexer::new(64);
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -931,7 +941,7 @@ mod tests {
         // First store: blocks at positions 0, 1
         let blocks1 = make_blocks(&[10, 20]);
         let parent_seq_hash = blocks1[1].seq_hash;
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks1, None, &mut wb1).unwrap();
 
@@ -959,7 +969,7 @@ mod tests {
     fn test_store_with_parent_error_worker_not_tracked() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let result = indexer.apply_stored(w1, &blocks, Some(SequenceHash(999)), &mut wb1);
         assert!(matches!(result, Err(ApplyError::WorkerNotTracked)));
@@ -969,7 +979,7 @@ mod tests {
     fn test_store_with_parent_error_parent_not_found() {
         let indexer = PositionalIndexer::new(64);
         let blocks1 = make_blocks(&[10, 20]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks1, None, &mut wb1).unwrap();
 
@@ -982,7 +992,7 @@ mod tests {
     fn test_remove_missing_block_is_noop() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -993,7 +1003,7 @@ mod tests {
     #[test]
     fn test_remove_unknown_worker_is_noop() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://unknown:8000");
+        let w1 = indexer.intern_worker("http://unknown:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_removed(w1, &[SequenceHash(1)], &mut wb1);
     }
@@ -1002,7 +1012,7 @@ mod tests {
     fn test_remove_worker() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
         indexer.remove_worker(w1, wb1);
@@ -1015,9 +1025,9 @@ mod tests {
     #[test]
     fn test_multiple_workers_same_position() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
-        let w3 = indexer.intern_worker("http://w3:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
+        let w3 = indexer.intern_worker("http://w3:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         let mut wb3 = WorkerBlockMap::default();
@@ -1040,7 +1050,7 @@ mod tests {
     #[test]
     fn test_empty_blocks_is_noop() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &[], None, &mut wb1).unwrap();
         assert_eq!(indexer.current_size(), 0);
@@ -1050,7 +1060,7 @@ mod tests {
     fn test_single_block_sequence() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[42]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1081,7 +1091,7 @@ mod tests {
         let indexer = PositionalIndexer::new(4); // small jump_size to exercise jump logic
         let values: Vec<u64> = (1..=20).collect();
         let blocks = make_blocks(&values);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1095,8 +1105,8 @@ mod tests {
         // w1 has 10 blocks, w2 has 6
         let values_w1: Vec<u64> = (1..=10).collect();
         let values_w2: Vec<u64> = (1..=6).collect();
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -1119,9 +1129,9 @@ mod tests {
         let v1: Vec<u64> = (1..=12).collect();
         let v2: Vec<u64> = (1..=7).collect();
         let v3: Vec<u64> = (1..=4).collect();
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
-        let w3 = indexer.intern_worker("http://w3:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
+        let w3 = indexer.intern_worker("http://w3:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         let mut wb3 = WorkerBlockMap::default();
@@ -1152,7 +1162,9 @@ mod tests {
         let writer = thread::spawn(move || {
             for i in 0..100u64 {
                 let blocks = make_blocks(&[i * 10, i * 10 + 1, i * 10 + 2]);
-                let wid = indexer_writer.intern_worker(&format!("http://w{i}:8000"));
+                let wid = indexer_writer
+                    .intern_worker(&format!("http://w{i}:8000"))
+                    .unwrap();
                 let mut wb = WorkerBlockMap::default();
                 let _ = indexer_writer.apply_stored(wid, &blocks, None, &mut wb);
             }
@@ -1181,8 +1193,8 @@ mod tests {
             seq_hash: SequenceHash(100),
             content_hash: ContentHash(10),
         }];
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -1212,8 +1224,8 @@ mod tests {
         // Worker 1: position 0 = content 10, position 1 = content 99
         // Prefix at pos 1 = XXH3(10 || 99)
         let blocks_w1 = make_blocks(&[10, 99]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -1245,7 +1257,7 @@ mod tests {
     fn test_early_exit_returns_score_one() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1260,7 +1272,7 @@ mod tests {
     fn test_early_exit_no_match() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1281,12 +1293,42 @@ mod tests {
     #[test]
     fn test_worker_id_after_store() {
         let indexer = PositionalIndexer::default();
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer
             .apply_stored(w1, &make_blocks(&[10]), None, &mut wb1)
             .unwrap();
         assert!(indexer.worker_id("http://w1:8000").is_some());
+    }
+
+    #[test]
+    fn test_intern_worker_over_limit_returns_none_without_corrupting_state() {
+        let indexer = PositionalIndexer::default();
+
+        for i in 0..MAX_WORKERS {
+            assert_eq!(
+                indexer.intern_worker(&format!("http://w{i}:8000")),
+                Some(i as u32)
+            );
+        }
+
+        // The (MAX_WORKERS + 1)th distinct worker has no slot: refuse it rather
+        // than persist an over-limit id that would later index tree_sizes OOB.
+        assert_eq!(indexer.intern_worker("http://overflow:8000"), None);
+        assert!(indexer.worker_id("http://overflow:8000").is_none());
+
+        // Re-interning still returns None (no bad state was recorded on the first try).
+        assert_eq!(indexer.intern_worker("http://overflow:8000"), None);
+
+        // current_size() slices tree_sizes[..next_worker_id]; it must stay in bounds.
+        assert_eq!(indexer.current_size(), 0);
+
+        // An already-interned worker is unaffected by hitting the cap.
+        let last = MAX_WORKERS - 1;
+        assert_eq!(
+            indexer.intern_worker(&format!("http://w{last}:8000")),
+            Some(last as u32)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1297,7 +1339,7 @@ mod tests {
     fn test_tree_sizes_after_store_and_remove() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30, 40, 50]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
         assert_eq!(indexer.current_size(), 5);
@@ -1315,7 +1357,7 @@ mod tests {
     fn test_duplicate_store_does_not_inflate_tree_size() {
         let indexer = PositionalIndexer::new(64);
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
 
         // First store: 3 new blocks
@@ -1339,7 +1381,7 @@ mod tests {
     #[test]
     fn test_remove_worker_nonexistent_is_noop() {
         let indexer = PositionalIndexer::default();
-        let w = indexer.intern_worker("http://ghost:8000");
+        let w = indexer.intern_worker("http://ghost:8000").unwrap();
         indexer.remove_worker(w, WorkerBlockMap::default()); // no-op, no panic
         assert_eq!(indexer.current_size(), 0);
     }
@@ -1349,7 +1391,7 @@ mod tests {
         let indexer = Arc::new(PositionalIndexer::new(4));
         let content: Vec<u64> = (1..=20).collect();
         let blocks = make_blocks(&content);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1374,7 +1416,7 @@ mod tests {
             let worker_content: Vec<u64> = (1..=5).collect();
             handles.push(std::thread::spawn(move || {
                 let worker = format!("http://writer{i}:8000");
-                let wid = idx.intern_worker(&worker);
+                let wid = idx.intern_worker(&worker).unwrap();
                 let mut wb = WorkerBlockMap::default();
                 let blks = make_blocks(&worker_content);
                 for _ in 0..50 {
@@ -1396,8 +1438,8 @@ mod tests {
     fn test_dashmap_cleanup_no_memory_leak() {
         let indexer = PositionalIndexer::default();
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
@@ -1446,7 +1488,7 @@ mod tests {
     fn test_query_prefix_of_stored() {
         let indexer = PositionalIndexer::default();
         let blocks = make_blocks(&[10, 20, 30, 40, 50]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1460,8 +1502,8 @@ mod tests {
         let indexer = PositionalIndexer::default();
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[99, 88, 77]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer
@@ -1492,8 +1534,8 @@ mod tests {
         assert_eq!(indexer.current_size(), 0);
 
         let blocks = make_blocks(&[10, 20, 30]);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
@@ -1591,7 +1633,7 @@ mod tests {
             })
             .collect();
 
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1614,7 +1656,7 @@ mod tests {
                 content_hash: compute_content_hash(chunk),
             })
             .collect();
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1653,8 +1695,8 @@ mod tests {
             })
             .collect();
 
-        let sglang = indexer.intern_worker("http://sglang:8000");
-        let vllm = indexer.intern_worker("http://vllm:8000");
+        let sglang = indexer.intern_worker("http://sglang:8000").unwrap();
+        let vllm = indexer.intern_worker("http://vllm:8000").unwrap();
         let mut wb_sg = WorkerBlockMap::default();
         let mut wb_vl = WorkerBlockMap::default();
         indexer
@@ -1682,7 +1724,7 @@ mod tests {
         chunk_size: usize,
         worker_blocks: &mut WorkerBlockMap,
     ) {
-        let worker_id = indexer.intern_worker(worker);
+        let worker_id = indexer.intern_worker(worker).unwrap();
         let all_blocks = make_blocks(content);
         let mut offset = 0;
         let mut parent: Option<SequenceHash> = None;
@@ -1702,7 +1744,7 @@ mod tests {
         let indexer = PositionalIndexer::new(32);
         let full: Vec<u64> = (1..=128).collect();
         let full_blocks = make_blocks(&full);
-        let full_id = indexer.intern_worker("http://full:8000");
+        let full_id = indexer.intern_worker("http://full:8000").unwrap();
         let mut wb_full = WorkerBlockMap::default();
         indexer
             .apply_stored(full_id, &full_blocks, None, &mut wb_full)
@@ -1711,7 +1753,7 @@ mod tests {
         for &depth in &[31, 32, 33] {
             let partial_blocks = make_blocks(&full[..depth]);
             let worker = format!("http://depth{depth}:8000");
-            let wid = indexer.intern_worker(&worker);
+            let wid = indexer.intern_worker(&worker).unwrap();
             let mut wb = WorkerBlockMap::default();
             indexer
                 .apply_stored(wid, &partial_blocks, None, &mut wb)
@@ -1721,7 +1763,7 @@ mod tests {
         for &depth in &[63, 64, 65] {
             let partial_blocks = make_blocks(&full[..depth]);
             let worker = format!("http://depth{depth}:8000");
-            let wid = indexer.intern_worker(&worker);
+            let wid = indexer.intern_worker(&worker).unwrap();
             let mut wb = WorkerBlockMap::default();
             indexer
                 .apply_stored(wid, &partial_blocks, None, &mut wb)
@@ -1745,7 +1787,7 @@ mod tests {
             let content: Vec<u64> = (1..=len as u64).collect();
             let blocks = make_blocks(&content);
             let worker = format!("http://len{len}:8000");
-            let wid = indexer.intern_worker(&worker);
+            let wid = indexer.intern_worker(&worker).unwrap();
             let mut wb = WorkerBlockMap::default();
             indexer.apply_stored(wid, &blocks, None, &mut wb).unwrap();
 
@@ -1767,7 +1809,7 @@ mod tests {
             let content = &full[..len];
             let blocks = make_blocks(content);
             let worker = format!("http://len{len}:8000");
-            let wid = indexer.intern_worker(&worker);
+            let wid = indexer.intern_worker(&worker).unwrap();
             let mut wb = WorkerBlockMap::default();
             indexer.apply_stored(wid, &blocks, None, &mut wb).unwrap();
 
@@ -1789,7 +1831,7 @@ mod tests {
         for &depth in &depths {
             let blocks = make_blocks(&full[..depth]);
             let worker = format!("http://w{depth}:8000");
-            let wid = indexer.intern_worker(&worker);
+            let wid = indexer.intern_worker(&worker).unwrap();
             let mut wb = WorkerBlockMap::default();
             indexer.apply_stored(wid, &blocks, None, &mut wb).unwrap();
         }
@@ -1814,9 +1856,9 @@ mod tests {
         let mut content_w1 = shared.clone();
         content_w1.extend(1001..=1060);
         let blocks_w1 = make_blocks(&content_w1);
-        let w1 = indexer.intern_worker("http://w1:8000");
-        let w2 = indexer.intern_worker("http://w2:8000");
-        let w3 = indexer.intern_worker("http://w3:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2 = indexer.intern_worker("http://w2:8000").unwrap();
+        let w3 = indexer.intern_worker("http://w3:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         let mut wb3 = WorkerBlockMap::default();
@@ -1847,7 +1889,7 @@ mod tests {
         let indexer = PositionalIndexer::new(64);
         let content: Vec<u64> = (1..=1000).collect();
         let blocks = make_blocks(&content);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1904,7 +1946,7 @@ mod tests {
     #[test]
     fn test_multiple_disjoint_sequences_per_worker() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
 
         let blocks1 = make_blocks(&[10, 20, 30]);
@@ -1929,7 +1971,7 @@ mod tests {
         let indexer = PositionalIndexer::new(32);
         let content: Vec<u64> = (1..=100).collect();
         let blocks = make_blocks(&content);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1949,7 +1991,7 @@ mod tests {
     fn test_remove_parent_does_not_cascade() {
         let indexer = PositionalIndexer::new(1);
         let blocks = make_blocks(&[10, 20, 30, 40, 50]);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         indexer.apply_stored(w1, &blocks, None, &mut wb1).unwrap();
 
@@ -1964,7 +2006,7 @@ mod tests {
     #[test]
     fn test_long_sequence_clear_and_rebuild() {
         let indexer = PositionalIndexer::new(32);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
 
         let original: Vec<u64> = (1..=100).collect();
@@ -1996,7 +2038,7 @@ mod tests {
         for &depth in &depths {
             let blocks = make_blocks(&content[..depth]);
             let worker = format!("http://w{depth}:8000");
-            let wid = indexer.intern_worker(&worker);
+            let wid = indexer.intern_worker(&worker).unwrap();
             let mut wb = WorkerBlockMap::default();
             indexer.apply_stored(wid, &blocks, None, &mut wb).unwrap();
         }

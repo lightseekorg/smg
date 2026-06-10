@@ -308,7 +308,13 @@ impl KvEventMonitor {
         model_id: String,
         mut shutdown_rx: oneshot::Receiver<()>,
     ) {
-        let worker_id = indexer.intern_worker(&worker_url);
+        let Some(worker_id) = indexer.intern_worker(&worker_url) else {
+            warn!(
+                worker_url = %worker_url,
+                "Indexer worker capacity reached, skipping KV event subscription for this worker"
+            );
+            return;
+        };
         let mut worker_blocks = WorkerBlockMap::default();
         let mut last_seq: u64 = 0;
         let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
@@ -673,7 +679,7 @@ mod tests {
     #[test]
     fn test_apply_stored_no_parent() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let stored = KvBlocksStored {
             blocks: vec![
@@ -702,7 +708,7 @@ mod tests {
     #[test]
     fn test_apply_stored_with_parent() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored1 = KvBlocksStored {
@@ -734,7 +740,7 @@ mod tests {
     #[test]
     fn test_apply_stored_fallback_on_worker_not_tracked() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://new-worker:8000");
+        let w1 = indexer.intern_worker("http://new-worker:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         // Pass parent_block_hash for an untracked worker — should fallback to no parent.
@@ -755,7 +761,7 @@ mod tests {
     #[test]
     fn test_apply_removed() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored = KvBlocksStored {
@@ -790,7 +796,7 @@ mod tests {
     #[test]
     fn test_apply_cleared_event() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored = KvBlocksStored {
@@ -813,7 +819,7 @@ mod tests {
     #[test]
     fn test_apply_event_dispatch_stored() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let event = KvCacheEvent {
             event_id: 1,
@@ -836,7 +842,7 @@ mod tests {
     #[test]
     fn test_apply_event_dispatch_removed() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored_event = KvCacheEvent {
@@ -868,7 +874,7 @@ mod tests {
     #[test]
     fn test_apply_event_dispatch_cleared() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         KvEventMonitor::apply_event(
@@ -908,7 +914,7 @@ mod tests {
     #[test]
     fn test_apply_event_no_data() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let event = KvCacheEvent {
             event_id: 1,

@@ -667,7 +667,9 @@ async fn run_benchmark(args: &Args, traces: Vec<Vec<TimedEntry>>) -> BenchmarkRe
 
     let num_total_workers = args.num_workers * args.duplication_factor;
     for w in 0..num_total_workers {
-        indexer.intern_worker(&format!("worker-{w}"));
+        indexer
+            .intern_worker(&format!("worker-{w}"))
+            .expect("worker count exceeds indexer capacity");
     }
 
     let traces: Vec<Arc<Vec<TimedEntry>>> = traces.into_iter().map(Arc::new).collect();
