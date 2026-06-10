@@ -17,12 +17,6 @@ pub enum WorkerError {
     #[error("Network error for worker {url}: {error}")]
     NetworkError { url: String, error: String },
 
-    #[error("Worker at capacity: {url}")]
-    WorkerAtCapacity { url: String },
-
-    #[error("Invalid URL format: {url}")]
-    InvalidUrl { url: String },
-
     #[error("Connection failed for worker {url}: {reason}")]
     ConnectionFailed { url: String, reason: String },
 }
@@ -87,14 +81,6 @@ mod tests {
             error.to_string(),
             "Network error for worker http://worker3:8080: Timeout after 30s"
         );
-    }
-
-    #[test]
-    fn test_worker_at_capacity_display() {
-        let error = WorkerError::WorkerAtCapacity {
-            url: "http://worker4:8080".to_string(),
-        };
-        assert_eq!(error.to_string(), "Worker at capacity: http://worker4:8080");
     }
 
     #[test]

@@ -153,7 +153,6 @@ impl WorkerRegistry {
     /// Look up a worker by its ID.
     ///
     /// Returns `Some(worker)` when the ID exists, `None` otherwise.
-    /// Read-only, lock-free. Emits no events.
     pub fn get(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
         self.workers.get(worker_id).map(|entry| entry.clone())
     }
@@ -161,7 +160,7 @@ impl WorkerRegistry {
     /// Look up a worker by its URL.
     ///
     /// Returns `Some(worker)` when a worker with this URL is registered,
-    /// `None` otherwise. Read-only, lock-free. Emits no events.
+    /// `None` otherwise.
     ///
     /// A scheme-less `host:port` input is canonicalized against the registered
     /// `http://`/`grpc://` form — see [`Self::resolve_url_to_id`].
@@ -172,9 +171,8 @@ impl WorkerRegistry {
     /// Look up a worker's ID by its URL.
     ///
     /// Returns `Some(id)` when a worker with this URL is registered,
-    /// `None` otherwise. Read-only, lock-free. Emits no events. Useful for
-    /// callers that need to invoke `transition_status_if_revision` with
-    /// the current worker revision.
+    /// `None` otherwise. Useful for callers that need to invoke
+    /// `transition_status_if_revision` with the current worker revision.
     ///
     /// A scheme-less `host:port` input is canonicalized against the registered
     /// `http://`/`grpc://` form — see [`Self::resolve_url_to_id`].
@@ -229,7 +227,7 @@ impl WorkerRegistry {
     /// Prefers the URL stored on the live worker object; falls back to
     /// scanning `url_to_id` so pre-reserved IDs (from
     /// [`Self::reserve_id_for_url`]) can still be resolved before a worker
-    /// is installed. Read-only, lock-free. Emits no events.
+    /// is installed.
     pub fn get_url_by_id(&self, worker_id: &WorkerId) -> Option<String> {
         if let Some(worker) = self.get(worker_id) {
             return Some(worker.url().to_string());
@@ -244,7 +242,6 @@ impl WorkerRegistry {
     /// Returns `Some(ring)` if any workers are registered for this model,
     /// `None` otherwise. The ring is pre-built and updated on worker add
     /// or remove, so reads are allocation-free apart from the Arc clone.
-    /// Read-only, lock-free. Emits no events.
     pub fn get_hash_ring(&self, model_id: &str) -> Option<Arc<HashRing>> {
         self.hash_rings.get(model_id).map(|r| Arc::clone(&r))
     }
@@ -261,8 +258,7 @@ impl WorkerRegistry {
     /// This is the fastest possible read path: the model index already
     /// stores the slice as an `Arc<[_]>`, so the return value is just an
     /// atomic refcount bump with zero contention. Returns an empty shared
-    /// slice when the model is unknown. Read-only, lock-free. Emits no
-    /// events.
+    /// slice when the model is unknown.
     pub fn get_by_model(&self, model_id: &str) -> Arc<[Arc<dyn Worker>]> {
         self.model_index
             .get(model_id)
@@ -274,8 +270,7 @@ impl WorkerRegistry {
     ///
     /// Unified with [`Self::get_by_model`] on `Arc<[_]>` so callers can
     /// treat all worker collections uniformly. Builds a fresh slice per
-    /// call (one boxed-slice allocation). Read-only, lock-free. Emits no
-    /// events.
+    /// call (one boxed-slice allocation).
     pub fn get_by_type(&self, worker_type: WorkerType) -> Arc<[Arc<dyn Worker>]> {
         let workers: Vec<Arc<dyn Worker>> = self
             .type_workers
@@ -288,8 +283,7 @@ impl WorkerRegistry {
     /// Return all workers using a given connection mode (HTTP or gRPC).
     ///
     /// Returned as an immutable shared slice for uniformity with the other
-    /// collection getters. Builds a fresh slice per call. Read-only,
-    /// lock-free. Emits no events.
+    /// collection getters. Builds a fresh slice per call.
     pub fn get_by_connection(&self, connection_mode: ConnectionMode) -> Arc<[Arc<dyn Worker>]> {
         let workers: Vec<Arc<dyn Worker>> = self
             .connection_workers
@@ -302,7 +296,6 @@ impl WorkerRegistry {
     /// Return every prefill worker, regardless of which model they serve.
     ///
     /// Thin wrapper over [`Self::get_by_type`] with `WorkerType::Prefill`.
-    /// Read-only, lock-free. Emits no events.
     pub fn get_prefill_workers(&self) -> Arc<[Arc<dyn Worker>]> {
         self.get_by_type(WorkerType::Prefill)
     }
@@ -310,7 +303,6 @@ impl WorkerRegistry {
     /// Return every decode worker, regardless of which model they serve.
     ///
     /// Thin wrapper over [`Self::get_by_type`] with `WorkerType::Decode`.
-    /// Read-only, lock-free. Emits no events.
     pub fn get_decode_workers(&self) -> Arc<[Arc<dyn Worker>]> {
         self.get_by_type(WorkerType::Decode)
     }
@@ -331,7 +323,7 @@ impl WorkerRegistry {
     /// model or type when possible.
     ///
     /// Always returns an owned `Vec` because each call applies a unique
-    /// filter combination. Read-only, lock-free. Emits no events.
+    /// filter combination.
     pub fn get_workers_filtered(
         &self,
         model_id: Option<&str>,
@@ -378,8 +370,7 @@ impl WorkerRegistry {
     ///
     /// Allocates a fresh `Vec` by cloning each Arc. Intended for cold
     /// paths (admin endpoints, diagnostics). Hot routing paths should
-    /// prefer [`Self::get_by_model`]. Read-only, lock-free. Emits no
-    /// events.
+    /// prefer [`Self::get_by_model`].
     pub fn get_all(&self) -> Vec<Arc<dyn Worker>> {
         self.workers
             .iter()
@@ -390,7 +381,7 @@ impl WorkerRegistry {
     /// Return every worker paired with its ID.
     ///
     /// Used by bootstrap/reconcile paths that need to correlate workers
-    /// with their IDs. Read-only, lock-free. Emits no events.
+    /// with their IDs.
     pub fn get_all_with_ids(&self) -> Vec<(WorkerId, Arc<dyn Worker>)> {
         self.workers
             .iter()
@@ -400,8 +391,7 @@ impl WorkerRegistry {
 
     /// Return every worker's URL as a freshly allocated `Vec`.
     ///
-    /// Used by admin endpoints and tests. Read-only, lock-free. Emits no
-    /// events.
+    /// Used by admin endpoints and tests.
     pub fn get_all_urls(&self) -> Vec<String> {
         self.workers
             .iter()
@@ -412,7 +402,7 @@ impl WorkerRegistry {
     /// Return every worker's URL paired with its optional API key.
     ///
     /// Used by the gateway when proxying to upstream workers that require
-    /// per-worker credentials. Read-only, lock-free. Emits no events.
+    /// per-worker credentials.
     pub fn get_all_urls_with_api_key(&self) -> Vec<(String, Option<String>)> {
         self.workers
             .iter()
@@ -430,7 +420,6 @@ impl WorkerRegistry {
     /// Each `WorkerDescriptor` captures the fields a subscriber needs to
     /// rebuild its in-memory state from scratch (e.g. health scheduling
     /// after `RecvError::Lagged`) without re-reading the worker objects.
-    /// Read-only, lock-free. Emits no events.
     pub fn reconcile_snapshot(&self) -> Vec<WorkerDescriptor> {
         self.workers
             .iter()
@@ -450,8 +439,7 @@ impl WorkerRegistry {
     /// worker serving them.
     ///
     /// Skips model entries whose worker slice has become empty (those are
-    /// eventually evicted by the removal path). Read-only, lock-free.
-    /// Emits no events.
+    /// eventually evicted by the removal path).
     pub fn get_models(&self) -> Vec<String> {
         self.model_index
             .iter()
@@ -461,15 +449,11 @@ impl WorkerRegistry {
     }
 
     /// Return the number of registered workers.
-    ///
-    /// Read-only, lock-free. Emits no events.
     pub fn len(&self) -> usize {
         self.workers.len()
     }
 
     /// Return `true` when no workers are registered.
-    ///
-    /// Read-only, lock-free. Emits no events.
     pub fn is_empty(&self) -> bool {
         self.workers.is_empty()
     }
@@ -478,8 +462,7 @@ impl WorkerRegistry {
     ///
     /// Iterates the `workers` map once, counting totals per worker type,
     /// connection mode, circuit-breaker state, and health status. Used by
-    /// `/v1/stats` and monitoring dashboards. Read-only, lock-free.
-    /// Emits no events.
+    /// `/v1/stats` and monitoring dashboards.
     pub fn stats(&self) -> WorkerRegistryStats {
         let total_workers = self.workers.len();
         // Count models directly instead of allocating Vec via get_models() (lock-free)
@@ -544,8 +527,7 @@ impl WorkerRegistry {
     /// Return `(regular_count, pd_count)` using the type index directly.
     ///
     /// Avoids allocating the full worker list the way [`Self::stats`] does.
-    /// `pd_count` is any worker that is not `Regular`. Read-only, lock-free.
-    /// Emits no events.
+    /// `pd_count` is any worker that is not `Regular`.
     pub fn get_worker_distribution(&self) -> (usize, usize) {
         // Use the existing type_workers index for O(1) lookup
         let regular_count = self
@@ -568,7 +550,7 @@ impl WorkerRegistry {
     ///
     /// Returns `None` when no worker in this model group set a retry
     /// override. When retries are disabled for the group, the stored
-    /// `max_retries` is always 1. Read-only, lock-free. Emits no events.
+    /// `max_retries` is always 1.
     pub fn get_retry_config(&self, model_id: &str) -> Option<RetryConfig> {
         self.model_retry_configs
             .get(model_id)
@@ -600,7 +582,7 @@ impl WorkerRegistry {
     /// `StatusChanged` events before the `Registered` event for a
     /// concurrent same-ID operation.
     pub fn register(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
-        self.register_inner(worker, true)
+        self.register_inner(worker)
     }
 
     /// Register or replace a worker (upsert).
@@ -747,12 +729,6 @@ impl WorkerRegistry {
                 .or_default()
                 .push(worker_id.clone());
         }
-
-        // Mesh state sync was previously emitted here via
-        // `MeshSyncManager::sync_worker_state`. That path is removed
-        // in this PR; the v2 `WorkerSyncAdapter` is built but not
-        // yet driven from `WorkerRegistry`. Wiring lands in a
-        // follow-up PR.
 
         let _ = self.event_tx.send(WorkerEvent::Replaced {
             worker_id: worker_id.clone(),
@@ -951,10 +927,6 @@ impl WorkerRegistry {
             }
             Metrics::remove_worker_metrics(worker.url());
 
-            // Mesh removal previously forwarded via
-            // `MeshSyncManager::remove_worker_state`; removed in
-            // this PR pending v2 `WorkerSyncAdapter` wiring.
-
             let _ = self.event_tx.send(WorkerEvent::Removed {
                 worker_id: worker_id.clone(),
                 worker: worker.clone(),
@@ -1076,15 +1048,11 @@ impl WorkerRegistry {
     ///
     /// Acquires the per-worker mutation lock before making the worker
     /// visible in any index, and holds it for the full sequence — insert,
-    /// index updates, optional outgoing mesh sync, and the `Registered`
-    /// event broadcast. Releasing the lock only after the event is sent
-    /// guarantees subscribers cannot observe a mutation event for this
-    /// `WorkerId` before the `Registered` event that created it.
-    ///
-    /// `sync_mesh` is `true` for local workflow registrations and
-    /// `false` for mesh-imported workers (the mesh subscriber must not
-    /// re-broadcast incoming state to avoid a CRDT version-bump loop).
-    fn register_inner(&self, worker: Arc<dyn Worker>, sync_mesh: bool) -> Option<WorkerId> {
+    /// index updates, and the `Registered` event broadcast. Releasing the
+    /// lock only after the event is sent guarantees subscribers cannot
+    /// observe a mutation event for this `WorkerId` before the
+    /// `Registered` event that created it.
+    fn register_inner(&self, worker: Arc<dyn Worker>) -> Option<WorkerId> {
         // Resolve (or reserve) the worker_id from url_to_id. The entry
         // API is atomic per bucket, so concurrent callers either reuse
         // the same existing_id or serialize on vacant insertion.
@@ -1134,15 +1102,6 @@ impl WorkerRegistry {
             .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
-
-        // Outgoing mesh sync previously published the new state via
-        // `MeshSyncManager::sync_worker_state` while still holding
-        // the per-worker lock so observers couldn't see a later
-        // mutation before the initial state. The hook is removed in
-        // this PR; the v2 `WorkerSyncAdapter` will take its place in
-        // the follow-up wiring PR. The `sync_mesh` parameter is
-        // retained so callers don't shift signatures mid-flight.
-        let _ = sync_mesh;
 
         // Broadcast under the lock so event order per worker_id is
         // strictly: Registered → (Replaced | StatusChanged | Removed).
@@ -1308,14 +1267,12 @@ impl WorkerRegistry {
             worker.set_status(WorkerStatus::Ready);
         }
 
-        // `register_inner(worker, false)` skips OUTGOING mesh sync to
-        // avoid a version-bump loop on the CRDT, but still publishes
-        // the local `Registered` event under the per-worker mutation
-        // lock so in-process subscribers (WorkerManager's health
+        // Publishes the local `Registered` event under the per-worker
+        // mutation lock so in-process subscribers (WorkerManager's health
         // scheduler, etc.) pick up mesh-imported workers via the same
         // event path as any other registration.
         let worker: Arc<dyn Worker> = Arc::new(worker);
-        if let Some(id) = self.register_inner(worker, false) {
+        if let Some(id) = self.register_inner(worker) {
             tracing::info!(
                 worker_id = %id.as_str(),
                 url = %state.url,

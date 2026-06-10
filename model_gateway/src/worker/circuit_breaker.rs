@@ -332,25 +332,6 @@ impl CircuitBreaker {
         Duration::from_millis(elapsed_ms)
     }
 
-    /// Check if the circuit is in a half-open state
-    pub fn is_half_open(&self) -> bool {
-        self.state() == CircuitState::HalfOpen
-    }
-
-    /// Record a test success (for health check probing)
-    pub fn record_test_success(&self) {
-        if self.is_half_open() {
-            self.record_success();
-        }
-    }
-
-    /// Record a test failure (for health check probing)
-    pub fn record_test_failure(&self) {
-        if self.is_half_open() {
-            self.record_failure();
-        }
-    }
-
     /// Reset the circuit breaker to closed state
     pub fn reset(&self) {
         self.transition_to(CircuitState::Closed);
