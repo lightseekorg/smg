@@ -595,15 +595,11 @@ impl<'a> McpToolSession<'a> {
     }
 
     fn builtin_tool_bindings(orchestrator: &McpOrchestrator) -> HashSet<QualifiedToolName> {
-        [
-            BuiltinToolType::WebSearchPreview,
-            BuiltinToolType::CodeInterpreter,
-            BuiltinToolType::FileSearch,
-        ]
-        .into_iter()
-        .filter_map(|builtin_type| orchestrator.find_builtin_server(builtin_type))
-        .map(|(server_key, tool_name)| QualifiedToolName::new(server_key, tool_name))
-        .collect()
+        BuiltinToolType::all()
+            .into_iter()
+            .filter_map(|builtin_type| orchestrator.find_builtin_server(builtin_type))
+            .map(|(server_key, tool_name)| QualifiedToolName::new(server_key, tool_name))
+            .collect()
     }
 
     fn builtin_binding_for_entry(
@@ -1028,6 +1024,49 @@ mod tests {
         assert!(session.is_builtin_tool("brave_web_search"));
         assert!(!session.is_builtin_tool("internal_non_builtin_tool"));
         assert!(session.is_internal_non_builtin_tool("internal_non_builtin_tool"));
+    }
+
+    #[test]
+    fn test_is_builtin_tool_classifies_image_generation() {
+        use crate::core::config::{BuiltinToolType, McpConfig, McpServerConfig, McpTransport};
+
+        let orchestrator = McpOrchestrator::new_test_with_config(McpConfig {
+            servers: vec![McpServerConfig {
+                name: "image-server".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::ImageGeneration),
+                builtin_tool_name: Some("generate_image".to_string()),
+                internal: false,
+            }],
+            ..Default::default()
+        });
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "image-server",
+                create_test_tool("generate_image"),
+            ));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![McpServerBinding {
+                label: "image".to_string(),
+                server_key: "image-server".to_string(),
+                allowed_tools: None,
+            }],
+            "test-request",
+        );
+
+        assert!(session.is_builtin_tool("generate_image"));
+        assert!(session.is_builtin_server_label("image"));
     }
 
     #[test]

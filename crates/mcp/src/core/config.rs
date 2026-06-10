@@ -307,6 +307,25 @@ pub enum BuiltinToolType {
 }
 
 impl BuiltinToolType {
+    /// Every builtin tool type. The exhaustive `match` makes a new variant
+    /// fail to compile until it is added here, so callers that enumerate all
+    /// builtins (e.g. session builtin classification) cannot silently miss it.
+    pub fn all() -> [BuiltinToolType; 4] {
+        // The match exists solely for its exhaustiveness check.
+        let _exhaustive = |t: BuiltinToolType| match t {
+            BuiltinToolType::WebSearchPreview => (),
+            BuiltinToolType::CodeInterpreter => (),
+            BuiltinToolType::FileSearch => (),
+            BuiltinToolType::ImageGeneration => (),
+        };
+        [
+            BuiltinToolType::WebSearchPreview,
+            BuiltinToolType::CodeInterpreter,
+            BuiltinToolType::FileSearch,
+            BuiltinToolType::ImageGeneration,
+        ]
+    }
+
     /// Get the corresponding response format for this built-in type.
     pub fn response_format(self) -> ResponseFormatConfig {
         match self {
@@ -1224,6 +1243,19 @@ policy:
 
             let deserialized: BuiltinToolType = serde_json::from_str(&serialized).unwrap();
             assert_eq!(deserialized, builtin_type);
+        }
+    }
+
+    #[test]
+    fn test_builtin_tool_type_all_includes_every_variant() {
+        let all = BuiltinToolType::all();
+        for variant in [
+            BuiltinToolType::WebSearchPreview,
+            BuiltinToolType::CodeInterpreter,
+            BuiltinToolType::FileSearch,
+            BuiltinToolType::ImageGeneration,
+        ] {
+            assert!(all.contains(&variant), "all() missing {variant}");
         }
     }
 
