@@ -625,17 +625,14 @@ impl WorkerRegistry {
             return id;
         }
 
-        // URL exists with an active worker — replace it
+        // URL exists with an active worker — replace it. This is the "node
+        // claims this URL" path (startup workflows, K8s discovery): if a
+        // mesh import won the race for the URL, the local registration must
+        // take ownership back, else the worker is never published and a peer
+        // tombstone could delete a locally-configured worker. The promotion
+        // happens inside replace_inner, under the per-worker mutation lock.
         if let Some(existing_id) = self.url_to_id.get(worker.url()).map(|e| e.clone()) {
-            if self.replace(&existing_id, worker) {
-                // This is the "node claims this URL" path (startup workflows,
-                // K8s discovery): if a mesh import won the race for the URL,
-                // the local registration must take ownership back, else the
-                // worker is never published and a peer tombstone could delete
-                // a locally-configured worker.
-                self.worker_origins
-                    .insert(existing_id.clone(), WorkerOrigin::Local);
-            } else {
+            if !self.replace_inner(&existing_id, worker, Some(WorkerOrigin::Local)) {
                 // replace() returned false — worker was removed concurrently.
                 // The mutation lock prevents stale indexes, so this is safe to ignore.
                 tracing::warn!(
@@ -672,6 +669,21 @@ impl WorkerRegistry {
     /// Emits [`WorkerEvent::Replaced`] on success. Holds the per-worker
     /// mutation lock for the entire diff + broadcast sequence.
     pub fn replace(&self, worker_id: &WorkerId, new_worker: Arc<dyn Worker>) -> bool {
+        self.replace_inner(worker_id, new_worker, None)
+    }
+
+    /// Core replacement shared by [`Self::replace`] and
+    /// [`Self::register_or_replace`]. `promote_origin` is applied under the
+    /// per-worker mutation lock, before the `Replaced` event, so consumers
+    /// observing the event see the final origin (the outbound mesh sync
+    /// publishes a claimed worker immediately) and a concurrent `remove()`
+    /// cannot orphan the entry.
+    fn replace_inner(
+        &self,
+        worker_id: &WorkerId,
+        new_worker: Arc<dyn Worker>,
+        promote_origin: Option<WorkerOrigin>,
+    ) -> bool {
         // Serialize concurrent replacements for the same worker ID.
         // Lock is held only during the in-memory diff (no I/O, microseconds).
         let lock = self
@@ -758,6 +770,10 @@ impl WorkerRegistry {
                 .entry(*new_worker.connection_mode())
                 .or_default()
                 .push(worker_id.clone());
+        }
+
+        if let Some(origin) = promote_origin {
+            self.worker_origins.insert(worker_id.clone(), origin);
         }
 
         let _ = self.event_tx.send(WorkerEvent::Replaced {
