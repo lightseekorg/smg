@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 pub use driver::{BackgroundDriver, BackgroundDriverHandle};
 use smg_data_connector::BackgroundResponseRepository;
-pub use worker::{BackgroundWorker, UnavailableBackgroundWorker, BACKGROUND_EXECUTION_UNAVAILABLE};
+pub use worker::{
+    BackgroundWorker, HeadlessResponses, RealBackgroundWorker, UnavailableBackgroundWorker,
+    BACKGROUND_EXECUTION_UNAVAILABLE,
+};
 
 use crate::config::BackgroundConfig;
 

@@ -28,7 +28,8 @@ use axum::{
     http,
     response::{IntoResponse, Response},
 };
-use openai_protocol::responses::ResponsesRequest;
+use openai_protocol::responses::{ResponsesRequest, ResponsesResponse};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -36,9 +37,12 @@ use super::{
     common::{load_conversation_history, ResponsesCallContext},
     conversions, non_streaming, streaming,
 };
-use crate::routers::{
-    error,
-    grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
+use crate::{
+    middleware::TenantRequestMeta,
+    routers::{
+        error,
+        grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
+    },
 };
 
 /// Main handler for POST /v1/responses
@@ -48,7 +52,7 @@ pub(crate) async fn route_responses(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     headers: Option<http::HeaderMap>,
-    tenant_request_meta: crate::middleware::TenantRequestMeta,
+    tenant_request_meta: TenantRequestMeta,
     model_id: String,
 ) -> Response {
     let is_background = request.background.unwrap_or(false);
@@ -67,6 +71,8 @@ pub(crate) async fn route_responses(
             model_id,
             response_id: None,
             tenant_request_meta,
+            // Live path: a never-cancelled token (no background cooperative cancel).
+            cancel: CancellationToken::new(),
         };
         route_responses_streaming(ctx, request, params).await
     } else {
@@ -75,6 +81,8 @@ pub(crate) async fn route_responses(
             model_id,
             response_id: Some(format!("resp_{}", Uuid::now_v7())),
             tenant_request_meta,
+            // Live path: a never-cancelled token (no background cooperative cancel).
+            cancel: CancellationToken::new(),
         };
         route_responses_sync(ctx, request, params).await
     }
@@ -90,10 +98,38 @@ async fn route_responses_sync(
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
 ) -> Response {
-    match non_streaming::route_responses_internal(ctx, request, params).await {
+    // Live path persists exactly as before (`persist = true`).
+    match non_streaming::route_responses_internal(ctx, request, params, true).await {
         Ok(responses_response) => axum::Json(responses_response).into_response(),
         Err(response) => response, // Already a Response with proper status code
     }
+}
+
+/// Headless (background) non-streaming execution for the regular pipeline.
+///
+/// Runs the same core path as [`route_responses_sync`] but:
+/// - returns a typed `Result<ResponsesResponse, Response>` (the background
+///   worker maps it to a `finalize`, rather than serializing an HTTP response),
+/// - skips the internal response-row persist (`persist = false`) — the worker's
+///   `finalize` is the authoritative terminal write under the durable id,
+/// - uses the caller-supplied `response_id` (the durable background id) instead
+///   of minting a fresh one,
+/// - threads the cooperative-cancel token into the MCP tool loop.
+pub(crate) async fn execute_responses_headless(
+    ctx: &ResponsesContext,
+    request: Arc<ResponsesRequest>,
+    tenant_request_meta: TenantRequestMeta,
+    response_id: String,
+    cancel: CancellationToken,
+) -> Result<ResponsesResponse, Response> {
+    let params = ResponsesCallContext {
+        headers: None,
+        model_id: request.model.clone(),
+        response_id: Some(response_id),
+        tenant_request_meta,
+        cancel,
+    };
+    non_streaming::route_responses_internal(ctx, request, params, false).await
 }
 
 // ============================================================================

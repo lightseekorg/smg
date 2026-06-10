@@ -442,6 +442,44 @@ pub trait BackgroundResponseRepository: Send + Sync {
     /// any replica. Returns the number of rows requeued.
     async fn requeue_expired(&self, now: DateTime<Utc>) -> BackgroundRepositoryResult<u64>;
 
+    /// Read whether `cancel_requested` is currently set on an in-progress job.
+    ///
+    /// The worker polls this during execution to converge on a cooperative
+    /// mid-run cancel: when it returns `true`, the worker stops at its next
+    /// checkpoint and finalizes `cancelled`. Returns
+    /// [`BackgroundRepositoryError::NotFound`] if no response exists with that
+    /// id. Does not require the caller to hold the lease (it is a pure read).
+    async fn is_cancel_requested(
+        &self,
+        response_id: &ResponseId,
+    ) -> BackgroundRepositoryResult<bool>;
+
+    /// Re-queue a leased job for a later retry after a transient failure.
+    ///
+    /// Atomically: increments `retry_attempt`, sets `status='queued'`, sets
+    /// `next_attempt_at` to the caller-computed backoff deadline, and clears the
+    /// lease (`worker_id` / `lease_expires_at`) so the row becomes claimable
+    /// once `next_attempt_at` has passed.
+    ///
+    /// Lease fence: fails with [`BackgroundRepositoryError::LeaseNotHeld`] when
+    /// the caller is no longer the lease holder at `now` (a sweeper requeued the
+    /// row, or another worker stole it) — mirroring [`Self::finalize`], so a
+    /// stale worker cannot resurrect a row it no longer owns.
+    ///
+    /// Cancel precedence: if `cancel_requested` is set, the repository MUST NOT
+    /// requeue. It instead terminalizes the row `cancelled` (clearing the lease)
+    /// — matching the design's "cancel forbids retry" rule. Callers can detect
+    /// this by re-reading the row (or it surfaces as a terminal `cancelled` on
+    /// the next poll); this method still returns `Ok(())` in that case because
+    /// the requested transition (stop running this job) was honored.
+    async fn requeue_for_retry(
+        &self,
+        response_id: &ResponseId,
+        worker_id: &str,
+        now: DateTime<Utc>,
+        next_attempt_at: DateTime<Utc>,
+    ) -> BackgroundRepositoryResult<()>;
+
     /// Load the [`RequestContext`] stored at enqueue time. Used by the worker
     /// to replay storage-hook context during finalize-adjacent writes and
     /// conversation linkage.

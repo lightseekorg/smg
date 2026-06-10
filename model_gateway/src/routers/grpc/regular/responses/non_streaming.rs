@@ -42,11 +42,18 @@ use crate::{
 /// 1. Loads conversation history / response chain
 /// 2. Checks for MCP tools
 /// 3. Executes with or without MCP tool loop
-/// 4. Persists to storage
-pub(super) async fn route_responses_internal(
+/// 4. Persists to storage (when `persist` is `true`)
+///
+/// `persist` controls the final `persist_response_if_needed` call. The live
+/// (request-driven) path passes `true` so behavior is unchanged. The background
+/// headless path passes `false`: the background worker's `finalize` is the
+/// authoritative terminal write (with the durable `response_id`), so persisting
+/// here too would write the row twice — once with a freshly minted id.
+pub(crate) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
     params: ResponsesCallContext,
+    persist: bool,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
@@ -69,18 +76,38 @@ pub(super) async fn route_responses_internal(
         execute_without_mcp(ctx, &modified_request, &request, params).await?
     };
 
-    // 5. Persist response to storage if store=true
-    persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.response_storage.clone(),
-        &responses_response,
-        &request,
-        ctx.request_context.clone(),
-    )
-    .await;
+    // 5. Persist response to storage if store=true (live path only; the
+    // background worker owns the terminal write on the headless path).
+    if persist {
+        persist_response_if_needed(
+            ctx.conversation_storage.clone(),
+            ctx.conversation_item_storage.clone(),
+            ctx.response_storage.clone(),
+            &responses_response,
+            &request,
+            ctx.request_context.clone(),
+        )
+        .await;
+    }
 
     Ok(responses_response)
+}
+
+/// Build a minimal `cancelled` response for a cooperative mid-run cancel.
+///
+/// Only reachable on the background headless path (the live path's cancel token
+/// is never fired). The background worker forces the durable `response_id` and
+/// finalizes `cancelled`, so the exact id here is a best-effort placeholder.
+fn cancelled_response(
+    original_request: &ResponsesRequest,
+    response_id: Option<String>,
+) -> ResponsesResponse {
+    let id = response_id.unwrap_or_else(|| format!("resp_{}", uuid::Uuid::now_v7()));
+    ResponsesResponse::builder(id, &original_request.model)
+        .copy_from_request(original_request)
+        .status(ResponseStatus::Cancelled)
+        .completed_at(chrono::Utc::now().timestamp())
+        .build()
 }
 
 /// Execute request without MCP tool loop (simple pipeline execution)
@@ -173,6 +200,18 @@ pub(super) async fn execute_tool_loop(
     );
 
     loop {
+        // Cooperative cancel checkpoint (background headless path only; the live
+        // path's token is never cancelled). Each loop boundary is a natural,
+        // cheap checkpoint between model turns. On cancel we stop and return a
+        // `cancelled` outcome; the background worker finalizes it `cancelled`.
+        if params.cancel.is_cancelled() {
+            debug!("Tool loop cancelled cooperatively at iteration boundary");
+            return Ok(cancelled_response(
+                original_request,
+                params.response_id.clone(),
+            ));
+        }
+
         // Convert to chat request
         let mut chat_request = conversions::responses_to_chat(&current_request).map_err(|e| {
             error!(

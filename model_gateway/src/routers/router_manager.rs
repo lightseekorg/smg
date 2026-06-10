@@ -46,6 +46,7 @@ use crate::{
         common::header_utils::apply_provider_headers,
         error as route_error,
         factory::{router_ids, RouterId},
+        grpc::router::GrpcRouter,
         RouterFactory, RouterTrait,
     },
     server::ServerConfig,
@@ -181,6 +182,29 @@ impl RouterManager {
 
     pub fn router_count(&self) -> usize {
         self.routers.len()
+    }
+
+    /// Return the concrete [`GrpcRouter`] backing the GRPC_REGULAR (or GRPC_PD)
+    /// entry, if one is registered.
+    ///
+    /// The SMG-local responses pipeline — and therefore background headless
+    /// execution — only exists for the gRPC connection modes. The background
+    /// driver wiring (BGM-PR-07) uses this to decide whether it can run jobs:
+    /// `Some` → construct the real worker; `None` (HTTP-only deployment) → leave
+    /// jobs durably `queued`.
+    ///
+    /// `GrpcRouter` is cheaply `Clone` (all fields are `Arc`/shared), so this
+    /// downcasts the trait object via [`RouterTrait::as_any`] and clones it into
+    /// a fresh `Arc`.
+    pub fn grpc_router(&self) -> Option<Arc<GrpcRouter>> {
+        for id in [&router_ids::GRPC_REGULAR, &router_ids::GRPC_PD] {
+            if let Some(entry) = self.routers.get(id) {
+                if let Some(grpc) = entry.as_any().downcast_ref::<GrpcRouter>() {
+                    return Some(Arc::new(grpc.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// Selects a router by weighting all four router types (grpc-pd, http-pd, grpc-regular,

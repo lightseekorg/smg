@@ -50,6 +50,10 @@ pub(super) struct ResponsesCallContext {
     pub model_id: String,
     pub response_id: Option<String>,
     pub tenant_request_meta: TenantRequestMeta,
+    /// Cooperative-cancel signal. The live (request-driven) path supplies a
+    /// fresh, never-cancelled token; the background headless path supplies the
+    /// worker's token so a mid-run cancel converges at the tool-loop boundary.
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ToolLoopState {

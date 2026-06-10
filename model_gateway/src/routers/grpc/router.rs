@@ -6,9 +6,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openai_protocol::{
-    chat::ChatCompletionRequest, classify::ClassifyRequest, completion::CompletionRequest,
-    embedding::EmbeddingRequest, generate::GenerateRequest, messages::CreateMessageRequest,
-    responses::ResponsesRequest,
+    chat::ChatCompletionRequest,
+    classify::ClassifyRequest,
+    completion::CompletionRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+    messages::CreateMessageRequest,
+    responses::{ResponsesRequest, ResponsesResponse},
 };
 use tracing::debug;
 
@@ -28,7 +32,10 @@ use crate::{
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        common::retry::{is_retryable_status, RetryExecutor},
+        common::{
+            background::HeadlessResponses,
+            retry::{is_retryable_status, RetryExecutor},
+        },
         RouterTrait,
     },
     worker::WorkerRegistry,
@@ -348,7 +355,15 @@ impl GrpcRouter {
                 serve_harmony_responses_stream(&harmony_ctx, body.clone(), tenant_meta.clone())
                     .await
             } else {
-                match serve_harmony_responses(&harmony_ctx, body.clone(), tenant_meta.clone()).await
+                // Live path: persist as before, never-cancelled token.
+                match serve_harmony_responses(
+                    &harmony_ctx,
+                    body.clone(),
+                    tenant_meta.clone(),
+                    true,
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
                 {
                     Ok(response) => axum::Json(response).into_response(),
                     Err(error_response) => error_response,
@@ -361,6 +376,86 @@ impl GrpcRouter {
                 headers.cloned(),
                 tenant_meta.clone(),
                 model_id.to_string(),
+            )
+            .await
+        }
+    }
+
+    /// Headless (background) non-streaming execution.
+    ///
+    /// Runs the SMG-local responses pipeline for a background-claimed job and
+    /// returns a typed `Result<ResponsesResponse, Response>` — WITHOUT the
+    /// internal response-row persist (the background worker's `finalize` is the
+    /// authoritative terminal write under the durable `response_id`) and WITHOUT
+    /// minting a fresh response id (the caller passes the durable id).
+    ///
+    /// Mirrors [`Self::route_responses_impl`]'s harmony detection and context
+    /// construction, but:
+    /// - builds the [`ResponsesContext`] with the **passed** `request_context`
+    ///   (the background worker loads it from the repository and threads it in),
+    ///   not the router-construction task-local,
+    /// - runs the non-streaming regular / harmony path with `persist = false`,
+    /// - threads the cooperative-cancel token into the MCP tool loop.
+    ///
+    /// The produced response carries an internally minted id; the background
+    /// worker overwrites it with the durable `job.response_id` before finalize.
+    async fn execute_responses_headless_impl(
+        &self,
+        request: ResponsesRequest,
+        tenant_meta: TenantRequestMeta,
+        request_context: Option<smg_data_connector::RequestContext>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ResponsesResponse, Response> {
+        // Fail-fast worker validation, mirroring the live path.
+        if let Some(error_response) =
+            validate_worker_availability(&self.worker_registry, &request.model)
+        {
+            return Err(error_response);
+        }
+
+        let is_harmony =
+            HarmonyDetector::is_harmony_model_in_registry(&self.worker_registry, &request.model);
+
+        if is_harmony {
+            debug!(
+                "Headless Harmony responses execution for model: {}",
+                request.model
+            );
+            let harmony_ctx = ResponsesContext::new(
+                Arc::new(self.harmony_pipeline.clone()),
+                self.shared_components.clone(),
+                self.harmony_responses_context.response_storage.clone(),
+                self.harmony_responses_context.conversation_storage.clone(),
+                self.harmony_responses_context
+                    .conversation_item_storage
+                    .clone(),
+                self.harmony_responses_context.mcp_orchestrator.clone(),
+                self.harmony_responses_context.mcp_format_registry.clone(),
+                request_context,
+            );
+            serve_harmony_responses(&harmony_ctx, request, tenant_meta, false, &cancel).await
+        } else {
+            debug!(
+                "Headless regular responses execution for model: {}",
+                request.model
+            );
+            let regular_ctx = ResponsesContext::new(
+                Arc::new(self.pipeline.clone()),
+                self.shared_components.clone(),
+                self.responses_context.response_storage.clone(),
+                self.responses_context.conversation_storage.clone(),
+                self.responses_context.conversation_item_storage.clone(),
+                self.responses_context.mcp_orchestrator.clone(),
+                self.responses_context.mcp_format_registry.clone(),
+                request_context,
+            );
+            let response_id = format!("resp_{}", uuid::Uuid::now_v7());
+            responses::execute_responses_headless(
+                &regular_ctx,
+                Arc::new(request),
+                tenant_meta,
+                response_id,
+                cancel,
             )
             .await
         }
@@ -623,5 +718,19 @@ impl RouterTrait for GrpcRouter {
 
     fn router_type(&self) -> &'static str {
         "grpc"
+    }
+}
+
+#[async_trait]
+impl HeadlessResponses for GrpcRouter {
+    async fn execute_responses_headless(
+        &self,
+        request: ResponsesRequest,
+        tenant_meta: TenantRequestMeta,
+        request_context: Option<smg_data_connector::RequestContext>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ResponsesResponse, Response> {
+        self.execute_responses_headless_impl(request, tenant_meta, request_context, cancel)
+            .await
     }
 }

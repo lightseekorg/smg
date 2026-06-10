@@ -54,7 +54,10 @@ use crate::{
         otel_trace,
     },
     routers::{
-        common::background::create::{handle_background_create, BackgroundCreateDeps},
+        common::background::{
+            create::{handle_background_create, BackgroundCreateDeps},
+            BackgroundDriver, HeadlessResponses, RealBackgroundWorker,
+        },
         conversations,
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
@@ -1259,15 +1262,41 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     }
 
     // Background-mode driver (claim-tick + sweeper over the background
-    // repository) is intentionally NOT started here in BGM-PR-06. The only
-    // BackgroundWorker that exists yet is the placeholder
-    // UnavailableBackgroundWorker, which finalizes every claimed job as `failed`;
-    // spawning the driver with it would regress #1614's durable `queued`
-    // contract into immediate failure for every gateway with a background
-    // repository (including the default history_backend=memory). So
-    // `background=true` requests keep returning `queued` until BGM-PR-07 (#1221)
-    // wires `BackgroundDriver::spawn(...)` with the real worker. See
-    // `routers::common::background` for the driver + its tests.
+    // repository). BGM-PR-07 wires the real worker and gates startup on both a
+    // background repository AND a gRPC router being present — the SMG-local
+    // responses pipeline (and therefore headless background execution) only
+    // exists for the gRPC connection modes. The handle is bound for the server
+    // lifetime (like `_worker_manager`); dropping it stops the loops.
+    //
+    // - repo + gRPC router → spawn the driver with `RealBackgroundWorker`.
+    // - repo but no gRPC router (HTTP-only deployment) → do NOT spawn; leave
+    //   jobs durably `queued` (per #1614) and log once.
+    // - no repo → nothing to do.
+    let _background_driver = match (
+        app_context.background_repository.clone(),
+        router_manager.grpc_router(),
+    ) {
+        (Some(repository), Some(grpc_router)) => {
+            let headless: Arc<dyn HeadlessResponses> = grpc_router;
+            let worker = Arc::new(RealBackgroundWorker::new(
+                repository.clone(),
+                headless,
+                config.router_config.background.clone(),
+            ));
+            let driver =
+                BackgroundDriver::new(repository, worker, config.router_config.background.clone());
+            info!("Starting background-mode driver (gRPC headless execution enabled)");
+            Some(driver.spawn().await)
+        }
+        (Some(_), None) => {
+            info!(
+                "Background repository present but no gRPC router; background jobs will stay \
+                 queued (headless execution requires a gRPC connection mode)"
+            );
+            None
+        }
+        (None, _) => None,
+    };
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
         app_context.rate_limiter.clone(),

@@ -510,6 +510,76 @@ impl BackgroundResponseRepository for MemoryBackgroundRepository {
         Ok(count)
     }
 
+    async fn is_cancel_requested(
+        &self,
+        response_id: &ResponseId,
+    ) -> BackgroundRepositoryResult<bool> {
+        let state = self.state.read();
+        let entry = state
+            .entries
+            .get(response_id)
+            .ok_or_else(|| BackgroundRepositoryError::NotFound(response_id.clone()))?;
+        Ok(entry.cancel_requested)
+    }
+
+    async fn requeue_for_retry(
+        &self,
+        response_id: &ResponseId,
+        worker_id: &str,
+        now: DateTime<Utc>,
+        next_attempt_at: DateTime<Utc>,
+    ) -> BackgroundRepositoryResult<()> {
+        let mut state = self.state.write();
+        let entry = state
+            .entries
+            .get_mut(response_id)
+            .ok_or_else(|| BackgroundRepositoryError::NotFound(response_id.clone()))?;
+
+        // Already terminal (e.g. a concurrent cancel-before-claim or finalize):
+        // nothing to requeue, and the caller's lease is gone. Treat as benign
+        // by reporting the lease is no longer held — same signal the worker
+        // gets when a sweeper or another worker took the row.
+        if entry.status.is_terminal() {
+            return Err(BackgroundRepositoryError::LeaseNotHeld {
+                response_id: response_id.clone(),
+                worker_id: worker_id.to_string(),
+            });
+        }
+
+        // Lease fence: only the current lease holder, within its window, may
+        // requeue — mirrors `finalize` so a stale worker can't resurrect a row
+        // the sweeper already reclaimed (or another worker stole).
+        let lease_still_valid = entry.lease_expires_at.is_some_and(|exp| exp > now);
+        if entry.worker_id.as_deref() != Some(worker_id) || !lease_still_valid {
+            return Err(BackgroundRepositoryError::LeaseNotHeld {
+                response_id: response_id.clone(),
+                worker_id: worker_id.to_string(),
+            });
+        }
+
+        // Cancel precedence: a cancel observed during the run forbids retry.
+        // Terminalize `cancelled` instead of requeuing, clearing the lease and
+        // patching the stored payload so `GET /v1/responses/{id}` reflects the
+        // terminal state.
+        if entry.cancel_requested {
+            entry.status = InternalStatus::Cancelled;
+            entry.completed_at = Some(now);
+            entry.worker_id = None;
+            entry.lease_expires_at = None;
+            overwrite_raw_response_status(&mut entry.raw_response, "cancelled");
+            let stored = entry.to_stored_response(response_id);
+            self.response_storage.upsert_response_sync(stored);
+            return Ok(());
+        }
+
+        entry.status = InternalStatus::Queued;
+        entry.worker_id = None;
+        entry.lease_expires_at = None;
+        entry.retry_attempt = entry.retry_attempt.saturating_add(1);
+        entry.next_attempt_at = next_attempt_at;
+        Ok(())
+    }
+
     async fn load_request_context(
         &self,
         response_id: &ResponseId,
@@ -1179,5 +1249,224 @@ mod tests {
                 .unwrap(),
             DeleteResult::Deleted
         );
+    }
+
+    #[tokio::test]
+    async fn is_cancel_requested_reflects_flag() {
+        let repo = MemoryBackgroundRepository::new_standalone();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+
+        // Queued, no cancel yet → false.
+        assert!(!repo
+            .is_cancel_requested(&ResponseId::from("r1"))
+            .await
+            .unwrap());
+
+        // Claim then request cancel → in-progress flag set → true.
+        let _ = repo
+            .claim_next("w1", Utc::now(), Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::CancelRequested
+        );
+        assert!(repo
+            .is_cancel_requested(&ResponseId::from("r1"))
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_cancel_requested_not_found() {
+        let repo = MemoryBackgroundRepository::new_standalone();
+        let err = repo
+            .is_cancel_requested(&ResponseId::from("missing"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackgroundRepositoryError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn requeue_for_retry_increments_attempt_and_becomes_claimable() {
+        let repo = MemoryBackgroundRepository::new_standalone();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+
+        // Requeue with a backoff deadline 30s out, still holding the lease.
+        let next_attempt_at = claim_time + chrono::Duration::seconds(30);
+        repo.requeue_for_retry(
+            &ResponseId::from("r1"),
+            "w1",
+            claim_time + chrono::Duration::seconds(5),
+            next_attempt_at,
+        )
+        .await
+        .unwrap();
+
+        // Not yet claimable before next_attempt_at.
+        let early = repo
+            .claim_next(
+                "w2",
+                claim_time + chrono::Duration::seconds(10),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert!(early.is_none(), "must not be claimable before backoff");
+
+        // Claimable after next_attempt_at, with retry_attempt incremented.
+        let job = repo
+            .claim_next(
+                "w2",
+                claim_time + chrono::Duration::seconds(31),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap()
+            .expect("re-claim after backoff");
+        assert_eq!(job.retry_attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn requeue_for_retry_rejects_non_lease_holder() {
+        let repo = MemoryBackgroundRepository::new_standalone();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+
+        // A different worker may not requeue a lease it doesn't hold.
+        let err = repo
+            .requeue_for_retry(
+                &ResponseId::from("r1"),
+                "w2",
+                claim_time + chrono::Duration::seconds(5),
+                claim_time + chrono::Duration::seconds(30),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BackgroundRepositoryError::LeaseNotHeld { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn requeue_for_retry_rejects_expired_lease() {
+        // Stale-worker guard: a worker whose lease has already expired must not
+        // be able to requeue, even before the sweeper runs.
+        let repo = MemoryBackgroundRepository::new_standalone();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+
+        let after_expiry = claim_time + chrono::Duration::seconds(120);
+        let err = repo
+            .requeue_for_retry(
+                &ResponseId::from("r1"),
+                "w1",
+                after_expiry,
+                after_expiry + chrono::Duration::seconds(30),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BackgroundRepositoryError::LeaseNotHeld { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn requeue_for_retry_terminalizes_when_cancel_requested() {
+        // Cancel precedence: a cancel observed mid-run forbids retry. The repo
+        // terminalizes `cancelled` (not requeued) and mirrors the cancelled
+        // payload into shared response storage.
+        let rs = Arc::new(MemoryResponseStorage::new());
+        let repo = MemoryBackgroundRepository::new(Arc::clone(&rs));
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        assert_eq!(
+            repo.request_cancel(&ResponseId::from("r1")).await.unwrap(),
+            StoredCancelResult::CancelRequested
+        );
+
+        // requeue_for_retry returns Ok but does NOT requeue — it cancels.
+        repo.requeue_for_retry(
+            &ResponseId::from("r1"),
+            "w1",
+            claim_time + chrono::Duration::seconds(5),
+            claim_time + chrono::Duration::seconds(30),
+        )
+        .await
+        .unwrap();
+
+        // Row is terminal-cancelled: not claimable, payload reflects cancelled.
+        let reclaim = repo
+            .claim_next(
+                "w2",
+                claim_time + chrono::Duration::seconds(40),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert!(reclaim.is_none(), "cancelled row must not be re-claimable");
+
+        let stored = rs
+            .get_response(&ResponseId::from("r1"))
+            .await
+            .unwrap()
+            .expect("cancelled payload must be mirrored");
+        assert_eq!(stored.raw_response["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn requeue_for_retry_rejects_terminal_row() {
+        let repo = MemoryBackgroundRepository::new_standalone();
+        repo.enqueue(enqueue_req("r1"), None, None).await.unwrap();
+        let claim_time = Utc::now();
+        let _ = repo
+            .claim_next("w1", claim_time, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("claim");
+        repo.finalize(
+            finalize_req("r1", "w1", FinalizeStatus::Completed),
+            claim_time + chrono::Duration::seconds(5),
+        )
+        .await
+        .unwrap();
+
+        let err = repo
+            .requeue_for_retry(
+                &ResponseId::from("r1"),
+                "w1",
+                claim_time + chrono::Duration::seconds(6),
+                claim_time + chrono::Duration::seconds(30),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BackgroundRepositoryError::LeaseNotHeld { .. }
+        ));
     }
 }

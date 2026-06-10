@@ -16,6 +16,7 @@ use openai_protocol::{
 };
 use serde_json::{json, to_string};
 use smg_mcp::{McpServerBinding, McpToolSession};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use super::{
@@ -51,10 +52,19 @@ use crate::{
 ///    - Build next request with tool results
 ///    - Repeat from step 1 (full pipeline re-execution)
 /// 4. If no tool calls, return final response
+/// `persist` controls the final `persist_response_if_needed` call: the live
+/// (request-driven) path passes `true` (behavior unchanged); the background
+/// headless path passes `false` because the worker's `finalize` is the
+/// authoritative terminal write under the durable `response_id`.
+///
+/// `cancel` is a cooperative-cancel signal checked at each tool-loop boundary;
+/// the live path passes a never-cancelled token.
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
+    persist: bool,
+    cancel: &CancellationToken,
 ) -> Result<ResponsesResponse, Response> {
     // Clone request for persistence
     let original_request = request.clone();
@@ -76,6 +86,7 @@ pub(crate) async fn serve_harmony_responses(
             current_request,
             tenant_request_meta.clone(),
             mcp_servers,
+            cancel,
         )
         .await?
     } else {
@@ -83,16 +94,19 @@ pub(crate) async fn serve_harmony_responses(
         execute_without_mcp_loop(ctx, current_request, tenant_request_meta).await?
     };
 
-    // Persist response to storage if store=true
-    persist_response_if_needed(
-        ctx.conversation_storage.clone(),
-        ctx.conversation_item_storage.clone(),
-        ctx.response_storage.clone(),
-        &response,
-        &original_request,
-        ctx.request_context.clone(),
-    )
-    .await;
+    // Persist response to storage if store=true (live path only; the background
+    // worker owns the terminal write on the headless path).
+    if persist {
+        persist_response_if_needed(
+            ctx.conversation_storage.clone(),
+            ctx.conversation_item_storage.clone(),
+            ctx.response_storage.clone(),
+            &response,
+            &original_request,
+            ctx.request_context.clone(),
+        )
+        .await;
+    }
 
     Ok(response)
 }
@@ -105,6 +119,7 @@ async fn execute_with_mcp_loop(
     mut current_request: ResponsesRequest,
     tenant_request_meta: TenantRequestMeta,
     mcp_servers: Vec<McpServerBinding>,
+    cancel: &CancellationToken,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
@@ -151,6 +166,17 @@ async fn execute_with_mcp_loop(
     );
 
     loop {
+        // Cooperative cancel checkpoint (background headless path only; the live
+        // path's token is never cancelled). The loop boundary between model
+        // turns is a natural checkpoint; on cancel we stop and return a
+        // `cancelled` outcome, which the background worker finalizes `cancelled`.
+        if cancel.is_cancelled() {
+            debug!("Harmony tool loop cancelled cooperatively at iteration boundary");
+            // Restore the caller's original tools (hide internal MCP tools).
+            current_request.tools = original_tools.take();
+            return Ok(cancelled_response(&current_request));
+        }
+
         iteration_count += 1;
 
         // Record tool loop iteration metric
@@ -423,6 +449,24 @@ async fn execute_without_mcp_loop(
             Ok(*response)
         }
     }
+}
+
+/// Build a minimal `cancelled` response for a cooperative mid-run cancel.
+///
+/// Only reachable on the background headless path (the live path's cancel token
+/// is never fired). The background worker forces the durable `response_id` and
+/// finalizes `cancelled`, so the id minted here is a best-effort placeholder.
+fn cancelled_response(request: &ResponsesRequest) -> ResponsesResponse {
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    ResponsesResponse::builder(format!("resp_{}", uuid::Uuid::now_v7()), &request.model)
+        .copy_from_request(request)
+        .created_at(created_at)
+        .completed_at(created_at)
+        .status(ResponseStatus::Cancelled)
+        .build()
 }
 
 /// Build ResponsesResponse with tool calls (MCP and/or function tools)
