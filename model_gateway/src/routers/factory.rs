@@ -136,7 +136,7 @@ impl RouterFactory {
     /// Create a gRPC router with injected policy
     pub fn create_grpc_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
         let router = GrpcRouter::new(ctx)?;
-
+        router.start_background_driver();
         Ok(Box::new(router))
     }
 

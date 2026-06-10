@@ -31,7 +31,7 @@ use openai_protocol::{
         RealtimeTranscriptionSessionCreateRequest,
     },
     rerank::RerankRequest,
-    responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
+    responses::ResponsesRequest,
     transcription::{AudioFile, TranscriptionRequest},
     UNKNOWN_MODEL_ID,
 };
@@ -43,10 +43,9 @@ use crate::{
     config::RoutingMode,
     middleware::TenantRequestMeta,
     routers::{
-        common::{background::HeadlessResponses, header_utils::apply_provider_headers},
+        common::header_utils::apply_provider_headers,
         error as route_error,
         factory::{router_ids, RouterId},
-        grpc::router::GrpcRouter,
         RouterFactory, RouterTrait,
     },
     server::ServerConfig,
@@ -852,46 +851,6 @@ impl std::fmt::Debug for RouterManager {
             .field("default_router", &*default_router)
             .finish()
     }
-}
-
-/// Per-model dispatch for headless (background) responses execution: routes to
-/// the model's router and runs it via [`GrpcRouter`]. A model on any non-gRPC
-/// backend yields a terminal `failed` response (the worker must not retry it).
-#[async_trait]
-impl HeadlessResponses for RouterManager {
-    async fn execute_responses_headless(
-        &self,
-        request: ResponsesRequest,
-        tenant_meta: TenantRequestMeta,
-        request_context: Option<smg_data_connector::RequestContext>,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<ResponsesResponse, Response> {
-        let Some(router) = self.select_router_for_request(Some(request.model.as_str())) else {
-            return Ok(background_unsupported_response(&request));
-        };
-        match router.as_any().downcast_ref::<GrpcRouter>() {
-            Some(grpc) => {
-                grpc.execute_responses_headless(request, tenant_meta, request_context, cancel)
-                    .await
-            }
-            None => Ok(background_unsupported_response(&request)),
-        }
-    }
-}
-
-/// Terminal `failed` response for a background job whose model has no
-/// headless-capable (gRPC) backend.
-fn background_unsupported_response(request: &ResponsesRequest) -> ResponsesResponse {
-    let mut resp =
-        ResponsesResponse::builder(format!("resp_{}", uuid::Uuid::now_v7()), &request.model)
-            .copy_from_request(request)
-            .status(ResponseStatus::Failed)
-            .build();
-    resp.error = Some(serde_json::json!({
-        "code": "background_execution_unavailable",
-        "message": "Background execution is not available for this model's connection mode.",
-    }));
-    resp
 }
 
 #[cfg(test)]

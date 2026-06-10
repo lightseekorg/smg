@@ -19,7 +19,10 @@
 //! backends, which is explicitly *not* required for correctness — see the
 //! recovered design, Part A.9).
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use rand::Rng as _;
 use smg_data_connector::BackgroundResponseRepository;
@@ -37,6 +40,11 @@ use crate::config::BackgroundConfig;
 /// as a fraction of the base interval. Spreads claim ticks across replicas so
 /// they don't stampede the backend on the same cadence.
 const CLAIM_JITTER_FRACTION: f64 = 0.2;
+
+/// Owns the strong handle for a process-lifetime driver. The supervised loops
+/// hold `Weak`s, so the strong `Arc` must live somewhere; there is one gRPC
+/// router per process.
+static DETACHED_DRIVER: OnceLock<BackgroundDriverHandle> = OnceLock::new();
 
 /// Drives background-job execution by polling the repository trait.
 ///
@@ -146,6 +154,14 @@ impl BackgroundDriver {
             _claim_tick: claim_tick,
             _sweeper: sweeper,
         }
+    }
+
+    /// Spawn the driver and keep its handle alive for the lifetime of the
+    /// process. There is one gRPC router per process, so the handle is stored in
+    /// a process-global `OnceLock`.
+    pub async fn spawn_detached(self) {
+        let handle = self.spawn().await;
+        let _ = DETACHED_DRIVER.set(handle);
     }
 
     /// Compute the claim-tick interval with a small additive jitter so replicas

@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 pub use driver::{BackgroundDriver, BackgroundDriverHandle};
 use smg_data_connector::BackgroundResponseRepository;
-pub use worker::{BackgroundWorker, HeadlessResponses, RealBackgroundWorker};
+pub(crate) use worker::run_job;
+pub use worker::BackgroundWorker;
 
 use crate::config::BackgroundConfig;
 
@@ -39,7 +40,7 @@ impl BackgroundServices {
     }
 }
 
-// The [`driver::BackgroundDriver`] is started at process startup whenever
-// background mode is enabled (a background repository is configured); it runs
-// claimed jobs via [`RealBackgroundWorker`], dispatching per-model through the
-// router manager. See `server.rs`.
+// The [`driver::BackgroundDriver`] is started whenever background mode is
+// enabled (a background repository is configured). The gRPC router constructs
+// and starts it with itself as the [`BackgroundWorker`]; see
+// `routers::grpc::router`.

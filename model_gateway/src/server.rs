@@ -54,10 +54,7 @@ use crate::{
         otel_trace,
     },
     routers::{
-        common::background::{
-            create::{handle_background_create, BackgroundCreateDeps},
-            BackgroundDriver, HeadlessResponses, RealBackgroundWorker,
-        },
+        common::background::create::{handle_background_create, BackgroundCreateDeps},
         conversations,
         openai::realtime::ws::RealtimeQueryParams,
         parse, responses as response_handlers,
@@ -1260,24 +1257,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         worker_monitor.start_event_loop();
         debug!("Started WorkerMonitor event loop");
     }
-
-    // Background-mode driver (claim-tick + sweeper). Runs whenever background
-    // mode is enabled (a background repository is configured); per-job execution
-    // dispatches through the router manager. Bound for the server lifetime.
-    let _background_driver = if let Some(repository) = app_context.background_repository.clone() {
-        let headless: Arc<dyn HeadlessResponses> = router_manager.clone();
-        let worker = Arc::new(RealBackgroundWorker::new(
-            repository.clone(),
-            headless,
-            config.router_config.background.clone(),
-        ));
-        let driver =
-            BackgroundDriver::new(repository, worker, config.router_config.background.clone());
-        info!("Starting background-mode driver");
-        Some(driver.spawn().await)
-    } else {
-        None
-    };
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
         app_context.rate_limiter.clone(),

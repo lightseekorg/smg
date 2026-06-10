@@ -14,6 +14,7 @@ use openai_protocol::{
     messages::CreateMessageRequest,
     responses::{ResponsesRequest, ResponsesResponse},
 };
+use smg_data_connector::{BackgroundResponseRepository, LeasedJob};
 use tracing::debug;
 
 use super::{
@@ -29,12 +30,12 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    config::types::RetryConfig,
+    config::{types::RetryConfig, BackgroundConfig},
     middleware::TenantRequestMeta,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         common::{
-            background::HeadlessResponses,
+            background::{self, BackgroundDriver, BackgroundWorker},
             retry::{is_retryable_status, RetryExecutor},
         },
         RouterTrait,
@@ -56,6 +57,8 @@ pub struct GrpcRouter {
     responses_context: ResponsesContext,
     harmony_responses_context: ResponsesContext,
     retry_config: RetryConfig,
+    background_repository: Option<Arc<dyn BackgroundResponseRepository>>,
+    background_config: BackgroundConfig,
 }
 
 impl GrpcRouter {
@@ -178,6 +181,8 @@ impl GrpcRouter {
             responses_context,
             harmony_responses_context,
             retry_config: ctx.router_config.effective_retry_config(),
+            background_repository: ctx.background_repository.clone(),
+            background_config: ctx.router_config.background.clone(),
         })
     }
 
@@ -456,6 +461,26 @@ impl GrpcRouter {
         }
     }
 
+    /// Spawn the background-job driver (claim-tick + sweeper) when a background
+    /// repository is configured, with a clone of this router as the worker. The
+    /// driver runs for the lifetime of the process.
+    pub(crate) fn start_background_driver(&self) {
+        let Some(repository) = self.background_repository.clone() else {
+            return;
+        };
+        let worker: Arc<dyn BackgroundWorker> = Arc::new(self.clone());
+        let config = self.background_config.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "process-lifetime background driver"
+        )]
+        tokio::spawn(async move {
+            BackgroundDriver::new(repository, worker, config)
+                .spawn_detached()
+                .await;
+        });
+    }
+
     /// Main route_embeddings implementation
     async fn route_embeddings_impl(
         &self,
@@ -717,15 +742,19 @@ impl RouterTrait for GrpcRouter {
 }
 
 #[async_trait]
-impl HeadlessResponses for GrpcRouter {
-    async fn execute_responses_headless(
-        &self,
-        request: ResponsesRequest,
-        tenant_meta: TenantRequestMeta,
-        request_context: Option<smg_data_connector::RequestContext>,
-        cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<ResponsesResponse, Response> {
-        self.execute_responses_headless_impl(request, tenant_meta, request_context, cancel)
-            .await
+impl BackgroundWorker for GrpcRouter {
+    async fn execute(&self, job: LeasedJob) {
+        let Some(repository) = self.background_repository.as_ref() else {
+            return;
+        };
+        Box::pin(background::run_job(
+            repository,
+            &self.background_config,
+            job,
+            |req, tenant_meta, ctx, cancel| {
+                self.execute_responses_headless_impl(req, tenant_meta, ctx, cancel)
+            },
+        ))
+        .await;
     }
 }
