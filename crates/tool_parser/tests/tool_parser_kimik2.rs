@@ -92,6 +92,58 @@ async fn test_kimik2_streaming() {
     assert!(found_name, "Should have found tool name during streaming");
 }
 
+#[tokio::test]
+async fn test_kimik2_multiline_arguments() {
+    let parser = KimiK2Parser::new();
+
+    // Pretty-printed JSON arguments span multiple lines; the regex must use DOTALL.
+    let input = "Sure.\n\
+<|tool_calls_section_begin|>\n\
+<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\n  \"location\": \"Tokyo\",\n  \"note\": \"line one\\nline two\"\n}<|tool_call_end|>\n\
+<|tool_calls_section_end|>";
+
+    let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(normal_text, "Sure.\n");
+    assert_eq!(tools[0].function.name, "get_weather");
+
+    let args: serde_json::Value = serde_json::from_str(&tools[0].function.arguments).unwrap();
+    assert_eq!(args["location"], "Tokyo");
+    assert_eq!(args["note"], "line one\nline two");
+}
+
+#[tokio::test]
+async fn test_kimik2_streaming_multiline_arguments() {
+    let tools = create_test_tools();
+    let mut parser = KimiK2Parser::new();
+
+    let chunks = vec![
+        "<|tool_calls_section_begin|>\n",
+        "<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>",
+        "{\n  \"location\": ",
+        "\"Tokyo\"\n}",
+        "<|tool_call_end|>\n",
+        "<|tool_calls_section_end|>",
+    ];
+
+    let mut found_name = false;
+    let mut streamed_args = String::new();
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if let Some(name) = call.name {
+                assert_eq!(name, "get_weather");
+                found_name = true;
+            }
+            streamed_args.push_str(&call.parameters);
+        }
+    }
+
+    assert!(found_name, "Should have found tool name during streaming");
+    let args: serde_json::Value = serde_json::from_str(&streamed_args).unwrap();
+    assert_eq!(args["location"], "Tokyo");
+}
+
 #[test]
 fn test_kimik2_format_detection() {
     let parser = KimiK2Parser::new();

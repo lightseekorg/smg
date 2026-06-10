@@ -106,15 +106,15 @@ impl KimiK2Parser {
     )]
     pub fn new() -> Self {
         // Pattern for complete tool calls
-        let tool_call_pattern = r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*?\})\s*<\|tool_call_end\|>";
+        let tool_call_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*?\})\s*<\|tool_call_end\|>";
         let tool_call_extractor = Regex::new(tool_call_pattern).expect("Valid regex pattern");
 
         // Pattern for streaming (partial) tool calls
-        let stream_pattern = r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*)";
+        let stream_pattern = r"(?s)<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*)";
         let stream_tool_call_extractor = Regex::new(stream_pattern).expect("Valid regex pattern");
 
         // Pattern for removing completed tool calls
-        let end_pattern = r"<\|tool_call_begin\|>.*?<\|tool_call_end\|>";
+        let end_pattern = r"(?s)<\|tool_call_begin\|>.*?<\|tool_call_end\|>";
         let tool_call_end_pattern = Regex::new(end_pattern).expect("Valid regex pattern");
 
         // Robust parser for ids like "functions.search:0" or fallback "search:0"
