@@ -95,6 +95,23 @@ impl VllmEngineClient {
     crate::impl_get_tokenizer!();
     crate::impl_subscribe_kv_events!();
 
+    /// Get load metrics from the vLLM engine.
+    pub async fn get_loads(
+        &self,
+        include: Vec<String>,
+    ) -> Result<proto::GetLoadsResponse, tonic::Status> {
+        debug!("Requesting vLLM load metrics");
+        let request = Request::new(proto::GetLoadsRequest {
+            dp_rank: None,
+            include,
+        });
+
+        let mut client = self.client.clone();
+        let response = client.get_loads(request).await?;
+        debug!("vLLM load metrics response received");
+        Ok(response.into_inner())
+    }
+
     /// Build a single vLLM GenerateRequest from OpenAI ChatCompletionRequest
     #[expect(
         clippy::unused_self,
@@ -671,6 +688,38 @@ impl VllmEngineClient {
         sampling.constraint = Self::build_single_constraint_from_plain(p)?;
 
         Ok(sampling)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proto → protocol type conversions (load metrics)
+// ---------------------------------------------------------------------------
+
+impl From<proto::SchedulerLoad> for openai_protocol::worker::SchedulerLoadSnapshot {
+    fn from(load: proto::SchedulerLoad) -> Self {
+        Self {
+            dp_rank: load.dp_rank,
+            num_running_reqs: load.num_running_reqs,
+            num_waiting_reqs: load.num_waiting_reqs,
+            num_total_reqs: load.num_total_reqs,
+            num_used_tokens: load.num_used_tokens,
+            max_total_num_tokens: load.max_total_num_tokens,
+            token_usage: load.token_usage,
+            gen_throughput: load.gen_throughput,
+            cache_hit_rate: load.cache_hit_rate,
+            utilization: load.utilization,
+            max_running_requests: load.max_running_requests,
+        }
+    }
+}
+
+impl From<proto::GetLoadsResponse> for openai_protocol::worker::WorkerLoadResponse {
+    fn from(resp: proto::GetLoadsResponse) -> Self {
+        Self {
+            timestamp: resp.timestamp,
+            dp_rank_count: resp.dp_rank_count,
+            loads: resp.loads.into_iter().map(Into::into).collect(),
+        }
     }
 }
 

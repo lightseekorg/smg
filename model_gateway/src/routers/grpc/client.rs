@@ -247,6 +247,10 @@ impl GrpcClient {
                 let resp = client.get_loads(vec!["core".to_string()]).await?;
                 Ok(WorkerLoadResponse::from(resp))
             }
+            Self::Vllm(client) => {
+                let resp = client.get_loads(vec!["core".to_string()]).await?;
+                Ok(WorkerLoadResponse::from(resp))
+            }
             _ => Err(tonic::Status::unimplemented(
                 "GetLoads RPC not supported for this backend",
             )),

@@ -26,6 +26,9 @@ service VllmEngine {
   // Get server information
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 
+  // Get scheduler load metrics
+  rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
+
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 
@@ -330,4 +333,47 @@ message GetServerInfoResponse {
   // KV transfer config (for PD disaggregation)
   string kv_connector = 6;  // "MooncakeConnector", "NixlConnector", "" if not configured
   string kv_role = 7;       // "kv_producer", "kv_consumer", "kv_both", "" if not configured
+}
+
+// =====================
+// Load Metrics
+// =====================
+
+message GetLoadsRequest {
+  // Optional: filter to a specific DP rank.
+  optional int32 dp_rank = 1;
+
+  // Sections to include (e.g. "core"). vLLM currently emits only core metrics.
+  repeated string include = 2;
+}
+
+message GetLoadsResponse {
+  // ISO 8601 timestamp.
+  string timestamp = 1;
+
+  // vLLM version.
+  string version = 2;
+
+  // Number of DP ranks reported.
+  int32 dp_rank_count = 3;
+
+  // Per-DP-rank load metrics.
+  repeated SchedulerLoad loads = 4;
+}
+
+// Per-DP-rank scheduler load snapshot. vLLM populates the fields it can read
+// cheaply from the engine's scheduler stats; unset fields are 0.
+message SchedulerLoad {
+  int32 dp_rank = 1;
+  int32 num_running_reqs = 2;
+  int32 num_waiting_reqs = 3;
+  int32 num_total_reqs = 4;
+  int32 num_used_tokens = 5;
+  int32 max_total_num_tokens = 6;
+  // KV-cache utilization in [0,1) (vLLM SchedulerStats.kv_cache_usage).
+  double token_usage = 7;
+  double gen_throughput = 8;
+  double cache_hit_rate = 9;
+  double utilization = 10;
+  int32 max_running_requests = 11;
 }
