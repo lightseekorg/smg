@@ -518,7 +518,7 @@ impl Router {
                 },
                 PolicyType::LeastLoad => ConfigPolicyConfig::LeastLoad {
                     load_check_interval_secs: 5,
-                    lambda: 1.5,
+                    kv_pressure_weight: 1.5,
                 },
                 PolicyType::Bucket => ConfigPolicyConfig::Bucket {
                     balance_abs_threshold: self.balance_abs_threshold,

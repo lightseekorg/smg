@@ -340,7 +340,7 @@ impl ConfigValidator {
             }
             PolicyConfig::LeastLoad {
                 load_check_interval_secs,
-                lambda,
+                kv_pressure_weight,
             } => {
                 if *load_check_interval_secs == 0 {
                     return Err(ConfigError::InvalidValue {
@@ -350,10 +350,10 @@ impl ConfigValidator {
                     });
                 }
 
-                if !lambda.is_finite() || *lambda < 0.0 {
+                if !kv_pressure_weight.is_finite() || *kv_pressure_weight < 0.0 {
                     return Err(ConfigError::InvalidValue {
-                        field: "lambda".to_string(),
-                        value: lambda.to_string(),
+                        field: "kv_pressure_weight".to_string(),
+                        value: kv_pressure_weight.to_string(),
                         reason: "Must be finite and >= 0.0".to_string(),
                     });
                 }

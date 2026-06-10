@@ -19,9 +19,11 @@ impl PolicyFactory {
             PolicyConfig::Random => Arc::new(RandomPolicy::new()),
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
             PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
-            PolicyConfig::LeastLoad { lambda, .. } => {
-                Arc::new(LeastLoadPolicy::with_lambda(*lambda))
-            }
+            PolicyConfig::LeastLoad {
+                kv_pressure_weight, ..
+            } => Arc::new(LeastLoadPolicy::with_kv_pressure_weight(
+                *kv_pressure_weight,
+            )),
             PolicyConfig::CacheAware {
                 cache_threshold,
                 balance_abs_threshold,

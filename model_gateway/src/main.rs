@@ -931,7 +931,7 @@ impl CliArgs {
             },
             "least_load" => PolicyConfig::LeastLoad {
                 load_check_interval_secs: 5,
-                lambda: 1.5,
+                kv_pressure_weight: 1.5,
             },
             "prefix_hash" => PolicyConfig::PrefixHash {
                 prefix_token_count: self.prefix_token_count,

@@ -10,28 +10,28 @@ use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
 use crate::worker::Worker;
 
 /// Default KV-pressure weight (request-equivalents per unit of M/M/1 congestion).
-pub const DEFAULT_LAMBDA: f64 = 1.5;
+pub const DEFAULT_KV_PRESSURE_WEIGHT: f64 = 1.5;
 
 #[derive(Debug)]
 pub struct LeastLoadPolicy {
     /// Cached load reports from the worker monitor (keyed by worker URL).
     cached_loads: RwLock<HashMap<String, WorkerLoadResponse>>,
     /// KV-pressure weight.
-    lambda: f64,
+    kv_pressure_weight: f64,
 }
 
 impl LeastLoadPolicy {
     pub fn new() -> Self {
-        Self::with_lambda(DEFAULT_LAMBDA)
+        Self::with_kv_pressure_weight(DEFAULT_KV_PRESSURE_WEIGHT)
     }
 
-    pub fn with_lambda(lambda: f64) -> Self {
+    pub fn with_kv_pressure_weight(kv_pressure_weight: f64) -> Self {
         Self {
             cached_loads: RwLock::new(HashMap::new()),
-            lambda: if lambda.is_finite() && lambda >= 0.0 {
-                lambda
+            kv_pressure_weight: if kv_pressure_weight.is_finite() && kv_pressure_weight >= 0.0 {
+                kv_pressure_weight
             } else {
-                DEFAULT_LAMBDA
+                DEFAULT_KV_PRESSURE_WEIGHT
             },
         }
     }
@@ -48,7 +48,7 @@ impl LeastLoadPolicy {
             .and_then(|m| m.get(worker.url()))
             .map(|l| l.effective_token_usage().clamp(0.0, 0.999))
             .unwrap_or(0.0);
-        in_flight + self.lambda * k / (1.0 - k)
+        in_flight + self.kv_pressure_weight * k / (1.0 - k)
     }
 }
 
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn kv_barrier_avoids_full_worker() {
-        let policy = LeastLoadPolicy::with_lambda(2.0);
+        let policy = LeastLoadPolicy::with_kv_pressure_weight(2.0);
         let a = mk("http://a:8000"); // idle but KV-full
         let b = mk("http://b:8000"); // 1 in-flight but KV empty
         b.increment_load();

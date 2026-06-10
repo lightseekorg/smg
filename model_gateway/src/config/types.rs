@@ -374,7 +374,7 @@ pub enum PolicyConfig {
     PowerOfTwo { load_check_interval_secs: u64 },
 
     /// Least-load policy: routes to the worker minimizing
-    /// `in_flight + lambda * k/(1-k)` — the real-time in-flight request count plus
+    /// `in_flight + kv_pressure_weight * k/(1-k)` — the real-time in-flight request count plus
     /// a convex KV-cache pressure term from the load monitor.
     /// See `policies/least_load.rs`.
     #[serde(rename = "least_load")]
@@ -382,8 +382,8 @@ pub enum PolicyConfig {
         #[serde(default = "default_least_load_interval")]
         load_check_interval_secs: u64,
         /// KV-pressure weight (request-equivalents per unit of M/M/1 congestion).
-        #[serde(default = "default_least_load_lambda")]
-        lambda: f64,
+        #[serde(default = "default_least_load_kv_pressure_weight")]
+        kv_pressure_weight: f64,
     },
 
     #[serde(rename = "bucket")]
@@ -462,7 +462,7 @@ fn default_least_load_interval() -> u64 {
     10
 }
 
-fn default_least_load_lambda() -> f64 {
+fn default_least_load_kv_pressure_weight() -> f64 {
     1.5
 }
 
