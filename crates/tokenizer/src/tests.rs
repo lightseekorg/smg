@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     mock,
+    stream::INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
     traits::{Decoder, Encoder},
     Tokenizer,
 };
@@ -71,8 +72,9 @@ fn test_decode_stream_basic() {
     let result = stream.step(3).unwrap();
     assert_eq!(result, Some(" test".to_string()));
 
-    // The stream should now track all three tokens
-    assert_eq!(stream.tokens(), &[1, 2, 3]);
+    // Consumed tokens are drained after a successful step; only the retained
+    // window remains.
+    assert_eq!(stream.tokens(), &[3]);
 }
 
 #[test]
@@ -98,7 +100,7 @@ fn test_decode_stream_multiple_steps() {
     let result = stream.step(3).unwrap();
     assert_eq!(result, Some(" test".to_string()));
 
-    assert_eq!(stream.tokens(), &[1, 2, 3]);
+    assert_eq!(stream.tokens(), &[3]);
 }
 
 #[test]
@@ -249,4 +251,38 @@ fn test_decode_stream_multibyte_char_boundary() {
     //   "byte index 3 is not a char boundary; it is inside '🎉' (bytes 2..6)"
     let result = stream.step(3).unwrap();
     assert_eq!(result, Some("\u{1F389}".to_string()));
+}
+
+/// Retained token history must stay bounded across many steps (no per-stream
+/// unbounded growth), while accumulated output still matches a full decode.
+#[test]
+fn test_decode_stream_history_bounded() {
+    let mock_tokenizer = Arc::new(mock::MockTokenizer::new());
+    let tokenizer = Tokenizer::from_arc(mock_tokenizer);
+
+    let mut stream = tokenizer.decode_stream(&[], false);
+
+    let mut all_token_ids = Vec::new();
+    let mut output = String::new();
+    for i in 0..1000u32 {
+        let token_id = (i % 4) + 1; // cycle through mock word tokens
+        all_token_ids.push(token_id);
+        if let Some(text) = stream.step(token_id).unwrap() {
+            output.push_str(&text);
+        }
+        // Buffer holds at most the prefix window plus the newest token, never
+        // the full history.
+        assert!(
+            stream.tokens().len() <= INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET + 1,
+            "retained history grew to {} tokens",
+            stream.tokens().len()
+        );
+    }
+
+    if let Some(text) = stream.flush().unwrap() {
+        output.push_str(&text);
+    }
+
+    let expected = tokenizer.decode(&all_token_ids, false).unwrap();
+    assert_eq!(output, expected, "drained output must match full decode");
 }
