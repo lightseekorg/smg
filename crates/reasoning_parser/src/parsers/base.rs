@@ -41,6 +41,20 @@ impl BaseReasoningParser {
             || (self.config.think_end_token.starts_with(text)
                 && self.config.think_end_token != text)
     }
+
+    /// Byte length of the longest suffix of `text` that is a non-empty proper
+    /// prefix of `think_end_token` — i.e. an end token split across chunks.
+    fn partial_end_suffix_len(&self, text: &str) -> usize {
+        let end = &self.config.think_end_token;
+        let max = text.len().min(end.len().saturating_sub(1));
+        for len in (1..=max).rev() {
+            let start = text.len() - len;
+            if text.is_char_boundary(start) && end.starts_with(&text[start..]) {
+                return len;
+            }
+        }
+        0
+    }
 }
 
 impl ReasoningParser for BaseReasoningParser {
@@ -133,9 +147,12 @@ impl ReasoningParser for BaseReasoningParser {
 
         // Continue with reasoning content
         if self.in_reasoning && self.config.stream_reasoning {
-            // Stream the content immediately
-            let reasoning_text = current_text;
-            self.buffer.clear();
+            // Hold back a trailing partial end token so a `</think>` split across
+            // chunks is detected on the next call instead of leaking as reasoning.
+            let hold = self.partial_end_suffix_len(&current_text);
+            let split = current_text.len() - hold;
+            let reasoning_text = current_text[..split].to_string();
+            self.buffer = current_text[split..].to_string();
             Ok(ParserResult::reasoning(reasoning_text))
         } else if !self.in_reasoning {
             // If we're not in a reasoning block, return as normal text
@@ -306,6 +323,78 @@ mod tests {
             .unwrap();
         assert_eq!(result3.normal_text, " normal");
         assert_eq!(result3.reasoning_text, "more");
+    }
+
+    #[test]
+    fn test_streaming_end_token_split_across_chunks() {
+        let mut parser = create_test_parser(false, true);
+
+        parser
+            .parse_reasoning_streaming_incremental("<think>reasoning ")
+            .unwrap();
+
+        // Chunk ends mid-`</think>`: the partial suffix must be held back, not leaked.
+        let split = parser
+            .parse_reasoning_streaming_incremental("done</thi")
+            .unwrap();
+        assert_eq!(split.reasoning_text, "done");
+        assert_eq!(split.normal_text, "");
+
+        // Remainder completes the end token; the answer must be normal text.
+        let rest = parser
+            .parse_reasoning_streaming_incremental("nk>answer")
+            .unwrap();
+        assert_eq!(rest.reasoning_text, "");
+        assert_eq!(rest.normal_text, "answer");
+    }
+
+    #[test]
+    fn test_streaming_end_token_split_multibyte() {
+        let config = ParserConfig {
+            think_start_token: "◁think▷".to_string(),
+            think_end_token: "◁/think▷".to_string(),
+            ..Default::default()
+        };
+        let mut parser = BaseReasoningParser::new(config);
+
+        parser
+            .parse_reasoning_streaming_incremental("◁think▷cot ")
+            .unwrap();
+
+        let split = parser
+            .parse_reasoning_streaming_incremental("more◁/th")
+            .unwrap();
+        assert_eq!(split.reasoning_text, "more");
+        assert_eq!(split.normal_text, "");
+
+        let rest = parser
+            .parse_reasoning_streaming_incremental("ink▷answer")
+            .unwrap();
+        assert_eq!(rest.reasoning_text, "");
+        assert_eq!(rest.normal_text, "answer");
+    }
+
+    #[test]
+    fn test_streaming_partial_end_suffix_disambiguated_as_reasoning() {
+        let mut parser = create_test_parser(false, true);
+
+        parser
+            .parse_reasoning_streaming_incremental("<think>reasoning ")
+            .unwrap();
+
+        // Tail looks like a partial `</think>` and is held back.
+        let held = parser
+            .parse_reasoning_streaming_incremental("done</th")
+            .unwrap();
+        assert_eq!(held.reasoning_text, "done");
+
+        // Next chunk shows it was not the end token: the held suffix must surface
+        // as reasoning, not be dropped.
+        let next = parser
+            .parse_reasoning_streaming_incremental("eory")
+            .unwrap();
+        assert_eq!(next.reasoning_text, "</theory");
+        assert_eq!(next.normal_text, "");
     }
 
     #[test]
