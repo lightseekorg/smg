@@ -225,11 +225,14 @@ impl CrdtOrMap {
     /// the cached snapshot newer than its key, forcing one extra rebuild —
     /// never a stale serve, since every mutation strictly increases the sum.
     pub fn operation_log_snapshot(&self) -> Arc<OperationLog> {
-        let generation: u64 = self
-            .all_engines()
+        // Sum over the engine table directly: `all_engines` would allocate a
+        // Vec of handles on every 1 Hz round just to read the counters.
+        let engines = self.engines_snapshot();
+        let generation: u64 = engines
             .iter()
-            .map(|engine| engine.op_generation())
-            .sum();
+            .map(|(_, engine)| engine.op_generation())
+            .sum::<u64>()
+            + self.default_engine.op_generation();
         if let Some((cached_gen, snapshot)) = self.op_snapshot.read().as_ref() {
             if *cached_gen == generation {
                 return Arc::clone(snapshot);

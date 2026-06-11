@@ -76,7 +76,9 @@ impl RateLimitEngine {
         let mut log = self.log.write();
         log.append(op);
         self.op_generation.fetch_add(1, Ordering::Release);
-        if log.len() > self.compact_trigger() {
+        // The trigger floor is 64, so a short log skips the DashMap len()
+        // (an O(shards) scan) on this per-write path.
+        if log.len() > 64 && log.len() > self.compact_trigger() {
             Self::compact_log(&mut log);
             // Local-write path only: dropping oldest on the remote-merge path
             // would shed remotely-learned shards (see the helper's docs).
