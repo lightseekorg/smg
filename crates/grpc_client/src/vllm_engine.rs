@@ -144,6 +144,7 @@ impl VllmEngineClient {
             stream: body.stream,
             kv_transfer_params: None,
             kv_transfer_params_json: None,
+            data_parallel_rank: None,
             mm_inputs,
         };
 
@@ -177,6 +178,7 @@ impl VllmEngineClient {
             stream: body.stream,
             kv_transfer_params: None,
             kv_transfer_params_json: None,
+            data_parallel_rank: None,
             mm_inputs: None,
         };
 
@@ -214,6 +216,7 @@ impl VllmEngineClient {
             stream: body.stream.unwrap_or(false),
             kv_transfer_params: None,
             kv_transfer_params_json: None,
+            data_parallel_rank: None,
             mm_inputs: None,
         };
 
@@ -430,6 +433,7 @@ impl VllmEngineClient {
             stream: body.stream.unwrap_or(false),
             kv_transfer_params: None,
             kv_transfer_params_json: None,
+            data_parallel_rank: None,
             mm_inputs: multimodal_inputs,
         };
 
@@ -493,6 +497,7 @@ impl VllmEngineClient {
             stream: body.stream,
             kv_transfer_params: None,
             kv_transfer_params_json: None,
+            data_parallel_rank: None,
             mm_inputs: None,
         };
 
@@ -814,6 +819,7 @@ mod tests {
             stream: false,
             kv_transfer_params: None,
             kv_transfer_params_json: None,
+            data_parallel_rank: None,
             mm_inputs: None,
         };
 
