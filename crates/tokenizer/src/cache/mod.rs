@@ -184,7 +184,9 @@ impl Encoder for CachedTokenizer {
             {
                 let suffix = &input[prefix_len..];
                 if !suffix.is_empty() {
-                    let suffix_encoding = self.inner.encode(suffix, add_special_tokens)?;
+                    // The cached prefix already carries any leading special tokens,
+                    // so the suffix must never re-add them (it is never segment 0).
+                    let suffix_encoding = self.inner.encode(suffix, false)?;
 
                     let mut merged_tokens = prefix_tokens;
                     merged_tokens.extend_from_slice(suffix_encoding.token_ids());
@@ -295,6 +297,113 @@ impl Tokenizer for CachedTokenizer {
 #[cfg(test)]
 mod tests {
     use crate::{mock::MockTokenizer, *};
+
+    /// Tokenizer that prepends a sentinel BOS when `add_special_tokens` is set,
+    /// so duplicated specials across a prefix/suffix merge are observable.
+    struct BosTokenizer {
+        special_tokens: SpecialTokens,
+    }
+
+    const BOS_ID: TokenIdType = 99;
+
+    impl BosTokenizer {
+        fn new() -> Self {
+            Self {
+                special_tokens: SpecialTokens {
+                    bos_token: Some("<bos>".to_string()),
+                    additional_special_tokens: vec![
+                        "<|im_start|>".to_string(),
+                        "<|im_end|>".to_string(),
+                    ],
+                    ..Default::default()
+                },
+            }
+        }
+    }
+
+    impl Encoder for BosTokenizer {
+        fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
+            let mut ids: Vec<TokenIdType> = Vec::new();
+            if add_special_tokens {
+                ids.push(BOS_ID);
+            }
+            ids.extend(input.bytes().map(TokenIdType::from));
+            Ok(Encoding::Plain(ids))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|i| self.encode(i, add_special_tokens))
+                .collect()
+        }
+    }
+
+    impl Decoder for BosTokenizer {
+        fn decode(&self, _token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    impl traits::Tokenizer for BosTokenizer {
+        fn vocab_size(&self) -> usize {
+            256
+        }
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            &self.special_tokens
+        }
+        fn token_to_id(&self, _token: &str) -> Option<TokenIdType> {
+            None
+        }
+        fn id_to_token(&self, _id: TokenIdType) -> Option<String> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn test_l1_hit_does_not_duplicate_special_tokens() {
+        let tokenizer = Arc::new(BosTokenizer::new());
+        let config = CacheConfig {
+            enable_l0: false,
+            l0_max_entries: 0,
+            enable_l1: true,
+            l1_max_memory: 1024 * 1024,
+        };
+        let cached = CachedTokenizer::new(tokenizer, config);
+
+        let input = "<|im_start|>system\nhi<|im_end|><|im_start|>user\nquery<|im_end|>";
+
+        // First call warms the L1 cache at special-token boundaries.
+        let first = cached.encode(input, true).unwrap();
+        // Second call hits the warm L1 cache and merges prefix + suffix.
+        let second = cached.encode(input, true).unwrap();
+
+        // The merged result must match a fresh, uncached encode: a single BOS at
+        // the start, none duplicated mid-sequence and none dropped.
+        let fresh = CachedTokenizer::new(
+            Arc::new(BosTokenizer::new()),
+            CacheConfig {
+                enable_l0: false,
+                l0_max_entries: 0,
+                enable_l1: false,
+                l1_max_memory: 0,
+            },
+        )
+        .encode(input, true)
+        .unwrap();
+
+        assert_eq!(first.token_ids(), fresh.token_ids());
+        assert_eq!(second.token_ids(), fresh.token_ids());
+        assert_eq!(
+            second.token_ids().iter().filter(|&&t| t == BOS_ID).count(),
+            1,
+            "exactly one BOS expected, got tokens: {:?}",
+            second.token_ids()
+        );
+    }
 
     #[test]
     fn test_cache_hit() {
