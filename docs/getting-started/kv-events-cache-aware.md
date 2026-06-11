@@ -98,13 +98,16 @@ vLLM emits KV cache events the same way (ZMQ publisher); enable them with `--kv-
 ```bash
 pip install "smg-grpc-servicer[vllm]"
 
-# Launch vLLM as an SMG gRPC worker (see the gRPC Workers guide for the full
-# launch mechanics); the only KV-events-specific addition is --kv-events-config:
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
+# Use vLLM's gRPC entrypoint (NOT `vllm serve`, which starts the HTTP server and
+# cannot stream KV events); add --kv-events-config to turn on event publishing:
+python -m vllm.entrypoints.grpc_server \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --host 0.0.0.0 \
+  --port 50051 \
   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv-events"}'
 ```
 
-Event-driven routing requires the worker to run in **SMG gRPC mode** — see [gRPC Workers](grpc-workers.md) for the launch details; the snippet above shows only the KV-events-specific flag you add on top.
+Event-driven routing requires the worker to run in **SMG gRPC mode** — KV events are streamed over the `SubscribeKvEvents` gRPC RPC, so a plain `vllm serve` HTTP worker cannot participate. See [gRPC Workers](grpc-workers.md) for the full launch reference; the snippet above adds only the KV-events-specific `--kv-events-config` flag on top.
 
 | Field | Why |
 |---|---|
