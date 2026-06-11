@@ -467,6 +467,9 @@ impl NamespaceCrdtEngine for LwwEngine {
     fn gc_tombstones(&self, grace: Duration) -> usize {
         let now = Instant::now();
         let mut removed = 0;
+        // Collected keys' winning tombstone versions, for the log purge below.
+        let mut purged: std::collections::HashMap<String, (u64, ReplicaId)> =
+            std::collections::HashMap::new();
         let keys_to_check: Vec<String> = self
             .metadata
             .iter()
@@ -491,9 +494,25 @@ impl NamespaceCrdtEngine for LwwEngine {
                                 && now.saturating_duration_since(winner.created_at) >= grace
                         })
             });
-            if was_removed.is_some() {
+            if let Some((key, versions)) = was_removed {
                 removed += 1;
+                if let Some(winner) = versions.iter().max_by_key(|v| v.version_key()) {
+                    purged.insert(key, winner.version_key());
+                }
             }
+        }
+        if !purged.is_empty() {
+            // Purge the collected keys' dominated ops so log size keeps
+            // tracking metadata (the compaction trigger) and dead tombstones
+            // stop gossiping. Newer concurrent ops for a reused key survive
+            // the version filter.
+            let mut log = self.log.write();
+            log.retain_ops(|op| {
+                purged
+                    .get(op.key())
+                    .is_none_or(|gc_version| (op.timestamp(), op.replica_id()) > *gc_version)
+            });
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
         removed
     }

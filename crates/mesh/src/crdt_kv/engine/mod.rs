@@ -89,8 +89,9 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
 
     // ---- Maintenance ----
 
-    /// Garbage-collect tombstones older than `grace`. Returns the number of
-    /// metadata entries removed.
+    /// Garbage-collect tombstones older than `grace`, purging the collected
+    /// keys' dominated ops from the operation log so log size keeps tracking
+    /// the key population. Returns the number of metadata entries removed.
     fn gc_tombstones(&self, grace: Duration) -> usize;
 }
 

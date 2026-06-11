@@ -154,6 +154,12 @@ impl OperationLog {
         drain_count
     }
 
+    /// Drop every operation for which `keep` returns `false`. Used by
+    /// tombstone GC to purge collected keys' dominated ops from the log.
+    pub(super) fn retain_ops(&mut self, keep: impl FnMut(&Operation) -> bool) {
+        self.operations.retain(keep);
+    }
+
     /// Serialize to bincode bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
         bincode::serialize(self)
