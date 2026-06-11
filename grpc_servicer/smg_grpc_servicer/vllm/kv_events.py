@@ -7,7 +7,6 @@ module needs no vLLM import and is unit-testable without a vLLM install.
 Mirrors grpc_servicer/smg_grpc_servicer/sglang/servicer.py:652-779.
 """
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 
@@ -42,11 +41,13 @@ def endpoint_for_rank(endpoint: str, dp_rank: int) -> str:
     """Resolve a vLLM KV-events PUB endpoint to a connectable SUB address.
 
     The publisher binds to e.g. ``tcp://*:5557``; subscribers connect to
-    ``127.0.0.1``. For data-parallel deployments each rank publishes on
-    ``base_port + dp_rank``. Non-tcp endpoints (ipc://, inproc://) are returned
-    with the bind wildcard substituted but no port arithmetic.
+    ``127.0.0.1``. Bind wildcards (``*`` and ``0.0.0.0``) are rewritten to
+    ``127.0.0.1`` since ``0.0.0.0`` is not a connectable address on macOS/Windows.
+    For data-parallel deployments each rank publishes on ``base_port + dp_rank``.
+    Non-tcp endpoints (ipc://, inproc://) are returned with the bind wildcard
+    substituted but no port arithmetic.
     """
-    resolved = endpoint.replace("*", "127.0.0.1")
+    resolved = endpoint.replace("*", "127.0.0.1").replace("0.0.0.0", "127.0.0.1")
     if resolved.startswith("tcp://") and dp_rank:
         host, sep, port = resolved.rpartition(":")
         if sep and port.isdigit():
@@ -152,23 +153,26 @@ async def stream_kv_events(
 
     Args:
         sub_socket: a connected ``zmq.asyncio`` SUB socket (duck-typed; only
-            ``recv_multipart()`` is used). The caller owns the socket lifecycle
-            (this function never closes it).
+            ``poll()`` and ``recv_multipart()`` are used). The caller owns the
+            socket lifecycle (this function never closes it).
         decode: bytes → decoded vLLM batch (e.g. ``msgspec.msgpack.Decoder(KVEventBatch).decode``).
         send_initial_metadata: awaitable called once before the first recv so the
             gRPC client's ``subscribe_kv_events().await`` resolves promptly.
         is_cancelled: returns True when the RPC is cancelled; loop then exits.
-        recv_timeout: per-recv timeout so cancellation is observed even when idle.
+        recv_timeout: poll timeout so cancellation is observed even when idle.
 
     Yields proto KvEventBatch using the ZMQ publisher's native sequence numbers.
     """
     await send_initial_metadata()
     event_id = 0
     while not is_cancelled():
-        try:
-            frames = await asyncio.wait_for(sub_socket.recv_multipart(), timeout=recv_timeout)
-        except (TimeoutError, asyncio.TimeoutError):  # noqa: UP041 - distinct classes on py3.10
+        # poll() is the safe way to bound the wait on a zmq.asyncio socket:
+        # cancelling a recv_multipart() future (e.g. via asyncio.wait_for) does
+        # not cancel the in-flight ZMQ recv and can drop an already-dequeued
+        # message. poll() reports readability without that side effect.
+        if not await sub_socket.poll(timeout=int(recv_timeout * 1000)):
             continue
+        frames = await sub_socket.recv_multipart()
 
         # ZMQ multipart: [topic, 8-byte big-endian seq, msgpack payload].
         if len(frames) < 3:

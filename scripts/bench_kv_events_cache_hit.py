@@ -81,6 +81,8 @@ async def run(args):
         wall = time.perf_counter() - wall_start
 
     def pct(xs, p):
+        if not xs:
+            return 0.0
         return statistics.quantiles(xs, n=100)[p - 1] if len(xs) > 1 else xs[0]
 
     print(

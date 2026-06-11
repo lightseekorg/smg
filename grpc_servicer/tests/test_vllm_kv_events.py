@@ -87,6 +87,11 @@ class TestEndpointForRank:
     def test_portless_tcp_wildcard_no_crash(self):
         assert kv_events.endpoint_for_rank("tcp://*", 2) == "tcp://127.0.0.1"
 
+    def test_zero_host_becomes_loopback(self):
+        # 0.0.0.0 is not connectable on macOS/Windows; must rewrite to 127.0.0.1.
+        assert kv_events.endpoint_for_rank("tcp://0.0.0.0:5557", 0) == "tcp://127.0.0.1:5557"
+        assert kv_events.endpoint_for_rank("tcp://0.0.0.0:5557", 2) == "tcp://127.0.0.1:5559"
+
 
 class TestResolveKvEventsConfig:
     class _Cfg:

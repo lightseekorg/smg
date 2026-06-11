@@ -45,35 +45,38 @@ def _seq_bytes(n: int) -> bytes:
 async def test_stream_yields_batches_in_order():
     ctx = zmq.asyncio.Context.instance()
     pub = ctx.socket(zmq.PUB)
-    port = pub.bind_to_random_port("tcp://127.0.0.1")
     sub = ctx.socket(zmq.SUB)
-    sub.subscribe(b"")
-    sub.connect(f"tcp://127.0.0.1:{port}")
-    await asyncio.sleep(0.2)  # allow SUB connection to establish before publishing
-
-    # decode ignores payload bytes and returns a prebuilt fake batch keyed by seq.
-    def fake_decode(payload: bytes):
-        return KVEventBatch(int.from_bytes(payload, "big"))
-
     collected = []
+    try:
+        port = pub.bind_to_random_port("tcp://127.0.0.1")
+        sub.subscribe(b"")
+        sub.connect(f"tcp://127.0.0.1:{port}")
+        await asyncio.sleep(0.2)  # allow SUB connection to establish before publishing
 
-    async def consume():
-        async for batch in kv_events.stream_kv_events(
-            sub, fake_decode, send_initial_metadata=_noop, is_cancelled=lambda: len(collected) >= 2
-        ):
-            collected.append(batch)
+        # decode ignores payload bytes and returns a prebuilt fake batch keyed by seq.
+        def fake_decode(payload: bytes):
+            return KVEventBatch(int.from_bytes(payload, "big"))
 
-    async def _noop():
-        return None
+        async def _noop():
+            return None
 
-    consumer = asyncio.create_task(consume())
-    for seq in (1, 2):
-        await pub.send_multipart([b"kv", _seq_bytes(seq), seq.to_bytes(8, "big")])
-        await asyncio.sleep(0.05)
-    await asyncio.wait_for(consumer, timeout=5)
+        async def consume():
+            async for batch in kv_events.stream_kv_events(
+                sub,
+                fake_decode,
+                send_initial_metadata=_noop,
+                is_cancelled=lambda: len(collected) >= 2,
+            ):
+                collected.append(batch)
 
-    pub.close(linger=0)
-    sub.close(linger=0)
+        consumer = asyncio.create_task(consume())
+        for seq in (1, 2):
+            await pub.send_multipart([b"kv", _seq_bytes(seq), seq.to_bytes(8, "big")])
+            await asyncio.sleep(0.05)
+        await asyncio.wait_for(consumer, timeout=5)
+    finally:
+        pub.close(linger=0)
+        sub.close(linger=0)
 
     assert [b.sequence_number for b in collected] == [1, 2]
     assert collected[0].events[0].stored.blocks[0].block_hash == 1
@@ -83,37 +86,40 @@ async def test_stream_yields_batches_in_order():
 async def test_stream_skips_short_frames_and_decode_errors():
     ctx = zmq.asyncio.Context.instance()
     pub = ctx.socket(zmq.PUB)
-    port = pub.bind_to_random_port("tcp://127.0.0.1")
     sub = ctx.socket(zmq.SUB)
-    sub.subscribe(b"")
-    sub.connect(f"tcp://127.0.0.1:{port}")
-    await asyncio.sleep(0.2)
-
-    def fake_decode(payload: bytes):
-        if payload == b"bad":
-            raise ValueError("boom")
-        return KVEventBatch(7)
-
     collected = []
+    try:
+        port = pub.bind_to_random_port("tcp://127.0.0.1")
+        sub.subscribe(b"")
+        sub.connect(f"tcp://127.0.0.1:{port}")
+        await asyncio.sleep(0.2)
 
-    async def _noop():
-        return None
+        def fake_decode(payload: bytes):
+            if payload == b"bad":
+                raise ValueError("boom")
+            return KVEventBatch(7)
 
-    async def consume():
-        async for batch in kv_events.stream_kv_events(
-            sub, fake_decode, send_initial_metadata=_noop, is_cancelled=lambda: len(collected) >= 1
-        ):
-            collected.append(batch)
+        async def _noop():
+            return None
 
-    consumer = asyncio.create_task(consume())
-    await pub.send_multipart([b"kv", _seq_bytes(1)])  # short frame -> skipped
-    await asyncio.sleep(0.05)
-    await pub.send_multipart([b"kv", _seq_bytes(2), b"bad"])  # decode error -> skipped
-    await asyncio.sleep(0.05)
-    await pub.send_multipart([b"kv", _seq_bytes(3), b"ok"])  # good -> yielded
-    await asyncio.wait_for(consumer, timeout=5)
+        async def consume():
+            async for batch in kv_events.stream_kv_events(
+                sub,
+                fake_decode,
+                send_initial_metadata=_noop,
+                is_cancelled=lambda: len(collected) >= 1,
+            ):
+                collected.append(batch)
 
-    pub.close(linger=0)
-    sub.close(linger=0)
+        consumer = asyncio.create_task(consume())
+        await pub.send_multipart([b"kv", _seq_bytes(1)])  # short frame -> skipped
+        await asyncio.sleep(0.05)
+        await pub.send_multipart([b"kv", _seq_bytes(2), b"bad"])  # decode error -> skipped
+        await asyncio.sleep(0.05)
+        await pub.send_multipart([b"kv", _seq_bytes(3), b"ok"])  # good -> yielded
+        await asyncio.wait_for(consumer, timeout=5)
+    finally:
+        pub.close(linger=0)
+        sub.close(linger=0)
 
     assert [b.sequence_number for b in collected] == [3]

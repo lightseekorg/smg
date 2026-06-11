@@ -1020,7 +1020,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 "--kv-events-config "
                 '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
             )
-            return
 
         import msgspec
         import zmq
@@ -1053,6 +1052,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 yield proto_batch
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.exception("SubscribeKvEvents failed")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
         finally:
             sub_socket.close(linger=0)
             logger.info("SubscribeKvEvents: stream closed")
