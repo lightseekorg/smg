@@ -184,8 +184,14 @@ class GrpcRequestManager:
         self.context = zmq.asyncio.Context(2)
 
         # Socket for receiving outputs from scheduler
+        # If skip_tokenizer_init mode, scheduler sends outputs to tokenizer_ipc_name.
+        self.recv_ipc_name = (
+            port_args.tokenizer_ipc_name
+            if server_args.skip_tokenizer_init
+            else port_args.detokenizer_ipc_name
+        )
         self.recv_from_scheduler = get_zmq_socket(
-            self.context, zmq.PULL, port_args.detokenizer_ipc_name, bind=True
+            self.context, zmq.PULL, self.recv_ipc_name, bind=True
         )
 
         # Socket for sending requests to scheduler
@@ -225,7 +231,7 @@ class GrpcRequestManager:
 
         logger.info(
             f"GrpcRequestManager initialized with ZMQ IPC: "
-            f"recv={port_args.detokenizer_ipc_name}, "
+            f"recv={self.recv_ipc_name}, "
             f"send={port_args.scheduler_input_ipc_name}"
         )
         if self.bootstrap_server:
