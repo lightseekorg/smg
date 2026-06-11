@@ -232,4 +232,4 @@ kubectl auth can-i watch pods -n inference --as=system:serviceaccount:inference:
 
 - [Service Discovery Concepts](../concepts/architecture/service-discovery.md) — Worker lifecycle, monitoring metrics, cross-namespace discovery
 - [Load Balancing](load-balancing.md) — Choose a routing policy for discovered workers
-- [PD Disaggregation](pd-disaggregation.md) — Full PD setup with SGLang and vLLM
+- [PD Disaggregation](pd-disaggregation.md) — Full PD setup with vLLM and SGLang

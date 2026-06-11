@@ -24,7 +24,7 @@ SMG maintains an exact replica of each backend's KV cache structure, enabling 10
 
 ### :material-sync: Backend Synchronization
 
-Uses the same tokens, page sizes, and eviction policies as backend schedulers (SGLang, vLLM, TensorRT-LLM).
+Uses the same tokens, page sizes, and eviction policies as backend schedulers (vLLM, TensorRT-LLM, TokenSpeed, SGLang).
 
 </div>
 
@@ -135,7 +135,7 @@ The gateway's radix tree uses the **exact same parameters** as backend scheduler
 
 - **Perfect Cache Prediction**: Since the gateway tree mirrors backend behavior exactly, prefix match calculations are 100% accurate
 - **Kernel-Aware**: Honors page boundaries used by inference kernels (FlashInfer, Mamba, etc.)
-- **Eviction Parity**: Tracks the same eviction policy as SGLang/vLLM/TensorRT-LLM schedulers
+- **Eviction Parity**: Tracks the same eviction policy as vLLM/TensorRT-LLM/TokenSpeed/SGLang schedulers
 
 ---
 

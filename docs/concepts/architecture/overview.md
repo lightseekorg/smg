@@ -116,9 +116,10 @@ The gRPC path provides maximum performance by handling all text processing at th
 
 ### Supported Backends
 
-- SGLang (gRPC)
 - vLLM (gRPC)
 - TensorRT-LLM (gRPC)
+- TokenSpeed (gRPC)
+- SGLang (gRPC)
 
 ---
 
@@ -141,9 +142,9 @@ Disaggregated inference with separate prefill and decode workers:
 
 ### Supported Backends
 
-- SGLang (HTTP)
 - vLLM (HTTP)
 - TensorRT-LLM (HTTP)
+- SGLang (HTTP)
 
 ---
 
@@ -218,7 +219,7 @@ The cache-aware policy optimizes for KV cache reuse:
 4. Otherwise, route to worker with most cache capacity
 5. Falls back to least-loaded when system is imbalanced
 
-This integrates with SGLang, vLLM, and TensorRT-LLM's native KV cache management.
+This integrates with vLLM, TensorRT-LLM, TokenSpeed, and SGLang's native KV cache management.
 
 ---
 

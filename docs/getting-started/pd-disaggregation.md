@@ -186,14 +186,14 @@ curl http://localhost:30000/v1/chat/completions \
 
 ---
 
-## SGLang vs vLLM PD at a Glance
+## vLLM vs SGLang PD at a Glance
 
-| | SGLang PD | vLLM PD |
-|---|-----------|---------|
-| **Protocol** | HTTP | gRPC |
-| **Dispatch** | Both workers receive request simultaneously | Prefill first, then decode |
-| **KV Transfer** | Bootstrap-based coordination | NIXL (RDMA) or Mooncake (TCP/RDMA) |
-| **SMG flags** | `--prefill http://... <bootstrap_port>` | `--prefill grpc://...` + `--model-path` |
+| | vLLM PD | SGLang PD |
+|---|---------|-----------|
+| **Protocol** | gRPC | HTTP |
+| **Dispatch** | Prefill first, then decode | Both workers receive request simultaneously |
+| **KV Transfer** | NIXL (RDMA) or Mooncake (TCP/RDMA) | Bootstrap-based coordination |
+| **SMG flags** | `--prefill grpc://...` + `--model-path` | `--prefill http://... <bootstrap_port>` |
 
 ---
 

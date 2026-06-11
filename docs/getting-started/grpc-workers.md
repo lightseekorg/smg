@@ -11,7 +11,7 @@ When workers connect via gRPC instead of HTTP, SMG becomes a full OpenAI-compati
 #### Before you begin
 
 - Completed the [Getting Started](index.md) guide
-- A gRPC-capable inference worker (vLLM with gRPC entrypoint)
+- A gRPC-capable inference worker (for example vLLM, TensorRT-LLM, TokenSpeed, or SGLang)
 - Access to the model weights or a HuggingFace model path (for tokenizer loading)
 
 </div>
@@ -35,16 +35,6 @@ In HTTP mode, SMG is a smart proxy — routing and failover only. In gRPC mode, 
 
 ## Start a gRPC Worker
 
-=== "SGLang"
-
-    ```bash
-    python -m sglang.launch_server \
-      --model-path meta-llama/Llama-3.1-8B-Instruct \
-      --host 0.0.0.0 \
-      --port 50051 \
-      --grpc-mode
-    ```
-
 === "vLLM"
 
     ```bash
@@ -63,6 +53,25 @@ In HTTP mode, SMG is a smart proxy — routing and failover only. In gRPC mode, 
       --host 0.0.0.0 \
       --port 50051 \
       --backend pytorch
+    ```
+
+=== "TokenSpeed"
+
+    ```bash
+    python -m smg_grpc_servicer.tokenspeed \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 50051
+    ```
+
+=== "SGLang"
+
+    ```bash
+    python -m sglang.launch_server \
+      --model-path meta-llama/Llama-3.1-8B-Instruct \
+      --host 0.0.0.0 \
+      --port 50051 \
+      --grpc-mode
     ```
 
 ---
@@ -209,7 +218,7 @@ Auto-detected from the model name. Override with `--tool-call-parser` if needed.
 
 | Use Case | Recommended Mode |
 |----------|-----------------|
-| Workers already run OpenAI servers (SGLang, vLLM HTTP) | HTTP |
+| Workers already run OpenAI servers (vLLM HTTP or SGLang) | HTTP |
 | You need gateway-level tool parsing or Responses MCP | gRPC |
 | You want token-aware load balancing | gRPC |
 | You use thinking models and want reasoning extraction | gRPC |

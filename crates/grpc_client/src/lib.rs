@@ -1,8 +1,8 @@
-//! gRPC clients for SGLang, vLLM, TensorRT-LLM, MLX, and TokenSpeed backends.
+//! gRPC clients for vLLM, TensorRT-LLM, MLX, TokenSpeed, and SGLang backends.
 //!
 //! This crate provides gRPC client implementations for communicating with
-//! the SGLang scheduler, vLLM engine, TensorRT-LLM engine, MLX engine, and
-//! TokenSpeed scheduler backends.
+//! the vLLM engine, TensorRT-LLM engine, MLX engine, TokenSpeed scheduler,
+//! and SGLang scheduler backends.
 
 pub mod common_proto {
     #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]

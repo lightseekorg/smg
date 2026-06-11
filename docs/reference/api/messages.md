@@ -61,7 +61,7 @@ curl http://localhost:30000/v1/messages \
 
 ## gRPC Backend
 
-The Messages API works with gRPC backends such as SGLang and vLLM. When routing to a gRPC backend, SMG translates the Anthropic message format to the backend's native format and translates the response back.
+The Messages API works with gRPC backends such as vLLM, TensorRT-LLM, TokenSpeed, and SGLang. When routing to a gRPC backend, SMG translates the Anthropic message format to the backend's native format and translates the response back.
 
 !!! note
     When using the Messages API with gRPC backends, SMG handles format translation automatically. The backend receives requests in its native format.
@@ -73,7 +73,7 @@ The Messages API works with gRPC backends such as SGLang and vLLM. When routing 
 | Mode | Backend | Description |
 |------|---------|-------------|
 | HTTP (proxy) | Anthropic API | Forward requests to `api.anthropic.com` |
-| gRPC | SGLang/vLLM | Translate and route to local inference |
+| gRPC | vLLM/TensorRT-LLM/TokenSpeed/SGLang | Translate and route to local inference |
 
 ---
 

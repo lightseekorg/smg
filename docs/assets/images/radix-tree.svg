@@ -215,7 +215,7 @@
 
   <!-- Backend scheduler info -->
   <rect x="655" y="350" width="300" height="115" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
-  <text x="805" y="372" text-anchor="middle" class="rt-layer-label" fill="#10b981">SGLang / vLLM / TensorRT-LLM</text>
+  <text x="805" y="372" text-anchor="middle" class="rt-layer-label" fill="#10b981">vLLM / TensorRT-LLM / TokenSpeed / SGLang</text>
 
   <text x="735" y="395" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Token-based scheduling</text>
   <text x="735" y="412" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Page-aligned KV cache</text>

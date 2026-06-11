@@ -73,8 +73,8 @@ SMG supports PD disaggregation with two inference backends:
 
 | Runtime | Protocol | Dispatch | KV Transfer | Best For |
 |---------|----------|----------|-------------|----------|
-| **SGLang** | HTTP | Parallel | Bootstrap-based coordination | Production deployments with SGLang |
 | **vLLM** | gRPC | Sequential | NIXL or Mooncake | High-performance with RDMA/TCP networking |
+| **SGLang** | HTTP | Parallel | Bootstrap-based coordination | Production deployments with SGLang |
 
 ### vLLM KV Transfer Backends
 
@@ -301,16 +301,16 @@ The KV cache is transferred between workers using the backend's native mechanism
 
 | Backend | Transfer Method | Coordination |
 |---------|-----------------|--------------|
-| SGLang | NCCL/Gloo over network | Bootstrap metadata (host/port/room) |
 | vLLM + NIXL | RDMA | `kv_transfer_params` relayed by SMG |
 | vLLM + Mooncake | TCP/RDMA | P2P handshake via master server |
-
-**SGLang**: SMG injects bootstrap metadata (`DisaggregatedParams`) into requests, enabling workers to coordinate KV transfer through a shared "room".
+| SGLang | NCCL/Gloo over network | Bootstrap metadata (host/port/room) |
 
 **vLLM**: SMG uses the standard proxy pattern — sends `max_tokens=1` to prefill to trigger KV cache computation, then relays the engine's KV-transfer metadata to the decode request:
 
 - **NIXL**: SMG tags the prefill request with `do_remote_decode=true`; the engine holds its KV blocks and returns handoff params (e.g. `remote_engine_id`, `remote_request_id`, `remote_block_ids`, `remote_host`/`remote_port`, `tp_size`) that SMG forwards verbatim with the decode request, which pulls the blocks over RDMA
 - **Mooncake**: SMG injects the prefill worker's bootstrap host/port; workers coordinate via P2P handshake (no external metadata server required)
+
+**SGLang**: SMG injects bootstrap metadata (`DisaggregatedParams`) into requests, enabling workers to coordinate KV transfer through a shared "room".
 
 ---
 

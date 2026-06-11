@@ -16,7 +16,7 @@
   <a href="https://pytorch.org/blog/lightseek-smg/"><img src="https://img.shields.io/badge/PyTorch-Technical%20Blog-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch Blog"></a>
 </p>
 
-High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
+Engine-agnostic, high-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
@@ -26,8 +26,8 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
 
 |                                 |                                                                                                                                                                  |
 |:--------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether SGLang, vLLM, or TensorRT-LLM—to reuse prefixes and reduce redundant computation. |
-| **🔌 One API, Any Backend**     | Route to self-hosted models (SGLang, vLLM, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint.    |
+| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether vLLM, TensorRT-LLM, TokenSpeed, or SGLang—to reuse prefixes and reduce redundant computation. |
+| **🔌 One API, Any Backend**     | Route to self-hosted models (vLLM, TensorRT-LLM, TokenSpeed, SGLang) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint. |
 | **⚡ Built for Speed**           | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running.     |
 | **🔒 Enterprise Control**       | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure.   |
 | **📊 Full Observability**       | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer.                   |
@@ -78,10 +78,11 @@ That's it. SMG is now load-balancing requests across your workers.
 | Self-Hosted | Cloud Providers |
 |-------------|-----------------|
 | vLLM | OpenAI |
-| SGLang | Anthropic |
-| TensorRT-LLM | Google Gemini |
-| Ollama | AWS Bedrock |
-| Any OpenAI-compatible server | Azure OpenAI |
+| TensorRT-LLM | Anthropic |
+| TokenSpeed | Google Gemini |
+| SGLang | AWS Bedrock |
+| Ollama | Azure OpenAI |
+| Any OpenAI-compatible server | Any OpenAI-compatible provider |
 
 ## Features
 

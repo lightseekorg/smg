@@ -42,8 +42,8 @@ The gateway image is on Docker Hub, engine images are on GitHub Container Regist
 |-----------|----------|-------|
 | Gateway | `docker.io` | `lightseekorg/smg:1.3.3` |
 | vLLM worker | `ghcr.io` | `lightseekorg/smg:1.3.3-vllm-v0.18.0` |
-| SGLang worker | `ghcr.io` | `lightseekorg/smg:1.3.3-sglang-v0.5.9` |
 | TRT-LLM worker | `ghcr.io` | `lightseekorg/smg:1.3.3-trtllm-1.3.0rc8` |
+| SGLang worker | `ghcr.io` | `lightseekorg/smg:1.3.3-sglang-v0.5.9` |
 
 Worker images default to `ghcr.io`. Set `workers[].image.tag` to the engine-specific tag.
 

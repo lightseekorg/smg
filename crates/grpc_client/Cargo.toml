@@ -2,14 +2,14 @@
 name = "smg-grpc-client"
 version = "1.5.1"
 edition = "2021"
-description = "gRPC clients for SGLang and vLLM backends"
+description = "gRPC clients for vLLM, TensorRT-LLM, MLX, TokenSpeed, and SGLang backends"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
 authors = [
     "Simo Lin <linsimo.mark@gmail.com>",
     "Chang Su <mckvtl@gmail.com>",
 ]
-keywords = ["grpc", "sglang", "vllm", "llm"]
+keywords = ["grpc", "vllm", "tokenspeed", "llm", "sglang"]
 categories = ["api-bindings"]
 
 [lib]
