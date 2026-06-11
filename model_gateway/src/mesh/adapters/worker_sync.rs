@@ -23,7 +23,9 @@
 //!
 //! Known gap: only the owner tombstones its keys, so a permanently-dead
 //! node's `worker:` keys persist cluster-wide (imports stay registered,
-//! demoted by local probes). Cleanup belongs to dead-node key GC.
+//! demoted by local probes), and a crash-restart that registers locally
+//! before its old state gossips back orphans up to one store key per
+//! worker per restart. Cleanup belongs to dead-node key GC.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -140,7 +142,11 @@ impl WorkerSyncAdapter {
     /// — the sink is idempotent on URL (health refresh short-circuit),
     /// so overlap with a concurrent live event is fine.
     fn backfill_existing(&self) {
-        for key in self.workers.keys("") {
+        self.backfill_keys(self.workers.keys(""));
+    }
+
+    fn backfill_keys(&self, keys: impl IntoIterator<Item = String>) {
+        for key in keys {
             let Some(worker_id) = key.strip_prefix(PREFIX).filter(|s| !s.is_empty()) else {
                 warn!(key, "worker: backfill yielded unexpected key shape");
                 continue;
@@ -158,7 +164,8 @@ impl WorkerSyncAdapter {
     /// key from another publisher can re-import in the same pass.
     fn reconcile_once(&self) {
         // Key-presence set: `keys()` avoids cloning every live value just
-        // to test membership.
+        // to test membership, and feeds the backfill below so the
+        // namespace is scanned once per pass.
         let live: HashSet<String> = self.workers.keys("").into_iter().collect();
         for (id, _) in self.worker_registry.get_all_with_ids() {
             let key = format!("{PREFIX}{}", id.as_str());
@@ -169,7 +176,7 @@ impl WorkerSyncAdapter {
                 self.sync_key_from_store(&key, id.as_str());
             }
         }
-        self.backfill_existing();
+        self.backfill_keys(live);
     }
 
     /// Bring the registry in line with the store's current state for one
