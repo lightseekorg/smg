@@ -1008,10 +1008,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         request: common_pb2.SubscribeKvEventsRequest,
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[common_pb2.KvEventBatch]:
-        """Bridge vLLM's in-process ZMQ KV cache events to gRPC server-streaming.
+        """Bridge vLLM's in-process ZMQ KV cache events to a gRPC stream.
 
-        Mirrors sglang/servicer.py:SubscribeKvEvents. Uses the ZMQ publisher's
-        native sequence numbers directly as gRPC sequence numbers.
+        The ZMQ publisher's sequence numbers are used directly as the gRPC
+        batch sequence numbers.
         """
         if self._kv_events_config is None:
             await context.abort(

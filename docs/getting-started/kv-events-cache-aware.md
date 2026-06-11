@@ -93,13 +93,12 @@ For data-parallel deployments, the actual TCP port becomes `endpoint_port + dp_r
 
 ### Alternative: launch a vLLM worker
 
-vLLM emits KV cache events the same way (ZMQ publisher); enable them with `--kv-events-config` and run the worker in SMG gRPC mode:
+vLLM publishes KV cache events on a ZMQ socket; enable them with `--kv-events-config` and run the worker in SMG gRPC mode:
 
 ```bash
 pip install "smg-grpc-servicer[vllm]"
 
-# Use vLLM's gRPC entrypoint (NOT `vllm serve`, which starts the HTTP server and
-# cannot stream KV events); add --kv-events-config to turn on event publishing:
+# vLLM's gRPC entrypoint (not `vllm serve`, which is HTTP and can't stream KV events):
 python -m vllm.entrypoints.grpc_server \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --host 0.0.0.0 \
@@ -107,15 +106,15 @@ python -m vllm.entrypoints.grpc_server \
   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv-events"}'
 ```
 
-Event-driven routing requires the worker to run in **SMG gRPC mode** — KV events are streamed over the `SubscribeKvEvents` gRPC RPC, so a plain `vllm serve` HTTP worker cannot participate. See [gRPC Workers](grpc-workers.md) for the full launch reference; the snippet above adds only the KV-events-specific `--kv-events-config` flag on top.
+Event-driven routing needs the worker in **SMG gRPC mode** — KV events stream over the `SubscribeKvEvents` RPC, so a plain `vllm serve` HTTP worker can't participate. See [gRPC Workers](grpc-workers.md) for the full launch reference.
 
 | Field | Why |
 |---|---|
 | `enable_kv_cache_events: true` | vLLM-specific master switch. Without it no events are published even if a publisher is set. |
 | `publisher: "zmq"` | Selects the ZMQ publisher the servicer bridges. |
-| `endpoint` / `topic` | Same meaning as SGLang. For data-parallel, the port is `endpoint_port + dp_rank`; SMG currently consumes rank 0. |
+| `endpoint` / `topic` | ZMQ `PUB` address and topic prefix. For data-parallel, the port is `endpoint_port + dp_rank`; SMG currently consumes rank 0. |
 
-Everything downstream (SMG flags, block-size learning, verification logs) is identical to the SGLang flow — `KvEventMonitor` is engine-agnostic.
+Everything downstream — SMG flags, block-size learning, and the verification logs — is unchanged; `KvEventMonitor` consumes the events the same way for any gRPC worker.
 
 ---
 

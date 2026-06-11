@@ -1,10 +1,8 @@
 """vLLM KV-cache-event → proto conversion and ZMQ streaming.
 
-Engine-free: imports only stdlib + the generated proto. vLLM event objects are
-dispatched by class name (BlockStored / BlockRemoved / AllBlocksCleared) so this
-module needs no vLLM import and is unit-testable without a vLLM install.
-
-Mirrors grpc_servicer/smg_grpc_servicer/sglang/servicer.py:652-779.
+Engine-free: imports only stdlib + the generated proto, and dispatches vLLM
+events by class name (BlockStored / BlockRemoved / AllBlocksCleared), so it
+needs no vLLM import and is unit-testable without vLLM installed.
 """
 
 import logging
@@ -20,14 +18,11 @@ _U64_MODULUS = 0x10000000000000000
 
 
 def to_int64(value: int | bytes) -> int:
-    """Reduce a vLLM block hash to a signed int64.
+    """Reduce a vLLM block hash to a signed int64 for the proto block_hash field.
 
-    vLLM's ExternalBlockHash is ``bytes | int``: int when
-    VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES is set (the default), else sha256 bytes.
-    Bytes are interpreted big-endian (matching vLLM's own conversion) before the
-    64-bit reduction. The proto block_hash field is int64; SMG uses the hash only
-    as a node identity and re-derives a content hash from token_ids
-    (kv_event_monitor.rs:592-597), so a deterministic 64-bit reduction is safe.
+    vLLM's block hash is ``int | bytes`` (sha256 bytes when int hashes are
+    disabled); bytes are read big-endian. SMG uses the hash only as a node
+    identity, so the 64-bit reduction is safe as long as it stays deterministic.
     """
     if isinstance(value, (bytes, bytearray)):
         value = int.from_bytes(value, "big")
@@ -40,12 +35,10 @@ def to_int64(value: int | bytes) -> int:
 def endpoint_for_rank(endpoint: str, dp_rank: int) -> str:
     """Resolve a vLLM KV-events PUB endpoint to a connectable SUB address.
 
-    The publisher binds to e.g. ``tcp://*:5557``; subscribers connect to
-    ``127.0.0.1``. Bind wildcards (``*`` and ``0.0.0.0``) are rewritten to
-    ``127.0.0.1`` since ``0.0.0.0`` is not a connectable address on macOS/Windows.
-    For data-parallel deployments each rank publishes on ``base_port + dp_rank``.
-    Non-tcp endpoints (ipc://, inproc://) are returned with the bind wildcard
-    substituted but no port arithmetic.
+    Bind wildcards (``*``, ``0.0.0.0``) are rewritten to ``127.0.0.1`` (the
+    latter is not connectable on macOS/Windows). For data-parallel deployments
+    each rank publishes on ``base_port + dp_rank``; non-tcp endpoints (ipc://,
+    inproc://) get the wildcard substituted but no port arithmetic.
     """
     resolved = endpoint.replace("*", "127.0.0.1").replace("0.0.0.0", "127.0.0.1")
     if resolved.startswith("tcp://") and dp_rank:
@@ -58,9 +51,8 @@ def endpoint_for_rank(endpoint: str, dp_rank: int) -> str:
 def resolve_kv_events_config(engine: object):
     """Return the vLLM KVEventsConfig iff ZMQ event publishing is enabled, else None.
 
-    Reads ``engine.vllm_config.kv_events_config`` (same access pattern as
-    servicer.py:416 for kv_transfer_config). Uses getattr throughout so it works
-    against any vLLM version and is testable with a fake engine.
+    Reads ``engine.vllm_config.kv_events_config`` via getattr so it tolerates any
+    vLLM version and is testable with a fake engine.
     """
     vllm_config = getattr(engine, "vllm_config", None)
     cfg = getattr(vllm_config, "kv_events_config", None)
@@ -166,10 +158,8 @@ async def stream_kv_events(
     await send_initial_metadata()
     event_id = 0
     while not is_cancelled():
-        # poll() is the safe way to bound the wait on a zmq.asyncio socket:
-        # cancelling a recv_multipart() future (e.g. via asyncio.wait_for) does
-        # not cancel the in-flight ZMQ recv and can drop an already-dequeued
-        # message. poll() reports readability without that side effect.
+        # poll() before recv: cancelling a zmq.asyncio recv future does not
+        # cancel the in-flight ZMQ recv and can drop an already-dequeued message.
         if not await sub_socket.poll(timeout=int(recv_timeout * 1000)):
             continue
         frames = await sub_socket.recv_multipart()
