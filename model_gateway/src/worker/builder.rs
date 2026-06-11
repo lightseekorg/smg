@@ -190,6 +190,12 @@ impl BasicWorkerBuilder {
         self
     }
 
+    /// Set KV transfer engine id (vLLM `kv_transfer_config.engine_id`)
+    pub fn kv_engine_id(mut self, engine_id: impl Into<String>) -> Self {
+        self.spec.kv_engine_id = Some(engine_id.into());
+        self
+    }
+
     /// Set worker priority (higher value = higher priority)
     pub fn priority(mut self, priority: u32) -> Self {
         self.spec.priority = priority;

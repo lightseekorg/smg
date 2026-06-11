@@ -23,16 +23,20 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import time
-import uuid
 from pathlib import Path
 
 import pytest
+from infra.constants import vllm_kv_backend
+from infra.pd_logs import (
+    assert_worker_logs_captured,
+    unique_prompt,
+    wait_for_marker,
+    worker_log_dir,
+)
 
 logger = logging.getLogger(__name__)
 
-# Router logs land here via the gateway marker (rolling files named smg.YYYY-MM-DD).
-# Worker logs go to E2E_LOG_DIR when set (CI), otherwise setup_backend reuses this dir.
+# Router logs land here via the gateway marker (rolling files named smg.YYYY-MM-DD)
 _LOG_DIR = Path(tempfile.gettempdir()) / f"smg-e2e-pd-nixl-{os.getpid()}"
 
 RELAY_MARKER = "relaying prefill kv_transfer_params"
@@ -46,45 +50,8 @@ HANDSHAKE_MARKERS = (
     "Registering remote agent",
 )
 
-_LOG_FLUSH_TIMEOUT_S = 15.0
 
-
-def _worker_log_dir() -> Path:
-    return Path(os.environ.get("E2E_LOG_DIR") or _LOG_DIR)
-
-
-def _read_logs(log_dir: Path, pattern: str) -> str:
-    return "\n".join(
-        path.read_text(encoding="utf-8", errors="replace")
-        for path in sorted(log_dir.glob(pattern))
-        if path.is_file()
-    )
-
-
-def _wait_for_marker(log_dir: Path, pattern: str, marker: str | tuple[str, ...]) -> str:
-    # Both the router file appender and worker pipes flush asynchronously
-    markers = (marker,) if isinstance(marker, str) else marker
-    deadline = time.monotonic() + _LOG_FLUSH_TIMEOUT_S
-    logs = ""
-    while time.monotonic() < deadline:
-        logs = _read_logs(log_dir, pattern)
-        if any(m in logs for m in markers):
-            return logs
-        time.sleep(0.5)
-    return logs
-
-
-def _unique_prompt() -> str:
-    # Unique filler defeats prefix caching so every request exercises a fresh
-    # prefill -> transfer -> decode cycle
-    filler = " ".join(uuid.uuid4().hex for _ in range(24))
-    return (
-        f"Session token: {filler}\n"
-        "Ignoring the session token above, explain in two sentences why the "
-        "sky appears blue during the day."
-    )
-
-
+@pytest.mark.skipif(vllm_kv_backend() != "nixl", reason="nixl PD leg only")
 @pytest.mark.engine("vllm")
 @pytest.mark.gpu(2)
 @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
@@ -100,14 +67,14 @@ class TestPDNixlKvTransfer:
         for _ in range(3):
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": _unique_prompt()}],
+                messages=[{"role": "user", "content": unique_prompt()}],
                 max_tokens=64,
                 temperature=0.0,
             )
             choice = response.choices[0]
             assert choice.message.content, "Empty completion from PD pipeline"
 
-        router_logs = _wait_for_marker(_LOG_DIR, "smg*", RELAY_MARKER)
+        router_logs = wait_for_marker(_LOG_DIR, "smg*", RELAY_MARKER)
         assert NO_PARAMS_MARKER not in router_logs, (
             "Router reported prefill returned no kv_transfer_params — "
             "NIXL handoff is broken (decode recomputed the prefill)"
@@ -121,19 +88,15 @@ class TestPDNixlKvTransfer:
 
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": _unique_prompt()}],
+            messages=[{"role": "user", "content": unique_prompt()}],
             max_tokens=32,
             temperature=0.0,
         )
         assert response.choices[0].message.content
 
-        worker_dir = _worker_log_dir()
-        worker_logs = _wait_for_marker(worker_dir, "worker-*.log", HANDSHAKE_MARKERS)
-        if not worker_logs:
-            pytest.skip(
-                "No worker log files captured (SHOW_WORKER_LOGS=1?); "
-                "cannot assert on NIXL handshake"
-            )
+        worker_dir = worker_log_dir(_LOG_DIR)
+        worker_logs = wait_for_marker(worker_dir, "worker-*.log", HANDSHAKE_MARKERS)
+        assert_worker_logs_captured(worker_logs, "NIXL handshake")
         assert any(marker in worker_logs for marker in HANDSHAKE_MARKERS), (
             "No NIXL handshake found in worker logs — the decode worker never "
             f"pulled KV from prefill; checked {worker_dir}/worker-*.log for "

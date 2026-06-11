@@ -308,7 +308,7 @@ The KV cache is transferred between workers using the backend's native mechanism
 **vLLM**: SMG uses the standard proxy pattern — sends `max_tokens=1` to prefill to trigger KV cache computation, then relays the engine's KV-transfer metadata to the decode request:
 
 - **NIXL**: SMG tags the prefill request with `do_remote_decode=true`; the engine holds its KV blocks and returns handoff params (e.g. `remote_engine_id`, `remote_request_id`, `remote_block_ids`, `remote_host`/`remote_port`, `tp_size`) that SMG forwards verbatim with the decode request, which pulls the blocks over RDMA
-- **Mooncake**: SMG injects the prefill worker's bootstrap host/port; workers coordinate via P2P handshake (no external metadata server required)
+- **Mooncake**: push-based — the engine returns no handoff, so SMG mints a shared `transfer_id`, tags the prefill request, and synthesizes the decode params (`remote_engine_id` from worker registration via GetServerInfo, `remote_bootstrap_addr` = `http://bootstrap_host:bootstrap_port`); workers coordinate via P2P handshake (no external metadata server required). Falls back to legacy host/port injection when the servicer predates `kv_engine_id` reporting
 
 **SGLang**: SMG injects bootstrap metadata (`DisaggregatedParams`) into requests, enabling workers to coordinate KV transfer through a shared "room".
 

@@ -82,7 +82,7 @@ smg \
 SMG sends to prefill first with `max_tokens=1`, then sends the original request to decode, relaying KV-transfer metadata between the two legs:
 
 - **NIXL**: SMG tags the prefill request with `do_remote_decode=true`, harvests the `kv_transfer_params` the prefill engine returns (engine id, request id, block ids, side-channel address, TP size), and forwards them verbatim with the decode request so decode pulls the KV cache over NIXL.
-- **Mooncake**: SMG injects the prefill worker's bootstrap host/port into the decode request.
+- **Mooncake**: the connector is push-based and returns nothing, so SMG mints a shared `transfer_id`, tags the prefill request with it, and synthesizes the decode params (`remote_engine_id` discovered from the worker at registration, `remote_bootstrap_addr` from the worker's bootstrap host/port). With an older servicer that doesn't report `kv_engine_id`, SMG falls back to legacy host/port injection.
 
 ### Start vLLM Workers with NIXL
 
@@ -138,7 +138,7 @@ VLLM_MOONCAKE_BOOTSTRAP_PORT=8998 \
 python -m vllm.entrypoints.grpc_server \
   --model /path/to/model \
   --port 50051 \
-  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer","engine_id":"prefill-0"}'
 
 # Decode worker
 python -m vllm.entrypoints.grpc_server \
@@ -146,6 +146,16 @@ python -m vllm.entrypoints.grpc_server \
   --port 50052 \
   --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
 ```
+
+Set an explicit `engine_id` on each prefill worker in production. SMG discovers
+the id once at worker registration; without a pinned id, vLLM generates a new
+one per process, so a restarted prefill container would invalidate the
+registered id until the worker is re-registered.
+
+Limitation: Mooncake PD requires the prefill workers to run without vLLM data
+parallelism (`data_parallel_size = 1`). With DP active the servicer reports no
+engine id and SMG falls back to legacy host/port injection (decode recomputes
+the prompt locally).
 
 ```bash
 smg \

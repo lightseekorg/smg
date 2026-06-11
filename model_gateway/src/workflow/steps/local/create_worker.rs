@@ -61,6 +61,7 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
         // Extract KV transfer config (dedicated metadata fields, not labels)
         let kv_connector = labels.remove("kv_connector");
         let kv_role = labels.remove("kv_role");
+        let kv_engine_id = labels.remove("kv_engine_id").filter(|s| !s.is_empty());
 
         // Determine model_id: config.models > discovered labels > UNKNOWN_MODEL_ID
         let model_id = config
@@ -167,6 +168,9 @@ impl StepExecutor<WorkerWorkflowData> for CreateLocalWorkerStep {
                 }
                 if let Some(ref r) = kv_role {
                     builder = builder.kv_role(r);
+                }
+                if let Some(ref e) = kv_engine_id {
+                    builder = builder.kv_engine_id(e);
                 }
 
                 // Builder sets initial status: Pending if health-checked, Ready if not.

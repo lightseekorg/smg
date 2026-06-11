@@ -44,6 +44,28 @@ rm -rf "${SITE_PACKAGES}/nixl_ep"
 python3 -c "import torch, nixl"
 echo "nixl import canary OK"
 
+# Mooncake transfer engine, only on the MooncakeConnector PD leg so a broken
+# wheel cannot fail the unrelated vLLM jobs
+if [ "${E2E_VLLM_KV_BACKEND:-nixl}" = "mooncake" ]; then
+    # Mooncake's native extension links libibverbs/libnuma at load time even
+    # when the transfer protocol is tcp — without these the import fails with
+    # "libibverbs.so.1: cannot open shared object file".
+    echo "Installing mooncake system dependencies..."
+    sudo apt-get install -y --no-install-recommends libnuma1 libibverbs1 ibverbs-providers
+
+    # The cuda13 wheel variant matches vLLM's cu130 torch stack, so no
+    # libcudart.so.12 shim is needed (torch's bundled CUDA 13 runtime
+    # satisfies it once torch is imported first). Pinned — floating mooncake
+    # resolves have broken CI before.
+    echo "Installing mooncake-transfer-engine (cuda13)..."
+    uv pip install "mooncake-transfer-engine-cuda13==0.3.11.post1"
+
+    # Import canary: fail here (not mid-e2e) if the mooncake install is broken —
+    # vLLM swallows this ImportError at module load (torch first for CUDA libs)
+    python3 -c "import torch; from mooncake.engine import TransferEngine"
+    echo "mooncake import canary OK"
+fi
+
 # FlashInfer JIT cache: vLLM JIT-compiles flashinfer kernels at engine startup
 # and the pods have no CUDA toolchain — install the precompiled cache instead,
 # same recipe as vLLM's own Dockerfile.
