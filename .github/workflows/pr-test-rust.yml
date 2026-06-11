@@ -492,9 +492,14 @@ jobs:
             test_timeout: 18
           # tokenspeed builds from source (~30m cold), so keep the job
           # timeout generous even though the test step is short.
+          # Admin-ops e2e (flush/profile) piggybacks here because this is
+          # the only lane with tokenspeed installed — e2e-1gpu-gateway
+          # installs sglang/vllm only. The engine marker filter keeps the
+          # rest of e2e_test/router out of this job.
           - engine: tokenspeed
             timeout: 50
-            test_timeout: 15
+            test_timeout: 18
+            test_dirs: e2e_test/chat_completions e2e_test/router/test_admin_ops.py
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -502,7 +507,7 @@ jobs:
       runner: 1-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_timeout: ${{ matrix.test_timeout }}
-      test_dirs: e2e_test/chat_completions
+      test_dirs: ${{ matrix.test_dirs || 'e2e_test/chat_completions' }}
     secrets: inherit
 
   e2e-1gpu-completions:
