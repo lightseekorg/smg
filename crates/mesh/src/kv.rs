@@ -629,8 +629,20 @@ impl MeshKV {
     /// valued with its own name.
     pub fn reconcile_replica_registry(&self) {
         let own_key = format!("{REPLICA_PREFIX}{}", self.store.replica_id());
+        // A prior incarnation's entry retires only once nothing live is
+        // attributed to it (a crash-restart can leave keys whose winning op
+        // it authored): retiring earlier would orphan those keys at this
+        // node's real death, since attribution rebuilds from live entries.
+        let still_authoring = self.live_key_authors();
         for key in self.replica_keys_of(&self.server_name) {
-            if key != own_key {
+            if key == own_key {
+                continue;
+            }
+            let authoring = key
+                .strip_prefix(REPLICA_PREFIX)
+                .and_then(|id| ReplicaId::from_string(id).ok())
+                .is_some_and(|replica| still_authoring.contains(&replica));
+            if !authoring {
                 self.delete_with_notify(&key);
             }
         }
@@ -642,6 +654,38 @@ impl MeshKV {
             self.store
                 .insert(own_key, self.server_name.clone().into_bytes());
         }
+    }
+
+    /// Replica ids authoring the winning op of some live key in an
+    /// author-attributed namespace.
+    fn live_key_authors(&self) -> HashSet<ReplicaId> {
+        let prefixes: Vec<String> = self
+            .dead_node_sweeps
+            .read()
+            .iter()
+            .filter(|(_, attribution)| *attribution == DeadKeyAttribution::AuthorReplica)
+            .map(|(prefix, _)| prefix.clone())
+            .collect();
+        if prefixes.is_empty() {
+            return HashSet::new();
+        }
+        let ops = self.store.operation_log_snapshot();
+        let mut winners: HashMap<&str, (u64, ReplicaId)> = HashMap::new();
+        for op in ops.operations() {
+            if !prefixes.iter().any(|p| op.key().starts_with(p.as_str())) {
+                continue;
+            }
+            let version = (op.timestamp(), op.replica_id());
+            winners
+                .entry(op.key())
+                .and_modify(|winner| *winner = version.max(*winner))
+                .or_insert(version);
+        }
+        winners
+            .into_iter()
+            .filter(|(key, _)| self.store.contains_key(key))
+            .map(|(_, (_, replica))| replica)
+            .collect()
     }
 
     /// Replica-registry keys mapping to `node` (one per incarnation).

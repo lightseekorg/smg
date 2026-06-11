@@ -338,6 +338,38 @@ fn reconcile_retires_prior_incarnations_registry_entries() {
 }
 
 #[test]
+fn reconcile_keeps_prior_entry_while_it_still_authors_live_keys() {
+    // Crash-restart: the prior incarnation's worker key is still live and
+    // attributed to its replica id. Retiring that registry entry would
+    // orphan the key at this node's real death, so it must survive
+    // reconcile until the key is gone.
+    let prior = MeshKV::new("node-a".to_string());
+    let prior_ns = prior.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    prior_ns.put("worker:legacy", b"v1".to_vec());
+
+    let current = MeshKV::new("node-a".to_string());
+    let current_ns = current.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    current.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
+    deliver_crdt(&prior, &current);
+
+    current.reconcile_replica_registry();
+    assert_eq!(
+        current.replica_keys_of("node-a").len(),
+        2,
+        "entry still authoring a live key survives reconcile"
+    );
+
+    // Once the key is gone, the next reconcile retires the stale entry.
+    current_ns.delete("worker:legacy");
+    current.reconcile_replica_registry();
+    assert_eq!(
+        current.replica_keys_of("node-a").len(),
+        1,
+        "entry retires once nothing live is attributed to it"
+    );
+}
+
+#[test]
 fn reconcile_reasserts_own_registry_entry_after_premature_sweep() {
     // A partitioned-but-alive node swept by survivors must heal its own
     // registry entry, or author attribution is disarmed for its real death.
