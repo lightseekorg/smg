@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use smg_mesh::{MergeStrategy, MeshKV};
+use smg_mesh::{DeadKeyAttribution, MergeStrategy, MeshKV};
 
 use super::adapters::{RateLimitSyncAdapter, WorkerSyncAdapter};
 use crate::worker::WorkerRegistry;
@@ -45,6 +45,11 @@ impl MeshAdapters {
     ) -> Arc<Self> {
         let worker_ns = mesh_kv.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
         let rl_ns = mesh_kv.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+        // Dead-node cleanup: worker keys attribute by the publisher's replica
+        // id (single-writer namespace); rl shard keys carry the node name as
+        // their last segment.
+        mesh_kv.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
+        mesh_kv.configure_dead_node_sweep("rl:", DeadKeyAttribution::NodeNameSuffix);
         let worker = WorkerSyncAdapter::new(worker_ns, worker_registry);
         let rate_limit = RateLimitSyncAdapter::new(rl_ns, node_name);
         worker.start();
@@ -116,6 +121,49 @@ mod tests {
         adapters.rate_limit().sync_counter("global", 2, 5);
         adapters.rate_limit().sync_counter("global", 1, 100);
         assert_eq!(adapters.rate_limit().get_aggregate("global"), 5);
+    }
+
+    #[tokio::test]
+    async fn dead_node_sweep_evicts_worker_and_rl_shard() {
+        let mesh = MeshKV::new("node-a".into());
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapters = MeshAdapters::start(&mesh, "node-a".into(), registry.clone());
+
+        adapters.rate_limit().sync_counter("global", 1, 5);
+        assert_eq!(adapters.rate_limit().get_aggregate("global"), 5);
+
+        let state = WorkerState {
+            worker_id: "w1".into(),
+            model_id: "llama-3".into(),
+            url: "http://remote:8080".into(),
+            health: true,
+            load: 0.0,
+            version: 1,
+            spec: vec![],
+        };
+        adapters.worker().on_worker_changed("w1", &state);
+        for _ in 0..100 {
+            if registry.get_by_url("http://remote:8080").is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(registry.get_by_url("http://remote:8080").is_some());
+
+        // Declare the publishing node dead. In production a survivor runs
+        // this against a dead peer's keys; the local plumbing is identical:
+        // replica-id attribution sweeps worker:w1, suffix attribution sweeps
+        // rl:global:node-a, and the worker tombstone evicts the import.
+        mesh.handle_node_removed("node-a");
+
+        assert_eq!(adapters.rate_limit().get_aggregate("global"), 0);
+        for _ in 0..100 {
+            if registry.get_by_url("http://remote:8080").is_none() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        panic!("swept worker tombstone did not evict the imported worker");
     }
 
     #[tokio::test]
