@@ -311,10 +311,9 @@ impl WorkerSyncAdapter {
 
     /// True when the store already holds an equivalent state for the
     /// worker. `load` is not compared (volatile and unread by importers);
-    /// specs compare as JSON values, not bytes — `WorkerSpec` holds maps,
+    /// specs compare semantically as JSON values — `WorkerSpec` holds maps,
     /// so two encodings of identical specs can differ byte-wise. Cheap
-    /// scalar fields gate the JSON parses, so changed workers skip the
-    /// expensive path.
+    /// scalar fields and a byte-equality fast path gate the JSON parses.
     fn store_matches(&self, id: &WorkerId, state: &WorkerState) -> bool {
         let Some(bytes) = self.workers.get(&format!("{PREFIX}{}", id.as_str())) else {
             return false;
@@ -330,12 +329,19 @@ impl WorkerSyncAdapter {
         {
             return false;
         }
+        // Byte equality is sufficient (not necessary): re-serialising the
+        // same spec instance is byte-stable in-process, so this skips the
+        // JSON parses in the steady state; key-order drift (e.g. across
+        // restarts) falls through to the semantic comparison.
+        if stored.spec == state.spec {
+            return true;
+        }
         match (
             serde_json::from_slice::<serde_json::Value>(&stored.spec),
             serde_json::from_slice::<serde_json::Value>(&state.spec),
         ) {
             (Ok(a), Ok(b)) => a == b,
-            _ => stored.spec == state.spec,
+            _ => false,
         }
     }
 
