@@ -90,6 +90,41 @@ pub struct GossipController {
     /// registry, and chunk assembler shared with the server-side
     /// SyncStream handlers.
     mesh_kv: Option<Arc<crate::kv::MeshKV>>,
+    /// How long a node may stay Down before it is removed from the
+    /// cluster and its keys are swept (SWIM §5.2).
+    dead_timeout: Duration,
+}
+
+/// SWIM §5.2 default: Down nodes are removed after 60s.
+const DEFAULT_DEAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Track how long each peer has been Down and return those past
+/// `dead_timeout`, due for removal. `down_since` keeps the first moment a
+/// peer was seen Down; entries are dropped when the peer revives (its next
+/// Down restarts the clock) or leaves the state map.
+fn expire_down_nodes(
+    down_since: &mut HashMap<String, Instant>,
+    state: &BTreeMap<String, NodeState>,
+    self_name: &str,
+    dead_timeout: Duration,
+    now: Instant,
+) -> Vec<String> {
+    down_since.retain(|name, _| {
+        state
+            .get(name)
+            .is_some_and(|node| node.status == NodeStatus::Down as i32)
+    });
+    let mut expired = Vec::new();
+    for (name, node) in state {
+        if name == self_name || node.status != NodeStatus::Down as i32 {
+            continue;
+        }
+        let since = down_since.entry(name.clone()).or_insert(now);
+        if now.saturating_duration_since(*since) >= dead_timeout {
+            expired.push(name.clone());
+        }
+    }
+    expired
 }
 
 impl GossipController {
@@ -109,6 +144,7 @@ impl GossipController {
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
             current_stream_batch: Arc::new(RwLock::new(Arc::new(crate::kv::RoundBatch::default()))),
             mesh_kv: None,
+            dead_timeout: DEFAULT_DEAD_TIMEOUT,
         }
     }
 
@@ -138,6 +174,9 @@ impl GossipController {
         use std::collections::HashMap;
         let mut retry_managers: HashMap<String, RetryManager> = HashMap::new();
 
+        // First moment each peer was seen Down, for dead_timeout removal.
+        let mut down_since: HashMap<String, Instant> = HashMap::new();
+
         loop {
             log::info!("Round {} Status:{:?}", cnt, read_state.read());
 
@@ -155,6 +194,26 @@ impl GossipController {
                         true
                     }
                 });
+            }
+
+            // SWIM §5.2: remove nodes Down for longer than dead_timeout and
+            // sweep their keys (replica registry, registered namespaces).
+            let expired = expire_down_nodes(
+                &mut down_since,
+                &init_state.read(),
+                &self.self_name,
+                self.dead_timeout,
+                Instant::now(),
+            );
+            for name in expired {
+                log::warn!("Removing node {name} after dead_timeout; sweeping its keys");
+                init_state.write().remove(&name);
+                retry_managers.remove(&name);
+                down_since.remove(&name);
+                if let Some(mesh_kv) = &self.mesh_kv {
+                    let swept = mesh_kv.handle_node_removed(&name);
+                    log::info!("Dead-node sweep for {name} tombstoned {swept} keys");
+                }
             }
 
             // Get available peers from cluster state
@@ -939,5 +998,121 @@ mod retry_manager_tests {
     fn should_retry_before_any_attempt() {
         let mgr = RetryManager::default();
         assert!(mgr.should_retry());
+    }
+}
+
+#[cfg(test)]
+mod dead_node_tests {
+    use super::*;
+
+    fn node(name: &str, status: NodeStatus) -> NodeState {
+        NodeState {
+            name: name.to_string(),
+            address: format!("{name}:50051"),
+            status: status as i32,
+            version: 1,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn state_of(nodes: Vec<NodeState>) -> BTreeMap<String, NodeState> {
+        nodes.into_iter().map(|n| (n.name.clone(), n)).collect()
+    }
+
+    const TIMEOUT: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn down_node_expires_only_after_dead_timeout() {
+        let mut down_since = HashMap::new();
+        let state = state_of(vec![
+            node("a", NodeStatus::Alive),
+            node("b", NodeStatus::Down),
+        ]);
+        let t0 = Instant::now();
+
+        let expired = expire_down_nodes(&mut down_since, &state, "self", TIMEOUT, t0);
+        assert!(expired.is_empty(), "fresh Down node survives");
+
+        let expired = expire_down_nodes(
+            &mut down_since,
+            &state,
+            "self",
+            TIMEOUT,
+            t0 + Duration::from_secs(59),
+        );
+        assert!(expired.is_empty(), "still inside dead_timeout");
+
+        let expired = expire_down_nodes(
+            &mut down_since,
+            &state,
+            "self",
+            TIMEOUT,
+            t0 + Duration::from_secs(60),
+        );
+        assert_eq!(expired, vec!["b".to_string()], "expired at dead_timeout");
+    }
+
+    #[test]
+    fn revival_restarts_the_clock() {
+        let mut down_since = HashMap::new();
+        let down = state_of(vec![node("b", NodeStatus::Down)]);
+        let alive = state_of(vec![node("b", NodeStatus::Alive)]);
+        let t0 = Instant::now();
+
+        expire_down_nodes(&mut down_since, &down, "self", TIMEOUT, t0);
+        expire_down_nodes(
+            &mut down_since,
+            &alive,
+            "self",
+            TIMEOUT,
+            t0 + Duration::from_secs(30),
+        );
+        assert!(down_since.is_empty(), "revival clears tracking");
+
+        // Down again: the clock restarts from the new observation.
+        let expired = expire_down_nodes(
+            &mut down_since,
+            &down,
+            "self",
+            TIMEOUT,
+            t0 + Duration::from_secs(61),
+        );
+        assert!(expired.is_empty(), "second Down gets a fresh dead_timeout");
+    }
+
+    #[test]
+    fn self_is_never_expired() {
+        let mut down_since = HashMap::new();
+        let state = state_of(vec![node("self", NodeStatus::Down)]);
+        let t0 = Instant::now();
+        expire_down_nodes(&mut down_since, &state, "self", TIMEOUT, t0);
+        let expired = expire_down_nodes(
+            &mut down_since,
+            &state,
+            "self",
+            TIMEOUT,
+            t0 + Duration::from_secs(120),
+        );
+        assert!(expired.is_empty());
+        assert!(down_since.is_empty(), "self is never tracked");
+    }
+
+    #[test]
+    fn departed_node_is_dropped_from_tracking() {
+        let mut down_since = HashMap::new();
+        let down = state_of(vec![node("b", NodeStatus::Down)]);
+        let t0 = Instant::now();
+        expire_down_nodes(&mut down_since, &down, "self", TIMEOUT, t0);
+        assert_eq!(down_since.len(), 1);
+
+        let empty = state_of(vec![]);
+        expire_down_nodes(
+            &mut down_since,
+            &empty,
+            "self",
+            TIMEOUT,
+            t0 + Duration::from_secs(1),
+        );
+        assert!(down_since.is_empty(), "node gone from state is untracked");
     }
 }
