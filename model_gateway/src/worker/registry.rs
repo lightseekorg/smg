@@ -1315,10 +1315,12 @@ impl WorkerRegistry {
         // If worker already exists at this URL, update its health
         // status from the mesh state. Don't re-register — the existing
         // worker has full config from its creation workflow.
-        // `true` always promotes to `Ready`; `false` only demotes from
-        // `Ready` to `NotReady` and leaves `Pending` / `Failed` alone
-        // (those are owned by the local state machine, not by mesh
-        // hints).
+        // `true` promotes `Pending`/`NotReady` to `Ready`; `false` only
+        // demotes from `Ready` to `NotReady`. `Failed` and `Draining`
+        // are owned by the local state machine, never by mesh hints — a
+        // dead owner's stale `health=true` key replayed by the periodic
+        // reconcile would otherwise flap a probe-failed import back into
+        // rotation every pass.
         if let Some(existing_id) = self.get_id_by_url(&state.url) {
             // A locally-owned worker's state is published BY this node;
             // a peer's echo of it must never mutate local status — the
@@ -1331,9 +1333,12 @@ impl WorkerRegistry {
                 return;
             }
             if let Some(existing) = self.get(&existing_id) {
+                let status = existing.status();
                 if state.health {
-                    existing.set_status(WorkerStatus::Ready);
-                } else if existing.status() == WorkerStatus::Ready {
+                    if matches!(status, WorkerStatus::Pending | WorkerStatus::NotReady) {
+                        existing.set_status(WorkerStatus::Ready);
+                    }
+                } else if status == WorkerStatus::Ready {
                     existing.set_status(WorkerStatus::NotReady);
                 }
                 tracing::debug!(
@@ -1637,6 +1642,35 @@ mod tests {
             worker.status(),
             WorkerStatus::Ready,
             "an explicitly-unhealthy import must not be routable"
+        );
+    }
+
+    #[test]
+    fn stale_healthy_state_never_resurrects_probe_failed_import() {
+        // A dead owner's key keeps health=true forever; the periodic
+        // reconcile replays it. A probe-failed import must stay failed,
+        // not flap back into rotation every pass.
+        let registry = WorkerRegistry::new();
+        let state = remote_state("peer-w1", "http://remote:8080", true, vec![]);
+        registry.on_remote_worker_state(&state);
+        let worker = registry.get_by_url("http://remote:8080").unwrap();
+        assert_eq!(worker.status(), WorkerStatus::Ready);
+
+        worker.set_status(WorkerStatus::Failed);
+        registry.on_remote_worker_state(&state);
+        assert_eq!(
+            registry.get_by_url("http://remote:8080").unwrap().status(),
+            WorkerStatus::Failed,
+            "mesh hints must not resurrect probe-owned terminal states"
+        );
+
+        // NotReady is still promotable: the owner saying healthy again
+        // is the legitimate recovery signal.
+        worker.set_status(WorkerStatus::NotReady);
+        registry.on_remote_worker_state(&state);
+        assert_eq!(
+            registry.get_by_url("http://remote:8080").unwrap().status(),
+            WorkerStatus::Ready
         );
     }
 
