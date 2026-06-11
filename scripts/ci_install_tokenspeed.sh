@@ -122,6 +122,13 @@ fi
 # ── smg gRPC packages (same as other engines: from source so PR changes land) ─
 cd - > /dev/null
 echo "Installing smg-grpc-proto and smg-grpc-servicer from source..."
+# TokenSpeed's engine package pins its own builds of these modules
+# (tokenspeed-smg-grpc-proto / tokenspeed-smg-grpc-servicer). Those dists
+# install the same smg_grpc_proto / smg_grpc_servicer import paths into
+# site-packages, which shadow the editable installs below — the worker
+# would then serve stale proto descriptors ("Method not found!" for any
+# RPC added in the PR). Drop them first; the source installs replace them.
+uv pip uninstall tokenspeed-smg-grpc-proto tokenspeed-smg-grpc-servicer
 uv pip install -e crates/grpc_client/python/
 uv pip install -e grpc_servicer/
 
@@ -131,5 +138,16 @@ python3 -c "from tokenspeed.runtime.engine.async_llm import AsyncLLM; \
     print('AsyncLLM bases:', [b.__name__ for b in AsyncLLM.__bases__])"
 python3 -c "from smg_grpc_servicer.tokenspeed.servicer import TokenSpeedSchedulerServicer; \
     print('gRPC servicer: importable')"
+python3 -c "
+import pathlib
+import smg_grpc_proto
+import smg_grpc_servicer
+
+repo = pathlib.Path.cwd().resolve()
+paths = [pathlib.Path(m.__file__).resolve() for m in (smg_grpc_proto, smg_grpc_servicer)]
+shadowed = [str(p) for p in paths if repo not in p.parents]
+assert not shadowed, f'smg gRPC modules shadowed by site-packages copies: {shadowed}'
+print('smg gRPC modules resolve to repo source: OK')
+"
 
 echo "TokenSpeed installation complete"
