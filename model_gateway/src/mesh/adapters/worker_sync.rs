@@ -20,6 +20,10 @@
 //! therefore echoes back through the inbound loop and lands in
 //! `on_remote_worker_state`, which ignores state for locally-owned
 //! workers — so the echo is inert.
+//!
+//! Known gap: only the owner tombstones its keys, so a permanently-dead
+//! node's `worker:` keys persist cluster-wide (imports stay registered,
+//! demoted by local probes). Cleanup belongs to dead-node key GC.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -150,63 +154,52 @@ impl WorkerSyncAdapter {
     /// is never re-fired (re-merged ops are idempotent no-ops), so this
     /// periodic pass is the recovery path for missed puts — including a
     /// cold-start merge burst larger than the channel — and missed
-    /// tombstones. Removal runs first so a same-URL key from another
-    /// publisher can re-import in the same pass.
+    /// tombstones. Missing-key handling runs before backfill so a same-URL
+    /// key from another publisher can re-import in the same pass.
     fn reconcile_once(&self) {
-        for (id, worker) in self.worker_registry.get_all_with_ids() {
+        // Key-presence set: `keys()` avoids cloning every live value just
+        // to test membership.
+        let live: HashSet<String> = self.workers.keys("").into_iter().collect();
+        for (id, _) in self.worker_registry.get_all_with_ids() {
             let key = format!("{PREFIX}{}", id.as_str());
-            if self.workers.get(&key).is_some() {
-                continue;
-            }
-            match self.worker_registry.origin_of(&id) {
-                Some(WorkerOrigin::Mesh) => {
-                    let removed = self.worker_registry.remove_remote(&id);
-                    if removed.is_some() {
-                        info!(worker_id = %id.as_str(), "reconcile removed worker with tombstoned key");
-                    }
-                }
-                // A local worker with no backing key: its publish (or its
-                // re-assert after a foreign tombstone) was lost. Re-publish.
-                Some(WorkerOrigin::Local) => {
-                    self.on_worker_changed(id.as_str(), &worker_state_of(&id, &worker));
-                }
-                None => {}
+            if !live.contains(&key) {
+                // Missing backing key: same handling as a live tombstone
+                // event — imports are removed, locally-owned state is
+                // re-asserted.
+                self.sync_key_from_store(&key, id.as_str());
             }
         }
         self.backfill_existing();
     }
 
     /// Bring the registry in line with the store's current state for one
-    /// key: a live value routes through `on_remote_worker_state`, a missing
-    /// (tombstoned) one through `remove_remote`. Tombstones resolve via the
-    /// publisher's id, which the import adopted; a tombstone for a
-    /// locally-owned or unknown id is a no-op.
+    /// key: a live value routes through `on_remote_worker_state`; a missing
+    /// (tombstoned) one removes a mesh import, re-asserts a locally-owned
+    /// worker's state, and ignores unknown ids. Tombstones resolve via the
+    /// publisher's id, which the import adopted.
     fn sync_key_from_store(&self, key: &str, worker_id: &str) {
         match self.workers.get(key) {
             Some(bytes) => self.apply_incoming(worker_id, &bytes),
             None => {
                 let id = WorkerId::from_string(worker_id.to_string());
+                // A missing key for a locally-owned worker is anomalous
+                // (foreign tombstone or a lost publish): the key is already
+                // gone cluster-wide and peers dropped their imports, so
+                // re-assert the authoritative state — otherwise the worker
+                // stays delisted everywhere until its next status change.
+                if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
+                    if let Some(worker) = self.worker_registry.get(&id) {
+                        warn!(
+                            worker_id,
+                            "re-publishing locally-owned worker after foreign tombstone"
+                        );
+                        self.on_worker_changed(worker_id, &worker_state_of(&id, &worker));
+                        return;
+                    }
+                }
                 match self.worker_registry.remove_remote(&id) {
                     Some(_) => info!(worker_id, "removed worker on remote tombstone"),
-                    None => {
-                        // A tombstone for a key this node owns is anomalous
-                        // (buggy peer or bad tooling). The delete already
-                        // removed the key cluster-wide and peers dropped
-                        // their imports, so re-assert the state — otherwise
-                        // the worker stays delisted everywhere until its
-                        // next local status change.
-                        if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
-                            if let Some(worker) = self.worker_registry.get(&id) {
-                                warn!(
-                                    worker_id,
-                                    "re-publishing locally-owned worker after foreign tombstone"
-                                );
-                                self.on_worker_changed(worker_id, &worker_state_of(&id, &worker));
-                                return;
-                            }
-                        }
-                        debug!(worker_id, "ignored tombstone (unknown id)");
-                    }
+                    None => debug!(worker_id, "ignored tombstone (unknown id)"),
                 }
             }
         }
@@ -314,10 +307,10 @@ impl WorkerSyncAdapter {
     }
 }
 
-/// Snapshot a live worker into the mesh wire shape. `spec` carries the full
-/// `WorkerSpec` so the importing side can rebuild the worker faithfully;
-/// `version` is the registry revision (informational — CRDT ordering is
-/// owned by the Lamport clock).
+/// Snapshot a live worker into the mesh wire shape. `spec` carries the
+/// `WorkerSpec` (minus `api_key`, which never leaves the node) so the
+/// importing side can rebuild the worker; `version` is the registry
+/// revision (informational — CRDT ordering is owned by the Lamport clock).
 ///
 /// The spec is JSON, not bincode: `WorkerSpec` uses `skip_serializing_*`
 /// serde attributes, which a positional format cannot round-trip — bincode
