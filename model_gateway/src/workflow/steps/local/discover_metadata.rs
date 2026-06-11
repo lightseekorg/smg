@@ -263,6 +263,7 @@ fn normalize_grpc_keys(labels: &mut HashMap<String, String>) {
         ("tensor_parallel_size", "tp_size"),
         ("pipeline_parallel_size", "pp_size"),
         ("context_parallel_size", "cp_size"),
+        ("data_parallel_size", "dp_size"),
     ] {
         if let Some(val) = labels.remove(from) {
             labels.entry(to.to_string()).or_insert(val);

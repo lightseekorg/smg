@@ -224,7 +224,7 @@ impl PipelineStage for RequestExecutionStage {
 impl RequestExecutionStage {
     async fn execute_single(
         &self,
-        proto_request: ProtoGenerateRequest,
+        mut proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
     ) -> Result<ExecutionResult, Response> {
@@ -238,6 +238,10 @@ impl RequestExecutionStage {
                 "Expected single client but got dual",
             )
         })?;
+
+        if let Some(rank) = workers.single().and_then(|w| w.dp_rank()) {
+            proto_request.set_data_parallel_rank(rank as i32);
+        }
 
         let result = client.generate(proto_request).await;
         workers.record_outcome(result.cb_status_code());
@@ -301,11 +305,17 @@ impl RequestExecutionStage {
             )
         })?;
 
-        let prefill_request = proto_request.clone_inner();
+        let mut prefill_request = proto_request.clone_inner();
         // Strip multimodal data from decode request — the decode worker only
         // needs the KV cache from prefill, not the pixel tensors (~40MB saved).
         let mut decode_request = proto_request;
         decode_request.clear_mm_inputs();
+        if let Some(rank) = workers.prefill_worker().and_then(|w| w.dp_rank()) {
+            prefill_request.set_data_parallel_rank(rank as i32);
+        }
+        if let Some(rank) = workers.decode_worker().and_then(|w| w.dp_rank()) {
+            decode_request.set_data_parallel_rank(rank as i32);
+        }
 
         let (prefill_result, decode_result): (StreamResult, StreamResult) = tokio::join!(
             prefill_client.generate(prefill_request),
@@ -420,6 +430,9 @@ impl RequestExecutionStage {
         let mut prefill_request = proto_request.clone_inner();
         prefill_request.sanitize_sampling_for_prefill(1);
         prefill_request.set_stream(false);
+        if let Some(rank) = workers.prefill_worker().and_then(|w| w.dp_rank()) {
+            prefill_request.set_data_parallel_rank(rank as i32);
+        }
         if mode == KvConnectorMode::Nixl {
             if relay_kv_params {
                 prefill_request.set_kv_transfer_params_json(NIXL_PREFILL_KV_PARAMS.to_string());
@@ -479,6 +492,9 @@ impl RequestExecutionStage {
         // Decode reuses proto_request as-is; same request_id as the prefill leg is
         // load-bearing for NIXL P/D correlation on vLLM < 0.13
         let mut decode_request = proto_request;
+        if let Some(rank) = workers.decode_worker().and_then(|w| w.dp_rank()) {
+            decode_request.set_data_parallel_rank(rank as i32);
+        }
         match (&mode, prefill_kv_params) {
             // Modern Mooncake: synthesized params under the minted transfer_id
             (

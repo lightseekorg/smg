@@ -1164,7 +1164,8 @@ impl Worker for BasicWorker {
                             runtime_str,
                             self.metadata.spec.url
                         );
-                        match GrpcClient::connect(&self.metadata.spec.url, &runtime_str).await {
+                        // DP-expanded workers carry a `{base}@{rank}` URL; connect to the base
+                        match GrpcClient::connect(self.metadata.base_url(), &runtime_str).await {
                             Ok(client) => {
                                 tracing::info!(
                                     "Successfully connected gRPC client ({}) for worker: {}",

@@ -568,6 +568,15 @@ impl ProtoGenerateRequest {
         }
     }
 
+    /// Pin the request to a data-parallel rank (engines without the field ignore it).
+    pub fn set_data_parallel_rank(&mut self, rank: i32) {
+        match self {
+            Self::Vllm(req) => req.data_parallel_rank = Some(rank),
+            Self::Sglang(req) => req.data_parallel_rank = rank,
+            Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => {}
+        }
+    }
+
     /// Number of parallel samples requested (vLLM only; 1 when unset).
     pub fn sampling_n(&self) -> u32 {
         match self {
@@ -1368,5 +1377,26 @@ mod tests {
             Some(tokenspeed::tensor_data::Payload::Inline(data)) => data,
             _ => panic!("expected inline TensorData payload"),
         }
+    }
+
+    #[test]
+    fn set_data_parallel_rank_per_engine() {
+        let mut vllm_req = ProtoGenerateRequest::Vllm(Box::default());
+        vllm_req.set_data_parallel_rank(2);
+        assert!(matches!(
+            &vllm_req,
+            ProtoGenerateRequest::Vllm(req) if req.data_parallel_rank == Some(2)
+        ));
+
+        let mut sglang_req = ProtoGenerateRequest::Sglang(Box::default());
+        sglang_req.set_data_parallel_rank(3);
+        assert!(matches!(
+            &sglang_req,
+            ProtoGenerateRequest::Sglang(req) if req.data_parallel_rank == 3
+        ));
+
+        // Engines without the proto field ignore the pin
+        let mut mlx_req = ProtoGenerateRequest::Mlx(Box::default());
+        mlx_req.set_data_parallel_rank(1);
     }
 }
