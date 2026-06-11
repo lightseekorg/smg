@@ -68,10 +68,12 @@ def _grpc_server_options(max_message_bytes: int) -> list[tuple[str, int]]:
     return [
         ("grpc.max_send_message_length", max_message_bytes),
         ("grpc.max_receive_message_length", max_message_bytes),
-        # Allow gateway keepalive pings during long prefill / non-streaming
-        # requests while keeping ping-strike enforcement enabled.
-        ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
-        ("grpc.keepalive_permit_without_calls", 1),
+        # Permissive keepalive so long prefill stalls don't trip GOAWAY.
+        # Strikes disabled: a blocked loop batch-processes queued pings,
+        # which otherwise strikes out idle lanes (GOAWAY too_many_pings).
+        ("grpc.http2.min_recv_ping_interval_without_data_ms", 1000),
+        ("grpc.http2.max_ping_strikes", 0),
+        ("grpc.keepalive_permit_without_calls", True),
     ]
 
 
