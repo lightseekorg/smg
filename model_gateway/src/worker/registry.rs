@@ -928,6 +928,20 @@ impl WorkerRegistry {
     /// mutation lock for the whole teardown so it cannot race a
     /// concurrent `replace()`.
     pub fn remove(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
+        self.remove_inner(worker_id, None)
+    }
+
+    /// Core removal shared by [`Self::remove`] and [`Self::remove_remote`].
+    /// When `expect_origin` is set, the origin is re-checked after the
+    /// per-worker mutation lock is acquired and the removal aborts on a
+    /// mismatch — a lock-free pre-check alone races `replace_inner`'s
+    /// promotion (check Mesh, block on the lock, promotion lands, then
+    /// delete a now locally-owned worker).
+    fn remove_inner(
+        &self,
+        worker_id: &WorkerId,
+        expect_origin: Option<WorkerOrigin>,
+    ) -> Option<Arc<dyn Worker>> {
         // Acquire the same per-worker lock used by replace() to prevent
         // remove racing with a concurrent replace that has already snapshot
         // the old worker and is about to re-insert.
@@ -937,6 +951,16 @@ impl WorkerRegistry {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone();
         let _guard = lock.lock();
+
+        if let Some(expected) = expect_origin {
+            if self.origin_of(worker_id) != Some(expected) {
+                tracing::warn!(
+                    worker_id = %worker_id.as_str(),
+                    "Aborting removal: worker origin changed before the lock was acquired"
+                );
+                return None;
+            }
+        }
 
         if let Some((_, worker)) = self.workers.remove(worker_id) {
             self.url_to_id.remove(worker.url());
@@ -1008,15 +1032,17 @@ impl WorkerRegistry {
 
     /// Remove a mesh-imported worker in response to a remote tombstone.
     ///
-    /// Delegates to [`Self::remove`] only when the worker's origin is
-    /// [`WorkerOrigin::Mesh`]. A locally-owned worker is never removed by
-    /// a peer's tombstone — only the owning node retires its own key, so
-    /// a remote tombstone for a local worker is anomalous and is refused
-    /// with a warning. Returns the removed worker, or `None` if the id is
-    /// unknown or locally owned.
+    /// Removes only when the worker's origin is [`WorkerOrigin::Mesh`],
+    /// re-verified under the per-worker mutation lock so a concurrent
+    /// local claim (`register_or_replace` promoting the origin) cannot
+    /// slip between the check and the removal. A locally-owned worker is
+    /// never removed by a peer's tombstone — only the owning node retires
+    /// its own key, so a remote tombstone for a local worker is anomalous
+    /// and is refused with a warning. Returns the removed worker, or
+    /// `None` if the id is unknown or locally owned.
     pub fn remove_remote(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
         match self.origin_of(worker_id) {
-            Some(WorkerOrigin::Mesh) => self.remove(worker_id),
+            Some(WorkerOrigin::Mesh) => self.remove_inner(worker_id, Some(WorkerOrigin::Mesh)),
             Some(WorkerOrigin::Local) => {
                 tracing::warn!(
                     worker_id = %worker_id.as_str(),
@@ -1727,6 +1753,32 @@ mod tests {
         assert!(
             registry.remove_remote(&id).is_none(),
             "a peer tombstone can no longer delete the claimed worker"
+        );
+    }
+
+    #[test]
+    fn remove_inner_aborts_when_origin_changed_before_lock() {
+        // The TOCTOU guard: remove_remote's pre-check can observe Mesh,
+        // then lose the lock race to a local claim that promotes the
+        // origin. The under-lock recheck must abort the removal.
+        let registry = WorkerRegistry::new();
+        let local: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let id = registry.register(local).unwrap();
+
+        // Models the post-promotion state: expecting Mesh, finding Local.
+        assert!(
+            registry
+                .remove_inner(&id, Some(WorkerOrigin::Mesh))
+                .is_none(),
+            "removal must abort when the origin no longer matches"
+        );
+        assert!(
+            registry.get(&id).is_some(),
+            "the claimed worker survives the racing tombstone"
         );
     }
 
