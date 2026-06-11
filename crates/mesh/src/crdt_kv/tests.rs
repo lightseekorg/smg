@@ -1521,6 +1521,24 @@ fn test_watermark_covers_acked_versions() {
 }
 
 #[test]
+fn test_watermark_sentinel_ack_covers_only_strictly_older() {
+    // A legacy timestamp-only ack maps to (v, ReplicaId::MAX). It proves
+    // nothing about WHICH op the peer holds at timestamp v, so a
+    // same-timestamp tombstone from another replica — which the sentinel
+    // also suppresses from ever being sent — must not count as covered.
+    let replica = ReplicaId::new();
+    let legacy = Operation::insert("k".to_string(), b"v".to_vec(), 5, ReplicaId::MAX);
+    let acked = CrdtWatermark::from_ops(std::slice::from_ref(&legacy));
+
+    assert!(acked.covers("k", (4, replica)), "strictly older is covered");
+    assert!(
+        !acked.covers("k", (5, replica)),
+        "same-timestamp is not covered by a sentinel ack"
+    );
+    assert!(!acked.covers("k", (6, replica)), "newer is not covered");
+}
+
+#[test]
 fn test_gc_tombstones_multiple_keys() {
     init_test_logging();
     let map = CrdtOrMap::new();
