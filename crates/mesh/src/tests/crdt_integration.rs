@@ -218,6 +218,35 @@ fn round_batch_snapshot_is_shared_until_write() {
 }
 
 #[test]
+fn relayed_rl_merge_invalidates_round_batch_snapshot() {
+    // A relay node with no local writes must still re-gossip remotely merged
+    // rl ops: the remote merge bumps op_generation, invalidating the cached
+    // snapshot so the next round's batch carries the learned ops.
+    let sender = MeshKV::new("sender".to_string());
+    let s_ns = sender.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+
+    let relay = MeshKV::new("relay".to_string());
+    relay.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+
+    let before = relay.collect_round_batch().crdt_ops;
+    s_ns.put("rl:global:node-a", encode_epoch_count(1, 5).to_vec());
+    deliver_crdt(&sender, &relay);
+
+    let after = relay.collect_round_batch().crdt_ops;
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "a remote rl merge invalidates the cached snapshot"
+    );
+    assert!(
+        after
+            .operations()
+            .iter()
+            .any(|op| op.key() == "rl:global:node-a"),
+        "the relay's outgoing batch carries the merged rl op"
+    );
+}
+
+#[test]
 fn op_log_stays_bounded_by_live_keys() {
     // 500 updates to one key previously accumulated 500 ops (full values)
     // until the flat 10k threshold; the adaptive trigger folds the log so

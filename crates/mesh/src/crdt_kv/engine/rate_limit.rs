@@ -391,6 +391,7 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                 log.append(op.clone());
             }
             Self::compact_log(&mut log);
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
 
         // Snapshot the observable (encoded-live) value of every key this batch
