@@ -13,6 +13,23 @@
 set -euo pipefail
 
 export HF_HOME="${HF_HOME:-/models}"
+
+# Redirect the hf-xet working dir off the shared model cache.
+#
+# hf-xet (the default huggingface_hub download backend) writes its log files
+# and CAS chunk cache under "$HF_HOME/xet" by default. Because HF_HOME points at
+# the per-node hostPath model cache that every CI runner pod shares, multiple
+# pods racing on that single "$HF_HOME/xet" dir intermittently fail with
+# "Permission denied (os error 13)" while writing xet logs / chunks.
+#
+# Unlike "$HF_HOME/hub" (content-addressed snapshots, guarded by the per-model
+# flock below) and "$HF_HOME/.locks", the xet working dir is shared, unlocked,
+# and touched by every download regardless of model. Give each job its own xet
+# scratch dir off the shared mount; the snapshot cache in "$HF_HOME/hub" stays
+# shared, so cross-job model caching is unaffected.
+export HF_XET_CACHE="${HF_XET_CACHE:-${RUNNER_TEMP:-/tmp}/hf-xet}"
+mkdir -p "$HF_XET_CACHE"
+
 LOCK_DIR="${HF_HOME}/.locks"
 MAX_RETRIES=3
 RETRY_DELAY=30
