@@ -187,12 +187,16 @@ impl GossipService {
         let mut state = self.state.write();
         let mut updated = false;
         for node in incoming_nodes {
-            // SWIM refutation: a node hearing itself reported non-Alive
+            // SWIM refutation: a node hearing itself reported as FAILED
             // re-asserts Alive past the rumor's version. Without this, a
             // stale Down rumor outliving a restart (its version exceeds the
             // fresh boot's) would win every merge and the live node would
-            // be declared dead — and swept — repeatedly.
-            if node.name == self.self_name && node.status != NodeStatus::Alive as i32 {
+            // be declared dead — and swept — repeatedly. Only failure states
+            // are refuted: a self-initiated Leaving echoed back by peers is
+            // intentional and must survive the merge.
+            let failure_rumor = node.status == NodeStatus::Suspected as i32
+                || node.status == NodeStatus::Down as i32;
+            if node.name == self.self_name && failure_rumor {
                 let refuted_version = node.version + 1;
                 log::warn!(
                     "Refuting status {} rumor about self (v{}); re-asserting Alive v{refuted_version}",
@@ -688,6 +692,34 @@ mod sender_tick_tests {
             entry.version, 4,
             "older rumor cannot regress the refutation"
         );
+    }
+
+    #[test]
+    fn merge_state_preserves_leaving_rumor_about_self() {
+        // Graceful shutdown broadcasts Leaving; a peer echoing it back within
+        // the propagation window must not be refuted to Alive, or the
+        // graceful leave degrades into a dead-timeout removal.
+        let state = ClusterState::default();
+        let service = GossipService::new(
+            state.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+            "self",
+        );
+        service.merge_state(vec![NodeState {
+            name: "self".to_string(),
+            address: "127.0.0.1:50051".to_string(),
+            status: NodeStatus::Leaving as i32,
+            version: 5,
+            metadata: std::collections::HashMap::new(),
+        }]);
+        let entry = state.read().get("self").cloned().expect("self present");
+        assert_eq!(
+            entry.status,
+            NodeStatus::Leaving as i32,
+            "intentional Leaving is not refuted"
+        );
+        assert_eq!(entry.version, 5);
     }
 
     #[test]
