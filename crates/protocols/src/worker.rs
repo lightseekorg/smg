@@ -974,6 +974,16 @@ pub struct WorkerUpdateRequest {
     pub health: Option<HealthCheckUpdate>,
 }
 
+// ── Request types ───────────────────────────────────────────────────
+
+/// Query parameters for `GET /workers`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListWorkersQuery {
+    /// Only return workers serving this model, e.g. `?model=moonshotai/Kimi-K2.5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 // ── Response types ──────────────────────────────────────────────────
 
 /// Generic API response

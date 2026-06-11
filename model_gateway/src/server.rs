@@ -32,7 +32,9 @@ use openai_protocol::{
     responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
-    worker::{StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest},
+    worker::{
+        ListWorkersQuery, StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest,
+    },
 };
 use rustls::crypto::ring;
 use serde::Deserialize;
@@ -618,12 +620,6 @@ async fn create_worker(
         Ok(result) => result.into_response(),
         Err(err) => err.into_response(),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct ListWorkersQuery {
-    /// Only return workers serving this model, e.g. `?model=moonshotai/Kimi-K2.5`.
-    model: Option<String>,
 }
 
 async fn list_workers_rest(
