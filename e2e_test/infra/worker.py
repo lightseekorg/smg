@@ -23,6 +23,7 @@ from .constants import (
     ConnectionMode,
     WorkerType,
     get_runtime,
+    vllm_kv_backend,
 )
 from .model_specs import get_model_spec
 from .process_utils import detect_ib_device, get_open_port, wait_for_health
@@ -271,15 +272,19 @@ class Worker:
             "0.9",
         ]
 
-        # PD disaggregation: NIXL KV transfer roles
+        # PD disaggregation: KV transfer roles (backend via E2E_VLLM_KV_BACKEND)
         if self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
             kv_role = "kv_producer" if self.worker_type == WorkerType.PREFILL else "kv_consumer"
-            cmd.extend(
-                [
-                    "--kv-transfer-config",
-                    json.dumps({"kv_connector": "NixlConnector", "kv_role": kv_role}),
-                ]
-            )
+            if vllm_kv_backend() == "mooncake":
+                # tcp keeps the transfer off RDMA, which is flaky on shared CI nodes
+                config = {
+                    "kv_connector": "MooncakeConnector",
+                    "kv_role": kv_role,
+                    "kv_connector_extra_config": {"mooncake_protocol": "tcp"},
+                }
+            else:
+                config = {"kv_connector": "NixlConnector", "kv_role": kv_role}
+            cmd.extend(["--kv-transfer-config", json.dumps(config)])
 
         extra = spec.get("vllm_args", [])
         if extra:
@@ -381,10 +386,16 @@ class Worker:
         env.setdefault("PYTHONUNBUFFERED", "1")
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_ids))
 
-        # vLLM PD workers need a unique NIXL side-channel port per worker
+        # vLLM PD workers need per-worker side-channel ports for their KV backend
         if self.engine == "vllm" and self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
-            self.nixl_port = get_open_port()
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_port)
+            if vllm_kv_backend() == "mooncake":
+                # The producer's bootstrap server must listen on the port the
+                # gateway advertises in remote_bootstrap_addr
+                if self.bootstrap_port is not None:
+                    env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(self.bootstrap_port)
+            else:
+                self.nixl_port = get_open_port()
+                env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_port)
 
         # TRT-LLM multi-GPU needs NCCL tuning for CI compatibility
         if self.engine == "trtllm" and len(self.gpu_ids) > 1:

@@ -124,6 +124,14 @@ def is_tokenspeed() -> bool:
     return get_runtime() == "tokenspeed"
 
 
+ENV_VLLM_KV_BACKEND = "E2E_VLLM_KV_BACKEND"
+
+
+def vllm_kv_backend() -> str:
+    """KV transfer backend for vLLM PD workers: "nixl" (default) or "mooncake"."""
+    return os.environ.get(ENV_VLLM_KV_BACKEND, "nixl").lower()
+
+
 # Runtime display labels
 RUNTIME_LABELS = {
     "sglang": "SGLang",

@@ -44,6 +44,26 @@ rm -rf "${SITE_PACKAGES}/nixl_ep"
 python3 -c "import torch, nixl"
 echo "nixl import canary OK"
 
+# Mooncake transfer engine, only on the MooncakeConnector PD leg so a broken
+# wheel cannot fail the unrelated vLLM jobs
+if [ "${E2E_VLLM_KV_BACKEND:-nixl}" = "mooncake" ]; then
+    echo "Installing mooncake-transfer-engine..."
+    uv pip install "mooncake-transfer-engine>=0.3.8"
+
+    # The mooncake wheel links libcudart.so.12 regardless of the torch CUDA
+    # flavor; provide it from the cu12 runtime wheel (venv + job env only —
+    # the wheel ships no unversioned libcudart.so, so cu13 lookups are unaffected)
+    uv pip install nvidia-cuda-runtime-cu12
+    CUDART12_DIR=$(python3 -c "import glob, sysconfig; print(glob.glob(sysconfig.get_paths()['platlib'] + '/nvidia/cuda_runtime/lib/libcudart.so.12')[0].rsplit('/', 1)[0])")
+    export LD_LIBRARY_PATH="${CUDART12_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "${GITHUB_ENV:-/dev/null}"
+
+    # Import canary: fail here (not mid-e2e) if the mooncake install is broken —
+    # vLLM swallows this ImportError at module load (torch first for CUDA libs)
+    python3 -c "import torch; from mooncake.engine import TransferEngine"
+    echo "mooncake import canary OK"
+fi
+
 # FlashInfer JIT cache: vLLM JIT-compiles flashinfer kernels at engine startup
 # and the pods have no CUDA toolchain — install the precompiled cache instead,
 # same recipe as vLLM's own Dockerfile.

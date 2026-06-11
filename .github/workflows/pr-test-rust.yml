@@ -618,7 +618,7 @@ jobs:
     secrets: inherit
 
   e2e-2gpu-pd:
-    name: e2e-2gpu-pd (${{ matrix.engine }})
+    name: e2e-2gpu-pd (${{ matrix.engine }}${{ matrix.kv_backend && format('-{0}', matrix.kv_backend) || '' }})
     needs: [e2e-1gpu-gateway, detect-changes]
     if: >-
       always()
@@ -636,6 +636,9 @@ jobs:
             timeout: 30
           - engine: vllm
             timeout: 30
+          - engine: vllm
+            kv_backend: mooncake
+            timeout: 30
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: ${{ matrix.engine }}
@@ -643,6 +646,7 @@ jobs:
       runner: 2-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
+      vllm_kv_backend: ${{ matrix.kv_backend || 'nixl' }}
     secrets: inherit
 
   # === 4 GPU ===
