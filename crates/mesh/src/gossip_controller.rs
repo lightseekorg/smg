@@ -127,6 +127,31 @@ fn expire_down_nodes(
     expired
 }
 
+/// Removal holddown: a removed node re-offered by a slower survivor's
+/// full-state gossip is purged again each round instead of re-arming a
+/// fresh `dead_timeout` (and re-firing the sweep). A node that comes back
+/// Alive (restart, or its own SWIM refutation of the stale rumor) lifts
+/// its hold. Holds expire after `holddown`, which must exceed the slowest
+/// survivor's own removal lag.
+fn purge_held_reinsertions(
+    held: &mut HashMap<String, Instant>,
+    state: &mut BTreeMap<String, NodeState>,
+    holddown: Duration,
+    now: Instant,
+) {
+    held.retain(|_, since| now.saturating_duration_since(*since) < holddown);
+    held.retain(|name, _| match state.get(name) {
+        // Genuine return: lift the hold so normal tracking resumes.
+        Some(node) if node.status == NodeStatus::Alive as i32 => false,
+        // Stale re-offer: purge again quietly, keep holding.
+        Some(_) => {
+            state.remove(name);
+            true
+        }
+        None => true,
+    });
+}
+
 impl GossipController {
     pub fn new(
         state: ClusterState,
@@ -176,6 +201,8 @@ impl GossipController {
 
         // First moment each peer was seen Down, for dead_timeout removal.
         let mut down_since: HashMap<String, Instant> = HashMap::new();
+        // Recently removed nodes, held against gossip re-insertion.
+        let mut removed_holddown: HashMap<String, Instant> = HashMap::new();
 
         loop {
             log::info!("Round {} Status:{:?}", cnt, read_state.read());
@@ -198,6 +225,12 @@ impl GossipController {
 
             // SWIM §5.2: remove nodes Down for longer than dead_timeout and
             // sweep their keys (replica registry, registered namespaces).
+            purge_held_reinsertions(
+                &mut removed_holddown,
+                &mut init_state.write(),
+                self.dead_timeout * 3,
+                Instant::now(),
+            );
             let expired = expire_down_nodes(
                 &mut down_since,
                 &init_state.read(),
@@ -210,6 +243,12 @@ impl GossipController {
                 init_state.write().remove(&name);
                 retry_managers.remove(&name);
                 down_since.remove(&name);
+                removed_holddown.insert(name.clone(), Instant::now());
+                // Reap the dead peer's stream task now rather than letting it
+                // tick into a dead channel until the idle timeout.
+                if let Some(handle) = self.sync_connections.lock().await.remove(&name) {
+                    handle.abort();
+                }
                 if let Some(mesh_kv) = &self.mesh_kv {
                     let swept = mesh_kv.handle_node_removed(&name);
                     log::info!("Dead-node sweep for {name} tombstoned {swept} keys");
@@ -1095,6 +1134,46 @@ mod dead_node_tests {
         );
         assert!(expired.is_empty());
         assert!(down_since.is_empty(), "self is never tracked");
+    }
+
+    #[test]
+    fn holddown_purges_reinserted_down_entry_without_retracking() {
+        let mut held = HashMap::new();
+        let t0 = Instant::now();
+        held.insert("d".to_string(), t0);
+
+        // A slower survivor's gossip re-inserted d(Down): purged, still held.
+        let mut state = state_of(vec![node("d", NodeStatus::Down)]);
+        purge_held_reinsertions(&mut held, &mut state, TIMEOUT, t0 + Duration::from_secs(1));
+        assert!(!state.contains_key("d"), "stale re-offer purged");
+        assert!(held.contains_key("d"), "hold persists");
+    }
+
+    #[test]
+    fn holddown_lifts_when_node_returns_alive() {
+        let mut held = HashMap::new();
+        let t0 = Instant::now();
+        held.insert("d".to_string(), t0);
+
+        let mut state = state_of(vec![node("d", NodeStatus::Alive)]);
+        purge_held_reinsertions(&mut held, &mut state, TIMEOUT, t0 + Duration::from_secs(1));
+        assert!(state.contains_key("d"), "alive return kept in membership");
+        assert!(held.is_empty(), "hold lifted on alive return");
+    }
+
+    #[test]
+    fn holddown_expires_after_window() {
+        let mut held = HashMap::new();
+        let t0 = Instant::now();
+        held.insert("d".to_string(), t0);
+
+        let mut state = state_of(vec![node("d", NodeStatus::Down)]);
+        purge_held_reinsertions(&mut held, &mut state, TIMEOUT, t0 + TIMEOUT);
+        assert!(held.is_empty(), "hold expires after the window");
+        assert!(
+            state.contains_key("d"),
+            "post-holddown re-offer re-enters normal tracking"
+        );
     }
 
     #[test]

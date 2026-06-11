@@ -187,6 +187,37 @@ impl GossipService {
         let mut state = self.state.write();
         let mut updated = false;
         for node in incoming_nodes {
+            // SWIM refutation: a node hearing itself reported non-Alive
+            // re-asserts Alive past the rumor's version. Without this, a
+            // stale Down rumor outliving a restart (its version exceeds the
+            // fresh boot's) would win every merge and the live node would
+            // be declared dead — and swept — repeatedly.
+            if node.name == self.self_name && node.status != NodeStatus::Alive as i32 {
+                let refuted_version = node.version + 1;
+                log::warn!(
+                    "Refuting status {} rumor about self (v{}); re-asserting Alive v{refuted_version}",
+                    node.status,
+                    node.version
+                );
+                state
+                    .entry(node.name.clone())
+                    .and_modify(|entry| {
+                        if entry.version < refuted_version {
+                            entry.status = NodeStatus::Alive as i32;
+                            entry.version = refuted_version;
+                            updated = true;
+                        }
+                    })
+                    .or_insert_with(|| {
+                        updated = true;
+                        NodeState {
+                            status: NodeStatus::Alive as i32,
+                            version: refuted_version,
+                            ..node
+                        }
+                    });
+                continue;
+            }
             state
                 .entry(node.name.clone())
                 .and_modify(|entry| {
@@ -618,6 +649,65 @@ mod sender_tick_tests {
         let rb = round_batch_with(vec![("td:foo", b"d")], vec![]);
         let decision = plan_sender_tick(Some(&rb), &rb, Some("peer_X"));
         assert!(matches!(decision, SenderTick::SkipBatchUnchanged));
+    }
+
+    #[test]
+    fn merge_state_refutes_non_alive_rumor_about_self() {
+        let state = ClusterState::default();
+        let service = GossipService::new(
+            state.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+            "self",
+        );
+
+        // A stale Down rumor about self (e.g. outliving a restart) must be
+        // refuted past its version, never accepted.
+        service.merge_state(vec![NodeState {
+            name: "self".to_string(),
+            address: "127.0.0.1:50051".to_string(),
+            status: NodeStatus::Down as i32,
+            version: 3,
+            metadata: std::collections::HashMap::new(),
+        }]);
+        let entry = state.read().get("self").cloned().expect("self present");
+        assert_eq!(entry.status, NodeStatus::Alive as i32, "rumor refuted");
+        assert_eq!(entry.version, 4, "refutation beats the rumor's version");
+
+        // A rumor older than the current refutation does not regress it.
+        service.merge_state(vec![NodeState {
+            name: "self".to_string(),
+            address: "127.0.0.1:50051".to_string(),
+            status: NodeStatus::Suspected as i32,
+            version: 2,
+            metadata: std::collections::HashMap::new(),
+        }]);
+        let entry = state.read().get("self").cloned().expect("self present");
+        assert_eq!(entry.status, NodeStatus::Alive as i32);
+        assert_eq!(
+            entry.version, 4,
+            "older rumor cannot regress the refutation"
+        );
+    }
+
+    #[test]
+    fn merge_state_accepts_non_alive_rumor_about_peers() {
+        let state = ClusterState::default();
+        let service = GossipService::new(
+            state.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+            "self",
+        );
+        service.merge_state(vec![NodeState {
+            name: "other".to_string(),
+            address: "127.0.0.1:50052".to_string(),
+            status: NodeStatus::Down as i32,
+            version: 3,
+            metadata: std::collections::HashMap::new(),
+        }]);
+        let entry = state.read().get("other").cloned().expect("other present");
+        assert_eq!(entry.status, NodeStatus::Down as i32, "peer rumor accepted");
     }
 
     #[test]
