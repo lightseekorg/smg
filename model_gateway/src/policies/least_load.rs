@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
 
 use openai_protocol::worker::WorkerLoadResponse;
@@ -22,6 +23,22 @@ pub const DEFAULT_MEAN_PREFILL_TOKENS: u32 = 1024;
 /// fleet its absolute value mainly sets the work-vs-barrier balance, so it
 /// co-tunes with `kv_pressure_weight`.
 pub const DEFAULT_THROUGHPUT: f64 = 2000.0;
+
+/// Default worker-load poll period (seconds) when the policy is built without a
+/// configured `load_check_interval_secs`, used to derive the staleness horizon.
+const DEFAULT_LOAD_CHECK_INTERVAL_SECS: u64 = 10;
+
+/// A cached load is treated as absent once it is older than this many poll
+/// intervals, so a worker whose fetch keeps failing degrades to request counts
+/// instead of routing on an indefinitely stale snapshot.
+const STALE_LOAD_INTERVALS: u32 = 3;
+
+/// Staleness horizon (a few poll intervals) past which an unrefreshed cached
+/// load is treated as absent; tolerates a couple of missed/slow polls.
+fn staleness_ttl(load_check_interval_secs: u64) -> Duration {
+    let secs = load_check_interval_secs.max(1) * u64::from(STALE_LOAD_INTERVALS);
+    Duration::from_secs(secs)
+}
 
 /// Least-(token-)work routing — route to the worker with the lowest estimated
 /// time-to-drain plus a convex KV-pressure barrier (argmin, lower is better):
@@ -79,8 +96,10 @@ pub const DEFAULT_THROUGHPUT: f64 = 2000.0;
 ///   in-flight correction absorbs staleness between polls.
 #[derive(Debug)]
 pub struct LeastLoadPolicy {
-    /// Cached load reports from the worker monitor (keyed by worker URL).
-    cached_loads: RwLock<HashMap<String, WorkerLoadResponse>>,
+    /// Cached load reports from the worker monitor (keyed by worker URL), each
+    /// stamped with the `Instant` it was last refreshed so a snapshot that stops
+    /// being refreshed (the worker's poll keeps failing) can age out.
+    cached_loads: RwLock<HashMap<String, (Instant, WorkerLoadResponse)>>,
     /// In-flight token-work dispatched per worker since its last load poll
     /// (keyed by worker URL); reset when a fresh report arrives.
     inflight_tokens: RwLock<HashMap<String, u64>>,
@@ -92,6 +111,8 @@ pub struct LeastLoadPolicy {
     /// Fallback throughput (tokens/s) for the `/throughput` term when a backend
     /// reports no live `gen_throughput`.
     default_throughput: f64,
+    /// Age past which a cached load is treated as absent (no fresh snapshot).
+    staleness_ttl: Duration,
 }
 
 impl LeastLoadPolicy {
@@ -116,6 +137,22 @@ impl LeastLoadPolicy {
         mean_prefill_tokens: u32,
         default_throughput: f64,
     ) -> Self {
+        Self::with_config(
+            kv_pressure_weight,
+            mean_prefill_tokens,
+            default_throughput,
+            DEFAULT_LOAD_CHECK_INTERVAL_SECS,
+        )
+    }
+
+    /// Build with the configured worker-load poll period, which sets the horizon
+    /// past which an unrefreshed cached load is treated as absent.
+    pub fn with_config(
+        kv_pressure_weight: f64,
+        mean_prefill_tokens: u32,
+        default_throughput: f64,
+        load_check_interval_secs: u64,
+    ) -> Self {
         Self {
             cached_loads: RwLock::new(HashMap::new()),
             inflight_tokens: RwLock::new(HashMap::new()),
@@ -130,6 +167,7 @@ impl LeastLoadPolicy {
             } else {
                 DEFAULT_THROUGHPUT
             },
+            staleness_ttl: staleness_ttl(load_check_interval_secs),
         }
     }
 
@@ -144,13 +182,13 @@ impl LeastLoadPolicy {
     fn score(
         &self,
         worker: &Arc<dyn Worker>,
-        loads: Option<&HashMap<String, WorkerLoadResponse>>,
+        loads: Option<&HashMap<&str, &WorkerLoadResponse>>,
         inflight: &HashMap<String, u64>,
         nominal_throughput: f64,
         fleet_has_loads: bool,
     ) -> f64 {
         let url = worker.url();
-        match loads.and_then(|m| m.get(url)) {
+        match loads.and_then(|m| m.get(url).copied()) {
             Some(load) => {
                 let inflight_tokens = inflight.get(url).copied().unwrap_or(0) as f64;
                 let queued_tokens = load.total_waiting_uncached_tokens() as f64;
@@ -196,7 +234,17 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
         }
 
         let loads_guard = self.cached_loads.read().ok();
-        let loads = loads_guard.as_deref();
+        // A snapshot that stopped being refreshed (its worker's poll keeps
+        // failing) is dropped here, so it no longer counts as cached and that
+        // worker degrades to the request-count fallback.
+        let now = Instant::now();
+        let fresh: Option<HashMap<&str, &WorkerLoadResponse>> = loads_guard.as_ref().map(|m| {
+            m.iter()
+                .filter(|(_, (stamped, _))| now.duration_since(*stamped) <= self.staleness_ttl)
+                .map(|(url, (_, load))| (url.as_str(), load))
+                .collect()
+        });
+        let loads = fresh.as_ref();
 
         // Fleet-nominal throughput (mean of positive reports) stands in for a
         // worker missing a fresh snapshot; `fleet_has_loads` distinguishes a
@@ -204,7 +252,7 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
         // from a fully dark fleet (fall back to join-shortest-queue).
         let (tp_sum, tp_count) = healthy
             .iter()
-            .filter_map(|&i| loads.and_then(|m| m.get(workers[i].url())))
+            .filter_map(|&i| loads.and_then(|m| m.get(workers[i].url()).copied()))
             .map(|l| l.total_gen_throughput())
             .filter(|t| *t > 0.0)
             .fold((0.0, 0u32), |(s, n), t| (s + t, n + 1));
@@ -267,8 +315,9 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
     }
 
     fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
+        let now = Instant::now();
         if let Ok(mut cached) = self.cached_loads.write() {
-            cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
+            cached.extend(loads.iter().map(|(k, v)| (k.clone(), (now, v.clone()))));
         }
         // A fresh snapshot already reflects work up to the poll, so reset the
         // since-poll in-flight estimate for the workers it covers.
@@ -503,6 +552,48 @@ mod tests {
     fn single_worker_always_selected() {
         let policy = LeastLoadPolicy::new();
         let workers = vec![mk("http://a:8000")];
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn stale_load_evicted_falls_back_to_in_flight() {
+        // poll1 reports both A and B; poll2 reports only A (B's fetch failed).
+        // B's stale report claims it is idle while its live in-flight is heavy:
+        // once the report ages past the staleness horizon B must be scored on
+        // that live in-flight, not the stale snapshot, and lose to idle A.
+        let mut policy = LeastLoadPolicy::new();
+        policy.staleness_ttl = Duration::from_millis(10);
+
+        let a = mk("http://a:8000");
+        let b = mk("http://b:8000");
+        for _ in 0..50 {
+            b.increment_load();
+        }
+        let workers = vec![a, b];
+
+        let mut poll1 = HashMap::new();
+        poll1.insert("http://a:8000".to_string(), make_load(0, 0.2, 100.0));
+        poll1.insert("http://b:8000".to_string(), make_load(0, 0.0, 100.0));
+        policy.update_loads(&poll1);
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        // poll2: only A refreshed; B keeps its now-stale (idle-looking) entry.
+        let mut poll2 = HashMap::new();
+        poll2.insert("http://a:8000".to_string(), make_load(0, 0.2, 100.0));
+        policy.update_loads(&poll2);
+
+        // The stale entry is still present in the cache (merge never drops it)...
+        assert!(policy
+            .cached_loads
+            .read()
+            .unwrap()
+            .contains_key("http://b:8000"));
+        // ...but selection ignores it: B is scored on its 50 live in-flight
+        // (≈512s) and loses to the freshly-idle A (≈0.04s).
         assert_eq!(
             policy.select_worker(&workers, &SelectWorkerInfo::default()),
             Some(0)

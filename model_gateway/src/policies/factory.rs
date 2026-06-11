@@ -18,16 +18,19 @@ impl PolicyFactory {
         match config {
             PolicyConfig::Random => Arc::new(RandomPolicy::new()),
             PolicyConfig::RoundRobin => Arc::new(RoundRobinPolicy::new()),
-            PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
+            PolicyConfig::PowerOfTwo {
+                load_check_interval_secs,
+            } => Arc::new(PowerOfTwoPolicy::with_config(*load_check_interval_secs)),
             PolicyConfig::LeastLoad {
+                load_check_interval_secs,
                 kv_pressure_weight,
                 mean_prefill_tokens,
                 default_throughput,
-                ..
-            } => Arc::new(LeastLoadPolicy::with_params(
+            } => Arc::new(LeastLoadPolicy::with_config(
                 *kv_pressure_weight,
                 *mean_prefill_tokens,
                 *default_throughput,
+                *load_check_interval_secs,
             )),
             PolicyConfig::CacheAware {
                 cache_threshold,

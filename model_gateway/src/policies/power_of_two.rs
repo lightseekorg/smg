@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
 
 use openai_protocol::worker::WorkerLoadResponse;
@@ -12,21 +13,61 @@ use tracing::debug;
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
 use crate::worker::Worker;
 
+/// Default worker-load poll period (seconds) when the policy is built without a
+/// configured `load_check_interval_secs`, used to derive the staleness horizon.
+const DEFAULT_LOAD_CHECK_INTERVAL_SECS: u64 = 10;
+
+/// A cached load is treated as absent once it is older than this many poll
+/// intervals, so a worker whose fetch keeps failing degrades to request counts
+/// instead of being compared on an indefinitely stale snapshot.
+const STALE_LOAD_INTERVALS: u32 = 3;
+
+/// Staleness horizon (a few poll intervals) past which an unrefreshed cached
+/// load is treated as absent; tolerates a couple of missed/slow polls.
+fn staleness_ttl(load_check_interval_secs: u64) -> Duration {
+    let secs = load_check_interval_secs.max(1) * u64::from(STALE_LOAD_INTERVALS);
+    Duration::from_secs(secs)
+}
+
 /// Power-of-two choices policy
 ///
 /// Randomly selects two workers and routes to the one with lower load.
 /// This provides good load distribution with minimal coordination overhead.
 #[derive(Debug)]
 pub struct PowerOfTwoPolicy {
-    /// Cached load information from external monitoring
-    cached_loads: RwLock<HashMap<String, WorkerLoadResponse>>,
+    /// Cached load information from external monitoring, each stamped with the
+    /// `Instant` it was last refreshed so a snapshot that stops being refreshed
+    /// (the worker's poll keeps failing) can age out.
+    cached_loads: RwLock<HashMap<String, (Instant, WorkerLoadResponse)>>,
+    /// Age past which a cached load is treated as absent (no fresh snapshot).
+    staleness_ttl: Duration,
 }
 
 impl PowerOfTwoPolicy {
     pub fn new() -> Self {
+        Self::with_config(DEFAULT_LOAD_CHECK_INTERVAL_SECS)
+    }
+
+    /// Build with the configured worker-load poll period, which sets the horizon
+    /// past which an unrefreshed cached load is treated as absent.
+    pub fn with_config(load_check_interval_secs: u64) -> Self {
         Self {
             cached_loads: RwLock::new(HashMap::new()),
+            staleness_ttl: staleness_ttl(load_check_interval_secs),
         }
+    }
+
+    /// Fresh cached load for `url`, or `None` once the last refresh has aged out.
+    fn fresh_load<'a>(
+        &self,
+        cached: &'a HashMap<String, (Instant, WorkerLoadResponse)>,
+        url: &str,
+        now: Instant,
+    ) -> Option<&'a WorkerLoadResponse> {
+        cached
+            .get(url)
+            .filter(|(stamped, _)| now.duration_since(*stamped) <= self.staleness_ttl)
+            .map(|(_, load)| load)
     }
 }
 
@@ -61,9 +102,16 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         // Access cached loads safely
         let loads_guard = self.cached_loads.read().ok();
 
-        // Try to get high-fidelity token usage for BOTH workers
-        let load1_response = loads_guard.as_ref().and_then(|m| m.get(worker1.url()));
-        let load2_response = loads_guard.as_ref().and_then(|m| m.get(worker2.url()));
+        // Try to get high-fidelity token usage for BOTH workers. A snapshot that
+        // stopped being refreshed (the worker's poll keeps failing) is treated as
+        // absent here so the pair falls back to request counts.
+        let now = Instant::now();
+        let load1_response = loads_guard
+            .as_ref()
+            .and_then(|m| self.fresh_load(m, worker1.url(), now));
+        let load2_response = loads_guard
+            .as_ref()
+            .and_then(|m| self.fresh_load(m, worker2.url(), now));
 
         // If either worker is missing token data (e.g. monitor failure),
         // we must degrade BOTH to request counts to ensure fairness.
@@ -114,8 +162,9 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
     }
 
     fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
+        let now = Instant::now();
         if let Ok(mut cached) = self.cached_loads.write() {
-            cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
+            cached.extend(loads.iter().map(|(k, v)| (k.clone(), (now, v.clone()))));
         }
     }
 
@@ -327,6 +376,58 @@ mod tests {
         assert_eq!(
             selected_idx, 0,
             "The policy failed to handle incompatible metrics. Should select idle Worker A."
+        );
+    }
+
+    #[test]
+    fn stale_load_evicted_falls_back_to_request_counts() {
+        // poll1 reports both A and B; poll2 reports only A (B's fetch failed).
+        // Once B's snapshot ages past the staleness horizon the pair must
+        // degrade to request counts instead of comparing on B's stale report.
+        let mut policy = PowerOfTwoPolicy::new();
+        policy.staleness_ttl = Duration::from_millis(10);
+
+        let worker_a = BasicWorkerBuilder::new("http://a:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        let worker_b = BasicWorkerBuilder::new("http://b:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        // B is busy by request count; its stale token report claims it is idle.
+        for _ in 0..5 {
+            worker_b.increment_load();
+        }
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(worker_a), Arc::new(worker_b)];
+
+        let mut poll1 = HashMap::new();
+        poll1.insert("http://a:8000".to_string(), make_load(0.9));
+        poll1.insert("http://b:8000".to_string(), make_load(0.1));
+        policy.update_loads(&poll1);
+        // Fresh token usage: B (0.1) beats A (0.9), so B is selected.
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            Some(1)
+        );
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        // poll2: only A refreshed; B keeps its now-stale entry.
+        let mut poll2 = HashMap::new();
+        poll2.insert("http://a:8000".to_string(), make_load(0.9));
+        policy.update_loads(&poll2);
+
+        // B's stale entry is ignored, so the pair falls back to request counts:
+        // A (0 reqs) beats B (5 reqs).
+        assert!(policy
+            .cached_loads
+            .read()
+            .unwrap()
+            .contains_key("http://b:8000"));
+        assert_eq!(
+            policy.select_worker(&workers, &SelectWorkerInfo::default()),
+            Some(0)
         );
     }
 
