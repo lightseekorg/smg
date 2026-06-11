@@ -5,6 +5,7 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
+use anyhow::{Context, Result as AnyhowResult};
 use image::DynamicImage;
 use ndarray::{Array4, ArrayD};
 
@@ -110,6 +111,94 @@ impl ModelSpecificValue {
             _ => None,
         }
     }
+
+    /// Interpret this value as per-item flat sizes.
+    pub fn as_flat_sizes(&self) -> AnyhowResult<Vec<usize>> {
+        match self {
+            Self::IntTensor { data, .. } => data
+                .iter()
+                .map(|&v| usize::try_from(v).context("negative flat size"))
+                .collect(),
+            Self::UintTensor { data, .. } => Ok(data.iter().map(|&v| v as usize).collect()),
+            Self::IntVec(values) => values
+                .iter()
+                .map(|&v| usize::try_from(v).context("negative flat size"))
+                .collect(),
+            Self::UintVec(values) => Ok(values.iter().map(|&v| v as usize).collect()),
+            _ => Err(anyhow::anyhow!("unsupported flat sizes value type")),
+        }
+    }
+
+    /// Slice item-batched metadata along the first dimension.
+    pub fn slice_first_dim(&self, start: usize, len: usize) -> AnyhowResult<Self> {
+        match self {
+            Self::Tensor { data, shape } => {
+                let (data, shape) = slice_tensor_first_dim(data, shape, start, len)?;
+                Ok(Self::Tensor { data, shape })
+            }
+            Self::IntTensor { data, shape } => {
+                let (data, shape) = slice_tensor_first_dim(data, shape, start, len)?;
+                Ok(Self::IntTensor { data, shape })
+            }
+            Self::UintTensor { data, shape } => {
+                let (data, shape) = slice_tensor_first_dim(data, shape, start, len)?;
+                Ok(Self::UintTensor { data, shape })
+            }
+            Self::IntVec(values) => Ok(Self::IntVec(slice_1d(values, start, len)?.to_vec())),
+            Self::UintVec(values) => Ok(Self::UintVec(slice_1d(values, start, len)?.to_vec())),
+            Self::FloatVec(values) => Ok(Self::FloatVec(slice_1d(values, start, len)?.to_vec())),
+            Self::TupleVec(values) => Ok(Self::TupleVec(slice_1d(values, start, len)?.to_vec())),
+            _ => Ok(self.clone()),
+        }
+    }
+}
+
+fn slice_tensor_first_dim<T: Clone>(
+    data: &[T],
+    shape: &[usize],
+    start: usize,
+    len: usize,
+) -> AnyhowResult<(Vec<T>, Vec<usize>)> {
+    let first_dim = *shape
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cannot slice scalar tensor"))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("tensor slice range overflow"))?;
+    anyhow::ensure!(
+        end <= first_dim,
+        "tensor first-dimension slice {start}..{end} exceeds {first_dim}"
+    );
+    let row_width = shape[1..]
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| anyhow::anyhow!("tensor row width overflow"))?;
+    let data_start = start
+        .checked_mul(row_width)
+        .ok_or_else(|| anyhow::anyhow!("tensor data start overflow"))?;
+    let data_len = len
+        .checked_mul(row_width)
+        .ok_or_else(|| anyhow::anyhow!("tensor data length overflow"))?;
+    let data_end = data_start
+        .checked_add(data_len)
+        .ok_or_else(|| anyhow::anyhow!("tensor data end overflow"))?;
+    anyhow::ensure!(
+        data_end <= data.len(),
+        "tensor slice data range {data_start}..{data_end} exceeds {}",
+        data.len()
+    );
+    let mut new_shape = shape.to_vec();
+    new_shape[0] = len;
+    Ok((data[data_start..data_end].to_vec(), new_shape))
+}
+
+fn slice_1d<T>(values: &[T], start: usize, len: usize) -> AnyhowResult<&[T]> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("slice range overflow"))?;
+    values
+        .get(start..end)
+        .ok_or_else(|| anyhow::anyhow!("slice range {start}..{end} exceeds {}", values.len()))
 }
 
 /// Preprocessed encoder inputs ready for model consumption.
