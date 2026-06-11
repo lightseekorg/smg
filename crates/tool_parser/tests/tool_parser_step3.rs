@@ -105,6 +105,28 @@ async fn test_step3_streaming() {
     assert!(found_complete);
 }
 
+#[tokio::test]
+async fn test_step3_streaming_plain_text_no_panic() {
+    let mut parser = Step3Parser::new();
+    let tools = create_test_tools();
+
+    // Plain ASCII text with no tool markers must be returned as normal text without
+    // panicking on the multi-byte bot_token "<｜tool_calls_begin｜>".
+    let chunks = vec!["some plain ascii text", " without any markers", " at all"];
+    let mut normal_text = String::new();
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        normal_text.push_str(&result.normal_text);
+        assert!(result.calls.is_empty());
+    }
+
+    assert_eq!(
+        normal_text,
+        "some plain ascii text without any markers at all"
+    );
+}
+
 #[test]
 fn test_step3_format_detection() {
     let parser = Step3Parser::new();

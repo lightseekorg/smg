@@ -77,7 +77,11 @@ pub fn ends_with_partial_token(buffer: &str, token: &str) -> Option<usize> {
         return None;
     }
 
-    (1..token.len()).find(|&i| buffer.ends_with(&token[..i]))
+    token
+        .char_indices()
+        .skip(1)
+        .map(|(i, _)| i)
+        .find(|&i| buffer.ends_with(&token[..i]))
 }
 
 /// Reset state for the current tool being parsed (used when skipping invalid tools).
@@ -391,6 +395,30 @@ mod tests {
         assert!(ends_with_partial_token("hello <|python_tag|>", "<|python_tag|>").is_none());
         assert!(ends_with_partial_token("", "<|python_tag|>").is_none());
         assert!(ends_with_partial_token("hello world", "<|python_tag|>").is_none());
+    }
+
+    #[test]
+    fn test_ends_with_partial_token_multibyte() {
+        // U+FF5C "｜" is 3 bytes, so token[..i] must only be sliced at char boundaries.
+        let token = "<｜tool_calls_begin｜>";
+
+        // Buffer not ending in '<' must not panic and yields no partial match.
+        assert_eq!(
+            ends_with_partial_token("some plain ascii text", token),
+            None
+        );
+
+        // Ending in '<' matches a 1-byte prefix.
+        assert_eq!(ends_with_partial_token("hello <", token), Some(1));
+
+        // Ending in "<｜" matches the prefix up to the next char boundary (1 + 3 bytes).
+        assert_eq!(ends_with_partial_token("hello <｜", token), Some(4));
+
+        // A complete token at the end is not a partial match.
+        assert_eq!(
+            ends_with_partial_token("x <｜tool_calls_begin｜>", token),
+            None
+        );
     }
 
     #[test]
