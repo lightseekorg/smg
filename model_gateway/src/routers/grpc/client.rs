@@ -834,3 +834,155 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use smg_grpc_client::{sglang_proto, tokenspeed_proto};
+
+    use super::{ModelInfo, ServerInfo};
+
+    fn string_value(s: &str) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(s.to_string())),
+        }
+    }
+
+    fn number_value(n: f64) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::NumberValue(n)),
+        }
+    }
+
+    /// The `/workers` metadata path for TokenSpeed: curated `server_args` keys
+    /// become labels, everything else (unlisted keys, scheduler_info, runtime
+    /// state) stays out.
+    #[test]
+    fn server_info_to_labels_tokenspeed_picks_curated_keys_and_version() {
+        let info = ServerInfo::TokenSpeed(Box::new(tokenspeed_proto::GetServerInfoResponse {
+            server_args: Some(prost_types::Struct {
+                fields: BTreeMap::from([
+                    ("model".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("tokenizer".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("tp_size".to_string(), number_value(2.0)),
+                    ("max_total_tokens".to_string(), number_value(8192.0)),
+                    // Not in TOKENSPEED_GRPC_KEYS — must not become a label.
+                    ("host".to_string(), string_value("127.0.0.1")),
+                ]),
+            }),
+            scheduler_info: Some(prost_types::Struct {
+                fields: BTreeMap::from([("status".to_string(), string_value("ready"))]),
+            }),
+            active_requests: 3,
+            uptime_seconds: 12.5,
+            max_total_num_tokens: 8192,
+            tokenspeed_version: "0.1.0".to_string(),
+            ..Default::default()
+        }));
+
+        let labels = info.to_labels();
+
+        assert_eq!(
+            labels.get("model").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(
+            labels.get("tokenizer").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        // Integral numbers are formatted without a decimal point.
+        assert_eq!(labels.get("tp_size").map(String::as_str), Some("2"));
+        assert_eq!(
+            labels.get("max_total_tokens").map(String::as_str),
+            Some("8192")
+        );
+        assert_eq!(labels.get("version").map(String::as_str), Some("0.1.0"));
+        assert!(!labels.contains_key("host"));
+        // scheduler_info and transient runtime state never become labels.
+        assert!(!labels.contains_key("status"));
+        assert!(!labels.contains_key("active_requests"));
+        assert!(!labels.contains_key("uptime_seconds"));
+    }
+
+    #[test]
+    fn server_info_to_labels_sglang_picks_curated_keys_and_version() {
+        let info = ServerInfo::Sglang(Box::new(sglang_proto::GetServerInfoResponse {
+            server_args: Some(prost_types::Struct {
+                fields: BTreeMap::from([
+                    ("model_path".to_string(), string_value("Qwen/Qwen3-8B")),
+                    ("dp_size".to_string(), number_value(4.0)),
+                    (
+                        "is_embedding".to_string(),
+                        prost_types::Value {
+                            kind: Some(prost_types::value::Kind::BoolValue(false)),
+                        },
+                    ),
+                    // Not in SGLANG_GRPC_KEYS — must not become a label.
+                    ("api_key".to_string(), string_value("secret")),
+                ]),
+            }),
+            sglang_version: "0.4.0".to_string(),
+            ..Default::default()
+        }));
+
+        let labels = info.to_labels();
+
+        assert_eq!(
+            labels.get("model_path").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(labels.get("dp_size").map(String::as_str), Some("4"));
+        // Booleans are kept even when false (embedding detection relies on it).
+        assert_eq!(
+            labels.get("is_embedding").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(labels.get("version").map(String::as_str), Some("0.4.0"));
+        assert!(!labels.contains_key("api_key"));
+    }
+
+    /// `GetModelInfoResponse` is flat for every backend, so it serializes via
+    /// `flat_labels`: empty strings and zero numbers are skipped, booleans are
+    /// kept, arrays are JSON-encoded.
+    #[test]
+    fn model_info_to_labels_tokenspeed_flat_serializes_skipping_empty_and_zero() {
+        let info = ModelInfo::TokenSpeed(Box::new(tokenspeed_proto::GetModelInfoResponse {
+            model_path: "Qwen/Qwen3-8B".to_string(),
+            tokenizer_path: String::new(), // empty — skipped
+            served_model_name: "qwen3-8b".to_string(),
+            architectures: vec!["Qwen3ForCausalLM".to_string()],
+            max_context_length: 32768,
+            vocab_size: 151_936,
+            pad_token_id: 0, // zero — skipped
+            supports_vision: false,
+            ..Default::default()
+        }));
+
+        let labels = info.to_labels();
+
+        assert_eq!(
+            labels.get("model_path").map(String::as_str),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(
+            labels.get("served_model_name").map(String::as_str),
+            Some("qwen3-8b")
+        );
+        assert_eq!(
+            labels.get("max_context_length").map(String::as_str),
+            Some("32768")
+        );
+        assert_eq!(labels.get("vocab_size").map(String::as_str), Some("151936"));
+        assert_eq!(
+            labels.get("architectures").map(String::as_str),
+            Some(r#"["Qwen3ForCausalLM"]"#)
+        );
+        assert_eq!(
+            labels.get("supports_vision").map(String::as_str),
+            Some("false")
+        );
+        assert!(!labels.contains_key("tokenizer_path"));
+        assert!(!labels.contains_key("pad_token_id"));
+    }
+}

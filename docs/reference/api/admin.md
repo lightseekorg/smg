@@ -363,7 +363,7 @@ Returns available models (proxied to workers).
 GET /get_model_info
 ```
 
-Returns detailed model information (proxied to workers).
+Returns detailed model information (proxied to HTTP workers).
 
 **Response:** `200 OK`
 ```json
@@ -374,6 +374,13 @@ Returns detailed model information (proxied to workers).
 }
 ```
 
+!!! note "gRPC workers"
+    This endpoint is not proxied for gRPC-connected workers. The gateway calls
+    the backend's `GetModelInfo` RPC once at worker registration and surfaces
+    the result as worker labels (`model_path`, `served_model_name`,
+    `vocab_size`, `max_context_length`, ...) in
+    [`GET /workers`](extensions.md#worker-management).
+
 ---
 
 ### Get Server Info
@@ -382,7 +389,7 @@ Returns detailed model information (proxied to workers).
 GET /get_server_info
 ```
 
-Returns server information (proxied to workers).
+Returns server information (proxied to HTTP workers).
 
 **Response:** `200 OK`
 ```json
@@ -392,6 +399,15 @@ Returns server information (proxied to workers).
   "gpu_count": 8
 }
 ```
+
+!!! note "gRPC workers"
+    This endpoint is not proxied for gRPC-connected workers. The gateway calls
+    the backend's `GetServerInfo` RPC once at worker registration and surfaces
+    a curated subset of `server_args` (`tp_size`, `dp_size`,
+    `max_total_tokens`, `version`, ...) as worker labels in
+    [`GET /workers`](extensions.md#worker-management). Live scheduler state
+    (running/waiting requests, KV utilization) is served by
+    [`GET /get_loads`](#get-loads) instead.
 
 ---
 
