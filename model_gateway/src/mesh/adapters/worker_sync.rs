@@ -310,29 +310,33 @@ impl WorkerSyncAdapter {
     }
 
     /// True when the store already holds an equivalent state for the
-    /// worker. `load` is ignored (volatile and unread by importers) and
-    /// specs are compared as JSON values, not bytes — `WorkerSpec` holds
-    /// maps, so two encodings of identical specs can differ byte-wise.
+    /// worker. `load` is not compared (volatile and unread by importers);
+    /// specs compare as JSON values, not bytes — `WorkerSpec` holds maps,
+    /// so two encodings of identical specs can differ byte-wise. Cheap
+    /// scalar fields gate the JSON parses, so changed workers skip the
+    /// expensive path.
     fn store_matches(&self, id: &WorkerId, state: &WorkerState) -> bool {
         let Some(bytes) = self.workers.get(&format!("{PREFIX}{}", id.as_str())) else {
             return false;
         };
-        let Ok(mut stored) = bincode::deserialize::<WorkerState>(&bytes) else {
+        let Ok(stored) = bincode::deserialize::<WorkerState>(&bytes) else {
             return false;
         };
-        let spec_equal = match (
+        if stored.worker_id != state.worker_id
+            || stored.model_id != state.model_id
+            || stored.url != state.url
+            || stored.health != state.health
+            || stored.version != state.version
+        {
+            return false;
+        }
+        match (
             serde_json::from_slice::<serde_json::Value>(&stored.spec),
             serde_json::from_slice::<serde_json::Value>(&state.spec),
         ) {
             (Ok(a), Ok(b)) => a == b,
             _ => stored.spec == state.spec,
-        };
-        let mut fresh = state.clone();
-        stored.load = 0.0;
-        fresh.load = 0.0;
-        stored.spec = Vec::new();
-        fresh.spec = Vec::new();
-        spec_equal && stored == fresh
+        }
     }
 
     /// Publish a worker update to the cluster. Callers pass the
