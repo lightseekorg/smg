@@ -511,8 +511,8 @@ impl PDRouter {
             };
 
             let sse_data = format!(
-                "data: {{'error': {}}}",
-                serde_json::to_string(&error_payload).unwrap_or_default()
+                "data: {}\n\n",
+                serde_json::to_string(&json!({ "error": error_payload })).unwrap_or_default()
             );
             let error_stream = tokio_stream::once(Ok(axum::body::Bytes::from(sse_data)));
 
@@ -1552,6 +1552,58 @@ mod tests {
 
         assert_eq!(prefill_worker.load(), 0);
         assert_eq!(decode_worker.load(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_decode_error_emits_valid_json_sse() {
+        let router = create_test_pd_router();
+
+        let prefill: Arc<dyn Worker> = Arc::from(create_test_worker(
+            "http://prefill".to_string(),
+            WorkerType::Prefill,
+            true,
+        ));
+        let decode: Arc<dyn Worker> = Arc::from(create_test_worker(
+            "http://decode".to_string(),
+            WorkerType::Decode,
+            true,
+        ));
+
+        let upstream = http::Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(r#"{"error":"boom \"quoted\""}"#)
+            .unwrap();
+        let decode_response = reqwest::Response::from(upstream);
+
+        let context = PDRequestContext {
+            route: "/v1/chat/completions",
+            batch_size: None,
+            is_stream: true,
+            return_logprob: false,
+            request_text: None,
+            model_id: UNKNOWN_MODEL_ID,
+            headers: None,
+        };
+
+        let response = router
+            .handle_decode_error_response(decode_response, &context, prefill, decode)
+            .await;
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let frame = std::str::from_utf8(&body).unwrap();
+
+        let payload = frame
+            .strip_prefix("data: ")
+            .expect("SSE frame must start with `data: `")
+            .trim_end();
+        let parsed: Value =
+            serde_json::from_str(payload).expect("bytes after `data: ` must be valid JSON");
+        assert!(
+            parsed.get("error").is_some(),
+            "parsed SSE payload must contain an `error` field: {parsed}"
+        );
     }
 
     #[tokio::test]
