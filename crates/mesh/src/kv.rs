@@ -597,6 +597,16 @@ impl MeshKV {
             .collect();
         let mut swept = 0;
         let sweeps = self.dead_node_sweeps.read().clone();
+        if dead_replicas.is_empty()
+            && sweeps
+                .iter()
+                .any(|(_, attribution)| *attribution == DeadKeyAttribution::AuthorReplica)
+        {
+            tracing::warn!(
+                node,
+                "no replica-registry entries for removed node; author-attributed sweeps skipped"
+            );
+        }
         for (prefix, attribution) in &sweeps {
             swept += match attribution {
                 DeadKeyAttribution::AuthorReplica => self.sweep_authored_by(prefix, &dead_replicas),
@@ -608,6 +618,30 @@ impl MeshKV {
             self.delete_with_notify(key);
         }
         swept
+    }
+
+    /// Owner-side replica-registry maintenance: re-assert this incarnation's
+    /// entry (healing a premature sweep, which would otherwise permanently
+    /// disarm author attribution for this node's real death) and retire
+    /// entries left by prior incarnations (bounding the registry at ~one
+    /// entry per live node across restarts). Driven at boot and on the
+    /// gossip loop's housekeeping cadence; only the owner touches entries
+    /// valued with its own name.
+    pub fn reconcile_replica_registry(&self) {
+        let own_key = format!("{REPLICA_PREFIX}{}", self.store.replica_id());
+        for key in self.replica_keys_of(&self.server_name) {
+            if key != own_key {
+                self.delete_with_notify(&key);
+            }
+        }
+        if self
+            .store
+            .get(&own_key)
+            .is_none_or(|value| value != self.server_name.as_bytes())
+        {
+            self.store
+                .insert(own_key, self.server_name.clone().into_bytes());
+        }
     }
 
     /// Replica-registry keys mapping to `node` (one per incarnation).

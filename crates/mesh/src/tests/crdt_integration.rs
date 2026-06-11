@@ -320,6 +320,47 @@ fn dead_node_sweep_tombstones_authored_keys() {
 }
 
 #[test]
+fn reconcile_retires_prior_incarnations_registry_entries() {
+    // A restarted node mints a fresh replica id; without owner-side
+    // retirement the registry would grow by one immortal key per boot.
+    let prior = MeshKV::new("node-a".to_string());
+    let current = MeshKV::new("node-a".to_string());
+    deliver_crdt(&prior, &current);
+    assert_eq!(
+        current.replica_keys_of("node-a").len(),
+        2,
+        "prior incarnation's entry arrived via gossip"
+    );
+
+    current.reconcile_replica_registry();
+    let keys = current.replica_keys_of("node-a");
+    assert_eq!(keys.len(), 1, "only the current incarnation's entry stays");
+}
+
+#[test]
+fn reconcile_reasserts_own_registry_entry_after_premature_sweep() {
+    // A partitioned-but-alive node swept by survivors must heal its own
+    // registry entry, or author attribution is disarmed for its real death.
+    let survivor = MeshKV::new("survivor".to_string());
+    let owner = MeshKV::new("node-a".to_string());
+    deliver_crdt(&owner, &survivor);
+
+    survivor.handle_node_removed("node-a");
+    deliver_crdt(&survivor, &owner);
+    assert!(
+        owner.replica_keys_of("node-a").is_empty(),
+        "the sweep tombstone reached the owner"
+    );
+
+    owner.reconcile_replica_registry();
+    assert_eq!(
+        owner.replica_keys_of("node-a").len(),
+        1,
+        "owner re-asserts its registry entry"
+    );
+}
+
+#[test]
 fn dead_node_sweep_matches_node_suffix() {
     let survivor = MeshKV::new("survivor".to_string());
     let rl = survivor.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);

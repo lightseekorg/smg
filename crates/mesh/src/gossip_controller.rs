@@ -293,6 +293,11 @@ impl GossipController {
             // Periodic retry-manager cleanup every 60 rounds (~60s).
             if cnt.is_multiple_of(60) {
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
+                // Owner-side replica-registry upkeep: re-assert this
+                // incarnation's entry, retire prior incarnations'.
+                if let Some(mesh_kv) = &self.mesh_kv {
+                    mesh_kv.reconcile_replica_registry();
+                }
             }
 
             // Stream round collection: drain stream namespace buffers and
