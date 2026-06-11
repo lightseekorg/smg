@@ -330,26 +330,27 @@ fn dead_node_sweep_tombstones_authored_keys() {
 }
 
 #[test]
-fn absent_entry_retirement_waits_for_attributed_live_keys() {
-    // A key relayed after the sweep keeps its attribution: the entry
-    // survives retirement until a re-sweep tombstones the key.
+fn absent_entry_retirement_sweeps_ghost_keys_first() {
+    // A key relayed after the quarantine's re-sweeps would outlive its
+    // attribution as a permanent ghost; retirement sweeps it in the same
+    // pass before deleting the entries.
     let dead = MeshKV::new("dead-node".to_string());
     let dead_ns = dead.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
     dead_ns.put("worker:late", b"v1".to_vec());
 
     let survivor = MeshKV::new("survivor".to_string());
-    survivor.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    let survivor_ns = survivor.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
     survivor.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
     deliver_crdt(&dead, &survivor);
+    assert!(survivor_ns.get("worker:late").is_some());
 
-    // The late key is live and attributed: retirement must hold off.
     let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
-    assert_eq!(retired, 0, "entry kept while it authors a live key");
-
-    // The held-name re-sweep tombstones the late key; retirement follows.
-    assert_eq!(survivor.handle_node_removed("dead-node"), 1);
-    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
-    assert_eq!(retired, 1, "entry retires once the late key is swept");
+    assert_eq!(retired, 1, "absent node's entry retires");
+    assert_eq!(
+        survivor_ns.get("worker:late"),
+        None,
+        "the ghost key is swept in the same pass"
+    );
 }
 
 #[test]

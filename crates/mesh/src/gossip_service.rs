@@ -44,7 +44,7 @@ use tracing::instrument;
 
 use super::{
     crdt_kv::CrdtWatermark,
-    gossip_controller::PeerWatermarks,
+    gossip_controller::{PeerWatermarks, WatermarkRegistration},
     metrics::{record_ack, record_nack, record_peer_reconnect, update_peer_connections},
     mtls::MTLSManager,
     partition::PartitionDetector,
@@ -444,6 +444,9 @@ impl Gossip for GossipService {
             let mut peer_id = String::new();
             update_peer_connections(&peer_id, true);
             let mut sequence: u64 = 0;
+            // Held for the stream's lifetime so its Drop deregisters on
+            // exit, unless a replacement stream already re-registered.
+            let mut _watermark_registration: Option<WatermarkRegistration> = None;
 
             loop {
                 let msg = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, incoming.next()).await {
@@ -474,9 +477,14 @@ impl Gossip for GossipService {
                         *learned_peer_inbound.write() = Some(peer_id.clone());
                         // Register this stream's ack watermark for the
                         // causal-stability GC; a reconnect replaces the
-                        // entry with this fresh (conservative) one.
+                        // entry with this fresh (conservative) one, and the
+                        // registration drops with this stream.
                         if let Some(watermarks) = &peer_watermarks_inbound {
-                            watermarks.insert(peer_id.clone(), acked_inbound.clone());
+                            _watermark_registration = Some(WatermarkRegistration::new(
+                                watermarks.clone(),
+                                peer_id.clone(),
+                                acked_inbound.clone(),
+                            ));
                         }
                     }
                 } else if msg.peer_id != peer_id {

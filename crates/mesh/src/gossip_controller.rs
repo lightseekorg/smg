@@ -105,13 +105,56 @@ pub struct GossipController {
 /// the causal-stability GC driver.
 pub(crate) type PeerWatermarks = Arc<DashMap<String, Arc<RwLock<CrdtWatermark>>>>;
 
+/// A stream's registration in the watermark table, deregistered on drop —
+/// but only while the table still points at this stream's watermark (a
+/// replacement stream's entry is left alone). A missing entry blocks GC
+/// conservatively until the peer reconnects, instead of a dead stream's
+/// frozen entry blocking it forever.
+pub(crate) struct WatermarkRegistration {
+    table: PeerWatermarks,
+    peer: String,
+    acked: Arc<RwLock<CrdtWatermark>>,
+}
+
+impl WatermarkRegistration {
+    pub(crate) fn new(
+        table: PeerWatermarks,
+        peer: String,
+        acked: Arc<RwLock<CrdtWatermark>>,
+    ) -> Self {
+        table.insert(peer.clone(), acked.clone());
+        Self { table, peer, acked }
+    }
+}
+
+impl Drop for WatermarkRegistration {
+    fn drop(&mut self) {
+        self.table
+            .remove_if(&self.peer, |_, acked| Arc::ptr_eq(acked, &self.acked));
+    }
+}
+
 /// SWIM §5.2 default: Down nodes are removed after 60s.
 const DEFAULT_DEAD_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Track how long each peer has been Down and return those past
+/// How long a removal stays quarantined: re-offers are purged, late keys
+/// are re-swept, registry entries are retained — and stable tombstone GC
+/// is paused, so a partitioned-but-alive node returning inside the window
+/// finds every tombstone intact and merges them instead of replaying its
+/// stale inserts around collected ones. Must exceed the tombstone grace.
+const REMOVAL_QUARANTINE: Duration = Duration::from_secs(600);
+
+/// True for membership states that lead to removal: failed (Down) or
+/// gracefully departed (Leaving). Spec §5.2 removes on either; a Leaving
+/// process has exited, so its in-memory CRDT state can never replay.
+fn is_departed(status: i32) -> bool {
+    status == NodeStatus::Down as i32 || status == NodeStatus::Leaving as i32
+}
+
+/// Track how long each peer has been Down or Leaving and return those past
 /// `dead_timeout`, due for removal. `down_since` keeps the first moment a
-/// peer was seen Down; entries are dropped when the peer revives (its next
-/// Down restarts the clock) or leaves the state map.
+/// peer was seen departed; entries are dropped when the peer revives (its
+/// next departure restarts the clock) or leaves the state map.
 fn expire_down_nodes(
     down_since: &mut HashMap<String, Instant>,
     state: &BTreeMap<String, NodeState>,
@@ -119,14 +162,10 @@ fn expire_down_nodes(
     dead_timeout: Duration,
     now: Instant,
 ) -> Vec<String> {
-    down_since.retain(|name, _| {
-        state
-            .get(name)
-            .is_some_and(|node| node.status == NodeStatus::Down as i32)
-    });
+    down_since.retain(|name, _| state.get(name).is_some_and(|node| is_departed(node.status)));
     let mut expired = Vec::new();
     for (name, node) in state {
-        if name == self_name || node.status != NodeStatus::Down as i32 {
+        if name == self_name || !is_departed(node.status) {
             continue;
         }
         let since = down_since.entry(name.clone()).or_insert(now);
@@ -255,12 +294,12 @@ impl GossipController {
                 });
             }
 
-            // SWIM §5.2: remove nodes Down for longer than dead_timeout and
-            // sweep their keys (replica registry, registered namespaces).
+            // SWIM §5.2: remove nodes Down (or Leaving) for longer than
+            // dead_timeout and sweep their keys.
             purge_held_reinsertions(
                 &mut removed_holddown,
                 &mut init_state.write(),
-                self.dead_timeout * 3,
+                REMOVAL_QUARANTINE,
                 Instant::now(),
             );
             let expired = expire_down_nodes(
@@ -375,7 +414,14 @@ impl GossipController {
                     }
                     // Causally-stable tombstone GC: collect only what every
                     // member has acked. Any member without a registered
-                    // watermark (no connection yet) blocks collection.
+                    // watermark (no connection yet) blocks collection, and
+                    // any removal still in quarantine pauses it — a
+                    // partitioned-but-alive node returning inside the window
+                    // must find tombstones intact, not replay around
+                    // collected ones. Residual risk: a live node partitioned
+                    // longer than the quarantine that then heals can still
+                    // replay; fencing that needs incarnation numbers (SWIM
+                    // hardening).
                     let peers: Vec<String> = init_state
                         .read()
                         .keys()
@@ -390,7 +436,7 @@ impl GossipController {
                                 .map(|entry| Arc::clone(entry.value()))
                         })
                         .collect();
-                    if handles.len() == peers.len() {
+                    if removed_holddown.is_empty() && handles.len() == peers.len() {
                         let stable = |key: &str, version: (u64, ReplicaId)| {
                             handles
                                 .iter()
@@ -665,10 +711,14 @@ impl GossipController {
                 // on CrdtAck and emits acks for received batches. Registered in
                 // the shared table for the causal-stability GC driver; a
                 // reconnect replaces the entry with this fresh (conservative)
-                // watermark.
+                // watermark, and the registration drops with this task.
                 let acked: Arc<RwLock<CrdtWatermark>> =
                     Arc::new(RwLock::new(CrdtWatermark::new()));
-                peer_watermarks.insert(peer_name.clone(), acked.clone());
+                let _watermark_registration = WatermarkRegistration::new(
+                    peer_watermarks,
+                    peer_name.clone(),
+                    acked.clone(),
+                );
 
                 // Send initial heartbeat
                 let heartbeat =
@@ -1245,6 +1295,22 @@ mod dead_node_tests {
             t0 + Duration::from_secs(61),
         );
         assert!(expired.is_empty(), "second Down gets a fresh dead_timeout");
+    }
+
+    #[test]
+    fn leaving_node_expires_like_down() {
+        // A gracefully departed process has exited (its in-memory CRDT
+        // state can never replay), so it must leave membership — otherwise
+        // its frozen watermark stalls stable GC forever.
+        let mut down_since = HashMap::new();
+        let state = state_of(vec![node("g", NodeStatus::Leaving)]);
+        let t0 = Instant::now();
+
+        let expired = expire_down_nodes(&mut down_since, &state, "self", TIMEOUT, t0);
+        assert!(expired.is_empty(), "fresh Leaving node survives");
+
+        let expired = expire_down_nodes(&mut down_since, &state, "self", TIMEOUT, t0 + TIMEOUT);
+        assert_eq!(expired, vec!["g".to_string()], "Leaving expires like Down");
     }
 
     #[test]
