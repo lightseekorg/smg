@@ -538,7 +538,9 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             await context.abort(grpc.StatusCode.INTERNAL, f"Flush cache failed: {e}")
             return
 
-        message = result.message or (
+        # TokenSpeed's FlushCacheReqOutput only carries `success` (no message
+        # field); tolerate one appearing upstream later.
+        message = getattr(result, "message", "") or (
             "Cache flushed successfully" if result.success else "Cache flush failed"
         )
         return common_pb2.FlushCacheResponse(success=bool(result.success), message=message)
