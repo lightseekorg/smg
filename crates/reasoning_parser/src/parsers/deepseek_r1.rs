@@ -114,7 +114,7 @@ mod tests {
         let result2 = parser
             .parse_reasoning_streaming_incremental(" the problem</think>answer")
             .unwrap();
-        assert_eq!(result2.reasoning_text, "the problem"); // Text is trimmed
+        assert_eq!(result2.reasoning_text, " the problem"); // Whitespace preserved
         assert_eq!(result2.normal_text, "answer");
     }
 
