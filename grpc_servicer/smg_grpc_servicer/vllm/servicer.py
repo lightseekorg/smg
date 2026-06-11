@@ -15,11 +15,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import grpc
+import msgspec
 import torch
+import zmq
+import zmq.asyncio
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from smg_grpc_proto.generated import common_pb2
 from transformers import BatchFeature
 from vllm import PoolingParams, SamplingParams, TokensPrompt
+from vllm.distributed.kv_events import KVEventBatch
 from vllm.engine.protocol import EngineClient
 from vllm.inputs.engine import MultiModalInput as VllmMultiModalInput
 from vllm.inputs.engine import mm_input, tokens_input
@@ -1020,11 +1024,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 "--kv-events-config "
                 '\'{"enable_kv_cache_events": true, "publisher": "zmq"}\'',
             )
-
-        import msgspec
-        import zmq
-        import zmq.asyncio
-        from vllm.distributed.kv_events import KVEventBatch
 
         config = self._kv_events_config
 
