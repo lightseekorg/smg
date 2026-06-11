@@ -19,7 +19,7 @@ use crate::{
     crdt_kv::{
         decode as decode_epoch_count, encode as encode_epoch_count, CrdtWatermark, EpochCount,
     },
-    kv::MeshKV,
+    kv::{DeadKeyAttribution, MeshKV},
     transport::{
         crdt_batch::{build_crdt_batches, dispatch_crdt_batch},
         limits::MAX_STREAM_CHUNK_BYTES,
@@ -270,6 +270,93 @@ fn op_log_stays_bounded_by_live_keys() {
 }
 
 #[test]
+fn new_publishes_replica_registry_entry() {
+    // Survivors attribute a dead node's single-writer keys through the
+    // gossiped replica registry, so every node publishes its op-author id
+    // at construction.
+    let mesh = MeshKV::new("node-a".to_string());
+    assert_eq!(
+        mesh.replica_keys_of("node-a").len(),
+        1,
+        "exactly one replica-registry entry for this incarnation"
+    );
+}
+
+#[test]
+fn dead_node_sweep_tombstones_authored_keys() {
+    let dead = MeshKV::new("dead-node".to_string());
+    let dead_ns = dead.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    dead_ns.put("worker:dead-owned", b"v1".to_vec());
+
+    let survivor = MeshKV::new("survivor".to_string());
+    let survivor_ns = survivor.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    survivor.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
+    survivor_ns.put("worker:own", b"v2".to_vec());
+
+    deliver_crdt(&dead, &survivor);
+    assert!(survivor_ns.get("worker:dead-owned").is_some());
+
+    let swept = survivor.handle_node_removed("dead-node");
+    assert_eq!(swept, 1, "only the dead node's key is swept");
+    assert_eq!(
+        survivor_ns.get("worker:dead-owned"),
+        None,
+        "dead node's key tombstoned"
+    );
+    assert_eq!(
+        survivor_ns.get("worker:own"),
+        Some(b"v2".to_vec()),
+        "survivor-owned key kept"
+    );
+    assert!(
+        survivor.replica_keys_of("dead-node").is_empty(),
+        "dead node's replica-registry entries retired"
+    );
+    assert_eq!(
+        survivor.replica_keys_of("survivor").len(),
+        1,
+        "survivor's own registry entry kept"
+    );
+}
+
+#[test]
+fn dead_node_sweep_matches_node_suffix() {
+    let survivor = MeshKV::new("survivor".to_string());
+    let rl = survivor.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+    survivor.configure_dead_node_sweep("rl:", DeadKeyAttribution::NodeNameSuffix);
+    rl.put("rl:global:dead-node", encode_epoch_count(1, 5).to_vec());
+    rl.put("rl:global:survivor", encode_epoch_count(1, 7).to_vec());
+
+    let swept = survivor.handle_node_removed("dead-node");
+    assert_eq!(swept, 1);
+    assert_eq!(rl.get("rl:global:dead-node"), None, "dead shard swept");
+    assert!(
+        rl.get("rl:global:survivor").is_some(),
+        "survivor shard kept"
+    );
+}
+
+#[tokio::test]
+async fn dead_node_sweep_fires_subscriber_tombstones() {
+    // Inbound adapters (e.g. worker registry removal) react to sweeps via
+    // the same (key, None) notification a normal delete fires.
+    let dead = MeshKV::new("dead-node".to_string());
+    let dead_ns = dead.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    dead_ns.put("worker:w1", b"v1".to_vec());
+
+    let survivor = MeshKV::new("survivor".to_string());
+    let survivor_ns = survivor.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    survivor.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
+    deliver_crdt(&dead, &survivor);
+
+    let mut sub = survivor_ns.subscribe("");
+    survivor.handle_node_removed("dead-node");
+    let (key, payload) = sub.receiver.recv().await.expect("sweep fires subscriber");
+    assert_eq!(key, "worker:w1");
+    assert!(payload.is_none(), "sweep notifies a tombstone");
+}
+
+#[test]
 fn gc_tombstones_respects_grace_through_mesh_kv() {
     // The controller drives this periodically; a fresh tombstone must
     // survive the grace period (engine-level reclamation is covered by
@@ -370,13 +457,17 @@ fn dropping_one_keys_batch_does_not_strand_it() {
     // key and strand it forever. Per-key tracking resends only the dropped key.
     let sender = MeshKV::new("sender".to_string());
     let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
-    s_ns.put("worker:a", vec![0u8; 200]);
-    s_ns.put("worker:b", vec![1u8; 200]);
 
     let receiver = MeshKV::new("receiver".to_string());
     let r_ns = receiver.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
 
+    // Flush and ack the construction-time replica-registry op so the batch
+    // split below is driven by the two worker keys alone.
     let mut acked = CrdtWatermark::new();
+    deliver_crdt_watermarked(&sender, &receiver, &mut acked);
+
+    s_ns.put("worker:a", vec![0u8; 200]);
+    s_ns.put("worker:b", vec![1u8; 200]);
     // A budget that fits one ~200-byte op per frame forces two separate batches.
     let batches = build_crdt_batches(&pending_ops(&sender, &acked), 300);
     assert!(
