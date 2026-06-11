@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use rand::{distr::Alphanumeric, Rng};
 use smg::{
     config::{
         validate_mesh_server_name, CircuitBreakerConfig, ConfigError, ConfigResult,
@@ -901,15 +900,6 @@ impl CliArgs {
             return Ok(None);
         }
 
-        let self_name = if let Some(name) = &self.mesh_server_name {
-            validate_mesh_server_name(name)?;
-            name.to_string()
-        } else {
-            let mut rng = rand::rng();
-            let random_string: String = (0..4).map(|_| rng.sample(Alphanumeric) as char).collect();
-            format!("Mesh_{random_string}")
-        };
-
         let peer = self
             .mesh_peer_urls
             .first()
@@ -941,6 +931,17 @@ impl CliArgs {
                     "mesh advertise address cannot be unspecified; set --mesh-advertise-host to a routable node IP".to_string(),
             });
         }
+
+        let self_name = if let Some(name) = &self.mesh_server_name {
+            validate_mesh_server_name(name)?;
+            name.to_string()
+        } else {
+            // Stable default: the advertise address is required, routable,
+            // and unique per node, so it yields the same identity across
+            // restarts (deterministic worker ids, no ghost member per boot).
+            // ':' is the rl shard-key separator, hence the '-'.
+            format!("Mesh_{}", advertise_addr.to_string().replace(':', "-"))
+        };
 
         Ok(Some(MeshServerConfig {
             self_name,
