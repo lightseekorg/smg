@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use smg_mesh::{MergeStrategy, MeshKV};
 
-use super::adapters::{RateLimitSyncAdapter, WorkerSyncAdapter};
+use super::{
+    adapters::{RateLimitSyncAdapter, WorkerSyncAdapter},
+    global_rate_limit::{unix_now_secs, GlobalRateLimiter},
+};
 use crate::worker::WorkerRegistry;
 
 /// Owns the started mesh sync adapters. Mesh on means every adapter here is
@@ -21,6 +24,7 @@ use crate::worker::WorkerRegistry;
 pub struct MeshAdapters {
     worker: Arc<WorkerSyncAdapter>,
     rate_limit: Arc<RateLimitSyncAdapter>,
+    global_rate_limit: Arc<GlobalRateLimiter>,
 }
 
 impl MeshAdapters {
@@ -49,7 +53,24 @@ impl MeshAdapters {
         let rate_limit = RateLimitSyncAdapter::new(rl_ns, node_name);
         worker.start();
         rate_limit.start();
-        Arc::new(Self { worker, rate_limit })
+        let global_rate_limit = GlobalRateLimiter::new(rate_limit.clone(), mesh_kv.configs());
+        let flusher = global_rate_limit.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "flush task runs for the adapter's lifetime, which is the process lifetime"
+        )]
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                flusher.flush(unix_now_secs());
+            }
+        });
+        Arc::new(Self {
+            worker,
+            rate_limit,
+            global_rate_limit,
+        })
     }
 
     /// Worker sync adapter.
@@ -60,6 +81,12 @@ impl MeshAdapters {
     /// Rate-limit sync adapter.
     pub fn rate_limit(&self) -> &Arc<RateLimitSyncAdapter> {
         &self.rate_limit
+    }
+
+    /// Cluster-wide request limiter, consulted by the concurrency
+    /// middleware before the local token bucket.
+    pub fn global_rate_limit(&self) -> &Arc<GlobalRateLimiter> {
+        &self.global_rate_limit
     }
 }
 

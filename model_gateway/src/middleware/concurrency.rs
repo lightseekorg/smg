@@ -28,6 +28,7 @@ use tracing::{debug, error, warn};
 
 use super::token_bucket::TokenBucket;
 use crate::{
+    mesh::global_rate_limit::unix_now_secs,
     observability::metrics::{metrics_labels, Metrics},
     server::AppState,
 };
@@ -202,11 +203,17 @@ pub async fn concurrency_limit_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Cluster-wide rate limiting was previously enforced via the
-    // v1 `MeshSyncManager::check_global_rate_limit` path. That hook
-    // is removed in this PR. Local per-node token-bucket rate
-    // limiting below still applies; cluster aggregation will return
-    // through the v2 `RateLimitSyncAdapter` in a follow-up PR.
+    // Cluster-wide rate limiting (d-3b): each node's admitted-request
+    // count gossips as an `rl:` shard; the limiter compares the
+    // epoch-aligned cluster aggregate against `config:rate_limit`.
+    // Absent mesh or config, this is a no-op.
+    if let Some(adapters) = &app_state.mesh_adapters {
+        if !adapters.global_rate_limit().try_admit(unix_now_secs()) {
+            debug!("Cluster-wide rate limit exceeded, returning 429");
+            Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_REJECTED);
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+    }
 
     let token_bucket = match &app_state.context.rate_limiter {
         Some(bucket) => bucket.clone(),
