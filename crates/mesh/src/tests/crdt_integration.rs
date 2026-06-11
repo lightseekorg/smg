@@ -10,6 +10,8 @@
 //! we bypass prost and route the ops directly, matching the chunking
 //! integration tests.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -29,7 +31,7 @@ use crate::{
 /// encode it into size-bounded batches, and dispatch each into the receiver.
 fn deliver_crdt(sender: &MeshKV, receiver: &MeshKV) {
     let ops = sender.collect_round_batch().crdt_ops;
-    for batch in build_crdt_batches(&ops, MAX_STREAM_CHUNK_BYTES) {
+    for batch in build_crdt_batches(ops.operations(), MAX_STREAM_CHUNK_BYTES) {
         dispatch_crdt_batch(receiver, batch);
     }
 }
@@ -40,8 +42,10 @@ fn pending_ops(sender: &MeshKV, acked: &CrdtWatermark) -> Vec<crate::crdt_kv::Op
     sender
         .collect_round_batch()
         .crdt_ops
-        .into_iter()
+        .operations()
+        .iter()
         .filter(|op| acked.allows(op))
+        .cloned()
         .collect()
 }
 
@@ -187,6 +191,53 @@ async fn remote_tombstone_after_insert_notifies_none() {
     assert_eq!(key, "worker:a");
     assert!(payload.is_none(), "tombstone notifies None");
     assert_eq!(r_ns.get("worker:a"), None);
+}
+
+#[test]
+fn round_batch_snapshot_is_shared_until_write() {
+    // Idle rounds must not deep-clone the op log: the same Arc is served
+    // until some engine's log mutates.
+    let mesh = MeshKV::new("node-a".to_string());
+    let ns = mesh.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    ns.put("worker:a", b"v1".to_vec());
+
+    let first = mesh.collect_round_batch().crdt_ops;
+    let second = mesh.collect_round_batch().crdt_ops;
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "no writes between rounds: the snapshot Arc is reused"
+    );
+
+    ns.put("worker:b", b"v2".to_vec());
+    let third = mesh.collect_round_batch().crdt_ops;
+    assert!(
+        !Arc::ptr_eq(&second, &third),
+        "a write invalidates the cached snapshot"
+    );
+    assert!(third.operations().iter().any(|op| op.key() == "worker:b"));
+}
+
+#[test]
+fn op_log_stays_bounded_by_live_keys() {
+    // 500 updates to one key previously accumulated 500 ops (full values)
+    // until the flat 10k threshold; the adaptive trigger folds the log so
+    // resident size tracks live keys, not write count.
+    let mesh = MeshKV::new("node-a".to_string());
+    let ns = mesh.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    for i in 0..500u32 {
+        ns.put("worker:hot", i.to_be_bytes().to_vec());
+    }
+    let ops = mesh.collect_round_batch().crdt_ops;
+    assert!(
+        ops.operations().len() <= 65,
+        "log must stay bounded by live keys, got {}",
+        ops.operations().len()
+    );
+    assert_eq!(
+        ns.get("worker:hot"),
+        Some(499u32.to_be_bytes().to_vec()),
+        "compaction keeps the latest value"
+    );
 }
 
 #[test]

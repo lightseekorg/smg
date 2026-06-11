@@ -48,6 +48,9 @@ pub(crate) struct RateLimitEngine {
     clock: Arc<LamportClock>,
     replica_id: ReplicaId,
     generation: AtomicU64,
+    /// Bumped on every log mutation; invalidation key for shared op-log
+    /// snapshots.
+    op_generation: AtomicU64,
 }
 
 impl RateLimitEngine {
@@ -58,13 +61,22 @@ impl RateLimitEngine {
             clock,
             replica_id,
             generation: AtomicU64::new(0),
+            op_generation: AtomicU64::new(0),
         }
+    }
+
+    /// Compact once the log carries more than twice the shard count
+    /// (min 64): a compacted log holds one op per key, so this bounds
+    /// resident log memory at O(keys) while amortizing the fold.
+    fn compact_trigger(&self) -> usize {
+        (self.entries.len() * 2).max(64)
     }
 
     fn append_op(&self, op: Operation) {
         let mut log = self.log.write();
         log.append(op);
-        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+        self.op_generation.fetch_add(1, Ordering::Release);
+        if log.len() > self.compact_trigger() {
             Self::compact_log(&mut log);
             // Local-write path only: dropping oldest on the remote-merge path
             // would shed remotely-learned shards (see the helper's docs).
@@ -340,6 +352,10 @@ impl NamespaceCrdtEngine for RateLimitEngine {
 
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    fn op_generation(&self) -> u64 {
+        self.op_generation.load(Ordering::Acquire)
     }
 
     fn export_ops(&self) -> Vec<Operation> {

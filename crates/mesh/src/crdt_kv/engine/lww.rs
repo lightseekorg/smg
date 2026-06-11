@@ -12,7 +12,10 @@
 //! - an [`OperationLog`] for replication
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -88,6 +91,9 @@ pub(crate) struct LwwEngine {
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>,
     key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     log: Arc<RwLock<OperationLog>>,
+    /// Bumped on every log mutation (including relay-only appends);
+    /// invalidation key for shared op-log snapshots.
+    op_generation: Arc<AtomicU64>,
     clock: Arc<LamportClock>,
     replica_id: ReplicaId,
 }
@@ -99,9 +105,17 @@ impl LwwEngine {
             metadata: Arc::new(DashMap::new()),
             key_locks: Arc::new(DashMap::new()),
             log: Arc::new(RwLock::new(OperationLog::new())),
+            op_generation: Arc::new(AtomicU64::new(0)),
             clock,
             replica_id,
         }
+    }
+
+    /// Compact once the log carries more than twice the live key count
+    /// (min 64): a compacted log holds one op per key, so this bounds
+    /// resident log memory at O(keys) while amortizing the fold.
+    fn compact_trigger(&self) -> usize {
+        (self.metadata.len() * 2).max(64)
     }
 
     fn key_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
@@ -233,7 +247,8 @@ impl LwwEngine {
     fn append_op(&self, op: Operation) {
         let mut log = self.log.write();
         log.append(op);
-        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+        self.op_generation.fetch_add(1, Ordering::Release);
+        if log.len() > self.compact_trigger() {
             Self::compact_log(&mut log);
             // Local-write path only: dropping oldest on the remote-merge path
             // would shed remotely-learned keys (see the helper's docs).
@@ -335,6 +350,10 @@ impl NamespaceCrdtEngine for LwwEngine {
         self.store.generation()
     }
 
+    fn op_generation(&self) -> u64 {
+        self.op_generation.load(Ordering::Acquire)
+    }
+
     fn export_ops(&self) -> Vec<Operation> {
         self.log.read().operations().to_vec()
     }
@@ -393,6 +412,7 @@ impl NamespaceCrdtEngine for LwwEngine {
                 log.append(op.clone());
             }
             Self::compact_log(&mut log);
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
 
         // Snapshot the observable value of every key this batch touches before

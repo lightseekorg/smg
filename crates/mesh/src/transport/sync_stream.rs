@@ -163,7 +163,7 @@ mod tests {
                 .into_iter()
                 .map(|(t, k, v)| (t.to_string(), k.to_string(), Bytes::copy_from_slice(v)))
                 .collect(),
-            crdt_ops: Vec::new(),
+            crdt_ops: Default::default(),
         }
     }
 

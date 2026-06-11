@@ -58,6 +58,12 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
     /// local or remote write that changes live state.
     fn generation(&self) -> u64;
 
+    /// Monotonically increasing op-log mutation counter. Unlike
+    /// [`Self::generation`], this also covers log-only mutations (a losing
+    /// remote op is appended for relay without changing live state), so it
+    /// is the correct invalidation key for shared op-log snapshots.
+    fn op_generation(&self) -> u64;
+
     // ---- Replication ----
 
     /// Snapshot every operation this engine has retained, in deterministic

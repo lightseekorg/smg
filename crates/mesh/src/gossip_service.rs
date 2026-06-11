@@ -338,6 +338,7 @@ impl Gossip for GossipService {
                         let acked = acked_sender.read();
                         stream_batch
                             .crdt_ops
+                            .operations()
                             .iter()
                             .filter(|op| acked.allows(op))
                             .cloned()
@@ -546,7 +547,7 @@ mod sender_tick_tests {
                 .into_iter()
                 .map(|(t, k, v)| (t.to_string(), k.to_string(), Bytes::copy_from_slice(v)))
                 .collect(),
-            crdt_ops: Vec::new(),
+            crdt_ops: Arc::default(),
         })
     }
 
