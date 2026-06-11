@@ -480,6 +480,12 @@ impl WorkerRegistry {
         self.workers.is_empty()
     }
 
+    /// Number of live per-worker mutation lock entries.
+    #[cfg(test)]
+    pub(crate) fn mutation_lock_count(&self) -> usize {
+        self.worker_mutation_locks.len()
+    }
+
     /// Return a consolidated snapshot of registry statistics.
     ///
     /// Iterates the `workers` map once, counting totals per worker type,
@@ -695,7 +701,10 @@ impl WorkerRegistry {
 
         let old_worker = match self.workers.get(worker_id) {
             Some(entry) => entry.clone(),
-            None => return false,
+            None => {
+                self.drop_lock_if_orphaned(worker_id, &lock);
+                return false;
+            }
         };
 
         let old_models: HashSet<String> = Self::worker_model_ids(&old_worker).into_iter().collect();
@@ -860,7 +869,13 @@ impl WorkerRegistry {
             .clone();
         let _guard = lock.lock();
 
-        let worker = self.workers.get(worker_id)?.clone();
+        let worker = match self.workers.get(worker_id) {
+            Some(entry) => entry.clone(),
+            None => {
+                self.drop_lock_if_orphaned(worker_id, &lock);
+                return None;
+            }
+        };
         if worker.revision() != expected_revision {
             return None;
         }
@@ -1081,6 +1096,18 @@ impl WorkerRegistry {
         model_ids
     }
 
+    /// Reclaim the per-worker mutation lock for an absent worker so a call for a
+    /// removed/unknown id (e.g. a late health probe) does not leak the entry.
+    /// `remove_if` runs under the shard write lock and drops the entry only when
+    /// it is still this exact, unshared `Arc` (`strong_count == 2`: the map plus
+    /// our `lock`), so it cannot race a concurrent insert reusing the key.
+    fn drop_lock_if_orphaned(&self, worker_id: &WorkerId, lock: &Arc<parking_lot::Mutex<()>>) {
+        self.worker_mutation_locks
+            .remove_if(worker_id, |_, existing| {
+                Arc::ptr_eq(existing, lock) && Arc::strong_count(lock) == 2
+            });
+    }
+
     fn sampling_defaults_label(worker: &Arc<dyn Worker>) -> Option<&str> {
         worker
             .metadata()
@@ -1294,7 +1321,13 @@ impl WorkerRegistry {
             .clone();
         let _guard = lock.lock();
 
-        let worker = self.workers.get(worker_id)?.clone();
+        let worker = match self.workers.get(worker_id) {
+            Some(entry) => entry.clone(),
+            None => {
+                self.drop_lock_if_orphaned(worker_id, &lock);
+                return None;
+            }
+        };
         if expected_revision.is_some_and(|revision| worker.revision() != revision) {
             return None;
         }
@@ -1942,6 +1975,84 @@ mod tests {
         assert_eq!(
             registry.transition_status(&missing, WorkerStatus::Ready),
             None
+        );
+    }
+
+    #[test]
+    fn test_mutation_on_absent_worker_does_not_leak_lock() {
+        let registry = WorkerRegistry::new();
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w-leak:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let worker_id = registry.register(worker).unwrap();
+        registry.remove(&worker_id);
+        assert_eq!(
+            registry.mutation_lock_count(),
+            0,
+            "remove() reclaims the lock for the worker it tore down"
+        );
+
+        // Late health-probe completions keep calling apply_if_revision for a
+        // removed id; the orphaned lock entry must not accumulate.
+        for _ in 0..32 {
+            assert!(registry
+                .apply_if_revision(&worker_id, 0, |_| ((), None))
+                .is_none());
+        }
+        // transition_status and replace take the same prologue.
+        for _ in 0..32 {
+            assert!(registry
+                .transition_status(&worker_id, WorkerStatus::NotReady)
+                .is_none());
+            let replacement: Arc<dyn Worker> = Arc::new(
+                BasicWorkerBuilder::new("http://w-leak:8080")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            );
+            assert!(!registry.replace(&worker_id, replacement));
+        }
+
+        // Also exercise an id that was never registered at all.
+        let unknown = WorkerId::from_string("never-registered".to_string());
+        for _ in 0..32 {
+            assert!(registry
+                .apply_if_revision(&unknown, 0, |_| ((), None))
+                .is_none());
+        }
+
+        assert_eq!(
+            registry.mutation_lock_count(),
+            0,
+            "mutations on absent worker ids must not grow the lock map"
+        );
+    }
+
+    #[test]
+    fn test_revision_mismatch_keeps_lock_for_present_worker() {
+        // The orphan reclaim must fire only when the worker is truly absent;
+        // a stale-revision no-op on a live worker still needs its lock.
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w-rev:8080")
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        );
+        let worker_id = registry.register(worker.clone()).unwrap();
+        let stale_revision = worker.revision().wrapping_add(1);
+
+        assert!(registry
+            .apply_if_revision(&worker_id, stale_revision, |_| ((), None))
+            .is_none());
+        assert_eq!(
+            registry.mutation_lock_count(),
+            1,
+            "a present worker keeps its lock across a revision-mismatch no-op"
         );
     }
 
