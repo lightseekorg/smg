@@ -23,6 +23,13 @@ pub struct HealthCheckResponse {
     pub message: String,
 }
 
+/// TRT-LLM reports liveness via a free-form status string whose only healthy
+/// value is `"OK"` (per `trtllm_service.proto`); anything else is an error
+/// description and must be treated as unhealthy.
+fn trtllm_status_healthy(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("ok")
+}
+
 /// Wraps the per-backend gRPC clients. RPCs absent on a backend's wire
 /// return `Status::unimplemented`.
 #[derive(Clone)]
@@ -199,8 +206,7 @@ impl GrpcClient {
             }
             Self::Trtllm(client) => {
                 let resp = client.health_check().await?;
-                let healthy = resp.status.to_lowercase().contains("ok")
-                    || resp.status.to_lowercase().contains("healthy");
+                let healthy = trtllm_status_healthy(&resp.status);
                 Ok(HealthCheckResponse {
                     healthy,
                     message: resp.status,
@@ -883,7 +889,19 @@ mod tests {
 
     use smg_grpc_client::{sglang_proto, tokenspeed_proto};
 
-    use super::{ModelInfo, ServerInfo};
+    use super::{trtllm_status_healthy, ModelInfo, ServerInfo};
+
+    #[test]
+    fn trtllm_status_healthy_matches_ok_exactly() {
+        assert!(trtllm_status_healthy("ok"));
+        assert!(trtllm_status_healthy("OK"));
+        assert!(trtllm_status_healthy("  OK  "));
+
+        assert!(!trtllm_status_healthy("not ok"));
+        assert!(!trtllm_status_healthy("checking"));
+        assert!(!trtllm_status_healthy("degraded"));
+        assert!(!trtllm_status_healthy(""));
+    }
 
     fn string_value(s: &str) -> prost_types::Value {
         prost_types::Value {
