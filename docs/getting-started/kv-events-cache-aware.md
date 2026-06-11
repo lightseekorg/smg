@@ -113,6 +113,8 @@ Event-driven routing needs the worker in **SMG gRPC mode** (`--grpc`) — KV eve
 | `publisher: "zmq"` | Selects the ZMQ publisher the servicer bridges. |
 | `endpoint` / `topic` | ZMQ `PUB` address and topic prefix. For data-parallel, the port is `endpoint_port + dp_rank`; SMG currently consumes rank 0. |
 
+SMG learns the block size from the `BlockStored` events themselves, so you needn't set it; pass vLLM's `--block-size N` (the analogue of SGLang's `--page-size`) only to pin a non-default value.
+
 Everything downstream — SMG flags, block-size learning, and the verification logs — is unchanged; `KvEventMonitor` consumes the events the same way for any gRPC worker.
 
 ---
