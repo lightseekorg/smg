@@ -437,10 +437,14 @@ impl GossipController {
                         })
                         .collect();
                     if removed_holddown.is_empty() && handles.len() == peers.len() {
+                        // Snapshot each watermark once per run: the predicate
+                        // is evaluated under engine shard locks, and a clone
+                        // here means no lock acquisition per tombstone (acks
+                        // landing mid-run just defer coverage to the next run).
+                        let watermarks: Vec<CrdtWatermark> =
+                            handles.iter().map(|acked| acked.read().clone()).collect();
                         let stable = |key: &str, version: (u64, ReplicaId)| {
-                            handles
-                                .iter()
-                                .all(|acked| acked.read().covers(key, version))
+                            watermarks.iter().all(|acked| acked.covers(key, version))
                         };
                         let collected = mesh_kv.gc_stable_tombstones(&stable);
                         if collected > 0 {
