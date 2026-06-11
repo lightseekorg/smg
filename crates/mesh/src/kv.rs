@@ -629,12 +629,13 @@ impl MeshKV {
     }
 
     /// Retire replica-registry entries for nodes in neither membership nor
-    /// the removal holddown, keeping any that still author live keys (a
-    /// late-relayed key keeps its attribution until the held-name re-sweep
-    /// tombstones it). Returns the number of entries retired.
+    /// the removal quarantine, first sweeping any live key still attributed
+    /// to them (a key relayed after the quarantine's re-sweeps would
+    /// otherwise outlive its attribution as a permanent ghost). Returns the
+    /// number of entries retired.
     pub fn retire_absent_replica_entries(&self, present: &HashSet<String>) -> usize {
-        let still_authoring = self.live_key_authors();
-        let mut retired = 0;
+        let mut absent_keys = Vec::new();
+        let mut absent_replicas: HashSet<ReplicaId> = HashSet::new();
         for key in self.store.keys() {
             if !key.starts_with(REPLICA_PREFIX) {
                 continue;
@@ -646,16 +647,34 @@ impl MeshKV {
             if node == self.server_name || present.contains(node.as_ref()) {
                 continue;
             }
-            let authoring = key
+            if let Some(replica) = key
                 .strip_prefix(REPLICA_PREFIX)
                 .and_then(|id| ReplicaId::from_string(id).ok())
-                .is_some_and(|replica| still_authoring.contains(&replica));
-            if !authoring {
-                self.delete_with_notify(&key);
-                retired += 1;
+            {
+                absent_replicas.insert(replica);
+            }
+            absent_keys.push(key);
+        }
+        if absent_keys.is_empty() {
+            return 0;
+        }
+        let sweeps = self.dead_node_sweeps.read().clone();
+        for (prefix, attribution) in &sweeps {
+            if *attribution == DeadKeyAttribution::AuthorReplica {
+                let swept = self.sweep_authored_by(prefix, &absent_replicas);
+                if swept > 0 {
+                    tracing::warn!(
+                        swept,
+                        prefix = prefix.as_str(),
+                        "swept ghost keys of departed nodes at registry retirement"
+                    );
+                }
             }
         }
-        retired
+        for key in &absent_keys {
+            self.delete_with_notify(key);
+        }
+        absent_keys.len()
     }
 
     /// Owner-side replica-registry maintenance: re-assert this incarnation's
