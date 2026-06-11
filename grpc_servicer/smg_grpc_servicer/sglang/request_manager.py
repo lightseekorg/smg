@@ -23,9 +23,12 @@ from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchEmbeddingOutput,
     BatchTokenIDOutput,
+    FlushCacheReqOutput,
+    GetInternalStateReqOutput,
     GetLoadsReqInput,
     GetLoadsReqOutput,
     HealthCheckOutput,
+    ProfileReqOutput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     WatchLoadUpdateReq,
@@ -194,6 +197,19 @@ class GrpcRequestManager:
             self.context, zmq.PULL, self.recv_ipc_name, bind=True
         )
 
+        # Communicator responses (ProfileReqOutput, FlushCacheReqOutput, ...)
+        # always arrive on tokenizer_ipc_name via the scheduler's
+        # send_to_tokenizer path. In skip_tokenizer_init mode
+        # recv_from_scheduler already binds that endpoint, so generation
+        # outputs and communicator responses share one socket; otherwise a
+        # second socket is needed for communicator responses.
+        if server_args.skip_tokenizer_init:
+            self.recv_from_tokenizer = None
+        else:
+            self.recv_from_tokenizer = get_zmq_socket(
+                self.context, zmq.PULL, port_args.tokenizer_ipc_name, bind=True
+            )
+
         # Socket for sending requests to scheduler
         self.send_to_scheduler = get_zmq_socket(
             self.context, zmq.PUSH, port_args.scheduler_input_ipc_name, bind=True
@@ -226,6 +242,15 @@ class GrpcRequestManager:
         # Communicators for request/response patterns with scheduler
         # Note: These must be initialized after send_to_scheduler socket is created
         self.get_loads_communicator = _GrpcCommunicator(
+            self.send_to_scheduler, fan_out=server_args.dp_size
+        )
+        self.profile_communicator = _GrpcCommunicator(
+            self.send_to_scheduler, fan_out=server_args.dp_size
+        )
+        self.flush_cache_communicator = _GrpcCommunicator(
+            self.send_to_scheduler, fan_out=server_args.dp_size
+        )
+        self.get_internal_state_communicator = _GrpcCommunicator(
             self.send_to_scheduler, fan_out=server_args.dp_size
         )
 
@@ -508,9 +533,10 @@ class GrpcRequestManager:
                     await self._handle_health_check_output(recv_obj)
                 elif isinstance(recv_obj, AbortReq):
                     await self._handle_abort_req(recv_obj)
-                elif isinstance(recv_obj, GetLoadsReqOutput):
-                    # Route to communicator for request/response pattern
-                    self.get_loads_communicator.handle_recv(recv_obj)
+                elif self._dispatch_communicator_output(recv_obj):
+                    # Communicator responses arrive here in skip_tokenizer_init
+                    # mode, where this socket is bound to tokenizer_ipc_name.
+                    pass
                 else:
                     logger.warning(f"Unknown output type: {type(recv_obj)}")
 
@@ -528,6 +554,52 @@ class GrpcRequestManager:
                 break
             except Exception as e:
                 logger.error(f"Handle loop error: {e}\n{get_exception_traceback()}")
+                if self.gracefully_exit:
+                    break
+
+    def _dispatch_communicator_output(self, recv_obj) -> bool:
+        """Route a communicator response from the scheduler to its communicator.
+
+        Returns True when the object was a recognized communicator response.
+        """
+        if isinstance(recv_obj, ProfileReqOutput):
+            self.profile_communicator.handle_recv(recv_obj)
+        elif isinstance(recv_obj, FlushCacheReqOutput):
+            self.flush_cache_communicator.handle_recv(recv_obj)
+        elif isinstance(recv_obj, GetInternalStateReqOutput):
+            self.get_internal_state_communicator.handle_recv(recv_obj)
+        elif isinstance(recv_obj, GetLoadsReqOutput):
+            self.get_loads_communicator.handle_recv(recv_obj)
+        else:
+            return False
+        return True
+
+    async def _handle_tokenizer_loop(self):
+        """Process communicator responses from the scheduler's send_to_tokenizer path.
+
+        The scheduler sends communicator responses (ProfileReqOutput,
+        FlushCacheReqOutput, ...) directly to tokenizer_ipc_name, not through
+        the detokenizer. This loop only runs when recv_from_tokenizer is a
+        dedicated socket — in skip_tokenizer_init mode those responses arrive
+        on recv_from_scheduler and are dispatched by handle_loop instead.
+        """
+        while not self.gracefully_exit:
+            try:
+                recv_obj = await self.recv_from_tokenizer.recv_pyobj()
+                if not self._dispatch_communicator_output(recv_obj):
+                    logger.warning(f"Unknown type on tokenizer socket: {type(recv_obj)}")
+            except zmq.error.Again:
+                if self.gracefully_exit:
+                    break
+                continue
+            except zmq.error.ZMQError as e:
+                if self.gracefully_exit:
+                    logger.debug(f"ZMQ recv interrupted during shutdown: {e}")
+                    break
+                logger.error(f"ZMQ error in tokenizer loop: {e}\n{get_exception_traceback()}")
+                break
+            except Exception as e:
+                logger.error(f"Tokenizer loop error: {e}\n{get_exception_traceback()}")
                 if self.gracefully_exit:
                     break
 
@@ -874,6 +946,8 @@ class GrpcRequestManager:
 
         # Close ZMQ sockets
         self.recv_from_scheduler.close()
+        if self.recv_from_tokenizer is not None:
+            self.recv_from_tokenizer.close()
         self.send_to_scheduler.close()
 
         # Terminate the ZMQ context - this is critical for asyncio loop to exit cleanly
@@ -914,6 +988,47 @@ class GrpcRequestManager:
 
         return results
 
+    # Communicators that callers may address through send_communicator_req.
+    _PUBLIC_COMMUNICATORS = frozenset(
+        {
+            "profile_communicator",
+            "flush_cache_communicator",
+            "get_internal_state_communicator",
+            "get_loads_communicator",
+        }
+    )
+
+    async def send_communicator_req(self, req, communicator_name: str, timeout: float = 30.0):
+        """Send a request to the scheduler via a named communicator and return responses.
+
+        This is the generic transport method for request/response patterns that
+        go through the scheduler's send_to_tokenizer path (profile, flush_cache,
+        get_internal_state, ...). Business logic (request construction, response
+        interpretation) belongs in the caller — sglang's HTTP sidecar relies on
+        this exact signature, so treat it as a public contract.
+
+        Args:
+            req: The request object to send to the scheduler.
+            communicator_name: Attribute name of the communicator
+                (e.g. "profile_communicator").
+            timeout: Timeout in seconds for the scheduler round-trip.
+
+        Returns:
+            List of response objects from the scheduler(s), one per DP rank.
+
+        Raises:
+            ValueError: If communicator_name is not a known communicator.
+            TimeoutError: If the scheduler does not respond within timeout.
+        """
+        if communicator_name not in self._PUBLIC_COMMUNICATORS:
+            raise ValueError(
+                f"Unknown communicator '{communicator_name}'. "
+                f"Allowed: {sorted(self._PUBLIC_COMMUNICATORS)}"
+            )
+        self.auto_create_handle_loop()
+        communicator = getattr(self, communicator_name)
+        return await communicator(req, timeout=timeout)
+
     def auto_create_handle_loop(self):
         """Automatically create and start the handle_loop task, matching TokenizerManager pattern."""
         if self.no_create_loop:
@@ -922,6 +1037,10 @@ class GrpcRequestManager:
         self.no_create_loop = True
         loop = get_or_create_event_loop()
         self.asyncio_tasks.add(loop.create_task(print_exception_wrapper(self.handle_loop)))
+        if self.recv_from_tokenizer is not None:
+            self.asyncio_tasks.add(
+                loop.create_task(print_exception_wrapper(self._handle_tokenizer_loop))
+            )
 
         self.event_loop = loop
 

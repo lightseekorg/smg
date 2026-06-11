@@ -12,12 +12,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Body;
 // Re-export protocol types as the canonical types for the gateway
-pub use openai_protocol::worker::{ConnectionMode, RuntimeType, WorkerType};
+pub use openai_protocol::worker::{ConnectionMode, ProfileOptions, RuntimeType, WorkerType};
 use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
     worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec, WorkerStatus},
 };
+use smg_grpc_client::common_proto;
 use tokio::{sync::OnceCell, time};
 
 use super::{CircuitBreaker, ResolvedResilience, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
@@ -29,6 +30,15 @@ use crate::{
 /// Default HTTP client timeout for worker requests (in seconds)
 pub const DEFAULT_WORKER_HTTP_TIMEOUT_SECS: u64 = 30;
 
+/// Timeout for worker HTTP `flush_cache` requests. Matches the gRPC
+/// client's local flush deadline.
+const FLUSH_HTTP_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Timeout for worker HTTP profile requests. Stopping a profile can take
+/// a long time while the backend serializes large traces. Matches the
+/// gRPC client's profile deadline.
+const PROFILE_HTTP_TIMEOUT: Duration = Duration::from_secs(630);
+
 /// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
 pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
 
@@ -37,6 +47,77 @@ pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
 
 /// vLLM NIXL KV connector name
 pub const NIXL_CONNECTOR: &str = "NixlConnector";
+
+/// POST an admin endpoint on an HTTP worker and map the outcome to a
+/// [`WorkerResult`].
+async fn admin_http_post(
+    client: &reqwest::Client,
+    url: String,
+    api_key: Option<&String>,
+    body: Option<serde_json::Value>,
+    operation: &str,
+    timeout: Duration,
+) -> WorkerResult<()> {
+    let mut req = client.post(&url).timeout(timeout);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => Err(WorkerError::OperationFailed {
+            url,
+            operation: operation.to_string(),
+            reason: format!("HTTP {}", resp.status()),
+        }),
+        Err(e) => Err(WorkerError::OperationFailed {
+            url,
+            operation: operation.to_string(),
+            reason: e.to_string(),
+        }),
+    }
+}
+
+/// Unwrap the optional gRPC client for an admin op, erroring when absent.
+fn require_grpc_client(
+    url: &str,
+    operation: &str,
+    client: Option<Arc<GrpcClient>>,
+) -> WorkerResult<Arc<GrpcClient>> {
+    client.ok_or_else(|| WorkerError::OperationFailed {
+        url: url.to_string(),
+        operation: operation.to_string(),
+        reason: "no gRPC client available".to_string(),
+    })
+}
+
+/// Map a gRPC admin-op outcome (`success` flag plus message) to a
+/// [`WorkerResult`].
+fn admin_grpc_result(
+    url: &str,
+    operation: &str,
+    result: Result<(bool, String), tonic::Status>,
+) -> WorkerResult<()> {
+    match result {
+        Ok((true, _)) => Ok(()),
+        Ok((false, message)) => Err(WorkerError::OperationFailed {
+            url: url.to_string(),
+            operation: operation.to_string(),
+            reason: if message.is_empty() {
+                "backend reported failure".to_string()
+            } else {
+                message
+            },
+        }),
+        Err(status) => Err(WorkerError::OperationFailed {
+            url: url.to_string(),
+            operation: operation.to_string(),
+            reason: status.to_string(),
+        }),
+    }
+}
 
 pub struct WorkerRoutingKeyLoad {
     url: String,
@@ -392,6 +473,114 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     }
     async fn grpc_health_check(&self) -> WorkerResult<bool>;
     async fn http_health_check(&self) -> WorkerResult<bool>;
+
+    // ── Admin operations ────────────────────────────────────────────
+    //
+    // Dual-path dispatch on connection mode, mirroring
+    // `check_health_async`: HTTP workers receive a POST to the engine's
+    // native admin endpoint, gRPC workers receive the corresponding RPC.
+    // Backends without the RPC surface the dispatcher's `Unimplemented`
+    // status as an `OperationFailed` error.
+
+    /// Flush the KV cache on this worker's backend.
+    async fn flush_cache(&self) -> WorkerResult<()> {
+        match self.connection_mode() {
+            ConnectionMode::Http => {
+                admin_http_post(
+                    self.http_client(),
+                    self.endpoint_url("/flush_cache"),
+                    self.api_key(),
+                    None,
+                    "flush_cache",
+                    FLUSH_HTTP_TIMEOUT,
+                )
+                .await
+            }
+            ConnectionMode::Grpc => {
+                let client =
+                    require_grpc_client(self.url(), "flush_cache", self.get_grpc_client().await?)?;
+                let result = client.flush_cache(0.0).await;
+                admin_grpc_result(
+                    self.url(),
+                    "flush_cache",
+                    result.map(|r| (r.success, r.message)),
+                )
+            }
+        }
+    }
+
+    /// Start a profiling run on this worker's backend.
+    async fn start_profile(&self, options: &ProfileOptions) -> WorkerResult<()> {
+        match self.connection_mode() {
+            ConnectionMode::Http => {
+                let body =
+                    serde_json::to_value(options).map_err(|e| WorkerError::OperationFailed {
+                        url: self.url().to_string(),
+                        operation: "start_profile".to_string(),
+                        reason: format!("failed to serialize profile options: {e}"),
+                    })?;
+                admin_http_post(
+                    self.http_client(),
+                    self.endpoint_url("/start_profile"),
+                    self.api_key(),
+                    Some(body),
+                    "start_profile",
+                    PROFILE_HTTP_TIMEOUT,
+                )
+                .await
+            }
+            ConnectionMode::Grpc => {
+                let client = require_grpc_client(
+                    self.url(),
+                    "start_profile",
+                    self.get_grpc_client().await?,
+                )?;
+                let req = common_proto::StartProfileRequest {
+                    output_dir: options.output_dir.clone(),
+                    start_step: options.start_step,
+                    num_steps: options.num_steps,
+                    activities: options.activities.clone().unwrap_or_default(),
+                    with_stack: options.with_stack,
+                    record_shapes: options.record_shapes,
+                    profile_by_stage: options.profile_by_stage,
+                };
+                let result = client.start_profile(req).await;
+                admin_grpc_result(
+                    self.url(),
+                    "start_profile",
+                    result.map(|r| (r.success, r.message)),
+                )
+            }
+        }
+    }
+
+    /// Stop the in-flight profiling run on this worker's backend and
+    /// export traces.
+    async fn stop_profile(&self) -> WorkerResult<()> {
+        match self.connection_mode() {
+            ConnectionMode::Http => {
+                admin_http_post(
+                    self.http_client(),
+                    self.endpoint_url("/stop_profile"),
+                    self.api_key(),
+                    None,
+                    "stop_profile",
+                    PROFILE_HTTP_TIMEOUT,
+                )
+                .await
+            }
+            ConnectionMode::Grpc => {
+                let client =
+                    require_grpc_client(self.url(), "stop_profile", self.get_grpc_client().await?)?;
+                let result = client.stop_profile().await;
+                admin_grpc_result(
+                    self.url(),
+                    "stop_profile",
+                    result.map(|r| (r.success, r.message)),
+                )
+            }
+        }
+    }
 }
 
 /// Extension trait for model_gateway-specific ConnectionMode methods.

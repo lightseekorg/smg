@@ -37,13 +37,17 @@ from sglang.srt.disaggregation.kv_events import (
 )
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
 from sglang.srt.managers.io_struct import (
+    FlushCacheReqInput,
     GetLoadsReqOutput,
+    ProfileReq,
+    ProfileReqType,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
 )
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem, MultimodalInputs
 from sglang.srt.sampling.sampling_params import SamplingParams as SGLSamplingParams
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import get_bool_env_var
 from sglang.utils import get_exception_traceback
 from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
 from smg_grpc_proto.generated import common_pb2
@@ -55,6 +59,20 @@ from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = logging.getLogger(__name__)
 HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
+# Profile round-trips include trace serialization, which can take minutes.
+PROFILE_COMM_TIMEOUT = 600.0
+
+
+def _aggregate_communicator_results(results: list, ok_message: str) -> tuple[bool, str]:
+    """Aggregate per-DP-rank communicator outputs into (success, message)."""
+    if not results:
+        return False, "No response from scheduler"
+    failures = [r for r in results if not r.success]
+    if failures:
+        return False, " | ".join(r.message or "failed" for r in failures)
+    return True, ok_message
+
+
 SAMPLING_DEFAULT_KEYS = (
     "temperature",
     "top_p",
@@ -601,6 +619,112 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             loads=loads,
             aggregate=_compute_aggregate_protobuf(loads),
         )
+
+    async def FlushCache(
+        self,
+        request: common_pb2.FlushCacheRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.FlushCacheResponse:
+        """Flush the KV cache on all scheduler processes."""
+        logger.debug("Receive flush cache request (timeout_s=%.1f)", request.timeout_s)
+        timeout_s = request.timeout_s
+        comm_timeout = max(30.0, timeout_s + 10.0)
+        try:
+            results = await self.request_manager.send_communicator_req(
+                FlushCacheReqInput(timeout_s=timeout_s),
+                "flush_cache_communicator",
+                timeout=comm_timeout,
+            )
+        except TimeoutError:
+            context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            context.set_details(
+                f"Flush cache timed out after {comm_timeout}s. "
+                "The scheduler may be unresponsive or under heavy load."
+            )
+            return common_pb2.FlushCacheResponse(
+                success=False, message=f"Flush cache timed out after {comm_timeout}s"
+            )
+        except Exception as e:
+            logger.error(f"FlushCache failed: {e}\n{get_exception_traceback()}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Flush cache failed: {e}")
+            return common_pb2.FlushCacheResponse(success=False, message=f"Flush cache failed: {e}")
+
+        success, message = _aggregate_communicator_results(results, "Cache flushed successfully")
+        if not results:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+        return common_pb2.FlushCacheResponse(success=success, message=message)
+
+    async def StartProfile(
+        self,
+        request: common_pb2.StartProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Start the profiler on all scheduler processes."""
+        logger.debug("Receive start profile request")
+
+        # Env-var overrides mirror sglang's TokenizerCommunicatorMixin defaults.
+        with_stack = request.with_stack if request.HasField("with_stack") else None
+        with_stack = (with_stack is not False) and get_bool_env_var(
+            "SGLANG_PROFILE_WITH_STACK", "true"
+        )
+        record_shapes = request.record_shapes if request.HasField("record_shapes") else None
+        record_shapes = (record_shapes is not False) and get_bool_env_var(
+            "SGLANG_PROFILE_RECORD_SHAPES", "true"
+        )
+
+        req = ProfileReq(
+            type=ProfileReqType.START_PROFILE,
+            output_dir=request.output_dir if request.HasField("output_dir") else None,
+            start_step=request.start_step if request.HasField("start_step") else None,
+            num_steps=request.num_steps if request.HasField("num_steps") else None,
+            activities=list(request.activities) if request.activities else None,
+            with_stack=with_stack,
+            record_shapes=record_shapes,
+            profile_by_stage=request.profile_by_stage,
+            profile_id=str(time.time()),
+        )
+        return await self._run_profile_req(req, "Start profiling", context)
+
+    async def StopProfile(
+        self,
+        request: common_pb2.StopProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Stop the profiler and export traces."""
+        logger.debug("Receive stop profile request")
+        req = ProfileReq(type=ProfileReqType.STOP_PROFILE)
+        return await self._run_profile_req(req, "Stop profiling", context)
+
+    async def _run_profile_req(
+        self,
+        req: ProfileReq,
+        op_name: str,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Send a ProfileReq to the scheduler and aggregate per-rank results."""
+        try:
+            results = await self.request_manager.send_communicator_req(
+                req, "profile_communicator", timeout=PROFILE_COMM_TIMEOUT
+            )
+        except TimeoutError:
+            context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)
+            context.set_details(f"{op_name} timed out after {PROFILE_COMM_TIMEOUT}s")
+            return common_pb2.ProfileResponse(
+                success=False, message=f"{op_name} timed out after {PROFILE_COMM_TIMEOUT}s"
+            )
+        except Exception as e:
+            logger.error(f"{op_name} failed: {e}\n{get_exception_traceback()}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"{op_name} failed: {e}")
+            return common_pb2.ProfileResponse(success=False, message=f"{op_name} failed: {e}")
+
+        success, message = _aggregate_communicator_results(results, f"{op_name} succeeded")
+        if not results:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+        return common_pb2.ProfileResponse(success=success, message=message)
 
     async def GetTokenizer(
         self,

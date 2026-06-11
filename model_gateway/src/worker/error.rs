@@ -19,6 +19,13 @@ pub enum WorkerError {
 
     #[error("Connection failed for worker {url}: {reason}")]
     ConnectionFailed { url: String, reason: String },
+
+    #[error("{operation} failed for worker {url}: {reason}")]
+    OperationFailed {
+        url: String,
+        operation: String,
+        reason: String,
+    },
 }
 
 /// Result type for worker operations

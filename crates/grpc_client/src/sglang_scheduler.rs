@@ -141,6 +141,7 @@ impl SglangSchedulerClient {
 
     crate::impl_get_tokenizer!();
     crate::impl_subscribe_kv_events!();
+    crate::impl_admin_ops!();
 
     /// Build a single SGLang EmbedRequest
     #[expect(

@@ -32,7 +32,7 @@ use openai_protocol::{
     responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
-    worker::{WorkerSpec, WorkerUpdateRequest},
+    worker::{StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest},
 };
 use rustls::crypto::ring;
 use serde::Deserialize;
@@ -575,7 +575,31 @@ async fn v1_realtime_transcription_session(
 }
 
 async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Response {
-    WorkerManager::flush_cache_all(&state.context.worker_registry, &state.context.client)
+    WorkerManager::flush_cache_all(&state.context.worker_registry)
+        .await
+        .into_response()
+}
+
+async fn start_profile(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<StartProfileRequest>>,
+) -> Response {
+    let body = body.map_or_else(StartProfileRequest::default, |Json(body)| body);
+    WorkerManager::start_profile_all(
+        &state.context.worker_registry,
+        &body.options,
+        body.url.as_deref(),
+    )
+    .await
+    .into_response()
+}
+
+async fn stop_profile(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<StopProfileRequest>>,
+) -> Response {
+    let body = body.map_or_else(StopProfileRequest::default, |Json(body)| body);
+    WorkerManager::stop_profile_all(&state.context.worker_registry, body.url.as_deref())
         .await
         .into_response()
 }
@@ -907,6 +931,8 @@ pub fn build_app(
     // Build admin routes with control plane auth if configured, otherwise use simple API key auth
     let admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
+        .route("/start_profile", post(start_profile))
+        .route("/stop_profile", post(stop_profile))
         .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
         .route("/parse/reasoning", post(parse_reasoning))

@@ -30,6 +30,15 @@ service SglangScheduler {
   // Get comprehensive load metrics
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
 
+  // Flush the KV cache on all scheduler processes
+  rpc FlushCache(smg.grpc.common.FlushCacheRequest) returns (smg.grpc.common.FlushCacheResponse);
+
+  // Start the profiler on all scheduler processes
+  rpc StartProfile(smg.grpc.common.StartProfileRequest) returns (smg.grpc.common.ProfileResponse);
+
+  // Stop the profiler and export traces
+  rpc StopProfile(smg.grpc.common.StopProfileRequest) returns (smg.grpc.common.ProfileResponse);
+
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 

@@ -57,6 +57,100 @@ macro_rules! impl_get_tokenizer {
 }
 pub(crate) use impl_get_tokenizer;
 
+/// Extra local-deadline margin for `flush_cache` on top of the timeout
+/// forwarded to the backend. The servicer bounds its own scheduler
+/// round-trip at `max(30, timeout_s + 10)` seconds, so the margin must
+/// cover that budget plus transport overhead.
+pub const FLUSH_RPC_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Local deadline for profile start/stop RPCs. Stopping a profile can take
+/// a long time while the backend serializes large traces.
+pub const PROFILE_RPC_DEADLINE: std::time::Duration = std::time::Duration::from_secs(630);
+
+/// Shared admin-op implementations (`flush_cache`, `start_profile`,
+/// `stop_profile`) for engine clients whose protos expose the common
+/// admin RPCs (request/response messages live in `common.proto`).
+///
+/// Every call enforces a local deadline so an unresponsive backend cannot
+/// hang the gateway, and injects trace context for distributed tracing.
+macro_rules! impl_admin_ops {
+    () => {
+        /// Flush the KV cache on the backend scheduler.
+        ///
+        /// `timeout_s` is forwarded to the backend: 0 = flush immediately
+        /// (fails if requests are in flight), >0 = wait up to that many
+        /// seconds for the scheduler to go idle first.
+        pub async fn flush_cache(
+            &self,
+            timeout_s: f32,
+        ) -> Result<$crate::common_proto::FlushCacheResponse, tonic::Status> {
+            tracing::debug!("Requesting cache flush (timeout_s={timeout_s})");
+            let mut request =
+                tonic::Request::new($crate::common_proto::FlushCacheRequest { timeout_s });
+            if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+                tracing::warn!("Failed to inject trace context: {}", e);
+            }
+            let deadline = std::time::Duration::from_secs_f32(timeout_s.max(0.0))
+                + $crate::FLUSH_RPC_DEADLINE_MARGIN;
+            let mut client = self.client.clone();
+            let response = tokio::time::timeout(deadline, client.flush_cache(request))
+                .await
+                .map_err(|_| {
+                    tonic::Status::deadline_exceeded(format!(
+                        "FlushCache did not complete within {deadline:?}"
+                    ))
+                })??;
+            Ok(response.into_inner())
+        }
+
+        /// Start the profiler on the backend scheduler.
+        pub async fn start_profile(
+            &self,
+            req: $crate::common_proto::StartProfileRequest,
+        ) -> Result<$crate::common_proto::ProfileResponse, tonic::Status> {
+            tracing::debug!("Requesting profile start");
+            let mut request = tonic::Request::new(req);
+            if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+                tracing::warn!("Failed to inject trace context: {}", e);
+            }
+            let mut client = self.client.clone();
+            let response =
+                tokio::time::timeout($crate::PROFILE_RPC_DEADLINE, client.start_profile(request))
+                    .await
+                    .map_err(|_| {
+                        tonic::Status::deadline_exceeded(format!(
+                            "StartProfile did not complete within {:?}",
+                            $crate::PROFILE_RPC_DEADLINE
+                        ))
+                    })??;
+            Ok(response.into_inner())
+        }
+
+        /// Stop the profiler on the backend scheduler and export traces.
+        pub async fn stop_profile(
+            &self,
+        ) -> Result<$crate::common_proto::ProfileResponse, tonic::Status> {
+            tracing::debug!("Requesting profile stop");
+            let mut request = tonic::Request::new($crate::common_proto::StopProfileRequest {});
+            if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+                tracing::warn!("Failed to inject trace context: {}", e);
+            }
+            let mut client = self.client.clone();
+            let response =
+                tokio::time::timeout($crate::PROFILE_RPC_DEADLINE, client.stop_profile(request))
+                    .await
+                    .map_err(|_| {
+                        tonic::Status::deadline_exceeded(format!(
+                            "StopProfile did not complete within {:?}",
+                            $crate::PROFILE_RPC_DEADLINE
+                        ))
+                    })??;
+            Ok(response.into_inner())
+        }
+    };
+}
+pub(crate) use impl_admin_ops;
+
 /// Shared `subscribe_kv_events()` implementation for all engine clients.
 ///
 /// Each engine's generated proto client has a `subscribe_kv_events` RPC method

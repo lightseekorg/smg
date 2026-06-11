@@ -7,8 +7,8 @@ use openai_protocol::{
     messages::CreateMessageRequest, worker::WorkerLoadResponse,
 };
 use smg_grpc_client::{
-    tokenizer_bundle, tokenizer_bundle::StreamBundle, MlxEngineClient, SglangSchedulerClient,
-    TokenSpeedSchedulerClient, TrtllmServiceClient, VllmEngineClient,
+    common_proto, tokenizer_bundle, tokenizer_bundle::StreamBundle, MlxEngineClient,
+    SglangSchedulerClient, TokenSpeedSchedulerClient, TrtllmServiceClient, VllmEngineClient,
 };
 
 use crate::routers::grpc::{
@@ -257,12 +257,51 @@ impl GrpcClient {
         }
     }
 
+    /// Flush the KV cache on the backend. Returns `Unimplemented` for
+    /// backends without the FlushCache RPC.
+    pub async fn flush_cache(
+        &self,
+        timeout_s: f32,
+    ) -> Result<common_proto::FlushCacheResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.flush_cache(timeout_s).await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => Err(
+                tonic::Status::unimplemented("FlushCache RPC not supported for this backend"),
+            ),
+        }
+    }
+
+    /// Start the profiler on the backend. Returns `Unimplemented` for
+    /// backends without the StartProfile RPC.
+    pub async fn start_profile(
+        &self,
+        req: common_proto::StartProfileRequest,
+    ) -> Result<common_proto::ProfileResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.start_profile(req).await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => Err(
+                tonic::Status::unimplemented("StartProfile RPC not supported for this backend"),
+            ),
+        }
+    }
+
+    /// Stop the profiler on the backend. Returns `Unimplemented` for
+    /// backends without the StopProfile RPC.
+    pub async fn stop_profile(&self) -> Result<common_proto::ProfileResponse, tonic::Status> {
+        match self {
+            Self::Sglang(client) => client.stop_profile().await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => Err(
+                tonic::Status::unimplemented("StopProfile RPC not supported for this backend"),
+            ),
+        }
+    }
+
     /// Subscribe to KV cache events. Returns `Unimplemented` on backends
     /// without KV-event streaming.
     pub async fn subscribe_kv_events(
         &self,
         start_seq: u64,
-    ) -> Result<tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>, tonic::Status> {
+    ) -> Result<tonic::Streaming<common_proto::KvEventBatch>, tonic::Status> {
         match self {
             Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
             Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
