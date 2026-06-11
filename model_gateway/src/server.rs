@@ -620,8 +620,21 @@ async fn create_worker(
     }
 }
 
-async fn list_workers_rest(State(state): State<Arc<AppState>>) -> Response {
-    state.context.worker_service.list_workers().into_response()
+#[derive(serde::Deserialize)]
+struct ListWorkersQuery {
+    /// Only return workers serving this model, e.g. `?model=moonshotai/Kimi-K2.5`.
+    model: Option<String>,
+}
+
+async fn list_workers_rest(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListWorkersQuery>,
+) -> Response {
+    state
+        .context
+        .worker_service
+        .list_workers(query.model.as_deref())
+        .into_response()
 }
 
 async fn get_worker(
