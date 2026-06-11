@@ -531,6 +531,14 @@ impl MeshKV {
         self.chunk_assembler.clone()
     }
 
+    /// Reclaim tombstone metadata older than the default grace period
+    /// across every CRDT engine. Driven periodically by the gossip
+    /// controller's housekeeping; without it, every deleted key's grave
+    /// marker is retained forever. Returns the number reclaimed.
+    pub fn gc_tombstones(&self) -> usize {
+        self.store.gc_tombstones()
+    }
+
     /// Fire subscribers whose prefix matches `key`. Used by the gossip
     /// receive path when a chunked value completes (or a single-chunk
     /// entry arrives), so handlers can deliver into adapter-owned

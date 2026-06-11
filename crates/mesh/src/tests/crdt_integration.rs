@@ -190,6 +190,22 @@ async fn remote_tombstone_after_insert_notifies_none() {
 }
 
 #[test]
+fn gc_tombstones_respects_grace_through_mesh_kv() {
+    // The controller drives this periodically; a fresh tombstone must
+    // survive the grace period (engine-level reclamation is covered by
+    // the crdt_kv tests).
+    let mesh = MeshKV::new("node-a".into());
+    let ns = mesh.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    ns.put("worker:a", b"v".to_vec());
+    ns.delete("worker:a");
+    assert_eq!(
+        mesh.gc_tombstones(),
+        0,
+        "a fresh tombstone survives the grace period"
+    );
+}
+
+#[test]
 fn caught_up_peer_is_sent_nothing() {
     let sender = MeshKV::new("sender".to_string());
     let s_ns = sender.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
