@@ -403,7 +403,7 @@ fn queue_due_probes(
             if config.remove_unhealthy {
                 removals.push(RemovalCandidate {
                     worker_id: worker_id.clone(),
-                    url: worker.url().to_string(),
+                    url: worker.base_url().to_string(),
                     expected_revision,
                 });
             }
@@ -503,7 +503,14 @@ async fn apply_probe_completion(
         );
         if new == WorkerStatus::Failed {
             if let Some(jq) = job_queue {
-                submit_removal_job(registry, &worker_id, worker.url(), expected_revision, jq).await;
+                submit_removal_job(
+                    registry,
+                    &worker_id,
+                    worker.base_url(),
+                    expected_revision,
+                    jq,
+                )
+                .await;
             }
         }
     }
@@ -1205,6 +1212,46 @@ mod tests {
             compute_next_status(&worker, false, &cfg(2, 3)),
             Some(WorkerStatus::NotReady)
         );
+    }
+
+    #[tokio::test]
+    async fn test_removal_candidate_strips_dp_rank_suffix() {
+        // Regression test: a DP-aware worker is registered under
+        // "{base}@{rank}", but the removal workflow prefix-matches
+        // "{url}@" in dp_aware mode. Submitting the registered (suffixed)
+        // URL made the prefix "{base}@{rank}@", which matched nothing, so
+        // unhealthy DP workers were never removed.
+        let registry = Arc::new(WorkerRegistry::new());
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://10.130.99.80:30000")
+                .worker_type(WorkerType::Regular)
+                .health_config(cfg(2, 3))
+                .dp_config(1, 4)
+                .build(),
+        );
+        assert_eq!(worker.url(), "http://10.130.99.80:30000@1");
+        worker.set_status(WorkerStatus::Failed);
+        let worker_id = registry.register(worker).unwrap();
+
+        let mut next_check = HashMap::new();
+        next_check.insert(worker_id, tokio::time::Instant::now());
+        let mut in_flight = HashSet::new();
+        let mut probes: ProbeFutures = FuturesUnordered::new();
+
+        let removals = queue_due_probes(
+            &registry,
+            &WorkerManagerConfig {
+                default_check_interval_secs: 5,
+                remove_unhealthy: true,
+            },
+            &mut next_check,
+            &mut in_flight,
+            &mut probes,
+            tokio::time::Instant::now(),
+        );
+
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0].url, "http://10.130.99.80:30000");
     }
 
     #[test]
