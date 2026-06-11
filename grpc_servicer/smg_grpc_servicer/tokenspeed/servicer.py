@@ -26,7 +26,7 @@ import torch
 from google.protobuf.struct_pb2 import Struct
 from google.protobuf.timestamp_pb2 import Timestamp
 from smg_grpc_proto import tokenspeed_scheduler_pb2_grpc
-from smg_grpc_proto.generated import tokenspeed_scheduler_pb2
+from smg_grpc_proto.generated import common_pb2, tokenspeed_scheduler_pb2
 from tokenspeed.runtime.multimodal.inputs import (
     Modality,
     MultimodalDataItem,
@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HEALTH_CHECK_TIMEOUT = int(os.getenv("TOKENSPEED_HEALTH_CHECK_TIMEOUT", "20"))
+# Profile round-trips include trace serialization, which can take minutes.
+PROFILE_TIMEOUT = 600.0
 
 
 def _lazy_generate_req_input():
@@ -509,6 +511,98 @@ class TokenSpeedSchedulerServicer(tokenspeed_scheduler_pb2_grpc.TokenSpeedSchedu
             loads=scheduler_loads,
             aggregate=aggregate,
         )
+
+    async def FlushCache(
+        self,
+        request: common_pb2.FlushCacheRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.FlushCacheResponse:
+        """Flush the KV cache on the scheduler.
+
+        TokenSpeed's ``FlushCacheReqInput`` carries no wait-for-idle knob, so
+        ``timeout_s`` only widens the gRPC-side wait for the scheduler reply;
+        the flush itself is immediate (fails if requests are in flight).
+        """
+        logger.debug("Receive flush cache request")
+        comm_timeout = max(30.0, request.timeout_s + 10.0)
+        try:
+            result = await asyncio.wait_for(self.async_llm.flush_cache(), timeout=comm_timeout)
+        except TimeoutError:
+            await context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"Flush cache timed out after {comm_timeout}s",
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.exception("FlushCache failed")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Flush cache failed: {e}")
+            return
+
+        message = result.message or (
+            "Cache flushed successfully" if result.success else "Cache flush failed"
+        )
+        return common_pb2.FlushCacheResponse(success=bool(result.success), message=message)
+
+    async def StartProfile(
+        self,
+        request: common_pb2.StartProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Start the profiler on the scheduler.
+
+        ``AsyncLLM.start_profile`` owns the business logic (env-var defaults,
+        ProfileReq construction) and raises on failure.
+        """
+        logger.debug("Receive start profile request")
+        try:
+            await asyncio.wait_for(
+                self.async_llm.start_profile(
+                    output_dir=request.output_dir if request.HasField("output_dir") else None,
+                    start_step=request.start_step if request.HasField("start_step") else None,
+                    num_steps=request.num_steps if request.HasField("num_steps") else None,
+                    activities=list(request.activities) if request.activities else None,
+                    with_stack=request.with_stack if request.HasField("with_stack") else None,
+                    record_shapes=(
+                        request.record_shapes if request.HasField("record_shapes") else None
+                    ),
+                    profile_by_stage=request.profile_by_stage,
+                ),
+                timeout=PROFILE_TIMEOUT,
+            )
+        except TimeoutError:
+            await context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"Start profiling timed out after {PROFILE_TIMEOUT}s",
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.exception("StartProfile failed")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Start profiling failed: {e}")
+            return
+
+        return common_pb2.ProfileResponse(success=True, message="Start profiling succeeded")
+
+    async def StopProfile(
+        self,
+        request: common_pb2.StopProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> common_pb2.ProfileResponse:
+        """Stop the profiler on the scheduler and export traces."""
+        logger.debug("Receive stop profile request")
+        try:
+            await asyncio.wait_for(self.async_llm.stop_profile(), timeout=PROFILE_TIMEOUT)
+        except TimeoutError:
+            await context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                f"Stop profiling timed out after {PROFILE_TIMEOUT}s",
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.exception("StopProfile failed")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Stop profiling failed: {e}")
+            return
+
+        return common_pb2.ProfileResponse(success=True, message="Stop profiling succeeded")
 
     # ------------------------------------------------------------------
     # Helpers

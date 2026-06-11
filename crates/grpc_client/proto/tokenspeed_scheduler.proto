@@ -4,8 +4,10 @@ package tokenspeed.grpc.scheduler;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
+import "common.proto";
 
-// TokenSpeed scheduler gRPC service. Fully self-contained wire definition.
+// TokenSpeed scheduler gRPC service. Self-contained wire definition apart
+// from the cross-engine admin messages in smg.grpc.common (flush/profile).
 // Trimmed to text+image generation (no embed, no PD-disaggregated, no
 // LoRA, no hidden-state forwarding). Multimodal carries preprocessed
 // tensors only — image fetch + per-model preprocess happen in the
@@ -17,6 +19,15 @@ service TokenSpeedScheduler {
   rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
+
+  // Flush the KV cache on the scheduler
+  rpc FlushCache(smg.grpc.common.FlushCacheRequest) returns (smg.grpc.common.FlushCacheResponse);
+
+  // Start the profiler on the scheduler
+  rpc StartProfile(smg.grpc.common.StartProfileRequest) returns (smg.grpc.common.ProfileResponse);
+
+  // Stop the profiler and export traces
+  rpc StopProfile(smg.grpc.common.StopProfileRequest) returns (smg.grpc.common.ProfileResponse);
 }
 
 // =====================

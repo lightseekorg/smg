@@ -167,6 +167,8 @@ impl TokenSpeedSchedulerClient {
         Ok(response.into_inner())
     }
 
+    crate::impl_admin_ops!();
+
     // ── Request builders ──────────────────────────────────────────────
 
     #[expect(

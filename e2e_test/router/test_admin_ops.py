@@ -141,3 +141,11 @@ class AdminOpsBehavior:
 @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
 class TestAdminOps(AdminOpsBehavior):
     """SGLang serves both connection modes behind the gateway."""
+
+
+@pytest.mark.engine("tokenspeed")
+@pytest.mark.gpu(1)
+@pytest.mark.e2e
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestAdminOpsTokenSpeed(AdminOpsBehavior):
+    """TokenSpeed runs gRPC-only behind the gateway."""

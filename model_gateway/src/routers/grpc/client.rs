@@ -265,9 +265,10 @@ impl GrpcClient {
     ) -> Result<common_proto::FlushCacheResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => client.flush_cache(timeout_s).await,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => Err(
-                tonic::Status::unimplemented("FlushCache RPC not supported for this backend"),
-            ),
+            Self::TokenSpeed(client) => client.flush_cache(timeout_s).await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "FlushCache RPC not supported for this backend",
+            )),
         }
     }
 
@@ -279,9 +280,10 @@ impl GrpcClient {
     ) -> Result<common_proto::ProfileResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => client.start_profile(req).await,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => Err(
-                tonic::Status::unimplemented("StartProfile RPC not supported for this backend"),
-            ),
+            Self::TokenSpeed(client) => client.start_profile(req).await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "StartProfile RPC not supported for this backend",
+            )),
         }
     }
 
@@ -290,9 +292,10 @@ impl GrpcClient {
     pub async fn stop_profile(&self) -> Result<common_proto::ProfileResponse, tonic::Status> {
         match self {
             Self::Sglang(client) => client.stop_profile().await,
-            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) | Self::TokenSpeed(_) => Err(
-                tonic::Status::unimplemented("StopProfile RPC not supported for this backend"),
-            ),
+            Self::TokenSpeed(client) => client.stop_profile().await,
+            Self::Vllm(_) | Self::Trtllm(_) | Self::Mlx(_) => Err(tonic::Status::unimplemented(
+                "StopProfile RPC not supported for this backend",
+            )),
         }
     }
 
