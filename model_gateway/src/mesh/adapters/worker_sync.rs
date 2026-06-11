@@ -23,9 +23,7 @@
 //!
 //! Known gap: only the owner tombstones its keys, so a permanently-dead
 //! node's `worker:` keys persist cluster-wide (imports stay registered,
-//! demoted by local probes), and a crash-restart that registers locally
-//! before its old state gossips back orphans up to one store key per
-//! worker per restart. Tombstone metadata also accrues per removed
+//! demoted by local probes). Tombstone metadata also accrues per removed
 //! worker (time-based collection would resurrect deleted keys; it is
 //! only sound at causal stability). Cleanup belongs to dead-node key GC.
 

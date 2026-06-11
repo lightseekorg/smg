@@ -44,6 +44,16 @@ impl WorkerId {
         Self(Uuid::now_v7().to_string())
     }
 
+    /// Derive the stable id for `(node, url)`: the same pair always yields
+    /// the same id, so a restarted node republishes its workers under
+    /// their previous mesh keys (tombstones resolve, no orphan keys).
+    /// Chained v5 namespacing keeps the pair collision-free without a
+    /// separator convention.
+    pub fn derived(node_name: &str, url: &str) -> Self {
+        let node_ns = Uuid::new_v5(&Uuid::NAMESPACE_URL, node_name.as_bytes());
+        Self(Uuid::new_v5(&node_ns, url.as_bytes()).to_string())
+    }
+
     /// Create a worker ID from a string
     pub fn from_string(s: String) -> Self {
         Self(s)
@@ -122,6 +132,12 @@ pub struct WorkerRegistry {
     /// removed in `remove()` teardown.
     worker_origins: Arc<DashMap<WorkerId, WorkerOrigin>>,
 
+    /// Mesh node identity for deterministic worker-id minting. When set
+    /// (mesh enabled), new ids derive from `(node, url)` so a restarted
+    /// node republishes under its previous mesh keys; unset (mesh off),
+    /// ids stay random v7.
+    id_namespace: std::sync::OnceLock<String>,
+
     /// Broadcast channel for worker state change events.
     event_tx: broadcast::Sender<WorkerEvent>,
 }
@@ -146,11 +162,36 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             model_retry_configs: Arc::new(DashMap::new()),
             worker_origins: Arc::new(DashMap::new()),
+            id_namespace: std::sync::OnceLock::new(),
             // Sized for fleet-scale bursts (startup registration, probe
             // storms): a lagged subscriber forces a full state resync, so
             // the capacity should comfortably exceed realistic worker
             // counts. ~100 B per slot; fixed cost ~100 KB.
             event_tx: broadcast::Sender::new(1024),
+        }
+    }
+
+    /// Install the mesh node identity used to mint deterministic worker
+    /// ids. Must run before workers register; ids minted earlier keep
+    /// their random form. Idempotent for the same name; a different name
+    /// is refused with a warning (the first writer wins).
+    pub fn set_worker_id_namespace(&self, node_name: &str) {
+        if self.id_namespace.set(node_name.to_string()).is_err()
+            && self.id_namespace.get().map(String::as_str) != Some(node_name)
+        {
+            tracing::warn!(
+                node_name,
+                "worker id namespace already set to a different name; keeping the first"
+            );
+        }
+    }
+
+    /// Mint an id for a new registration at `url`: deterministic when the
+    /// mesh node identity is installed, random otherwise.
+    fn mint_worker_id(&self, url: &str) -> WorkerId {
+        match self.id_namespace.get() {
+            Some(node) => WorkerId::derived(node, url),
+            None => WorkerId::new(),
         }
     }
 
@@ -913,7 +954,14 @@ impl WorkerRegistry {
     /// create the worker under this ID. Idempotent — repeated calls for
     /// the same URL return the same ID. Emits no events.
     pub fn reserve_id_for_url(&self, url: &str) -> WorkerId {
-        self.url_to_id.entry(url.to_string()).or_default().clone()
+        // Minted before taking the entry so the shard guard is never held
+        // across the mint; deterministic minting keeps the reservation
+        // identical to what register_inner would derive for the URL.
+        let candidate = self.mint_worker_id(url);
+        self.url_to_id
+            .entry(url.to_string())
+            .or_insert(candidate)
+            .clone()
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -1161,13 +1209,15 @@ impl WorkerRegistry {
     fn register_inner(&self, worker: Arc<dyn Worker>, origin: WorkerOrigin) -> Option<WorkerId> {
         // Resolve (or reserve) the worker_id from url_to_id. The entry
         // API is atomic per bucket, so concurrent callers either reuse
-        // the same existing_id or serialize on vacant insertion.
+        // the same existing_id or serialize on vacant insertion. The
+        // candidate is minted before taking the entry so the shard guard
+        // is never held across the mint.
+        let candidate = self.mint_worker_id(worker.url());
         let worker_id = match self.url_to_id.entry(worker.url().to_string()) {
             Entry::Occupied(entry) => entry.get().clone(),
             Entry::Vacant(entry) => {
-                let new_id = WorkerId::new();
-                entry.insert(new_id.clone());
-                new_id
+                entry.insert(candidate.clone());
+                candidate
             }
         };
 
@@ -1567,6 +1617,68 @@ mod tests {
 
         registry.remove(&worker_id);
         assert!(registry.get(&worker_id).is_none());
+    }
+
+    #[test]
+    fn deterministic_ids_survive_reregistration() {
+        let registry = WorkerRegistry::new();
+        registry.set_worker_id_namespace("node-a");
+
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let first = registry.register(worker).unwrap();
+        assert_eq!(first, WorkerId::derived("node-a", "http://w:8080"));
+
+        registry.remove(&first);
+        let again: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let second = registry.register(again).unwrap();
+        assert_eq!(
+            first, second,
+            "the same (node, url) re-registers under the same id"
+        );
+
+        // Reservations derive identically.
+        registry.remove(&second);
+        assert_eq!(registry.reserve_id_for_url("http://w:8080"), first);
+    }
+
+    #[test]
+    fn derived_ids_differ_across_nodes_and_urls() {
+        let a = WorkerId::derived("node-a", "http://w:8080");
+        assert_ne!(a, WorkerId::derived("node-b", "http://w:8080"));
+        assert_ne!(a, WorkerId::derived("node-a", "http://w:8081"));
+        // Chained namespacing: shifting bytes between node and url must
+        // not collide.
+        assert_ne!(
+            WorkerId::derived("node-a", "x/http://w:8080"),
+            WorkerId::derived("node-a/x", "http://w:8080")
+        );
+    }
+
+    #[test]
+    fn random_ids_without_namespace() {
+        let registry = WorkerRegistry::new();
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let first = registry.register(worker).unwrap();
+        registry.remove(&first);
+        let again: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://w:8080")
+                .model(ModelCard::new("m"))
+                .build(),
+        );
+        let second = registry.register(again).unwrap();
+        assert_ne!(first, second, "mesh-off deployments keep random ids");
     }
 
     #[test]

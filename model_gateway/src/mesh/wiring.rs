@@ -43,6 +43,12 @@ impl MeshAdapters {
         node_name: String,
         worker_registry: Arc<WorkerRegistry>,
     ) -> Arc<Self> {
+        // Deterministic worker ids: a restarted node republishes its
+        // workers under their previous mesh keys, so tombstones resolve
+        // and no orphan keys form. Installed here because this runs
+        // before the worker-init workflows register anything.
+        worker_registry.set_worker_id_namespace(&node_name);
+
         let worker_ns = mesh_kv.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
         let rl_ns = mesh_kv.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
         let worker = WorkerSyncAdapter::new(worker_ns, worker_registry);
@@ -71,6 +77,7 @@ mod tests {
     use tokio::time::sleep;
 
     use super::*;
+    use crate::worker::registry::WorkerId;
 
     fn started(mesh: &MeshKV) -> Arc<MeshAdapters> {
         MeshAdapters::start(mesh, "node-a".into(), Arc::new(WorkerRegistry::new()))
@@ -116,6 +123,20 @@ mod tests {
         adapters.rate_limit().sync_counter("global", 2, 5);
         adapters.rate_limit().sync_counter("global", 1, 100);
         assert_eq!(adapters.rate_limit().get_aggregate("global"), 5);
+    }
+
+    #[tokio::test]
+    async fn start_installs_deterministic_worker_ids() {
+        let mesh = MeshKV::new("node-a".into());
+        let registry = Arc::new(WorkerRegistry::new());
+        let _adapters = MeshAdapters::start(&mesh, "node-a".into(), registry.clone());
+
+        let id = registry.reserve_id_for_url("http://w:8080");
+        assert_eq!(
+            id,
+            WorkerId::derived("node-a", "http://w:8080"),
+            "mesh-enabled nodes mint restart-stable worker ids"
+        );
     }
 
     #[tokio::test]
