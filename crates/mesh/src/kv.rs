@@ -532,9 +532,15 @@ impl MeshKV {
     }
 
     /// Reclaim tombstone metadata older than the default grace period
-    /// across every CRDT engine. Driven periodically by the gossip
-    /// controller's housekeeping; without it, every deleted key's grave
-    /// marker is retained forever. Returns the number reclaimed.
+    /// across every CRDT engine. Returns the number reclaimed.
+    ///
+    /// Deliberately not driven anywhere: time-based collection is unsound.
+    /// A peer absent longer than the grace still holds the deleted key's
+    /// older insert in its op-log and replays it on reconnect; with the
+    /// tombstone metadata gone, the stale insert lands on an empty entry
+    /// and resurrects the key. Collection is only safe at causal stability
+    /// — every live peer acked past the tombstone and absent peers
+    /// declared dead — so the caller must be the dead-node cleanup layer.
     pub fn gc_tombstones(&self) -> usize {
         self.store.gc_tombstones()
     }

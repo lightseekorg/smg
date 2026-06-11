@@ -25,7 +25,9 @@
 //! node's `worker:` keys persist cluster-wide (imports stay registered,
 //! demoted by local probes), and a crash-restart that registers locally
 //! before its old state gossips back orphans up to one store key per
-//! worker per restart. Cleanup belongs to dead-node key GC.
+//! worker per restart. Tombstone metadata also accrues per removed
+//! worker (time-based collection would resurrect deleted keys; it is
+//! only sound at causal stability). Cleanup belongs to dead-node key GC.
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -107,6 +109,9 @@ impl WorkerSyncAdapter {
         )]
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+            // The first tick resolves immediately and start() already
+            // backfills synchronously; skip the redundant pass.
+            interval.tick().await;
             loop {
                 interval.tick().await;
                 reconcile.reconcile_once();
