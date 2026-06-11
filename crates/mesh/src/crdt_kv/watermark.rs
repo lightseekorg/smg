@@ -62,6 +62,13 @@ impl CrdtWatermark {
         self.versions.get(key).copied()
     }
 
+    /// True when the peer has acked `version` or newer for `key`. The
+    /// causal-stability check for tombstone GC: a tombstone is collectible
+    /// only when every live peer covers it.
+    pub fn covers(&self, key: &str, version: CrdtVersion) -> bool {
+        self.get(key).is_some_and(|acked| acked >= version)
+    }
+
     /// Advance toward `other`, taking the per-key maximum op-id. Monotone,
     /// idempotent, and commutative, so out-of-order or duplicate acks are
     /// self-correcting.

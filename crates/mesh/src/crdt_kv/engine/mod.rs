@@ -15,7 +15,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use super::operation::{CrdtChange, Operation};
+use super::{
+    operation::{CrdtChange, Operation},
+    replica::ReplicaId,
+};
 
 mod lww;
 mod rate_limit;
@@ -92,7 +95,18 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
     /// Garbage-collect tombstones older than `grace`, purging the collected
     /// keys' dominated ops from the operation log so log size keeps tracking
     /// the key population. Returns the number of metadata entries removed.
-    fn gc_tombstones(&self, grace: Duration) -> usize;
+    fn gc_tombstones(&self, grace: Duration) -> usize {
+        self.gc_tombstones_where(grace, &|_, _| true)
+    }
+
+    /// [`Self::gc_tombstones`] gated per tombstone: collect only when
+    /// `stable` returns true for the key and its winning version. The caller
+    /// proves causal stability — every live peer acked past the tombstone.
+    fn gc_tombstones_where(
+        &self,
+        grace: Duration,
+        stable: &dyn Fn(&str, (u64, ReplicaId)) -> bool,
+    ) -> usize;
 }
 
 /// Strategy-agnostic engine handle. Routers hold `Arc<dyn

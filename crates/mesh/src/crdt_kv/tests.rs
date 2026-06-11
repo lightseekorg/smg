@@ -11,6 +11,7 @@ use super::{
     merge_strategy::MergeStrategy,
     operation::{Operation, OperationLog},
     replica::ReplicaId,
+    watermark::CrdtWatermark,
 };
 static INIT: Once = Once::new();
 
@@ -1478,6 +1479,44 @@ fn test_epoch_max_wins_gc_purges_collected_keys_ops_from_log() {
             .iter()
             .any(|op| op.key() == "rl:global:node-b"),
         "live keys' ops stay"
+    );
+}
+
+#[test]
+fn test_stable_gc_blocks_uncovered_tombstones() {
+    // Causal stability: a tombstone no peer has acked must survive GC even
+    // past the grace, or a lagged peer's replayed insert resurrects the key.
+    init_test_logging();
+    let map = CrdtOrMap::new();
+    map.register_merge_strategy("rl:".to_string(), MergeStrategy::EpochMaxWins);
+
+    map.insert("key1".to_string(), b"v1".to_vec());
+    map.remove("key1");
+    map.insert("rl:global:node-a".to_string(), encode(1, 1).to_vec());
+    map.remove("rl:global:node-a");
+
+    let removed = map.gc_stable_tombstones(Duration::ZERO, &|_, _| false);
+    assert_eq!(removed, 0, "unstable tombstones survive in both engines");
+
+    let removed = map.gc_stable_tombstones(Duration::ZERO, &|_, _| true);
+    assert_eq!(removed, 2, "covered tombstones collect in both engines");
+}
+
+#[test]
+fn test_watermark_covers_acked_versions() {
+    let replica = ReplicaId::new();
+    let op = Operation::insert("k".to_string(), b"v".to_vec(), 5, replica);
+    let acked = CrdtWatermark::from_ops(std::slice::from_ref(&op));
+
+    assert!(acked.covers("k", (5, replica)), "acked version is covered");
+    assert!(acked.covers("k", (4, replica)), "older version is covered");
+    assert!(
+        !acked.covers("k", (6, replica)),
+        "newer version is not covered"
+    );
+    assert!(
+        !acked.covers("other", (1, replica)),
+        "unacked key is not covered"
     );
 }
 

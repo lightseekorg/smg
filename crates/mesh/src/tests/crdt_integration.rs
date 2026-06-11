@@ -308,6 +308,16 @@ fn dead_node_sweep_tombstones_authored_keys() {
         Some(b"v2".to_vec()),
         "survivor-owned key kept"
     );
+    assert_eq!(
+        survivor.replica_keys_of("dead-node").len(),
+        1,
+        "registry entries are retained at sweep time for late-key re-sweeps"
+    );
+
+    // Once the node is neither in membership nor held, and nothing live is
+    // attributed to it, its registry entries retire.
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 1);
     assert!(
         survivor.replica_keys_of("dead-node").is_empty(),
         "dead node's replica-registry entries retired"
@@ -317,6 +327,29 @@ fn dead_node_sweep_tombstones_authored_keys() {
         1,
         "survivor's own registry entry kept"
     );
+}
+
+#[test]
+fn absent_entry_retirement_waits_for_attributed_live_keys() {
+    // A key relayed after the sweep keeps its attribution: the entry
+    // survives retirement until a re-sweep tombstones the key.
+    let dead = MeshKV::new("dead-node".to_string());
+    let dead_ns = dead.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    dead_ns.put("worker:late", b"v1".to_vec());
+
+    let survivor = MeshKV::new("survivor".to_string());
+    survivor.configure_crdt_prefix("worker:", MergeStrategy::LastWriterWins);
+    survivor.configure_dead_node_sweep("worker:", DeadKeyAttribution::AuthorReplica);
+    deliver_crdt(&dead, &survivor);
+
+    // The late key is live and attributed: retirement must hold off.
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 0, "entry kept while it authors a live key");
+
+    // The held-name re-sweep tombstones the late key; retirement follows.
+    assert_eq!(survivor.handle_node_removed("dead-node"), 1);
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 1, "entry retires once the late key is swept");
 }
 
 #[test]
@@ -378,10 +411,11 @@ fn reconcile_reasserts_own_registry_entry_after_premature_sweep() {
     deliver_crdt(&owner, &survivor);
 
     survivor.handle_node_removed("node-a");
+    survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
     deliver_crdt(&survivor, &owner);
     assert!(
         owner.replica_keys_of("node-a").is_empty(),
-        "the sweep tombstone reached the owner"
+        "the retirement tombstone reached the owner"
     );
 
     owner.reconcile_replica_registry();

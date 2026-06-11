@@ -450,7 +450,11 @@ impl NamespaceCrdtEngine for RateLimitEngine {
             .collect()
     }
 
-    fn gc_tombstones(&self, grace: Duration) -> usize {
+    fn gc_tombstones_where(
+        &self,
+        grace: Duration,
+        stable: &dyn Fn(&str, (u64, ReplicaId)) -> bool,
+    ) -> usize {
         let now = Instant::now();
         let candidates: Vec<String> = self
             .entries
@@ -469,11 +473,14 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         let mut purged: std::collections::HashMap<String, RateLimitVersion> =
             std::collections::HashMap::new();
         for key in candidates {
-            let was_removed = self.entries.remove_if(&key, |_, entry| {
-                matches!(&entry.state, RateLimitState::Tombstone(_))
-                    && entry
+            let was_removed = self.entries.remove_if(&key, |_, entry| match &entry.state {
+                RateLimitState::Tombstone(version) => {
+                    entry
                         .tombstoned_at
                         .is_some_and(|at| now.saturating_duration_since(at) >= grace)
+                        && stable(&key, (version.timestamp, version.replica_id))
+                }
+                RateLimitState::Live(_) => false,
             });
             if let Some((key, entry)) = was_removed {
                 removed += 1;

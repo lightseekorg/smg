@@ -35,6 +35,7 @@ use std::{
 };
 
 use anyhow::Result;
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -54,7 +55,7 @@ use super::{
     },
 };
 use crate::{
-    crdt_kv::CrdtWatermark,
+    crdt_kv::{CrdtWatermark, ReplicaId},
     metrics,
     transport::{
         crdt_batch::{
@@ -93,7 +94,16 @@ pub struct GossipController {
     /// How long a node may stay Down before it is removed from the
     /// cluster and its keys are swept (SWIM §5.2).
     dead_timeout: Duration,
+    /// Per-peer CRDT ack watermarks, registered by both sender paths and
+    /// read by the causal-stability GC driver. Entries are replaced on
+    /// reconnect and removed when the peer leaves membership.
+    peer_watermarks: PeerWatermarks,
 }
+
+/// Per-peer CRDT ack watermark table, keyed by peer name. Shared between the
+/// client-side senders here, the server-side senders in `gossip_service`, and
+/// the causal-stability GC driver.
+pub(crate) type PeerWatermarks = Arc<DashMap<String, Arc<RwLock<CrdtWatermark>>>>;
 
 /// SWIM §5.2 default: Down nodes are removed after 60s.
 const DEFAULT_DEAD_TIMEOUT: Duration = Duration::from_secs(60);
@@ -185,7 +195,14 @@ impl GossipController {
             current_stream_batch: Arc::new(RwLock::new(Arc::new(crate::kv::RoundBatch::default()))),
             mesh_kv: None,
             dead_timeout: DEFAULT_DEAD_TIMEOUT,
+            peer_watermarks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Handle to the per-peer ack watermark table, shared with the
+    /// server-side sync_stream handlers.
+    pub(crate) fn peer_watermarks(&self) -> PeerWatermarks {
+        self.peer_watermarks.clone()
     }
 
     /// Attach the node-wide MeshKV handle. Plumbed from the server
@@ -286,6 +303,9 @@ impl GossipController {
                         removed_version,
                     },
                 );
+                // Spec step 4: drop the removed peer's ack watermark so it
+                // stops vetoing causal stability.
+                self.peer_watermarks.remove(&name);
                 // Reap the dead peer's stream task now rather than letting it
                 // tick into a dead channel until the idle timeout.
                 if let Some(handle) = self.sync_connections.lock().await.remove(&name) {
@@ -335,10 +355,52 @@ impl GossipController {
             // Periodic retry-manager cleanup every 60 rounds (~60s).
             if cnt.is_multiple_of(60) {
                 retry_managers.retain(|peer_name, _| map.contains_key(peer_name));
-                // Owner-side replica-registry upkeep: re-assert this
-                // incarnation's entry, retire prior incarnations'.
                 if let Some(mesh_kv) = &self.mesh_kv {
+                    // Owner-side replica-registry upkeep: re-assert this
+                    // incarnation's entry, retire prior incarnations'.
                     mesh_kv.reconcile_replica_registry();
+                    // Re-sweep held (recently removed) names so late-relayed
+                    // keys are tombstoned while attribution is still retained.
+                    for name in removed_holddown.keys() {
+                        mesh_kv.handle_node_removed(name);
+                    }
+                    // Retire registry entries for nodes neither in membership
+                    // nor still held (held names may yet see late keys).
+                    let mut present: std::collections::HashSet<String> =
+                        init_state.read().keys().cloned().collect();
+                    present.extend(removed_holddown.keys().cloned());
+                    let retired = mesh_kv.retire_absent_replica_entries(&present);
+                    if retired > 0 {
+                        log::info!("Retired {retired} replica-registry entries of departed nodes");
+                    }
+                    // Causally-stable tombstone GC: collect only what every
+                    // member has acked. Any member without a registered
+                    // watermark (no connection yet) blocks collection.
+                    let peers: Vec<String> = init_state
+                        .read()
+                        .keys()
+                        .filter(|name| **name != self.self_name)
+                        .cloned()
+                        .collect();
+                    let handles: Vec<_> = peers
+                        .iter()
+                        .filter_map(|peer| {
+                            self.peer_watermarks
+                                .get(peer)
+                                .map(|entry| Arc::clone(entry.value()))
+                        })
+                        .collect();
+                    if handles.len() == peers.len() {
+                        let stable = |key: &str, version: (u64, ReplicaId)| {
+                            handles
+                                .iter()
+                                .all(|acked| acked.read().covers(key, version))
+                        };
+                        let collected = mesh_kv.gc_stable_tombstones(&stable);
+                        if collected > 0 {
+                            log::info!("Causally-stable GC collected {collected} tombstones");
+                        }
+                    }
                 }
             }
 
@@ -569,6 +631,7 @@ impl GossipController {
         let sync_connections = self.sync_connections.clone();
         let current_stream_batch = self.current_stream_batch.clone();
         let mesh_kv = self.mesh_kv.clone();
+        let peer_watermarks = self.peer_watermarks.clone();
 
         // Log connection lifecycle: spawn
         log::debug!(
@@ -599,9 +662,13 @@ impl GossipController {
 
                 // Per-peer CRDT send watermark (per-key acked versions). The
                 // incremental sender filters by it; the inbound loop advances it
-                // on CrdtAck and emits acks for received batches.
+                // on CrdtAck and emits acks for received batches. Registered in
+                // the shared table for the causal-stability GC driver; a
+                // reconnect replaces the entry with this fresh (conservative)
+                // watermark.
                 let acked: Arc<RwLock<CrdtWatermark>> =
                     Arc::new(RwLock::new(CrdtWatermark::new()));
+                peer_watermarks.insert(peer_name.clone(), acked.clone());
 
                 // Send initial heartbeat
                 let heartbeat =

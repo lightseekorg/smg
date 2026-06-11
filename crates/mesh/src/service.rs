@@ -324,6 +324,10 @@ impl MeshServer {
         // client-side.
         service = service.with_current_stream_batch(controller.current_stream_batch());
 
+        // Share the controller's per-peer ack watermark table so the
+        // causal-stability GC sees both stream directions.
+        service = service.with_peer_watermarks(controller.peer_watermarks());
+
         // Add mTLS support if configured
         if let Some(mtls_manager) = self.mtls_manager.clone() {
             service = service.with_mtls_manager(mtls_manager);
