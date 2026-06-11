@@ -196,7 +196,13 @@ impl GossipService {
             // intentional and must survive the merge.
             let failure_rumor = node.status == NodeStatus::Suspected as i32
                 || node.status == NodeStatus::Down as i32;
-            if node.name == self.self_name && failure_rumor {
+            // Mid-graceful-shutdown the node IS departing: refuting a
+            // failure rumor here would override its own Leaving broadcast.
+            let self_is_leaving = node.name == self.self_name
+                && state
+                    .get(&node.name)
+                    .is_some_and(|entry| entry.status == NodeStatus::Leaving as i32);
+            if node.name == self.self_name && failure_rumor && !self_is_leaving {
                 let refuted_version = node.version + 1;
                 log::warn!(
                     "Refuting status {} rumor about self (v{}); re-asserting Alive v{refuted_version}",
@@ -720,6 +726,43 @@ mod sender_tick_tests {
             "intentional Leaving is not refuted"
         );
         assert_eq!(entry.version, 5);
+    }
+
+    #[test]
+    fn merge_state_does_not_refute_failure_rumors_while_leaving() {
+        // Mid-graceful-shutdown, a peer escalating this node's
+        // unresponsiveness to Suspected/Down must not be refuted to Alive —
+        // that would override the node's own Leaving broadcast.
+        let state = ClusterState::default();
+        state.write().insert(
+            "self".to_string(),
+            NodeState {
+                name: "self".to_string(),
+                address: "127.0.0.1:50051".to_string(),
+                status: NodeStatus::Leaving as i32,
+                version: 5,
+                metadata: std::collections::HashMap::new(),
+            },
+        );
+        let service = GossipService::new(
+            state.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+            "self",
+        );
+        service.merge_state(vec![NodeState {
+            name: "self".to_string(),
+            address: "127.0.0.1:50051".to_string(),
+            status: NodeStatus::Down as i32,
+            version: 6,
+            metadata: std::collections::HashMap::new(),
+        }]);
+        let entry = state.read().get("self").cloned().expect("self present");
+        assert_ne!(
+            entry.status,
+            NodeStatus::Alive as i32,
+            "a departing node never re-asserts Alive"
+        );
     }
 
     #[test]
