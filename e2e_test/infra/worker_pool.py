@@ -33,11 +33,12 @@ from .worker import Worker, start_workers, stop_workers
 logger = logging.getLogger(__name__)
 
 
-# Key is (engine, model_id, mode, worker_type, count). ``count`` is part of
-# the key because a class asking for count=2 after a count=1 class on the
-# same backend would otherwise reuse a 1-worker entry and run with the
-# wrong topology.
-_PoolKey = tuple[str, str, ConnectionMode, WorkerType, int]
+# Key is (engine, model_id, mode, worker_type, count, gpus, extra_engine_args).
+# ``count`` is part of the key because a class asking for count=2 after a
+# count=1 class on the same backend would otherwise reuse a 1-worker entry and
+# run with the wrong topology; ``gpus``/``extra_engine_args`` likewise change
+# the launched topology (e.g. --data-parallel-size).
+_PoolKey = tuple[str, str, ConnectionMode, WorkerType, int, int | None, tuple[str, ...] | None]
 
 
 class WorkerPool:
@@ -66,6 +67,8 @@ class WorkerPool:
         timeout: int = DEFAULT_STARTUP_TIMEOUT,
         log_dir: str | None = None,
         gpu_offset: int = 0,
+        gpus: int | None = None,
+        extra_engine_args: list[str] | None = None,
     ) -> list[Worker]:
         """Return ``count`` healthy workers for the given key.
 
@@ -106,11 +109,21 @@ class WorkerPool:
                     timeout=timeout,
                     log_dir=log_dir,
                     gpu_offset=gpu_offset,
+                    gpus=gpus,
+                    extra_engine_args=extra_engine_args,
                 )
 
             # REGULAR workers always start at gpu 0; ``gpu_offset`` is only
             # meaningful for non-REGULAR (PD decode) callers.
-            key: _PoolKey = (engine, model_id, mode, worker_type, count)
+            key: _PoolKey = (
+                engine,
+                model_id,
+                mode,
+                worker_type,
+                count,
+                gpus,
+                tuple(extra_engine_args) if extra_engine_args else None,
+            )
 
             if self._key == key and all(w.is_alive() for w in self._workers):
                 logger.info(
@@ -138,6 +151,8 @@ class WorkerPool:
                 worker_type=worker_type,
                 timeout=timeout,
                 log_dir=log_dir,
+                gpus=gpus,
+                extra_engine_args=extra_engine_args,
             )
             self._key = key
             self._workers = new_workers

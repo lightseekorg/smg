@@ -175,11 +175,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             "pixel_values"
         )
         logger.info(
-            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s",
+            "Generate request %s: input_type=%s, stream=%s, preprocessed_mm=%s, dp_rank=%s",
             request_id,
             input_type,
             request.stream,
             has_preprocessed_mm,
+            request.data_parallel_rank if request.HasField("data_parallel_rank") else None,
         )
 
         kv_transfer_params: dict | None = None

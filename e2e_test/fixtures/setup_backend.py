@@ -49,7 +49,13 @@ _GW_DEFAULTS = {
     "log_dir": None,
 }
 
-_WORKER_DEFAULTS = {"count": 1, "prefill": None, "decode": None}
+_WORKER_DEFAULTS = {
+    "count": 1,
+    "prefill": None,
+    "decode": None,
+    "gpus": None,
+    "extra_engine_args": None,
+}
 
 # Track worker startup failures — fail fast after repeated failures
 _worker_start_failures: dict[str, int] = {}  # engine -> count
@@ -106,6 +112,8 @@ def setup_backend(request: pytest.FixtureRequest):
     Configuration via markers:
       - ``@pytest.mark.model("model-id")``: Override default model
       - ``@pytest.mark.workers(count=1)``: Number of regular workers
+      - ``@pytest.mark.workers(gpus=2, extra_engine_args=[...])``: Per-worker
+        GPU count and extra engine CLI args (local workers only)
       - ``@pytest.mark.workers(prefill=1, decode=1)``: PD worker counts
       - ``@pytest.mark.gateway(policy=..., timeout=..., extra_args=...)``: Gateway config
 
@@ -205,6 +213,8 @@ def _setup_local(
         mode=connection_mode,
         count=num_workers,
         log_dir=log_dir,
+        gpus=workers_config.get("gpus"),
+        extra_engine_args=workers_config.get("extra_engine_args"),
     )
     try:
         _start_gateway(
