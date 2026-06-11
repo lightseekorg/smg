@@ -206,7 +206,7 @@
     <rect x="820" y="195" width="90" height="55" rx="6" fill="#334155" stroke="#8b5cf6" stroke-width="1.5"/>
     <text x="865" y="215" text-anchor="middle" class="sublabel" font-size="9">gRPC Backend</text>
     <text x="865" y="230" text-anchor="middle" class="tiny">vLLM • TRT-LLM</text>
-    <text x="865" y="242" text-anchor="middle" class="tiny" font-size="8">TokenSpeed • SGLang</text>
+    <text x="865" y="242" text-anchor="middle" class="tiny">SGLang</text>
   </g>
   <g>
     <rect x="925" y="200" width="70" height="45" rx="6" fill="#334155" stroke="#10b981" stroke-width="1"/>
