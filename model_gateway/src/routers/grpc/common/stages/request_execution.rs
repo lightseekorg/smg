@@ -31,8 +31,14 @@ const NIXL_PREFILL_KV_PARAMS: &str = r#"{"do_remote_decode":true,"do_remote_pref
 /// PD KV-transfer behavior derived from prefill worker metadata.
 #[derive(Debug, Clone, PartialEq)]
 enum KvConnectorMode {
-    /// MooncakeConnector: inject bootstrap host/port into the decode request.
-    Mooncake { host: String, port: u32 },
+    /// MooncakeConnector: mint a transfer_id, tag both legs, synthesize decode
+    /// params from worker metadata; legacy host/port injection when the
+    /// servicer predates kv_engine_id reporting (or DP is active).
+    Mooncake {
+        host: String,
+        port: u32,
+        engine_id: Option<String>,
+    },
     /// NixlConnector: tag prefill with do_remote_decode, relay returned params to decode.
     Nixl,
     /// Unknown/absent connector: relay returned params opportunistically.
@@ -43,15 +49,41 @@ fn kv_connector_mode(
     kv_connector: Option<&str>,
     bootstrap_host: &str,
     bootstrap_port: Option<u16>,
+    kv_engine_id: Option<&str>,
 ) -> KvConnectorMode {
     match kv_connector {
         Some(MOONCAKE_CONNECTOR) => KvConnectorMode::Mooncake {
             host: bootstrap_host.to_string(),
             port: u32::from(bootstrap_port.unwrap_or(DEFAULT_BOOTSTRAP_PORT)),
+            // Empty means unknown (forces the legacy fallback)
+            engine_id: kv_engine_id.filter(|s| !s.is_empty()).map(str::to_string),
         },
         Some(NIXL_CONNECTOR) => KvConnectorMode::Nixl,
         _ => KvConnectorMode::Passthrough,
     }
+}
+
+/// Prefill-leg params for Mooncake: the engine pins blocks under the minted id.
+fn mooncake_prefill_params(transfer_id: &str) -> String {
+    serde_json::json!({
+        "do_remote_decode": true,
+        "do_remote_prefill": false,
+        "transfer_id": transfer_id,
+    })
+    .to_string()
+}
+
+/// Decode-leg params for Mooncake, synthesized from prefill worker metadata
+/// (the engine returns nothing to relay; the connector is push-based).
+fn mooncake_decode_params(transfer_id: &str, engine_id: &str, host: &str, port: u32) -> String {
+    serde_json::json!({
+        "do_remote_decode": false,
+        "do_remote_prefill": true,
+        "transfer_id": transfer_id,
+        "remote_engine_id": engine_id,
+        "remote_bootstrap_addr": format!("http://{host}:{port}"),
+    })
+    .to_string()
 }
 
 /// Request execution stage: Execute gRPC requests (single or dual dispatch)
@@ -338,14 +370,20 @@ impl RequestExecutionStage {
                     meta.spec.kv_connector.as_deref(),
                     &meta.spec.bootstrap_host,
                     meta.spec.bootstrap_port,
+                    meta.spec.kv_engine_id.as_deref(),
                 )
             })
             .unwrap_or(KvConnectorMode::Passthrough);
 
         match &mode {
-            KvConnectorMode::Mooncake { host, port } => debug!(
+            KvConnectorMode::Mooncake {
+                host,
+                port,
+                engine_id,
+            } => debug!(
                 bootstrap_host = %host,
                 bootstrap_port = port,
+                engine_id_known = engine_id.is_some(),
                 "vLLM PD (Mooncake): will inject kv_transfer_params into decode request"
             ),
             KvConnectorMode::Nixl => debug!(
@@ -364,9 +402,19 @@ impl RequestExecutionStage {
             }
         }
 
-        // NIXL handoff is single-consumer: with n>1 each fan-out child on decode would
-        // pull, and the first completion frees the prefill blocks under its siblings
+        // The KV handoff is single-consumer: with n>1 each fan-out child on decode
+        // would pull, and the first completion frees the prefill blocks under its
+        // siblings (same hazard for NIXL and Mooncake)
         let relay_kv_params = proto_request.sampling_n() <= 1;
+
+        // Mooncake is push-based: the engine returns nothing, so the router mints
+        // the transfer correlation id and synthesizes decode params from metadata
+        let mooncake_transfer_id = match &mode {
+            KvConnectorMode::Mooncake {
+                engine_id: Some(_), ..
+            } if relay_kv_params => Some(format!("xfer-{}", uuid::Uuid::now_v7())),
+            _ => None,
+        };
 
         // Clone request and sanitize sampling (max_tokens=1, n=1), stream=false for prefill
         let mut prefill_request = proto_request.clone_inner();
@@ -382,6 +430,9 @@ impl RequestExecutionStage {
                      (decode recomputes the prompt locally)"
                 );
             }
+        }
+        if let Some(ref transfer_id) = mooncake_transfer_id {
+            prefill_request.set_kv_transfer_params_json(mooncake_prefill_params(transfer_id));
         }
 
         debug!(
@@ -429,8 +480,30 @@ impl RequestExecutionStage {
         // load-bearing for NIXL P/D correlation on vLLM < 0.13
         let mut decode_request = proto_request;
         match (&mode, prefill_kv_params) {
-            // Mooncake is n>1-safe: host/port is connection info, not a single-consumer handoff
-            (KvConnectorMode::Mooncake { host, port }, _) => {
+            // Modern Mooncake: synthesized params under the minted transfer_id
+            (
+                KvConnectorMode::Mooncake {
+                    host,
+                    port,
+                    engine_id: Some(engine_id),
+                },
+                _,
+            ) if mooncake_transfer_id.is_some() => {
+                let transfer_id = mooncake_transfer_id.as_deref().unwrap_or_default();
+                debug!(
+                    request_id = %decode_request.request_id(),
+                    transfer_id = %transfer_id,
+                    "vLLM PD (Mooncake): injecting minted kv_transfer_params into decode request"
+                );
+                decode_request.set_kv_transfer_params_json(mooncake_decode_params(
+                    transfer_id,
+                    engine_id,
+                    host,
+                    *port,
+                ));
+            }
+            // Legacy Mooncake (no engine_id discovered, or n>1): typed host/port injection
+            (KvConnectorMode::Mooncake { host, port, .. }, _) => {
                 debug!(
                     remote_host = %host,
                     remote_port = port,
@@ -485,24 +558,44 @@ mod tests {
 
     #[test]
     fn kv_connector_mode_mooncake_uses_bootstrap_metadata() {
-        let mode = kv_connector_mode(Some(MOONCAKE_CONNECTOR), "prefill-host", Some(9090));
+        let mode = kv_connector_mode(
+            Some(MOONCAKE_CONNECTOR),
+            "prefill-host",
+            Some(9090),
+            Some("engine-1"),
+        );
         assert_eq!(
             mode,
             KvConnectorMode::Mooncake {
                 host: "prefill-host".to_string(),
                 port: 9090,
+                engine_id: Some("engine-1".to_string()),
             }
         );
     }
 
     #[test]
-    fn kv_connector_mode_mooncake_defaults_port() {
-        let mode = kv_connector_mode(Some(MOONCAKE_CONNECTOR), "prefill-host", None);
+    fn kv_connector_mode_mooncake_defaults_port_and_tolerates_missing_engine_id() {
+        let mode = kv_connector_mode(Some(MOONCAKE_CONNECTOR), "prefill-host", None, None);
         assert_eq!(
             mode,
             KvConnectorMode::Mooncake {
                 host: "prefill-host".to_string(),
                 port: u32::from(DEFAULT_BOOTSTRAP_PORT),
+                engine_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn kv_connector_mode_mooncake_empty_engine_id_means_legacy() {
+        let mode = kv_connector_mode(Some(MOONCAKE_CONNECTOR), "host", Some(9090), Some(""));
+        assert_eq!(
+            mode,
+            KvConnectorMode::Mooncake {
+                host: "host".to_string(),
+                port: 9090,
+                engine_id: None,
             }
         );
     }
@@ -510,7 +603,7 @@ mod tests {
     #[test]
     fn kv_connector_mode_nixl() {
         assert_eq!(
-            kv_connector_mode(Some(NIXL_CONNECTOR), "ignored", Some(9090)),
+            kv_connector_mode(Some(NIXL_CONNECTOR), "ignored", Some(9090), None),
             KvConnectorMode::Nixl
         );
     }
@@ -518,13 +611,37 @@ mod tests {
     #[test]
     fn kv_connector_mode_unknown_or_missing_is_passthrough() {
         assert_eq!(
-            kv_connector_mode(Some("LMCacheConnector"), "host", None),
+            kv_connector_mode(Some("LMCacheConnector"), "host", None, None),
             KvConnectorMode::Passthrough
         );
         assert_eq!(
-            kv_connector_mode(None, "host", None),
+            kv_connector_mode(None, "host", None, None),
             KvConnectorMode::Passthrough
         );
+    }
+
+    #[test]
+    fn mooncake_prefill_params_carry_transfer_id() {
+        let value: serde_json::Value =
+            serde_json::from_str(&mooncake_prefill_params("xfer-abc")).unwrap();
+        assert_eq!(value["do_remote_decode"], true);
+        assert_eq!(value["do_remote_prefill"], false);
+        assert_eq!(value["transfer_id"], "xfer-abc");
+        assert_eq!(value.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn mooncake_decode_params_synthesize_full_handoff() {
+        let value: serde_json::Value = serde_json::from_str(&mooncake_decode_params(
+            "xfer-abc", "engine-1", "10.0.0.1", 8998,
+        ))
+        .unwrap();
+        assert_eq!(value["do_remote_decode"], false);
+        assert_eq!(value["do_remote_prefill"], true);
+        assert_eq!(value["transfer_id"], "xfer-abc");
+        assert_eq!(value["remote_engine_id"], "engine-1");
+        assert_eq!(value["remote_bootstrap_addr"], "http://10.0.0.1:8998");
+        assert_eq!(value.as_object().unwrap().len(), 5);
     }
 
     #[test]
