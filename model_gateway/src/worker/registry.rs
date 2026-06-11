@@ -599,7 +599,7 @@ impl WorkerRegistry {
     ///
     /// Emits [`WorkerEvent::Registered`] on success. Holds the per-worker
     /// mutation lock for the entire `register_inner` call — the index
-    /// updates, mesh sync, and event broadcast all run under the same
+    /// updates, origin record, and event broadcast all run under the same
     /// lock so subscribers cannot observe `Removed` / `Replaced` /
     /// `StatusChanged` events before the `Registered` event for a
     /// concurrent same-ID operation.
@@ -919,10 +919,10 @@ impl WorkerRegistry {
     /// Remove a worker by ID and clean up every index entry.
     ///
     /// Returns `Some(worker)` if the ID existed, `None` otherwise. Tears
-    /// down the URL mapping, per-worker mutation lock, model/type/
-    /// connection indexes, and per-model retry config when the last
-    /// worker for a model is removed. Also forwards the removal to mesh
-    /// sync and clears per-worker Prometheus metrics.
+    /// down the URL mapping, per-worker mutation lock, origin record,
+    /// model/type/connection indexes, and per-model retry config when the
+    /// last worker for a model is removed. Clears per-worker Prometheus
+    /// metrics; mesh tombstoning rides the `Removed` event.
     ///
     /// Emits [`WorkerEvent::Removed`] on success. Holds the per-worker
     /// mutation lock for the whole teardown so it cannot race a
@@ -973,6 +973,9 @@ impl WorkerRegistry {
                 worker.set_status(WorkerStatus::NotReady);
             }
             Metrics::remove_worker_metrics(worker.url());
+
+            // Mesh tombstoning rides the `Removed` event below: the
+            // outbound sync loop deletes `worker:{id}` for local workers.
 
             let _ = self.event_tx.send(WorkerEvent::Removed {
                 worker_id: worker_id.clone(),
@@ -1116,11 +1119,11 @@ impl WorkerRegistry {
     /// Core registration logic shared by local and mesh paths.
     ///
     /// Acquires the per-worker mutation lock before making the worker
-    /// visible in any index, and holds it for the full sequence — insert,
-    /// index updates, and the `Registered` event broadcast. Releasing the
-    /// lock only after the event is sent guarantees subscribers cannot
-    /// observe a mutation event for this `WorkerId` before the
-    /// `Registered` event that created it.
+    /// visible in any index, and holds it for the full sequence — origin
+    /// record, insert, index updates, and the `Registered` event
+    /// broadcast. Releasing the lock only after the event is sent
+    /// guarantees subscribers cannot observe a mutation event for this
+    /// `WorkerId` before the `Registered` event that created it.
     ///
     /// `origin` records whether this is a local workflow registration or a
     /// mesh import; the outbound mesh sync consults it so imported workers
@@ -1346,8 +1349,9 @@ impl WorkerRegistry {
         // tombstone for `worker:{id}` (which carries no value, only the
         // key) resolves to this worker. A pre-existing reservation for
         // the URL wins; the import then lives under the local id and a
-        // remote tombstone for it will not resolve (rare; local probes
-        // eventually demote it instead).
+        // remote tombstone for it will not resolve directly (rare; the
+        // adapter's reconcile pass removes the import once its backing
+        // key is gone).
         if !state.worker_id.is_empty() {
             self.url_to_id
                 .entry(state.url.clone())

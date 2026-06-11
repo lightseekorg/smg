@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Worker state entry synced across mesh nodes. `spec` is an
-/// opaque bincode-serialized `WorkerSpec`; the mesh crate
+/// opaque JSON-serialized `WorkerSpec`; the mesh crate
 /// doesn't interpret it.
 ///
 /// `Eq`/`Hash` are intentionally omitted: `load: f64` can be
@@ -18,9 +18,10 @@ pub struct WorkerState {
     pub health: bool,
     pub load: f64,
     pub version: u64,
-    /// Opaque worker specification (bincode-serialized
-    /// `WorkerSpec` from the gateway). Empty on old nodes that
-    /// don't populate this field.
+    /// Opaque worker specification (JSON-serialized `WorkerSpec`
+    /// from the gateway; JSON because the type's serde-skip
+    /// attributes don't round-trip positional formats). Empty on
+    /// old nodes that don't populate this field.
     #[serde(default)]
     pub spec: Vec<u8>,
 }
