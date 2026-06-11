@@ -47,16 +47,18 @@ echo "nixl import canary OK"
 # Mooncake transfer engine, only on the MooncakeConnector PD leg so a broken
 # wheel cannot fail the unrelated vLLM jobs
 if [ "${E2E_VLLM_KV_BACKEND:-nixl}" = "mooncake" ]; then
-    echo "Installing mooncake-transfer-engine..."
-    uv pip install "mooncake-transfer-engine>=0.3.8"
+    # Mooncake's native extension links libibverbs/libnuma at load time even
+    # when the transfer protocol is tcp — without these the import fails with
+    # "libibverbs.so.1: cannot open shared object file".
+    echo "Installing mooncake system dependencies..."
+    sudo apt-get install -y --no-install-recommends libnuma1 libibverbs1 ibverbs-providers
 
-    # The mooncake wheel links libcudart.so.12 regardless of the torch CUDA
-    # flavor; provide it from the cu12 runtime wheel (venv + job env only —
-    # the wheel ships no unversioned libcudart.so, so cu13 lookups are unaffected)
-    uv pip install nvidia-cuda-runtime-cu12
-    CUDART12_DIR=$(python3 -c "import glob, sysconfig; print(glob.glob(sysconfig.get_paths()['platlib'] + '/nvidia/cuda_runtime/lib/libcudart.so.12')[0].rsplit('/', 1)[0])")
-    export LD_LIBRARY_PATH="${CUDART12_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "${GITHUB_ENV:-/dev/null}"
+    # The cuda13 wheel variant matches vLLM's cu130 torch stack, so no
+    # libcudart.so.12 shim is needed (torch's bundled CUDA 13 runtime
+    # satisfies it once torch is imported first). Pinned — floating mooncake
+    # resolves have broken CI before.
+    echo "Installing mooncake-transfer-engine (cuda13)..."
+    uv pip install "mooncake-transfer-engine-cuda13==0.3.11.post1"
 
     # Import canary: fail here (not mid-e2e) if the mooncake install is broken —
     # vLLM swallows this ImportError at module load (torch first for CUDA libs)
