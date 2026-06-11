@@ -33,7 +33,7 @@ const NIXL_PREFILL_KV_PARAMS: &str = r#"{"do_remote_decode":true,"do_remote_pref
 enum KvConnectorMode {
     /// MooncakeConnector: mint a transfer_id, tag both legs, synthesize decode
     /// params from worker metadata; legacy host/port injection when the
-    /// servicer predates kv_engine_id reporting (or DP is active).
+    /// servicer predates kv_engine_id reporting (or DP runs without a pinned rank).
     Mooncake {
         host: String,
         port: u32,
@@ -60,6 +60,22 @@ fn kv_connector_mode(
         },
         Some(NIXL_CONNECTOR) => KvConnectorMode::Nixl,
         _ => KvConnectorMode::Passthrough,
+    }
+}
+
+/// Connector id of the engine core serving the prefill leg. With DP the cores
+/// suffix the configured id as `{base}_dp{rank}`, so minting needs a pinned
+/// rank; unpinned DP>1 yields None (no mint — decode recomputes locally).
+fn effective_kv_engine_id(
+    base: Option<&str>,
+    dp_size: Option<usize>,
+    dp_rank: Option<usize>,
+) -> Option<String> {
+    let base = base.filter(|s| !s.is_empty())?;
+    if dp_size.unwrap_or(1) > 1 {
+        dp_rank.map(|rank| format!("{base}_dp{rank}"))
+    } else {
+        Some(base.to_string())
     }
 }
 
@@ -376,11 +392,18 @@ impl RequestExecutionStage {
             .prefill_worker()
             .map(|w| {
                 let meta = w.metadata();
+                // Discovered dp_size matters even without --dp-aware expansion:
+                // a DP>1 engine behind an unexpanded worker must not be minted for
+                let dp_size = w
+                    .dp_size()
+                    .or_else(|| meta.spec.labels.get("dp_size").and_then(|s| s.parse().ok()));
+                let engine_id =
+                    effective_kv_engine_id(meta.spec.kv_engine_id.as_deref(), dp_size, w.dp_rank());
                 kv_connector_mode(
                     meta.spec.kv_connector.as_deref(),
                     &meta.spec.bootstrap_host,
                     meta.spec.bootstrap_port,
-                    meta.spec.kv_engine_id.as_deref(),
+                    engine_id.as_deref(),
                 )
             })
             .unwrap_or(KvConnectorMode::Passthrough);
@@ -753,5 +776,40 @@ mod tests {
 
         let unset = ProtoGenerateComplete::Vllm(vllm::GenerateComplete::default());
         assert_eq!(unset.kv_transfer_params_json(), None);
+    }
+
+    #[test]
+    fn effective_engine_id_passthrough_when_no_dp() {
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), None, None).as_deref(),
+            Some("eng")
+        );
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), Some(1), None).as_deref(),
+            Some("eng")
+        );
+    }
+
+    #[test]
+    fn effective_engine_id_suffixes_pinned_dp_rank() {
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), Some(2), Some(1)).as_deref(),
+            Some("eng_dp1")
+        );
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), Some(2), Some(0)).as_deref(),
+            Some("eng_dp0")
+        );
+    }
+
+    #[test]
+    fn effective_engine_id_none_for_unpinned_dp() {
+        assert_eq!(effective_kv_engine_id(Some("eng"), Some(2), None), None);
+    }
+
+    #[test]
+    fn effective_engine_id_none_for_missing_or_empty_base() {
+        assert_eq!(effective_kv_engine_id(None, Some(2), Some(0)), None);
+        assert_eq!(effective_kv_engine_id(Some(""), None, None), None);
     }
 }

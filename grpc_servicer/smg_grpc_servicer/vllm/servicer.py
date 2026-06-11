@@ -477,14 +477,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         if kv_transfer_config is not None:
             kv_connector = kv_transfer_config.kv_connector or ""
             kv_role = kv_transfer_config.kv_role or ""
-            # With DP active the engine cores suffix their connector engine_id
-            # (base_dp{rank}) and the router cannot attribute requests to a
-            # rank — report no id so it falls back to legacy injection
-            dp_active = (
-                parallel.data_parallel_size > 1 or getattr(parallel, "data_parallel_rank", 0) > 0
-            )
-            if not dp_active:
-                kv_engine_id = getattr(kv_transfer_config, "engine_id", "") or ""
+            # Base engine_id; with DP the engine cores serve `{id}_dp{rank}` and
+            # the router derives the suffix from the rank it pins per request
+            kv_engine_id = getattr(kv_transfer_config, "engine_id", "") or ""
 
         return vllm_engine_pb2.GetServerInfoResponse(
             kv_connector=kv_connector,
