@@ -627,6 +627,10 @@ pub struct WorkerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_role: Option<String>,
 
+    /// KV transfer engine id (vLLM `kv_transfer_config.engine_id`; Mooncake PD).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_engine_id: Option<String>,
+
     /// KV cache block size (tokens per block) for event-driven routing.
     /// When set, overrides the router-level default for this worker's model.
     /// Typically matches the backend engine's page size (e.g. 16 for SGLang).
@@ -677,6 +681,7 @@ impl WorkerSpec {
             dp_size: None,
             kv_connector: None,
             kv_role: None,
+            kv_engine_id: None,
             kv_block_size: None,
             health: HealthCheckUpdate::default(),
             http_pool: HttpPoolConfig::default(),
