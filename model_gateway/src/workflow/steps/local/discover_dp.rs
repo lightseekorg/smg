@@ -57,8 +57,7 @@ pub fn dp_info_from_labels(labels: &HashMap<String, String>) -> Result<DpInfo, S
         .or_else(|| {
             labels
                 .get("model_path")
-                .and_then(|p| p.rsplit('/').next())
-                .filter(|s| !s.is_empty())
+                .and_then(|p| p.split('/').rfind(|s| !s.is_empty()))
                 .map(str::to_string)
         })
         .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
@@ -162,6 +161,9 @@ mod tests {
     fn dp_info_from_labels_model_path_fallback() {
         let info =
             dp_info_from_labels(&labels(&[("dp_size", "2"), ("model_path", "org/repo")])).unwrap();
+        assert_eq!(info.model_id, "repo");
+        let info =
+            dp_info_from_labels(&labels(&[("dp_size", "2"), ("model_path", "org/repo/")])).unwrap();
         assert_eq!(info.model_id, "repo");
     }
 
