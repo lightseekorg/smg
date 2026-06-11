@@ -45,6 +45,14 @@ fi
 echo "Installing SGLang..."
 uv pip install --prerelease=allow "sglang[all]==0.5.12.post1"
 
+# sglang 0.5.12.post1 leaves its `kernels` dependency unpinned, so the resolver
+# picks kernels >=0.15, which requires LayerRepository(revision=/version=) —
+# an argument the transformers 5.6.0 hub_kernels integration (pinned by sglang)
+# does not pass. `import sglang` then dies at module load with
+# "ValueError: Either a revision or a version must be specified."
+# Pin to the band sglang upstream main now uses; drop once a release carries it.
+uv pip install "kernels>=0.14.1,<0.15"
+
 # Install flashinfer-jit-cache: sglang bundles flashinfer_python but only for attention ops.
 # Multi-GPU models need trtllm_comm kernels (fused allreduce + layernorm) which FlashInfer
 # JIT-compiles at runtime requiring nvcc. The jit-cache provides these pre-compiled.
