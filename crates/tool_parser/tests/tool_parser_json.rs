@@ -661,6 +661,35 @@ async fn test_json_incremental_arguments_streaming() {
 }
 
 #[tokio::test]
+async fn test_json_incremental_unicode_arguments() {
+    let tools = create_test_tools();
+    let mut parser = JsonParser::new();
+
+    // Multibyte argument value: on completion the buffer is sliced at the
+    // consumed offset, which must be a byte offset on a UTF-8 char boundary.
+    let input = r#"{"name": "search", "arguments": {"query": "Köln 世界 🌍"}}"#;
+    let chunks = streaming_helpers::create_realistic_chunks(input);
+
+    let mut tool_name_sent = false;
+    let mut streamed_args = String::new();
+
+    for chunk in chunks {
+        let result = parser.parse_incremental(&chunk, &tools).await.unwrap();
+        for call in result.calls {
+            if call.name.is_some() {
+                tool_name_sent = true;
+            }
+            streamed_args.push_str(&call.parameters);
+        }
+    }
+
+    assert!(tool_name_sent, "Should have sent tool name");
+    let parsed: serde_json::Value = serde_json::from_str(&streamed_args)
+        .unwrap_or_else(|e| panic!("streamed args not valid JSON: {e}; got: {streamed_args}"));
+    assert_eq!(parsed["query"], "Köln 世界 🌍");
+}
+
+#[tokio::test]
 async fn test_json_very_long_url_in_arguments() {
     let tools = create_test_tools();
     let mut parser = JsonParser::new();

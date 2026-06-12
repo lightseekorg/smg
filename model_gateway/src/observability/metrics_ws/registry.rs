@@ -71,6 +71,12 @@ impl WatchRegistry {
     pub fn subscribe(&self, topic: Topic) -> watch::Receiver<Option<Value>> {
         self.sender(topic).subscribe()
     }
+
+    /// Whether any WS handler is currently subscribed to `topic`. Collectors
+    /// gate snapshot building on this so they never serialize state nobody reads.
+    pub fn has_receivers(&self, topic: Topic) -> bool {
+        self.sender(topic).receiver_count() > 0
+    }
 }
 
 #[cfg(test)]
