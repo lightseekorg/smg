@@ -624,17 +624,17 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         let temporal_patch_size = self.config.temporal_patch_size;
         let patch_features = 3 * temporal_patch_size * patch_size * patch_size;
 
-        // Pre-allocate based on total pixel count to avoid repeated Vec growth
-        let estimated_total: usize = images
-            .iter()
-            .map(|img| {
-                let (w, h) = img.dimensions();
-                (w as usize * h as usize) / (self.config.merge_size * self.config.merge_size)
-                    * patch_features
-                    / (patch_size * patch_size)
-            })
-            .sum();
-        let mut all_patches: Vec<f32> = Vec::with_capacity(estimated_total);
+        // Pre-size exactly (unmerged grid patches x features; merging happens in
+        // token count, not in the patch buffer) so the pooled buffer never grows.
+        let mut estimated_total = 0usize;
+        for img in images {
+            let (w, h) = img.dimensions();
+            let (th, tw) = self
+                .smart_resize(h as usize, w as usize)
+                .unwrap_or((h as usize, w as usize));
+            estimated_total += (th / patch_size) * (tw / patch_size) * patch_features;
+        }
+        let mut all_patches: Vec<f32> = crate::vision::scratch::take_f32_cap(estimated_total);
         let mut patches_per_image: Vec<i64> = Vec::with_capacity(images.len());
         let mut grid_thw_data = Vec::with_capacity(images.len() * 3);
         let mut feature_token_counts = Vec::with_capacity(images.len());

@@ -7,6 +7,7 @@ pub mod registry;
 pub mod tracker;
 pub mod types;
 pub mod vision;
+pub use vision::image_processor::recycle_pixel_values;
 
 pub use error::{MediaConnectorError, MultiModalError, MultiModalResult};
 pub use media::{

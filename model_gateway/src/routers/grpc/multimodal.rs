@@ -1369,6 +1369,7 @@ pub(crate) fn assemble_tokenspeed_from_split(
     im_token_id: Option<u32>,
 ) -> TokenSpeedMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&preprocessed, pixel_wire_dtype());
+    llm_multimodal::recycle_pixel_values(preprocessed.pixel_values);
     let model_specific_tensors = serialize_model_specific(preprocessed.model_specific);
     TokenSpeedMultimodalData {
         pixel_values,
