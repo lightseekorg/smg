@@ -679,6 +679,9 @@ impl VisionPreProcessor for QwenVLProcessorBase {
 
             // Patchify directly into all_patches to avoid intermediate Vec + copy
             self.patchify_into(&tensor, grid_t, grid_h, grid_w, &mut all_patches)?;
+            // Recycle the CHW tensor's storage (standard layout, offset 0).
+            let (storage, _offset) = tensor.into_raw_vec_and_offset();
+            crate::vision::scratch::give_f32(storage);
             patches_per_image.push(num_patches as i64);
         }
 

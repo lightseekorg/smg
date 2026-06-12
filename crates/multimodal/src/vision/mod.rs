@@ -29,6 +29,7 @@
 //! let result = processor.preprocess(&images, &config)?;
 //! ```
 
+pub(crate) mod scratch;
 pub mod preprocessor_config;
 pub mod processor;
 pub mod processors;
