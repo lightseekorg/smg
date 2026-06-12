@@ -458,7 +458,6 @@ pub struct DiscoveryConfig {
     /// None = all namespaces
     pub namespace: Option<String>,
     pub port: u16,
-    pub check_interval_secs: u64,
     /// Regular mode
     pub selector: HashMap<String, String>,
     /// PD mode prefill
@@ -487,7 +486,6 @@ impl Default for DiscoveryConfig {
             enabled: false,
             namespace: None,
             port: 8000,
-            check_interval_secs: 120,
             selector: HashMap::new(),
             prefill_selector: HashMap::new(),
             decode_selector: HashMap::new(),
@@ -1038,7 +1036,6 @@ mod tests {
         assert!(!config.enabled);
         assert!(config.namespace.is_none());
         assert_eq!(config.port, 8000);
-        assert_eq!(config.check_interval_secs, 120);
         assert!(config.selector.is_empty());
         assert!(config.prefill_selector.is_empty());
         assert!(config.decode_selector.is_empty());
@@ -1055,7 +1052,6 @@ mod tests {
             enabled: true,
             namespace: Some("default".to_string()),
             port: 9000,
-            check_interval_secs: 30,
             selector: selector.clone(),
             prefill_selector: selector.clone(),
             decode_selector: selector.clone(),
@@ -1297,7 +1293,6 @@ mod tests {
                 enabled: true,
                 namespace: None,
                 port: 8080,
-                check_interval_secs: 45,
                 selector,
                 ..Default::default()
             })
@@ -1334,7 +1329,6 @@ mod tests {
                 enabled: true,
                 namespace: Some("production".to_string()),
                 port: 8443,
-                check_interval_secs: 120,
                 selector: selectors.clone(),
                 prefill_selector: selectors.clone(),
                 decode_selector: selectors,

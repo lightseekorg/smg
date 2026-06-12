@@ -598,7 +598,6 @@ impl Router {
                 enabled: true,
                 namespace: self.service_discovery_namespace.clone(),
                 port: self.service_discovery_port,
-                check_interval_secs: 60,
                 selector: self.selector.clone(),
                 prefill_selector: self.prefill_selector.clone(),
                 decode_selector: self.decode_selector.clone(),
@@ -1149,7 +1148,6 @@ impl Router {
             Some(service_discovery::ServiceDiscoveryConfig {
                 enabled: true,
                 selector: self.selector.clone(),
-                check_interval: std::time::Duration::from_secs(60),
                 port: self.service_discovery_port,
                 namespace: self.service_discovery_namespace.clone(),
                 pd_mode: self.pd_disaggregation,

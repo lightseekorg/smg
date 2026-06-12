@@ -492,14 +492,6 @@ impl ConfigValidator {
             });
         }
 
-        if discovery.check_interval_secs == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "discovery.check_interval_secs".to_string(),
-                value: discovery.check_interval_secs.to_string(),
-                reason: "Must be > 0".to_string(),
-            });
-        }
-
         match mode {
             RoutingMode::Regular { .. } => {
                 if discovery.selector.is_empty() {

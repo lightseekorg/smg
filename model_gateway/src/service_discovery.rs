@@ -4,7 +4,6 @@ use std::{
     // (HashSet insert/remove/contains) and never cross .await boundaries.
     // See: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use futures::StreamExt;
@@ -90,10 +89,6 @@ impl ModelIdSource {
 pub struct ServiceDiscoveryConfig {
     pub enabled: bool,
     pub selector: HashMap<String, String>,
-    /// Deprecated: no longer used. The informer self-heals via watch + backoff
-    /// and reconciles against its in-memory `Store` on every re-LIST. Retained
-    /// for config/CLI backward compatibility.
-    pub check_interval: Duration,
     pub port: u16,
     pub namespace: Option<String>,
     // PD mode specific configuration
@@ -167,7 +162,6 @@ impl Default for ServiceDiscoveryConfig {
         ServiceDiscoveryConfig {
             enabled: false,
             selector: HashMap::new(),
-            check_interval: Duration::from_secs(60),
             port: 8000,
             namespace: None,
             pd_mode: false,
@@ -410,14 +404,6 @@ pub async fn start_service_discovery(
     let _ = ring::default_provider().install_default();
 
     let client = Client::try_default().await?;
-
-    if config.check_interval != ServiceDiscoveryConfig::default().check_interval {
-        warn!(
-            "check_interval ({}s) is deprecated and no longer used: the informer self-heals via \
-             watch + backoff and reconciles against its in-memory Store on every re-LIST",
-            config.check_interval.as_secs()
-        );
-    }
 
     // Log the appropriate selectors based on mode
     if config.pd_mode {
@@ -1233,7 +1219,6 @@ mod tests {
         ServiceDiscoveryConfig {
             enabled: true,
             selector: HashMap::new(),
-            check_interval: Duration::from_secs(60),
             port: 8080,
             namespace: None,
             pd_mode: true,
@@ -1360,8 +1345,6 @@ mod tests {
 
     #[test]
     fn test_apply_router_event_delete_marks_down() {
-        use std::collections::BTreeMap;
-
         let mut router_selector = HashMap::new();
         router_selector.insert("role".to_string(), "router".to_string());
         let config = ServiceDiscoveryConfig {
@@ -1370,10 +1353,11 @@ mod tests {
             ..ServiceDiscoveryConfig::default()
         };
 
-        let cluster_state: ClusterState = Arc::new(parking_lot::RwLock::new(BTreeMap::new()));
+        let cluster_state: ClusterState =
+            Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
 
         // Build a router pod and pre-seed it as Alive via an Apply event.
-        let mut labels = BTreeMap::new();
+        let mut labels = std::collections::BTreeMap::new();
         labels.insert("role".to_string(), "router".to_string());
         let mut pod = create_k8s_pod(
             Some("r1"),
@@ -1427,7 +1411,6 @@ mod tests {
         let config = ServiceDiscoveryConfig::default();
         assert!(!config.enabled);
         assert!(config.selector.is_empty());
-        assert_eq!(config.check_interval, Duration::from_secs(60));
         assert_eq!(config.port, 8000);
         assert!(config.namespace.is_none());
         assert!(!config.pd_mode);
