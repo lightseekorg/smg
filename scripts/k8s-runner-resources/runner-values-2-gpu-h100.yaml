@@ -6,11 +6,11 @@ githubConfigUrl: "https://github.com/lightseekorg/smg"
 githubConfigSecret: github-arc-secret
 
 ## Runner scaling configuration
-minRunners: 0
-maxRunners: 6
+minRunners: 1
+maxRunners: 1
 
 ## name of the runner scale set to create.  Defaults to the helm release name
-runnerScaleSetName: "2-gpu-h100"
+runnerScaleSetName: "2-gpu-h100-test"
 
 resourceMeta: {}
 keyVault: {}
@@ -19,6 +19,14 @@ keyVault: {}
 template:
   spec:
     terminationGracePeriodSeconds: 600
+
+    # hostNetwork puts the runner in the host netns so PD disaggregation KV
+    # transfer (NIXL/Mooncake) sees the host's populated RoCE GID tables. An
+    # overlay-CNI pod sees the mlx5 NICs as PORT_ACTIVE but with an empty GID
+    # table, so RDMA init dies at worker startup. ClusterFirstWithHostNet keeps
+    # cluster DNS working while on the host network.
+    hostNetwork: true
+    dnsPolicy: ClusterFirstWithHostNet
 
     nodeSelector:
       nvidia.com/gpu: "true"
@@ -30,8 +38,11 @@ template:
         value: "true"
         effect: "NoSchedule"
 
+    # With hostNetwork the pod shares the host port space, so spread 2-gpu PD
+    # runners one-per-node to avoid host-port collisions between concurrent PD
+    # jobs (replaces the previous GPU bin-packing podAffinity).
     affinity:
-      podAffinity:
+      podAntiAffinity:
         preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
             podAffinityTerm:
@@ -40,8 +51,7 @@ template:
                   - key: actions.github.com/scale-set-name
                     operator: In
                     values:
-                      - 1-gpu-h100
-                      - 2-gpu-h100
+                      - 2-gpu-h100-test
               topologyKey: kubernetes.io/hostname
 
     volumes:
@@ -63,18 +73,49 @@ template:
 
     containers:
       - name: runner
-        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.3
         command:
           - /home/runner/run.sh
+        securityContext:
+          capabilities:
+            # RDMA verbs pin and register memory for queue pairs; without
+            # IPC_LOCK registration fails even though the GID table resolves.
+            add: ["IPC_LOCK"]
         env:
           - name: DOCKER_HOST
             value: unix:///var/run/docker.sock
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: '120'
+          - name: HF_HOME
+            value: /models
+          - name: HF_TOKEN  # required: ci_download_model.sh runs `hf download` for the gated Llama model
+            valueFrom:
+              secretKeyRef:
+                key: HUGGINGFACE_API_KEY
+                name: huggingface-secret
+          - name: OPENAI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                key: OPENAI_API_KEY
+                name: openai-api-key
+          - name: ANTHROPIC_API_KEY
+            valueFrom:
+              secretKeyRef:
+                key: ANTHROPIC_API_KEY
+                name: anthropic-api-key
+          - name: XAI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                key: XAI_API_KEY
+                name: xai-api-key
+          - name: NODE_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
         resources:
           requests:
-            cpu: "16"
-            memory: "64Gi"
+            cpu: '32'
+            memory: 128Gi
           limits:
             nvidia.com/gpu: 2
         volumeMounts:
@@ -97,7 +138,7 @@ template:
           - /home/runner/tmpDir/
         command:
           - cp
-        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.2
+        image: fra.ocir.io/idqj093njucb/action-runner:v0.0.3
         volumeMounts:
           - mountPath: /home/runner/tmpDir
             name: dind-externals
@@ -109,10 +150,22 @@ template:
         env:
           - name: DOCKER_GROUP_GID
             value: '123'
+          # Suppress dind's default TLS TCP listener (:2376). dockerd only needs
+          # the unix socket here; under hostNetwork a TCP listener would bind a
+          # node port unnecessarily.
+          - name: DOCKER_TLS_CERTDIR
+            value: ""
         image: fra.ocir.io/idqj093njucb/docker:dind
         restartPolicy: Always
         securityContext:
           privileged: true
+        resources:
+          limits:
+            cpu: '2'
+            memory: 4Gi
+          requests:
+            cpu: '1'
+            memory: 2Gi
         startupProbe:
           exec:
             command:
