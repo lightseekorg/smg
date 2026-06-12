@@ -46,16 +46,10 @@ template:
 
     volumes:
       - name: work
-        hostPath:
-          path: /raid/actions-runner
-          type: DirectoryOrCreate
+        emptyDir: {}
       - name: model-cache
         persistentVolumeClaim:
           claimName: model-cache
-      - name: runner-nvme
-        hostPath:
-          path: /raid/actions-runner
-          type: DirectoryOrCreate
       - name: dshm
         emptyDir:
           medium: Memory
@@ -65,9 +59,7 @@ template:
       - name: dind-externals
         emptyDir: {}
       - name: docker-storage
-        hostPath:
-          path: /raid/actions-runner
-          type: DirectoryOrCreate
+        emptyDir: {}
 
     containers:
       - name: runner
@@ -79,10 +71,6 @@ template:
             value: unix:///var/run/docker.sock
           - name: RUNNER_WAIT_FOR_DOCKER_IN_SECONDS
             value: '120'
-          - name: POD_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.name
         resources:
           requests:
             cpu: "8"
@@ -96,36 +84,12 @@ template:
             mountPath: /dev/shm
           - name: work
             mountPath: /home/runner/_work
-            subPathExpr: $(POD_NAME)/_work
-          - name: runner-nvme
-            mountPath: /home/runner/.cache
-            subPathExpr: $(POD_NAME)/.cache
-          - name: runner-nvme
-            mountPath: /tmp
-            subPathExpr: $(POD_NAME)/tmp
           - name: dind-sock
             mountPath: /var/run
           - name: docker-storage
             mountPath: /var/lib/docker
-            subPathExpr: $(POD_NAME)/docker
 
     initContainers:
-      - name: prepare-runner-nvme
-        image: fra.ocir.io/idqj093njucb/docker:dind
-        command:
-          - sh
-          - -c
-          - mkdir -p /runner-nvme/${POD_NAME}/_work /runner-nvme/${POD_NAME}/.cache /runner-nvme/${POD_NAME}/tmp /runner-nvme/${POD_NAME}/docker /models/.locks /models/hub /models/hub/.locks && chown -R 1001:1001 /runner-nvme/${POD_NAME} && chown 1001:1001 /models/.locks /models/hub /models/hub/.locks && chmod 1777 /runner-nvme/${POD_NAME}/tmp /models/.locks /models/hub/.locks
-        env:
-          - name: POD_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.name
-        volumeMounts:
-          - mountPath: /runner-nvme
-            name: runner-nvme
-          - mountPath: /models
-            name: model-cache
       - name: init-dind-externals
         args:
           - '-r'
@@ -145,21 +109,10 @@ template:
         env:
           - name: DOCKER_GROUP_GID
             value: '123'
-          - name: POD_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.name
         image: fra.ocir.io/idqj093njucb/docker:dind
         restartPolicy: Always
         securityContext:
           privileged: true
-        lifecycle:
-          preStop:
-            exec:
-              command:
-                - sh
-                - -c
-                - rm -rf -- "/runner-nvme/${POD_NAME:?}"
         startupProbe:
           exec:
             command:
@@ -169,15 +122,11 @@ template:
           initialDelaySeconds: 0
           periodSeconds: 5
         volumeMounts:
-          - mountPath: /runner-nvme
-            name: runner-nvme
           - mountPath: /home/runner/_work
             name: work
-            subPathExpr: $(POD_NAME)/_work
           - mountPath: /var/run
             name: dind-sock
           - mountPath: /home/runner/externals
             name: dind-externals
           - name: docker-storage
             mountPath: /var/lib/docker
-            subPathExpr: $(POD_NAME)/docker
