@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{builder::RangedU64ValueParser, ArgAction, Parser, Subcommand, ValueEnum};
 use rand::{distr::Alphanumeric, Rng};
 use smg::{
     config::{
@@ -20,6 +20,7 @@ use smg::{
 };
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
+use tokio::runtime::{Builder, Runtime};
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -730,6 +731,18 @@ struct CliArgs {
     /// Defaults to `stun.l.google.com:19302`. Set to "none" to disable.
     #[arg(long, help_heading = "WebRTC")]
     webrtc_stun_server: Option<String>,
+
+    // ==================== Runtime ====================
+    /// Number of tokio worker threads. Falls back to `TOKIO_WORKER_THREADS`,
+    /// then tokio's default (number of CPU cores) when unset. Right-size this
+    /// to the core count for CPU-bound workloads to avoid scheduler thrash.
+    #[arg(long, help_heading = "Runtime", value_parser = RangedU64ValueParser::<usize>::new().range(1..))]
+    worker_threads: Option<usize>,
+
+    /// Maximum number of tokio blocking threads. Falls back to tokio's default
+    /// (512) when unset.
+    #[arg(long, help_heading = "Runtime", value_parser = RangedU64ValueParser::<usize>::new().range(1..))]
+    max_blocking_threads: Option<usize>,
 }
 
 enum OracleConnectSource {
@@ -1418,6 +1431,31 @@ impl CliArgs {
     }
 }
 
+/// Overrides `worker_threads` only when set (CLI flag, then `TOKIO_WORKER_THREADS`)
+/// so the unset default stays tokio's `num_cpus`; returns the effective count, if any.
+fn build_runtime(
+    worker_threads: Option<usize>,
+    max_blocking_threads: Option<usize>,
+) -> Result<(Runtime, Option<usize>), Box<dyn std::error::Error>> {
+    let worker_threads = worker_threads.or_else(|| {
+        std::env::var("TOKIO_WORKER_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+    });
+
+    let mut builder = Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(n) = worker_threads {
+        builder.worker_threads(n);
+    }
+    if let Some(n) = max_blocking_threads {
+        builder.max_blocking_threads(n);
+    }
+
+    Ok((builder.build()?, worker_threads))
+}
+
 #[expect(
     clippy::print_stdout,
     reason = "pre-logger startup output and version display"
@@ -1500,10 +1538,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     router_config.validate()?;
 
     let server_config = cli_args.to_server_config(router_config)?;
-    let runtime = tokio::runtime::Runtime::new()?;
+
+    let (runtime, worker_threads) =
+        build_runtime(cli_args.worker_threads, cli_args.max_blocking_threads)?;
+    match worker_threads {
+        Some(n) => println!("Tokio worker threads: {n}"),
+        None => {
+            let cpus = std::thread::available_parallelism()
+                .map_or_else(|_| "num_cpus".to_string(), |n| n.get().to_string());
+            println!("Tokio worker threads: {cpus} (default)");
+        }
+    }
     runtime.block_on(Box::pin(server::startup(server_config)))?;
     if is_otel_enabled() {
         shutdown_otel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn worker_threads_flag_parses() {
+        let cli = Cli::try_parse_from(["smg", "--worker-threads", "4"]).expect("valid flag");
+        assert_eq!(cli.router_args.worker_threads, Some(4));
+        assert_eq!(cli.router_args.max_blocking_threads, None);
+    }
+
+    #[test]
+    fn worker_threads_defaults_to_none() {
+        let cli = Cli::try_parse_from(["smg"]).expect("no flag");
+        assert_eq!(cli.router_args.worker_threads, None);
+    }
+
+    #[test]
+    fn worker_threads_rejects_zero() {
+        assert!(Cli::try_parse_from(["smg", "--worker-threads", "0"]).is_err());
+        assert!(Cli::try_parse_from(["smg", "--max-blocking-threads", "0"]).is_err());
+    }
+
+    #[test]
+    fn build_runtime_honors_explicit_count() {
+        let (runtime, effective) = build_runtime(Some(2), Some(8)).expect("runtime builds");
+        assert_eq!(effective, Some(2));
+        runtime.block_on(async {});
+    }
+
+    #[test]
+    fn build_runtime_unset_builds_usable_default() {
+        // No explicit count and no env override: tokio's default is in effect,
+        // so the reported effective count is None and the runtime still works.
+        if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+            let (runtime, effective) = build_runtime(None, None).expect("runtime builds");
+            assert_eq!(effective, None);
+            runtime.block_on(async {});
+        }
+    }
 }
