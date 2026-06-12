@@ -91,7 +91,7 @@ def main() -> None:
     if lat:
         lat.sort()
         p50 = statistics.median(lat)
-        p99 = lat[min(len(lat) - 1, int(len(lat) * 0.99))]
+        p99 = lat[int((len(lat) - 1) * 0.99)]
         print(
             f"load: achieved_rps={ok / elapsed:.0f} p50={p50 * 1000:.0f}ms p99={p99 * 1000:.0f}ms"
         )
