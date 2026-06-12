@@ -27,9 +27,7 @@ def send_one(url: str, model: str, prompt: str) -> float | None:
             "max_tokens": 8,
         }
     ).encode()
-    req = urllib.request.Request(
-        url, data=body, headers={"content-type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
     start = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -95,8 +93,7 @@ def main() -> None:
         p50 = statistics.median(lat)
         p99 = lat[min(len(lat) - 1, int(len(lat) * 0.99))]
         print(
-            f"load: achieved_rps={ok / elapsed:.0f} "
-            f"p50={p50 * 1000:.0f}ms p99={p99 * 1000:.0f}ms"
+            f"load: achieved_rps={ok / elapsed:.0f} p50={p50 * 1000:.0f}ms p99={p99 * 1000:.0f}ms"
         )
 
 

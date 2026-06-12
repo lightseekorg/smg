@@ -1,7 +1,11 @@
 //! Mock gRPC worker implementing the TokenSpeed scheduler service. The gateway
 //! tokenizes and sends token ids; this service streams back canned token ids.
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
+    sync::Arc,
+};
 
 use futures::{stream, Stream};
 use smg_grpc_client::{common_proto as common, tokenspeed_scheduler::tokenspeed_proto as ts};
@@ -15,13 +19,14 @@ use crate::config::Config;
 
 /// Serve the mock TokenSpeed gRPC service on `port` until the process exits.
 pub async fn serve(cfg: Arc<Config>, host: String, port: u16) {
-    let addr = match format!("{host}:{port}").parse() {
-        Ok(addr) => addr,
+    let ip = match host.parse::<IpAddr>() {
+        Ok(ip) => ip,
         Err(e) => {
-            tracing::error!("grpc worker addr {host}:{port} invalid: {e}");
+            tracing::error!("grpc worker host {host} invalid: {e}");
             return;
         }
     };
+    let addr = SocketAddr::new(ip, port);
     let service = MockScheduler { cfg };
     if let Err(e) = Server::builder()
         .add_service(TokenSpeedSchedulerServer::new(service))
@@ -48,6 +53,9 @@ impl TokenSpeedScheduler for MockScheduler {
         request: Request<ts::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
         let request_id = request.into_inner().request_id;
+        if !self.cfg.gen_delay.is_zero() {
+            tokio::time::sleep(self.cfg.gen_delay).await;
+        }
         let ids: Vec<u32> = (0..self.cfg.output_tokens).map(|i| 100 + i).collect();
 
         let mut items: Vec<Result<ts::GenerateResponse, Status>> = Vec::new();

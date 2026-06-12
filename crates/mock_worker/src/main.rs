@@ -10,13 +10,9 @@ mod config;
 mod grpc;
 mod http;
 
-use std::{future::Future, pin::Pin, process::ExitCode, sync::Arc};
-
-use futures::future::join_all;
+use std::{process::ExitCode, sync::Arc};
 
 use crate::config::Config;
-
-type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -41,26 +37,35 @@ async fn main() -> ExitCode {
         cfg.model_id,
     );
 
-    let mut servers: Vec<BoxFuture> = Vec::new();
+    // Spawn each worker as its own task so they run across the whole runtime
+    // (join_all would poll them all on a single task) and an unexpected exit is
+    // surfaced instead of silently masked.
+    let mut workers = tokio::task::JoinSet::new();
     for i in 0..cfg.http_count {
         let Some(port) = cfg.http_base_port.checked_add(i) else {
             tracing::warn!("http port range overflowed u16 at offset {i}; stopping early");
             break;
         };
-        servers.push(Box::pin(http::serve(cfg.clone(), cfg.host.clone(), port)));
+        workers.spawn(http::serve(cfg.clone(), cfg.host.clone(), port));
     }
     for i in 0..cfg.grpc_count {
         let Some(port) = cfg.grpc_base_port.checked_add(i) else {
             tracing::warn!("grpc port range overflowed u16 at offset {i}; stopping early");
             break;
         };
-        servers.push(Box::pin(grpc::serve(cfg.clone(), cfg.host.clone(), port)));
+        workers.spawn(grpc::serve(cfg.clone(), cfg.host.clone(), port));
     }
 
-    tracing::info!("started {} mock workers; ctrl-c to stop", servers.len());
+    tracing::info!("started {} mock workers; ctrl-c to stop", workers.len());
 
     tokio::select! {
-        _ = join_all(servers) => {}
+        Some(res) = workers.join_next() => {
+            if let Err(e) = res {
+                tracing::error!("mock worker task failed: {e}");
+            } else {
+                tracing::error!("a mock worker stopped unexpectedly");
+            }
+        }
         result = tokio::signal::ctrl_c() => {
             if let Err(e) = result {
                 tracing::error!("failed to listen for ctrl-c: {e}");
