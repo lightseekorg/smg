@@ -77,10 +77,12 @@ template:
         command:
           - /home/runner/run.sh
         securityContext:
-          capabilities:
-            # RDMA verbs pin and register memory for queue pairs; without
-            # IPC_LOCK registration fails even though the GID table resolves.
-            add: ["IPC_LOCK"]
+          # The runner runs as non-root (uid 1001), so capabilities.add:
+          # [IPC_LOCK] only reaches the bounding set (not effective) and the
+          # default 64KiB RLIMIT_MEMLOCK blocks RDMA completion-queue
+          # allocation (ibv_create_cq -> ENOMEM, e.g. sglang/Mooncake).
+          # privileged makes IPC_LOCK effective and lifts the memlock cap.
+          privileged: true
         env:
           - name: DOCKER_HOST
             value: unix:///var/run/docker.sock
