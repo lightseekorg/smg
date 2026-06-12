@@ -5,6 +5,7 @@ pub mod middleware;
 pub mod observability;
 pub mod policies;
 pub mod routers;
+pub mod runtime;
 pub mod server;
 pub mod service_discovery;
 pub mod tenant;

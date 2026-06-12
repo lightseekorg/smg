@@ -13,6 +13,7 @@ use smg::{
         metrics::PrometheusConfig,
         otel_trace::{is_otel_enabled, shutdown_otel},
     },
+    runtime,
     server::{self, ServerConfig},
     service_discovery::{ModelIdSource, ServiceDiscoveryConfig},
     version,
@@ -1500,7 +1501,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     router_config.validate()?;
 
     let server_config = cli_args.to_server_config(router_config)?;
-    let runtime = tokio::runtime::Runtime::new()?;
+
+    // Build the runtime deliberately instead of via `Runtime::new()`: validated
+    // worker/blocking pools with env overrides (see `smg::runtime` for the
+    // precedence rules). Logging is not initialized yet — that happens inside
+    // `server::startup` — so the effective configuration is stashed and emitted
+    // right after logging init.
+    let runtime_config = runtime::RuntimeConfig::from_env()?;
+    runtime::stash_startup_log(runtime_config.clone());
+    let runtime = runtime_config.create_runtime()?;
     runtime.block_on(Box::pin(server::startup(server_config)))?;
     if is_otel_enabled() {
         shutdown_otel();

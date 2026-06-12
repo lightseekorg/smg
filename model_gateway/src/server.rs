@@ -1053,6 +1053,11 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ))
     };
 
+    // The runtime is built in `main` before logging exists; emit its effective
+    // configuration now that a subscriber is installed (no-op for embedders
+    // that call `startup` on a runtime of their own).
+    crate::runtime::log_effective_config();
+
     // Start metrics server and collectors.
     // Metrics server binds the port now; collectors start after AppContext is built.
     let (prometheus_handle, watch_registry) =
