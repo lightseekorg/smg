@@ -2,7 +2,7 @@ name: PR Test (SMG)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, keyang/ci-2gpu-pd-rdma-test ]  # TEMP(2gpu-pd-rdma): run on this test branch
     paths-ignore:
       - "docs/**"
       - "mkdocs.yml"
@@ -30,6 +30,7 @@ env:
 
 jobs:
   pre-commit:
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -50,6 +51,7 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
 
   python-lint:
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -77,6 +79,7 @@ jobs:
         run: mypy bindings/python/ --config-file mypy.ini
 
   grpc-proto-build-check:
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -206,6 +209,7 @@ jobs:
 
   python-unit-tests:
     needs: build-wheel
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -242,14 +246,7 @@ jobs:
 
   unit-tests:
     needs: [detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.detect-changes.result == 'success'
-      && (
-        github.event_name != 'pull_request'
-        || needs.detect-changes.outputs.rust-ci == 'true'
-      )
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -302,6 +299,7 @@ jobs:
 
   benchmarks:
     needs: build-wheel
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: 4-gpu-h100
     timeout-minutes: 30
     permissions:
@@ -374,6 +372,7 @@ jobs:
           retention-days: 7
 
   detect-changes:
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -467,14 +466,7 @@ jobs:
   e2e-1gpu-chat:
     name: e2e-1gpu-chat (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.chat-completions == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     # Now also runs the previously-2-GPU chat tests (gpt-oss-20b,
     # Qwen2.5-14B) since they're tp=1.
     strategy:
@@ -513,14 +505,7 @@ jobs:
   e2e-1gpu-completions:
     name: e2e-1gpu-completions (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.completions == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     strategy:
       fail-fast: false
       matrix:
@@ -541,14 +526,7 @@ jobs:
   e2e-1gpu-embeddings:
     name: e2e-1gpu-embeddings (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.embeddings == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     strategy:
       fail-fast: false
       matrix:
@@ -570,14 +548,7 @@ jobs:
   e2e-1gpu-gateway:
     name: e2e-1gpu-gateway (${{ matrix.engine }})
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.chat-completions == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     strategy:
       fail-fast: false
       matrix:
@@ -603,14 +574,7 @@ jobs:
 
   e2e-1gpu-responses:
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.agentic == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
@@ -624,15 +588,12 @@ jobs:
 
   e2e-2gpu-pd:
     name: e2e-2gpu-pd (${{ matrix.engine }}${{ matrix.kv_backend && format('-{0}', matrix.kv_backend) || '' }})
-    needs: [e2e-1gpu-gateway, detect-changes]
+    # TEMP(2gpu-pd-rdma): isolated run — depend only on build-wheel and run unconditionally.
+    needs: [build-wheel]
     if: >-
       always()
       && !cancelled()
-      && needs.e2e-1gpu-gateway.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.chat-completions == 'true')))
+      && needs.build-wheel.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -648,7 +609,7 @@ jobs:
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "2"
-      runner: 2-gpu-h100
+      runner: 2-gpu-h100-rdma-test  # TEMP(2gpu-pd-rdma): RDMA test runner
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
       vllm_kv_backend: ${{ matrix.kv_backend || 'nixl' }}
@@ -659,6 +620,7 @@ jobs:
   e2e-4gpu-chat:
     name: e2e-4gpu-chat (${{ matrix.engine }})
     needs: [e2e-1gpu-chat]
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     strategy:
       fail-fast: false
       matrix:
@@ -681,6 +643,7 @@ jobs:
   e2e-4gpu-gateway:
     name: e2e-4gpu-gateway
     needs: [e2e-1gpu-gateway]
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     uses: ./.github/workflows/e2e-gpu-job.yml
     with:
       engine: sglang
@@ -696,14 +659,7 @@ jobs:
   e2e-vendor:
     name: ${{ matrix.name }}
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.agentic == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     permissions:
       contents: read
     strategy:
@@ -802,6 +758,7 @@ jobs:
   go-unit-tests:
     name: go-unit-tests
     needs: build-wheel
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     timeout-minutes: 15
     permissions:
@@ -842,14 +799,7 @@ jobs:
   go-bindings-e2e:
     name: go-bindings-e2e
     needs: [build-wheel, detect-changes]
-    if: >-
-      always()
-      && !cancelled()
-      && needs.build-wheel.result == 'success'
-      && (github.event_name != 'pull_request'
-          || (needs.detect-changes.result == 'success'
-              && (needs.detect-changes.outputs.common == 'true'
-                  || needs.detect-changes.outputs.go-bindings == 'true')))
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: 1-gpu-h100
     timeout-minutes: 20
     permissions:
@@ -983,7 +933,7 @@ jobs:
 
   finish:
     needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, benchmarks, e2e-1gpu-chat, e2e-1gpu-completions, e2e-1gpu-embeddings, e2e-1gpu-gateway, e2e-1gpu-responses, e2e-2gpu-pd, e2e-4gpu-chat, e2e-4gpu-gateway, e2e-vendor, go-unit-tests, go-bindings-e2e]
-    if: always()
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     runs-on: k8s-runner-cpu
     permissions: {}
     steps:
@@ -1016,7 +966,7 @@ jobs:
   summarize-benchmarks:
     needs: [benchmarks]
     runs-on: k8s-runner-cpu
-    if: success()
+    if: false  # TEMP(2gpu-pd-rdma): disabled to isolate e2e-2gpu-pd
     permissions:
       contents: read
     steps:
