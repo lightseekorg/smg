@@ -121,6 +121,11 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
+    /// Optional dedicated port for a minimal liveness server, served from its
+    /// own OS thread + runtime so a saturated request runtime cannot starve it.
+    /// `None` (default) keeps liveness only on the main port, unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -688,6 +693,7 @@ impl Default for RouterConfig {
             mcp_config: None,
             enable_wasm: false,
             storage_hook_wasm_path: None,
+            liveness_port: None,
             server_cert: None,
             server_key: None,
         }

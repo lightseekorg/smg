@@ -143,6 +143,12 @@ struct CliArgs {
     #[arg(long, default_value_t = 30000, help_heading = "Worker Configuration")]
     port: u16,
 
+    /// Optional dedicated port for a minimal liveness server. Served from its
+    /// own thread + runtime so a saturated request runtime cannot starve the
+    /// k8s liveness probe. Unset (default) keeps liveness only on `--port`.
+    #[arg(long, help_heading = "Worker Configuration")]
+    liveness_port: Option<u16>,
+
     /// List of worker URLs (supports IPv4 and IPv6)
     #[arg(long, num_args = 0.., help_heading = "Worker Configuration")]
     worker_urls: Vec<String>,
@@ -1239,6 +1245,7 @@ impl CliArgs {
             .connection_mode(connection_mode)
             .host(&self.host)
             .port(self.port)
+            .maybe_liveness_port(self.liveness_port)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)

@@ -50,6 +50,7 @@ use crate::{
     mesh::MeshAdapters,
     middleware::{self, AuthConfig, QueuedRequest},
     observability::{
+        liveness_server,
         logging::{self, LoggingConfig},
         metrics::{self, PrometheusConfig},
         metrics_server,
@@ -1071,6 +1072,13 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         } else {
             (None, None)
         };
+
+    // Start the dedicated liveness server before the (slow) worker init path so
+    // the probe is answerable immediately and stays answerable even when the
+    // main request runtime is CPU-saturated.
+    if let Some(liveness_port) = config.router_config.liveness_port {
+        liveness_server::spawn_liveness_server(&config.host, liveness_port);
+    }
 
     // Build the mesh server if configured. Starting gossip is deferred until
     // MeshAdapters has registered the `worker:`/`rl:` CRDT namespaces below —

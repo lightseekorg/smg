@@ -170,6 +170,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn maybe_liveness_port(mut self, liveness_port: Option<u16>) -> Self {
+        self.config.liveness_port = liveness_port;
+        self
+    }
+
     // ==================== Request ====================
 
     pub fn max_payload_size(mut self, size: usize) -> Self {

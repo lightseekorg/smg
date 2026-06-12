@@ -476,6 +476,23 @@ impl ConfigValidator {
             });
         }
 
+        if let Some(liveness_port) = config.liveness_port {
+            if liveness_port == 0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "liveness_port".to_string(),
+                    value: liveness_port.to_string(),
+                    reason: "Port must be > 0".to_string(),
+                });
+            }
+            if liveness_port == config.port {
+                return Err(ConfigError::InvalidValue {
+                    field: "liveness_port".to_string(),
+                    value: liveness_port.to_string(),
+                    reason: "Must differ from the main server port".to_string(),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -1273,5 +1290,43 @@ mod tests {
 
         let result = ConfigValidator::validate(&config);
         assert!(result.is_err());
+    }
+
+    fn config_with_liveness_port(port: u16, liveness_port: Option<u16>) -> RouterConfig {
+        let mut config = RouterConfig::new(
+            RoutingMode::Regular {
+                worker_urls: vec!["http://worker1:8000".to_string()],
+            },
+            PolicyConfig::Random,
+        );
+        config.port = port;
+        config.liveness_port = liveness_port;
+        config
+    }
+
+    #[test]
+    fn test_liveness_port_unset_is_accepted() {
+        assert!(ConfigValidator::validate(&config_with_liveness_port(8080, None)).is_ok());
+    }
+
+    #[test]
+    fn test_liveness_port_distinct_is_accepted() {
+        assert!(ConfigValidator::validate(&config_with_liveness_port(8080, Some(8081))).is_ok());
+    }
+
+    #[test]
+    fn test_liveness_port_zero_is_rejected() {
+        assert!(matches!(
+            ConfigValidator::validate(&config_with_liveness_port(8080, Some(0))),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "liveness_port"
+        ));
+    }
+
+    #[test]
+    fn test_liveness_port_equal_to_main_port_is_rejected() {
+        assert!(matches!(
+            ConfigValidator::validate(&config_with_liveness_port(8080, Some(8080))),
+            Err(ConfigError::InvalidValue { ref field, .. }) if field == "liveness_port"
+        ));
     }
 }
