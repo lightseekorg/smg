@@ -58,19 +58,27 @@ async fn main() -> ExitCode {
 
     tracing::info!("started {} mock workers; ctrl-c to stop", workers.len());
 
-    tokio::select! {
-        Some(res) = workers.join_next() => {
-            if let Err(e) = res {
-                tracing::error!("mock worker task failed: {e}");
-            } else {
-                tracing::error!("a mock worker stopped unexpectedly");
+    // A single worker exiting (e.g. a port already in use) is logged but must
+    // not tear down the whole fleet — the remaining workers keep serving. Only
+    // ctrl-c stops the process. When the set is empty `join_next` yields None,
+    // so that select arm is disabled and we wait on the signal.
+    loop {
+        tokio::select! {
+            Some(joined) = workers.join_next() => {
+                match joined {
+                    Ok(()) => tracing::warn!(
+                        "a mock worker stopped (likely a port bind failure); others keep serving"
+                    ),
+                    Err(e) => tracing::error!("mock worker task panicked: {e}"),
+                }
             }
-        }
-        result = tokio::signal::ctrl_c() => {
-            if let Err(e) = result {
-                tracing::error!("failed to listen for ctrl-c: {e}");
+            result = tokio::signal::ctrl_c() => {
+                if let Err(e) = result {
+                    tracing::error!("failed to listen for ctrl-c: {e}");
+                }
+                tracing::info!("shutting down");
+                break;
             }
-            tracing::info!("shutting down");
         }
     }
     ExitCode::SUCCESS
