@@ -660,7 +660,7 @@ jobs:
     with:
       engine: ${{ matrix.engine }}
       gpu_tier: "2"
-      runner: 2-gpu-h100-test
+      runner: 2-gpu-h100
       timeout: ${{ matrix.timeout }}
       test_dirs: e2e_test/router
       vllm_kv_backend: ${{ matrix.kv_backend || 'nixl' }}

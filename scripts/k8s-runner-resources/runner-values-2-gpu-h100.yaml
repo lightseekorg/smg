@@ -6,11 +6,11 @@ githubConfigUrl: "https://github.com/lightseekorg/smg"
 githubConfigSecret: github-arc-secret
 
 ## Runner scaling configuration
-minRunners: 1
-maxRunners: 1
+minRunners: 2
+maxRunners: 8
 
 ## name of the runner scale set to create.  Defaults to the helm release name
-runnerScaleSetName: "2-gpu-h100-test"
+runnerScaleSetName: "2-gpu-h100"
 
 resourceMeta: {}
 keyVault: {}
@@ -51,7 +51,7 @@ template:
                   - key: actions.github.com/scale-set-name
                     operator: In
                     values:
-                      - 2-gpu-h100-test
+                      - 2-gpu-h100
               topologyKey: kubernetes.io/hostname
 
     volumes:
