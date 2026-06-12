@@ -278,9 +278,9 @@ impl PreprocessedEncoderInputs {
         self
     }
 
-    /// Get the batch size.
+    /// Get the number of media items represented by this preprocessed batch.
     pub fn batch_size(&self) -> usize {
-        self.encoder_input.shape()[0]
+        self.item_sizes.len()
     }
 
     /// Get the number of channels.

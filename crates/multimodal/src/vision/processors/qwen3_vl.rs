@@ -139,6 +139,20 @@ impl Qwen3VLProcessor {
         }
     }
 
+    fn with_preprocessor_config(&self, config: &PreProcessorConfig) -> Self {
+        if config.patch_size.is_some()
+            || config.merge_size.is_some()
+            || config.min_pixels.is_some()
+            || config.max_pixels.is_some()
+            || config.temporal_patch_size.is_some()
+            || config.size.is_some()
+        {
+            Self::from_preprocessor_config(config)
+        } else {
+            self.clone()
+        }
+    }
+
     /// Get the patch size.
     pub fn patch_size(&self) -> usize {
         self.inner.patch_size()
@@ -218,7 +232,8 @@ impl VisionPreProcessor for Qwen3VLProcessor {
         images: &[DynamicImage],
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        self.inner.preprocess(images, config)
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess(images, config)
     }
 
     fn preprocess_video(
@@ -226,11 +241,13 @@ impl VisionPreProcessor for Qwen3VLProcessor {
         frames: &[DynamicImage],
         config: &PreProcessorConfig,
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
-        self.inner.preprocess_video(frames, config)
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess_video(frames, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
-        self.inner.calculate_num_tokens(width, height, config)
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.calculate_num_tokens(width, height, config)
     }
 
     fn model_name(&self) -> &'static str {

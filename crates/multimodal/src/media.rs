@@ -130,6 +130,9 @@ impl MediaConnector {
         source: MediaSource,
         cfg: VideoFetchConfig,
     ) -> Result<Arc<VideoClip>, MediaConnectorError> {
+        // TODO: add a configurable max-video-bytes guard before fully buffering
+        // URL/data/file/inline payloads. VideoClip retains the original bytes,
+        // so oversized inputs should be rejected before decode.
         match source {
             MediaSource::Url(url) => self.fetch_http_video(url, cfg).await,
             MediaSource::DataUrl(data_url) => self.fetch_video_data_url(data_url, cfg).await,

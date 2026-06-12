@@ -461,7 +461,7 @@ impl VisionPreProcessor for Llama4VisionProcessor {
 
             all_outputs.push(output);
             all_aspect_ratios.push(aspect_ratio);
-            item_sizes.push((image.height(), image.width()));
+            item_sizes.push(image.dimensions());
             feature_token_counts.push(tokens);
         }
 
