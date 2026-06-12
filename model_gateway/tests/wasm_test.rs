@@ -19,6 +19,7 @@ use llm_tokenizer::TokenizerRegistry;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
+    observability::probe::ProbeState,
     policies::PolicyRegistry,
     routers::RouterFactory,
     server::{build_app, AppState},
@@ -189,6 +190,7 @@ async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir)
 
     let app_state = Arc::new(AppState {
         router,
+        probe_state: ProbeState::new(app_context.inflight_tracker.clone()),
         context: app_context.clone(),
         concurrency_queue_tx: None,
         router_manager: None,

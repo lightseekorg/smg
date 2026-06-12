@@ -8,4 +8,5 @@ pub mod metrics;
 pub mod metrics_server;
 pub mod metrics_ws;
 pub mod otel_trace;
+pub mod probe;
 pub mod runtime_metrics;
