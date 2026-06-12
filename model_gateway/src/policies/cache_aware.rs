@@ -1688,7 +1688,7 @@ mod tests {
         jump_size: usize,
     ) -> Arc<PositionalIndexer> {
         let indexer = Arc::new(PositionalIndexer::new(jump_size));
-        let worker_id = indexer.intern_worker(worker_url);
+        let worker_id = indexer.intern_worker(worker_url).unwrap();
         let mut wb = WorkerBlockMap::default();
         let blocks: Vec<StoredBlock> = token_chunks
             .iter()
@@ -1804,8 +1804,8 @@ mod tests {
 
         // Store same blocks for both workers (equal overlap)
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
-        let w2_id = indexer.intern_worker("http://w2:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
         let blocks = vec![StoredBlock {
@@ -1848,8 +1848,8 @@ mod tests {
         policy.init_workers(&workers);
 
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
-        let w2_id = indexer.intern_worker("http://w2:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
 
@@ -1917,8 +1917,8 @@ mod tests {
         policy.init_workers(&workers);
 
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
-        let w2_id = indexer.intern_worker("http://w2:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
+        let w2_id = indexer.intern_worker("http://w2:8000").unwrap();
         let mut wb1 = WorkerBlockMap::default();
         let mut wb2 = WorkerBlockMap::default();
 
@@ -2167,7 +2167,7 @@ mod tests {
 
         // Store blocks using block_size=8 (tokens chunked in groups of 8)
         let indexer = Arc::new(PositionalIndexer::new(4));
-        let w1_id = indexer.intern_worker("http://w1:8000");
+        let w1_id = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),

@@ -230,6 +230,11 @@ pub(crate) fn init_metrics() {
         "smg_worker_errors_total",
         "Worker-level errors by worker_type, connection_mode, error_type"
     );
+    describe_counter!(
+        "smg_kv_event_subscription_failures_total",
+        "KV event subscription task failures by worker and reason \
+         (panic, join_error, intern_failed)"
+    );
     describe_gauge!(
         "smg_manual_policy_cache_entries",
         "Number of routing entries in manual policy cache"
@@ -942,6 +947,18 @@ impl Metrics {
             "worker" => worker_interned
         )
         .set(if healthy { 1.0 } else { 0.0 });
+    }
+
+    /// Record a KV event subscription task failure (panic, join error, or
+    /// worker-id intern failure)
+    pub fn record_kv_event_subscription_failure(worker_url: &str, reason: &'static str) {
+        let worker_interned = intern_string(worker_url);
+        counter!(
+            "smg_kv_event_subscription_failures_total",
+            "worker" => worker_interned,
+            "reason" => reason
+        )
+        .increment(1);
     }
 
     // ========================================================================

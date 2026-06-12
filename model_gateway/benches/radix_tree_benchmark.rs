@@ -445,7 +445,7 @@ fn build_populated_indexer(
     let mut all_worker_chunks = Vec::with_capacity(workers.len());
 
     for worker in workers {
-        let worker_id = indexer.intern_worker(worker);
+        let worker_id = indexer.intern_worker(worker).unwrap();
         let mut wb = WorkerBlockMap::default();
         indexer
             .apply_stored(worker_id, &shared_blocks, None, &mut wb)
@@ -500,7 +500,7 @@ macro_rules! bench_indexer_store {
                 for _ in 0..iters {
                     let indexer = PositionalIndexer::new(32);
                     for worker in &workers {
-                        let worker_id = indexer.intern_worker(worker);
+                        let worker_id = indexer.intern_worker(worker).unwrap();
                         let mut wb = WorkerBlockMap::default();
                         let chunks = generate_token_chunks($blocks_per_worker, $block_size);
                         let blocks = chunks_to_stored_blocks(&chunks);
@@ -596,7 +596,7 @@ macro_rules! bench_indexer_concurrent {
             (0..$num_threads)
                 .map(|t| {
                     let chunks = &worker_chunks[t % workers.len()];
-                    let worker_id = indexer.intern_worker(&workers[t % workers.len()]);
+                    let worker_id = indexer.intern_worker(&workers[t % workers.len()]).unwrap();
 
                     // Read data: pre-computed content hashes
                     let query_tokens = flatten_tokens(chunks);
