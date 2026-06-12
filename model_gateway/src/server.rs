@@ -54,7 +54,7 @@ use crate::{
         metrics::{self, PrometheusConfig},
         metrics_server,
         metrics_ws::{collectors, registry::WatchRegistry},
-        otel_trace,
+        otel_trace, runtime_metrics,
     },
     routers::{
         conversations, openai::realtime::ws::RealtimeQueryParams, parse,
@@ -1067,6 +1067,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                 metrics_server::DEFAULT_MAX_WS_CONNECTIONS,
             )
             .await;
+            // Tokio runtime self-observability (event-loop canary + sampler).
+            // `startup` runs on the main runtime, so the observer lands on —
+            // and therefore measures — the runtime that serves requests.
+            runtime_metrics::spawn_observer();
             (Some(handle), Some(registry))
         } else {
             (None, None)

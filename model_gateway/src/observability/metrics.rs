@@ -319,6 +319,9 @@ pub(crate) fn init_metrics() {
     );
     describe_counter!("smg_db_items_stored", "Total items stored by storage_type");
 
+    // Layer 0: Tokio runtime self-observability (event-loop canary + sampler).
+    super::runtime_metrics::describe();
+
     // Initialize mesh metrics
     smg_mesh::init_mesh_metrics();
 
@@ -344,10 +347,21 @@ pub fn start_prometheus(config: PrometheusConfig) -> PrometheusHandle {
         ]
     });
 
+    // The event-loop canary needs its own buckets: its name does not end in
+    // `duration_seconds`, and the request-latency buckets above are far too
+    // coarse for 0-1s wake drift. Without explicit buckets the recorder would
+    // render it as a summary.
+    let canary_matcher = Matcher::Full(super::runtime_metrics::EVENT_LOOP_DELAY_SECONDS.into());
+
     PrometheusBuilder::new()
         .upkeep_timeout(Duration::from_secs(UPKEEP_INTERVAL_SECS))
         .set_buckets_for_metric(duration_matcher, &duration_bucket)
         .expect("failed to set duration bucket")
+        .set_buckets_for_metric(
+            canary_matcher,
+            super::runtime_metrics::EVENT_LOOP_DELAY_BUCKETS,
+        )
+        .expect("failed to set event loop delay buckets")
         .install_recorder()
         .expect("failed to install Prometheus recorder")
 }
