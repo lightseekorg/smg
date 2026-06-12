@@ -234,7 +234,6 @@ impl PDRouter {
                 ports.push(prefill_worker.bootstrap_port());
                 rooms.push(super::pd_types::generate_room_id());
             }
-            // Use static string keys to avoid per-request allocations
             obj.insert(
                 Self::BOOTSTRAP_HOST_KEY.to_string(),
                 Value::Array(hosts.into_iter().map(Value::from).collect()),
@@ -256,7 +255,6 @@ impl PDRouter {
                 Value::Array(rooms.into_iter().map(Value::from).collect()),
             );
         } else {
-            // Use static string keys to avoid per-request allocations
             obj.insert(
                 Self::BOOTSTRAP_HOST_KEY.to_string(),
                 Value::from(prefill_worker.bootstrap_host()),
@@ -422,7 +420,6 @@ impl PDRouter {
                                 context,
                                 Arc::clone(&prefill),
                                 Arc::clone(&decode),
-                                start_time,
                             )
                             .await;
 
@@ -603,7 +600,6 @@ impl PDRouter {
     }
 
     // Internal method that performs the actual dual dispatch (without retry logic)
-    #[expect(clippy::too_many_arguments)]
     async fn execute_dual_dispatch_internal(
         &self,
         headers: Option<&HeaderMap>,
@@ -612,7 +608,6 @@ impl PDRouter {
         context: PDRequestContext<'_>,
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
-        _start_time: Instant,
     ) -> Response {
         // For non-streaming: use guard for automatic load management
         // For streaming: load will be managed in create_streaming_response
@@ -1277,8 +1272,6 @@ impl RouterTrait for PDRouter {
     }
 
     async fn get_server_info(&self, _req: Request<Body>) -> Response {
-        // Get info from the first decode server to match sglang's server info format
-        // Note: We use decode workers for server info to match expected format
         self.proxy_to_first_prefill_worker("get_server_info", None)
             .await
     }
