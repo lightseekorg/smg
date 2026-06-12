@@ -148,7 +148,9 @@ def parse_scores(project_root: Path, model: str, categories: list[str]) -> dict[
 
 
 def _find_category_accuracy(score_root: Path, category: str) -> float | None:
-    for path in score_root.rglob(f"{category}_score.json"):
+    # BFCL nests scores as <model>/<section>/BFCL_v4_<category>_score.json, so
+    # match a trailing-wildcard pattern (the BFCL_v4_ prefix varies by version).
+    for path in score_root.rglob(f"*{category}_score.json"):
         try:
             first = path.read_text(encoding="utf-8").splitlines()[0]
             summary = json.loads(first)

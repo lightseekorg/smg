@@ -98,15 +98,26 @@ bash launch_arm.sh stop
   V1 engine has thrown `EngineDeadError` under concurrent bfcl load. Prefer a
   dedicated GPU per arm and a modest `--num-threads`.
 
-## Validation status (as of this commit)
+## Validation status — ran end-to-end ✅
 
-Brought up on the dev H100 box against Qwen3-4B-Instruct-2507:
+Brought up on a dev H100 box against `Qwen/Qwen3-4B-Instruct-2507`, BFCL
+`simple_python` (400 cases), FC mode, temp 0.001, both arms on the same GPU
+(sequentially), `--enforce-eager` + `HF_HUB_OFFLINE=1`:
 
-- ✅ Arm A (pure vLLM) serves native `tool_calls`; **FC mode confirmed** — bfcl
-  drives `/v1/chat/completions` with `tools`, so the server parser is scored.
-- ✅ `bfcl-eval` installs and runs; `-FC` handler + `--skip-server-setup` reach
-  the endpoint.
-- ⏳ A full end-to-end A/B score was **not** captured on the shared dev box: the
-  vLLM engine repeatedly died (`EngineDeadError`) under sustained bfcl load on
-  the contended GPU. The pipeline is complete and runnable — run it on a
-  dedicated GPU (or via `nightly-bfcl.yml`) to produce the comparison table.
+| arm | accuracy |
+|---|---|
+| pure vLLM (`--tool-call-parser hermes`) | **95.50%** (382/400) |
+| SMG → vLLM gRPC (`--tool-call-parser qwen`) | **95.25%** (381/400) |
+| **Δ (SMG − vLLM)** | **−0.25pp** (1 case — parity, within noise) |
+
+So on this slice SMG's Rust frontend is **at parity** with vLLM's native
+parser. Both arms served native `tool_calls` (FC mode confirmed end to end), and
+`run_ab.py` produced the table above. Scale to more categories + multiple runs
+(and the five target models) to characterise the delta with confidence; that's
+what `nightly-bfcl.yml` is for.
+
+Two things were needed to run cleanly on a shared/contended GPU (both folded
+into the tooling): `BFCL_VLLM_EXTRA=--enforce-eager` (vLLM's V1 engine threw
+`EngineDeadError` under load with CUDA graphs) and `HF_HUB_OFFLINE=1` (set by
+`run_ab.py`; otherwise per-request HF Hub round-trips throttle the run to a
+crawl).

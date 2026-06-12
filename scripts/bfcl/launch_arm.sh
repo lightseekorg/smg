@@ -35,6 +35,11 @@ VLLM_REASONING_PARSER="${BFCL_VLLM_REASONING_PARSER:-}"   # empty = none (non-th
 SMG_TOOL_PARSER="${BFCL_SMG_TOOL_PARSER:-qwen}"
 SMG_REASONING_PARSER="${BFCL_SMG_REASONING_PARSER:-}"
 
+# Extra args appended to every vLLM process (both arms). e.g.
+# BFCL_VLLM_EXTRA="--enforce-eager" — skips CUDA-graph capture, which has been
+# more stable under sustained bfcl load on shared/contended GPUs.
+VLLM_EXTRA="${BFCL_VLLM_EXTRA:-}"
+
 # Ports (override to avoid collisions on a shared box).
 ARM_A_PORT="${BFCL_ARM_A_PORT:-31199}"          # pure-vLLM OpenAI port
 ARM_B_GRPC_PORT="${BFCL_ARM_B_GRPC_PORT:-50081}" # vLLM gRPC worker port
@@ -83,6 +88,8 @@ case "$ARM" in
       --gpu-memory-utilization "$GPU_MEM_UTIL"
     )
     [ -n "$VLLM_REASONING_PARSER" ] && cmd+=(--reasoning-parser "$VLLM_REASONING_PARSER")
+    # shellcheck disable=SC2206  # intentional word-split of optional extra flags
+    [ -n "$VLLM_EXTRA" ] && cmd+=($VLLM_EXTRA)
     start arm_a "$RUN_DIR/arm_a_vllm.log" "${cmd[@]}"
     wait_http "http://127.0.0.1:$ARM_A_PORT/health" "${BFCL_STARTUP_TIMEOUT:-420}"
     echo "http://127.0.0.1:$ARM_A_PORT"
@@ -90,11 +97,15 @@ case "$ARM" in
 
   b)
     # 1) vLLM gRPC worker (raw-token; SMG will own template+parsing).
-    start arm_b_worker "$RUN_DIR/arm_b_worker.log" \
-      CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_PYTHON" -m vllm.entrypoints.grpc_server \
-      --model "$MODEL" --host 0.0.0.0 --port "$ARM_B_GRPC_PORT" \
-      --tensor-parallel-size 1 --max-model-len "$MAX_MODEL_LEN" \
+    declare -a wcmd=(
+      CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_PYTHON" -m vllm.entrypoints.grpc_server
+      --model "$MODEL" --host 0.0.0.0 --port "$ARM_B_GRPC_PORT"
+      --tensor-parallel-size 1 --max-model-len "$MAX_MODEL_LEN"
       --gpu-memory-utilization "$GPU_MEM_UTIL"
+    )
+    # shellcheck disable=SC2206  # intentional word-split of optional extra flags
+    [ -n "$VLLM_EXTRA" ] && wcmd+=($VLLM_EXTRA)
+    start arm_b_worker "$RUN_DIR/arm_b_worker.log" "${wcmd[@]}"
     wait_grpc "$ARM_B_GRPC_PORT" "${BFCL_STARTUP_TIMEOUT:-420}"
     # 2) SMG gateway in front, exposing the OpenAI API.
     declare -a smg_cmd=(
