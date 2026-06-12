@@ -1866,6 +1866,15 @@ fn f32_to_f16_bits(value: f32) -> u16 {
     half
 }
 
+/// Benchmark-only entry to the pixel serialization path (`cargo build --bin dataplane-bench`).
+#[doc(hidden)]
+pub fn bench_serialize_pixel_values(
+    preprocessed: &PreprocessedImages,
+    dtype: &str,
+) -> (Vec<u8>, Vec<u32>) {
+    serialize_pixel_values(preprocessed, dtype)
+}
+
 /// Serialize model-specific values to TensorBytes, consuming the map to avoid key clones.
 fn serialize_model_specific(
     model_specific: HashMap<String, ModelSpecificValue>,

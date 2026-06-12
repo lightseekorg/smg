@@ -6,6 +6,8 @@ pub mod middleware;
 pub mod observability;
 pub mod policies;
 pub mod routers;
+#[doc(hidden)]
+pub use routers::grpc::multimodal::bench_serialize_pixel_values;
 pub mod server;
 pub mod service_discovery;
 pub mod tenant;
