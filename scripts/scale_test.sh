@@ -47,6 +47,14 @@ if [[ "$HTTP" -eq 0 && "$GRPC" -eq 0 ]]; then
   echo "pass --http N and/or --grpc N" >&2; exit 2
 fi
 
+# Thousands of mock ports + gateway connections need plenty of file descriptors.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
+# Kill leftovers from prior runs so mock ports are free to bind.
+pkill -9 -x mock-worker 2>/dev/null || true
+pkill -9 -x smg 2>/dev/null || true
+sleep 2
+
 GW_PID=""; MOCK_PID=""
 cleanup() {
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true
@@ -54,23 +62,36 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Pin the target dir so `cargo build` and binary resolution always agree. The
+# environment may otherwise redirect the target dir to a hash that is not stable
+# across invocations (causing cold rebuilds + wrong paths). Override by exporting
+# CARGO_TARGET_DIR before running this script (e.g. point it at a warm dir).
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 if [[ "$BUILD" -eq 1 ]]; then
-  echo "==> building smg + mock-worker (release, sccache off)"
+  echo "==> building smg + mock-worker (release, sccache off) into $CARGO_TARGET_DIR"
   RUSTC_WRAPPER="" cargo build --release -p smg -p mock-worker
 fi
-# Resolve the real target dir (it may be redirected via CARGO_TARGET_DIR or a
-# global cargo config, so it is not necessarily ./target).
-TARGET_DIR=$(cargo metadata --format-version 1 --no-deps \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
-SMG="$TARGET_DIR/release/smg"
-MOCK="$TARGET_DIR/release/mock-worker"
+SMG="$CARGO_TARGET_DIR/release/smg"
+MOCK="$CARGO_TARGET_DIR/release/mock-worker"
+if [[ ! -x "$SMG" || ! -x "$MOCK" ]]; then
+  echo "binaries not found in $CARGO_TARGET_DIR/release (run without --no-build)" >&2
+  exit 1
+fi
+echo "    smg=$SMG"
+
+# Redirect both processes to log files. If they inherited this script's stdout
+# (often an unread pipe), their heavy logging would fill the pipe buffer and
+# block the process — stalling the gateway before it serves.
+LOGDIR="${TMPDIR:-/tmp}/smg-scale"
+mkdir -p "$LOGDIR"
+echo "==> logs: $LOGDIR/{mock,gateway}.log"
 
 # ---- start mock workers (one process, many ports) ----
 echo "==> starting mock workers: $HTTP http, $GRPC grpc"
 MOCK_ARGS=(--model "$MODEL" --gen-ms "$GEN_MS")
 [[ "$HTTP" -gt 0 ]] && MOCK_ARGS+=(--http-base-port "$HTTP_BASE" --http-count "$HTTP")
 [[ "$GRPC" -gt 0 ]] && MOCK_ARGS+=(--grpc-base-port "$GRPC_BASE" --grpc-count "$GRPC")
-"$MOCK" "${MOCK_ARGS[@]}" &
+"$MOCK" "${MOCK_ARGS[@]}" >"$LOGDIR/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 2
 
@@ -80,7 +101,7 @@ GW_ARGS=(--host 127.0.0.1 --port "$GW_PORT" --enable-igw --policy "$POLICY")
 # gRPC workers need a tokenizer; skip autoload so registration/routing can be
 # measured without a real tokenizer (generation itself is not exercised here).
 [[ "$GRPC" -gt 0 ]] && GW_ARGS+=(--disable-tokenizer-autoload)
-"$SMG" "${GW_ARGS[@]}" &
+"$SMG" "${GW_ARGS[@]}" >"$LOGDIR/gateway.log" 2>&1 &
 GW_PID=$!
 
 echo "==> waiting for gateway /health"
@@ -90,31 +111,33 @@ for _ in $(seq 1 60); do
 done
 
 # ---- register workers via REST, in parallel ----
+# Health disabled so workers are instantly Ready/routable — isolates routing
+# cost from the per-worker health-probe loop (and avoids the 60s promote wait).
+# Direct curl per port ({} = port via xargs); model/mode pinned so routing has a
+# concrete model (bare-URL auto-detect leaves model_id "unknown" -> 404 on route).
 echo "==> registering workers via POST /workers"
-register() {
-  local url="$1" body
-  if [[ "$url" == grpc://* ]]; then
-    body="{\"url\":\"$url\",\"connection_mode\":\"grpc\",\"runtime\":\"tokenspeed\",\"models\":[{\"id\":\"$MODEL\"}]}"
-  else
-    body="{\"url\":\"$url\",\"connection_mode\":\"http\",\"runtime\":\"sglang\",\"models\":[{\"id\":\"$MODEL\"}]}"
-  fi
-  curl -sf -X POST "http://127.0.0.1:$GW_PORT/workers" \
-    -H 'content-type: application/json' -d "$body" >/dev/null 2>&1 || true
-}
-export -f register
-export GW_PORT MODEL
-{
-  for ((p = HTTP_BASE; p < HTTP_BASE + HTTP; p++)); do echo "http://127.0.0.1:$p"; done
-  for ((p = GRPC_BASE; p < GRPC_BASE + GRPC; p++)); do echo "grpc://127.0.0.1:$p"; done
-} | xargs -P 32 -I {} bash -c 'register "$@"' _ {}
+H='"health":{"disable_health_check":true}'
+W="http://127.0.0.1:$GW_PORT/workers"
+if [[ "$HTTP" -gt 0 ]]; then
+  seq "$HTTP_BASE" $((HTTP_BASE + HTTP - 1)) | xargs -P 32 -I{} \
+    curl -s -o /dev/null --max-time 15 -X POST "$W" -H 'content-type: application/json' \
+    -d "{\"url\":\"http://127.0.0.1:{}\",\"connection_mode\":\"http\",\"runtime\":\"sglang\",\"models\":[{\"id\":\"$MODEL\"}],$H}" || true
+fi
+if [[ "$GRPC" -gt 0 ]]; then
+  seq "$GRPC_BASE" $((GRPC_BASE + GRPC - 1)) | xargs -P 32 -I{} \
+    curl -s -o /dev/null --max-time 15 -X POST "$W" -H 'content-type: application/json' \
+    -d "{\"url\":\"grpc://127.0.0.1:{}\",\"connection_mode\":\"grpc\",\"runtime\":\"tokenspeed\",\"models\":[{\"id\":\"$MODEL\"}],$H}" || true
+fi
 
 echo "==> waiting for workers to become Ready"
 EXPECT=$((HTTP + GRPC))
 n=0
 for _ in $(seq 1 120); do
-  body=$(curl -sf "http://127.0.0.1:$GW_PORT/workers" 2>/dev/null || true)
-  n=$(printf '%s' "$body" | grep -o '"url"' | wc -l | tr -d ' ')
-  [[ "${n:-0}" -ge "$EXPECT" ]] && break
+  body=$(curl -sf --max-time 20 "http://127.0.0.1:$GW_PORT/workers" 2>/dev/null || true)
+  n=$(printf '%s' "$body" | grep -o '"url"' | wc -l | tr -d ' ' || true)
+  n=${n:-0}
+  # Accept ~95%: a few ports may collide and a couple of workflows lag.
+  [[ "$n" -ge $((EXPECT * 95 / 100)) ]] && break
   sleep 1
 done
 echo "    registered ~${n:-0} / $EXPECT workers"
@@ -124,10 +147,10 @@ sample() {
   local label="$1" secs="$2"
   echo "==> [$label] sampling gateway PID $GW_PID for ${secs}s"
   for _ in $(seq 1 "$secs"); do
-    cpu=$(ps -o %cpu= -p "$GW_PID" 2>/dev/null | tr -d ' ')
-    rss=$(ps -o rss= -p "$GW_PID" 2>/dev/null | tr -d ' ')
+    cpu=$(ps -p "$GW_PID" -o pcpu= 2>/dev/null | tr -d ' ' || true)
+    rss=$(ps -p "$GW_PID" -o rss= 2>/dev/null | tr -d ' ' || true)
     hl=$(curl -so /dev/null -w '%{time_total}' "http://127.0.0.1:$GW_PORT/health" 2>/dev/null || echo NA)
-    echo "    [$label] cpu=${cpu}% rss_kb=${rss} health_s=${hl}"
+    echo "    [$label] cpu=${cpu:-NA}% rss_kb=${rss:-NA} health_s=${hl}"
     sleep 1
   done
 }
