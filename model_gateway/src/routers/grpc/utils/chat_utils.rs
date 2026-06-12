@@ -2,12 +2,13 @@
 
 use std::{collections::HashMap, io, sync::Arc};
 
+use anyhow::anyhow;
 use axum::response::Response;
 use bytes::Bytes;
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
-    traits::Tokenizer,
+    traits::{Encoding, Tokenizer},
     StopSequenceDecoder,
 };
 use openai_protocol::{
@@ -78,6 +79,17 @@ pub(crate) fn resolve_tokenizer(
     ctx.state.tokenizer = Some(tokenizer.clone());
 
     Ok(tokenizer)
+}
+
+/// Tokenize on the blocking pool so CPU-bound `encode` does not stall async worker threads.
+pub(crate) async fn encode_blocking(
+    tokenizer: Arc<dyn Tokenizer>,
+    text: String,
+    add_special_tokens: bool,
+) -> anyhow::Result<Encoding> {
+    tokio::task::spawn_blocking(move || tokenizer.encode(&text, add_special_tokens))
+        .await
+        .map_err(|e| anyhow!("tokenization task failed: {e}"))?
 }
 
 /// Process tool call arguments in messages

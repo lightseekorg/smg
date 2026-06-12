@@ -20,6 +20,7 @@ use tracing::{debug, error, warn};
 
 use crate::{
     app_context::AppContext,
+    routers::grpc::utils::encode_blocking,
     worker::UNKNOWN_MODEL_ID,
     workflow::{Job, TokenizerConfigRequest},
 };
@@ -98,7 +99,7 @@ pub async fn tokenize(registry: &Arc<TokenizerRegistry>, request: TokenizeReques
 
     for text in texts {
         // Don't add special tokens for tokenize API (matches Python behavior)
-        let encoding = match tokenizer.encode(text, false) {
+        let encoding = match encode_blocking(tokenizer.clone(), text.to_string(), false).await {
             Ok(enc) => enc,
             Err(e) => {
                 error!("Tokenization failed: {}", e);

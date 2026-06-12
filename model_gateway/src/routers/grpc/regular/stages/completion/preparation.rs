@@ -39,14 +39,16 @@ impl PipelineStage for CompletionPreparationStage {
             }
         };
 
-        let encoding = tokenizer.encode(&prompt_text, false).map_err(|e| {
-            error!(
-                function = "CompletionPreparationStage::execute",
-                error = %e,
-                "Tokenization failed"
-            );
-            error::bad_request("tokenization_failed", format!("Tokenization failed: {e}"))
-        })?;
+        let encoding = utils::encode_blocking(tokenizer.clone(), prompt_text.clone(), false)
+            .await
+            .map_err(|e| {
+                error!(
+                    function = "CompletionPreparationStage::execute",
+                    error = %e,
+                    "Tokenization failed"
+                );
+                error::bad_request("tokenization_failed", format!("Tokenization failed: {e}"))
+            })?;
 
         let stop_decoder = utils::create_stop_decoder(
             &tokenizer,
