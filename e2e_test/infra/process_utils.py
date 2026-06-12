@@ -185,36 +185,70 @@ def wait_for_workers_ready(
     )
 
 
-def detect_ib_device() -> str | None:
-    """Detect first active InfiniBand device (e.g., mlx5_0).
+# RoCE GIDs are programmed per network namespace from the bound netdev's IPs.
+# A pod with its own netns (no hostNetwork / SR-IOV) sees the shared host mlx5
+# devices as PORT_ACTIVE but with an all-zero GID table, so ibv_query_gid()
+# returns ENODATA and NIXL(UCX)/Mooncake RDMA init dies during worker startup.
+# Treat such a device as unusable so PD falls back to TCP: Mooncake auto-falls
+# back when no --disaggregation-ib-device is forced, and NIXL is pinned off
+# RDMA via UCX_TLS (see Worker._build_env).
+_IB_SYSFS_ROOT = "/sys/class/infiniband"
+_ZERO_GID = "0000:0000:0000:0000:0000:0000:0000:0000"
 
-    Returns:
-        Device name if found (e.g., "mlx5_0"), None otherwise.
+
+def _port_has_usable_gid(port_dir: str) -> bool:
+    """True if an RDMA port exposes at least one non-zero GID in this netns."""
+    gids_dir = os.path.join(port_dir, "gids")
+    try:
+        names = os.listdir(gids_dir)
+    except OSError:
+        return False
+    for name in names:
+        try:
+            with open(os.path.join(gids_dir, name), encoding="ascii") as fh:
+                gid = fh.read().strip()
+        except OSError:
+            continue
+        if gid and gid != _ZERO_GID:
+            return True
+    return False
+
+
+def detect_ib_device() -> str | None:
+    """Detect an RDMA device usable for PD KV transfer in this netns.
+
+    Returns a device name (e.g. "mlx5_0") only when it has an ACTIVE port whose
+    GID table is populated. Returns None when no device is usable — e.g. on CI
+    runner pods where the shared NICs are ACTIVE but expose an empty GID table
+    inside the pod network namespace — so callers skip RDMA and let PD fall
+    back to TCP/cuda_ipc instead of dying in transfer-engine init.
     """
     try:
-        subprocess.run(
-            ["ibv_devinfo", "-l"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=1,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        devices = sorted(os.listdir(_IB_SYSFS_ROOT))
+    except OSError:
         return None
 
-    for i in range(12):
-        dev = f"mlx5_{i}"
+    for dev in devices:
+        ports_dir = os.path.join(_IB_SYSFS_ROOT, dev, "ports")
         try:
-            res = subprocess.run(
-                ["ibv_devinfo", dev],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if res.returncode == 0 and "state:" in res.stdout:
-                for line in res.stdout.splitlines():
-                    if "state:" in line and "PORT_ACTIVE" in line:
-                        logger.info("Detected IB device: %s", dev)
-                        return dev
-        except Exception:
-            pass
+            ports = sorted(os.listdir(ports_dir))
+        except OSError:
+            continue
+        for port in ports:
+            port_dir = os.path.join(ports_dir, port)
+            try:
+                with open(os.path.join(port_dir, "state"), encoding="ascii") as fh:
+                    state = fh.read()
+            except OSError:
+                continue
+            if "ACTIVE" not in state:
+                continue
+            if _port_has_usable_gid(port_dir):
+                logger.info("Detected usable RDMA device: %s (port %s)", dev, port)
+                return dev
+
+    logger.info(
+        "No RDMA device with a usable GID in this netns; PD KV transfer will "
+        "fall back to TCP/cuda_ipc instead of RDMA"
+    )
     return None

@@ -397,6 +397,16 @@ class Worker:
                 self.nixl_port = get_open_port()
                 env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_port)
 
+                # NIXL drives UCX, which auto-probes RDMA verbs (rc/ud) at
+                # engine startup. Without a usable RoCE GID (ib_device is None)
+                # that probe hard-fails ("Failed to create UCX worker: Address
+                # not valid") and kills the worker. Pin UCX to non-RDMA
+                # transports so KV moves over cuda_ipc (same-node GPU<->GPU) /
+                # shared-mem / TCP. Presetting UCX_TLS overrides this (e.g. to
+                # force RDMA on a properly provisioned node).
+                if self.ib_device is None and "UCX_TLS" not in env:
+                    env["UCX_TLS"] = "cuda_ipc,cuda_copy,tcp,sm,self"
+
         # TRT-LLM multi-GPU needs NCCL tuning for CI compatibility
         if self.engine == "trtllm" and len(self.gpu_ids) > 1:
             env["NCCL_DEBUG"] = "WARN"
