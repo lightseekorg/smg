@@ -128,6 +128,7 @@ impl TokenSpeedScheduler for MockScheduler {
             weight_version: "mock".to_string(),
             default_sampling_params_json: String::new(),
             supports_vision: false,
+            ..Default::default()
         }))
     }
 
