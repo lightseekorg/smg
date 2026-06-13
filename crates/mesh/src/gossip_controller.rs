@@ -254,11 +254,29 @@ impl GossipController {
                 Instant::now(),
             );
             for name in expired {
+                // Re-check under the write lock: `expired` came from a read
+                // snapshot, and merge_state (on a gRPC task) may have revived
+                // this peer to Alive in the gap. Remove + sweep ONLY if it is
+                // still departed — otherwise this is the destructive live-node
+                // sweep the rest of this PR exists to prevent.
+                let removed_version = {
+                    let mut state = init_state.write();
+                    match state.get(&name) {
+                        Some(node) if node.status == NodeStatus::Down as i32 => {
+                            let version = node.version;
+                            state.remove(&name);
+                            Some(version)
+                        }
+                        _ => None,
+                    }
+                };
+                let Some(removed_version) = removed_version else {
+                    // Revived or already gone: stop tracking so it re-arms
+                    // cleanly if it goes Down again.
+                    down_since.remove(&name);
+                    continue;
+                };
                 log::warn!("Removing node {name} after dead_timeout; sweeping its keys");
-                let removed_version = init_state
-                    .write()
-                    .remove(&name)
-                    .map_or(0, |node| node.version);
                 retry_managers.remove(&name);
                 down_since.remove(&name);
                 removed_holddown.insert(
