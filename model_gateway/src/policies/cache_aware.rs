@@ -483,7 +483,7 @@ impl CacheAwarePolicy {
         // Use shortest queue when imbalanced
         let min_load_idx = healthy_indices
             .iter()
-            .min_by_key(|&&idx| workers[idx].load())
+            .min_by_key(|&&idx| (workers[idx].load(), workers[idx].processed_requests(), idx))
             .copied()?;
 
         let worker_url = workers[min_load_idx].url();
@@ -982,7 +982,13 @@ impl CacheAwarePolicy {
                 } else {
                     healthy_indices
                         .iter()
-                        .min_by_key(|&&idx| workers[idx].load())
+                        .min_by_key(|&&idx| {
+                        (
+                            workers[idx].load(),
+                            workers[idx].processed_requests(),
+                            idx,
+                        )
+                    })
                         .copied()
                 };
 
@@ -1064,7 +1070,13 @@ impl CacheAwarePolicy {
                 } else {
                     healthy_indices
                         .iter()
-                        .min_by_key(|&&idx| workers[idx].load())
+                        .min_by_key(|&&idx| {
+                        (
+                            workers[idx].load(),
+                            workers[idx].processed_requests(),
+                            idx,
+                        )
+                    })
                         .copied()
                 };
 
