@@ -10,9 +10,6 @@
 
 set -uo pipefail
 
-COMMAND="${1:?Usage: ci_agentic_svc_deps.sh <command> [args...]}"
-shift
-
 check_port() {
     local name="$1" host="$2" port="$3"
     echo -n "Checking $name on $host:$port... "
@@ -21,6 +18,34 @@ check_port() {
     else
         echo "FAILED"
         return 1
+    fi
+}
+
+ci_oracle_username() {
+    local prefix="$1"
+    local random="${CI_ORACLE_NAME_RANDOM:-$(openssl rand -hex 3)}"
+    random=$(printf "%s" "$random" | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z0-9')
+
+    local tag
+    if [ -n "${GITHUB_RUN_ID:-}" ]; then
+        local run_tail="${GITHUB_RUN_ID: -10}"
+        local attempt="${GITHUB_RUN_ATTEMPT:-0}"
+        tag="${run_tail}_${attempt}_${random}"
+    else
+        # Fallback for local/manual runs: keep the old hostname signal, plus entropy.
+        local raw_name
+        raw_name=$(echo "${HOSTNAME:-runner}" | rev | cut -d'-' -f1,2 | rev | tr '[:lower:]-' '[:upper:]_')
+        tag="${raw_name}_${random}"
+    fi
+
+    tag=$(printf "%s" "$tag" | tr -cd 'A-Z0-9_')
+    local max_tag_len=$((30 - ${#prefix} - 1))
+    printf "%s_%s\n" "$prefix" "${tag:0:$max_tag_len}"
+}
+
+append_github_env() {
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "$1" >> "$GITHUB_ENV"
     fi
 }
 
@@ -83,9 +108,7 @@ cmd_create_oracle_user() {
 
     pip install oracledb
 
-    # Use last two segments of pod name (e.g. arc-runner-gpu-h100-jfvzm-m2lm8 -> JFVZM_M2LM8)
-    RAW_NAME=$(echo "$HOSTNAME" | rev | cut -d'-' -f1,2 | rev | tr '[:lower:]-' '[:upper:]_')
-    TEST_USER="TEST_${RAW_NAME}"
+    TEST_USER="$(ci_oracle_username TEST)"
     # Prefix with 'P' so the password always starts with a letter (Oracle requirement)
     TEST_PASS="P$(openssl rand -hex 8)"
     echo "Creating Oracle test user: $TEST_USER"
@@ -93,6 +116,10 @@ cmd_create_oracle_user() {
     export ORA_TEST_USER="$TEST_USER"
     export ORA_TEST_PASS="$TEST_PASS"
     export ORA_DSN="$oracle_dsn"
+    append_github_env "ATP_USER=$TEST_USER"
+    append_github_env "ATP_PASSWORD=$TEST_PASS"
+    append_github_env "ATP_DSN=$oracle_dsn"
+    append_github_env "DB_AUTO_MIGRATE=true"
 
     python3 << 'PYEOF'
 import os, oracledb
@@ -107,11 +134,6 @@ conn.commit()
 conn.close()
 print("Oracle test user created successfully")
 PYEOF
-
-    echo "ATP_USER=$TEST_USER" >> "$GITHUB_ENV"
-    echo "ATP_PASSWORD=$TEST_PASS" >> "$GITHUB_ENV"
-    echo "ATP_DSN=$oracle_dsn" >> "$GITHUB_ENV"
-    echo "DB_AUTO_MIGRATE=true" >> "$GITHUB_ENV"
 }
 
 cmd_cleanup_oracle_user() {
@@ -152,9 +174,7 @@ cmd_create_oracle_flyway_user() {
 
     pip install oracledb
 
-    # Use last two segments of pod name (same logic as create-oracle-user)
-    RAW_NAME=$(echo "$HOSTNAME" | rev | cut -d'-' -f1,2 | rev | tr '[:lower:]-' '[:upper:]_')
-    FLYWAY_USER="FLYWAY_${RAW_NAME}"
+    FLYWAY_USER="$(ci_oracle_username FLYWAY)"
     # Prefix with 'P' so the password always starts with a letter (Oracle requirement)
     FLYWAY_PASS="P$(openssl rand -hex 8)"
     echo "Creating Oracle Flyway test user: $FLYWAY_USER"
@@ -162,6 +182,9 @@ cmd_create_oracle_flyway_user() {
     export ORA_FLYWAY_USER="$FLYWAY_USER"
     export ORA_FLYWAY_PASS="$FLYWAY_PASS"
     export ORA_DSN="$oracle_dsn"
+    append_github_env "ATP_FLYWAY_USER=$FLYWAY_USER"
+    append_github_env "ATP_FLYWAY_PASSWORD=$FLYWAY_PASS"
+    append_github_env "ATP_FLYWAY_DSN=$oracle_dsn"
 
     # Locate Flyway SQL files relative to the repo root
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -207,12 +230,6 @@ flyway_conn.commit()
 flyway_conn.close()
 print("Flyway SQL files executed successfully")
 PYEOF
-
-    {
-        echo "ATP_FLYWAY_USER=$FLYWAY_USER"
-        echo "ATP_FLYWAY_PASSWORD=$FLYWAY_PASS"
-        echo "ATP_FLYWAY_DSN=$oracle_dsn"
-    } >> "$GITHUB_ENV"
 }
 
 cmd_cleanup_oracle_flyway_user() {
@@ -245,6 +262,13 @@ except Exception as e:
     print(f"Warning: failed to drop Flyway test user: {e}")
 PYEOF
 }
+
+if [ "${CI_AGENTIC_SVC_DEPS_LIB_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+COMMAND="${1:?Usage: ci_agentic_svc_deps.sh <command> [args...]}"
+shift
 
 case "$COMMAND" in
     check)                cmd_check "$@" ;;
