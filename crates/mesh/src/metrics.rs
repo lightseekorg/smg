@@ -25,6 +25,10 @@ pub fn init_mesh_metrics() {
     );
     describe_counter!("router_mesh_peer_ack_total", "Total number of ACK messages");
     describe_counter!(
+        "router_mesh_subscriber_drops_total",
+        "Subscriber notifications dropped on a full channel, by namespace prefix"
+    );
+    describe_counter!(
         "router_mesh_peer_nack_total",
         "Total number of NACK messages"
     );
@@ -63,6 +67,16 @@ pub fn update_peer_connections(peer: &str, connected: bool) {
         "peer" => peer.to_string()
     )
     .set(if connected { 1.0 } else { 0.0 });
+}
+
+/// Record a subscriber notification dropped on a full channel. `prefix` is
+/// the subscription's registered prefix (low cardinality: `worker:`, `rl:`,
+/// `config:`, ...), so a sustained rate flags an under-provisioned consumer.
+pub fn record_subscriber_drop(prefix: &str) {
+    counter!("router_mesh_subscriber_drops_total",
+        "prefix" => prefix.to_string()
+    )
+    .increment(1);
 }
 
 /// Record peer reconnection

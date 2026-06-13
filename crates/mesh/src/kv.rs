@@ -157,7 +157,11 @@ impl SubscriberRegistry {
                 // For CRDT: watermark not advanced, resent next round.
                 // For Stream: dropped permanently (ephemeral).
                 for tx in entry.value() {
-                    let _ = tx.try_send((key.to_string(), value.clone()));
+                    if let Err(mpsc::error::TrySendError::Full(_)) =
+                        tx.try_send((key.to_string(), value.clone()))
+                    {
+                        crate::metrics::record_subscriber_drop(prefix);
+                    }
                 }
             }
         }
