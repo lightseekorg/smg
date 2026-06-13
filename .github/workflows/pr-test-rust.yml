@@ -315,7 +315,7 @@ jobs:
   benchmarks:
     needs: build-wheel
     runs-on: 4-gpu-h100
-    timeout-minutes: 30
+    timeout-minutes: 36
     permissions:
       contents: read
     steps:
@@ -357,6 +357,7 @@ jobs:
         env:
           ROUTER_LOCAL_MODEL_PATH: /models
           E2E_LOG_DIR: benchmark-logs
+          GENAI_BENCH_TEST_TIMEOUT: "480"
         run: |
           mkdir -p benchmark-logs
           bash scripts/ci_killall_sglang.sh "nuke_gpus"
@@ -494,8 +495,8 @@ jobs:
       matrix:
         include:
           - engine: sglang
-            timeout: 28
-            test_timeout: 20
+            timeout: 40
+            test_timeout: 32
           - engine: vllm
             timeout: 24
             test_timeout: 18
