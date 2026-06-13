@@ -464,7 +464,6 @@ jobs:
               - 'bindings/golang/src/**'
               - 'clients/rust/**'
               - 'clients/openapi-gen/**'
-              - 'tui/**'
               - '.cargo/**'
               - '.github/actions/setup-rust/**'
               - 'scripts/ci_install_rust.sh'

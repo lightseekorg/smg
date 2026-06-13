@@ -17,7 +17,7 @@ curl http://localhost:29000/metrics
 ```
 
 The same listener also serves a WebSocket stream of real-time metric updates
-at `/ws/metrics` (used by the TUI and dashboards that need live state).
+at `/ws/metrics` (used by dashboards that need live state).
 
 Configure via CLI:
 
