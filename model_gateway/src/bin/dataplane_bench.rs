@@ -87,9 +87,11 @@ fn main() {
             let tx = tx.clone();
             s.spawn(|| {
                 let tx = tx; // move the clone in
+                let model_id =
+                    std::env::var("DP_MODEL_ID").unwrap_or_else(|_| "qwen3-vl-397b".into());
                 let proc_ = registry
-                    .find("qwen3-vl-397b", None)
-                    .expect("no processor matched qwen3-vl");
+                    .find(&model_id, None)
+                    .expect("no processor matched DP_MODEL_ID");
                 while !stop.load(Ordering::Relaxed) {
                     // One iteration = one request: `batch` decoded images preprocessed
                     // as a single batch, matching the gateway's per-request shape
