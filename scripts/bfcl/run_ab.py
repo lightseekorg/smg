@@ -86,10 +86,9 @@ def run_bfcl(
     env["BFCL_PROJECT_ROOT"] = str(arm.project_root)
     env["LOCAL_SERVER_ENDPOINT"] = arm.host
     env["LOCAL_SERVER_PORT"] = arm.port
-    # The model is fully cached locally; avoid per-request HF Hub round-trips
-    # (they throttle hard without a token and crawl the run).
-    env.setdefault("HF_HUB_OFFLINE", "1")
-    env.setdefault("TRANSFORMERS_OFFLINE", "1")
+    # NOTE: we do NOT force HF_HUB_OFFLINE. With the model cached, bfcl runs fine
+    # online (~7 req/s in practice); forcing offline would only hide a genuinely
+    # missing cache. Export HF_HUB_OFFLINE=1 yourself for air-gapped runs.
 
     cats = ",".join(categories)
     if not skip_generate:

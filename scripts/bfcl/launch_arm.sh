@@ -23,7 +23,8 @@ set -euo pipefail
 ARM="${1:?usage: launch_arm.sh <a|b|stop>}"
 
 MODEL="${BFCL_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
-GPU="${BFCL_GPU:-0}"
+GPU="${BFCL_GPU:-0}"                              # CUDA_VISIBLE_DEVICES (e.g. "0" or "0,1")
+TP="${BFCL_TP:-1}"                               # tensor-parallel size (match GPU count)
 MAX_MODEL_LEN="${BFCL_MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${BFCL_GPU_MEM_UTIL:-0.55}"
 RUN_DIR="${BFCL_RUN_DIR:-/tmp/bfcl_ab}"
@@ -84,7 +85,7 @@ case "$ARM" in
       --served-model-name "$MODEL"
       --enable-auto-tool-choice --tool-call-parser "$VLLM_TOOL_PARSER"
       --host 0.0.0.0 --port "$ARM_A_PORT"
-      --tensor-parallel-size 1 --max-model-len "$MAX_MODEL_LEN"
+      --tensor-parallel-size "$TP" --max-model-len "$MAX_MODEL_LEN"
       --gpu-memory-utilization "$GPU_MEM_UTIL"
     )
     [ -n "$VLLM_REASONING_PARSER" ] && cmd+=(--reasoning-parser "$VLLM_REASONING_PARSER")
@@ -100,7 +101,7 @@ case "$ARM" in
     declare -a wcmd=(
       CUDA_VISIBLE_DEVICES="$GPU" "$VLLM_PYTHON" -m vllm.entrypoints.grpc_server
       --model "$MODEL" --host 0.0.0.0 --port "$ARM_B_GRPC_PORT"
-      --tensor-parallel-size 1 --max-model-len "$MAX_MODEL_LEN"
+      --tensor-parallel-size "$TP" --max-model-len "$MAX_MODEL_LEN"
       --gpu-memory-utilization "$GPU_MEM_UTIL"
     )
     # shellcheck disable=SC2206  # intentional word-split of optional extra flags

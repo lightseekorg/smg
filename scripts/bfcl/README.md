@@ -33,25 +33,31 @@ puts SMG's / vLLM's parser on the critical path, so the driver always uses the
 |---|---|
 | `launch_arm.sh` | bring up one arm (`a` = pure vLLM, `b` = vLLM-gRPC + SMG); prints its base_url; `stop` tears down via pidfiles. Fully env-parameterised. |
 | `run_ab.py` | point official `bfcl generate`+`evaluate` (FC mode) at both arms, parse per-category accuracy, emit a markdown + JSON comparison table, and a regression gate. Arms must already be serving. |
+| `register_bfcl_model.py` | register a model that bfcl-eval doesn't ship a handler for yet (new SKUs), by cloning an existing FC entry. Idempotent. |
 
 ## Quick start (manual, e.g. on a GPU box)
 
 ```bash
-# 0) one-time: a venv with bfcl-eval (+ soundfile, see Gotchas)
+# 0) one-time: a venv with bfcl-eval (+ soundfile), and ninja in the *vLLM* env
+#    for torch.compile / CUDA-graph kernel builds (see Gotchas).
 python -m venv ~/bfcl-env && ~/bfcl-env/bin/pip install bfcl-eval soundfile
+~/vllm-env/bin/pip install ninja          # then ensure ~/vllm-env/bin is on PATH
 
-# 1) bring up both arms (small model fits one H100 at mem-util ~0.4 each;
-#    or pin each arm to its own GPU via BFCL_GPU)
-export BFCL_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_BIN=~/vllm-env/bin/vllm \
-       VLLM_PYTHON=~/vllm-env/bin/python SMG_LAUNCH="$HOME/smg/target/ci/smg launch"
-BFCL_GPU=0 BFCL_ARM_A_PORT=31199 A_URL=$(bash launch_arm.sh a)
-BFCL_GPU=1 BFCL_ARM_B_GRPC_PORT=50081 BFCL_ARM_B_GW_PORT=31200 B_URL=$(bash launch_arm.sh b)
+# teach bfcl about a model it doesn't ship a handler for yet (new SKUs)
+~/bfcl-env/bin/python register_bfcl_model.py --model-id Qwen/Qwen3.6-27B
+
+# 1) bring up both arms (here: Qwen3.6-27B, TP=2, one arm per GPU pair)
+export BFCL_MODEL=Qwen/Qwen3.6-27B VLLM_BIN=~/vllm-env/bin/vllm \
+       VLLM_PYTHON=~/vllm-env/bin/python SMG_LAUNCH="$HOME/smg/target/ci/smg launch" \
+       BFCL_TP=2 BFCL_MAX_MODEL_LEN=16384 PATH=~/vllm-env/bin:$PATH
+A_URL=$(BFCL_GPU=0,1 BFCL_VLLM_TOOL_PARSER=qwen3_xml BFCL_VLLM_REASONING_PARSER=qwen3 bash launch_arm.sh a)
+B_URL=$(BFCL_GPU=2,3 BFCL_SMG_TOOL_PARSER=qwen_xml  BFCL_SMG_REASONING_PARSER=qwen3 bash launch_arm.sh b)
 
 # 2) run the official A/B
 ~/bfcl-env/bin/python run_ab.py \
     --baseline  "vllm=$A_URL" \
     --candidate "smg=$B_URL" \
-    --bfcl-model Qwen/Qwen3-4B-Instruct-2507-FC \
+    --bfcl-model Qwen/Qwen3.6-27B-FC \
     --categories simple_python,multiple,parallel,irrelevance \
     --bfcl ~/bfcl-env/bin/bfcl --project-root ~/bfcl_ab \
     --out ~/bfcl_ab.md --json-out ~/bfcl_ab.json
@@ -59,6 +65,11 @@ BFCL_GPU=1 BFCL_ARM_B_GRPC_PORT=50081 BFCL_ARM_B_GW_PORT=31200 B_URL=$(bash laun
 # 3) teardown
 bash launch_arm.sh stop
 ```
+
+Key env knobs for `launch_arm.sh`: `BFCL_GPU` (CUDA_VISIBLE_DEVICES, e.g. `0,1`),
+`BFCL_TP` (tensor-parallel size — match the GPU count), `BFCL_MAX_MODEL_LEN`,
+`BFCL_{VLLM,SMG}_{TOOL,REASONING}_PARSER`, and `BFCL_VLLM_EXTRA` for extra vLLM
+flags.
 
 `run_ab.py` exits non-zero if the candidate's overall accuracy drops more than
 `--tolerance` (default 2pp) below the baseline.
@@ -86,38 +97,57 @@ bash launch_arm.sh stop
 - **Cap the context.** Qwen3-4B defaults to a 256K `max_model_len` → ~36 GiB KV
   cache → engine init OOM. Pass `--max-model-len 16384` (the launch helper
   defaults to this); use the **same** value on both arms.
-- **Force HF offline once the model is cached.** Without `HF_HUB_OFFLINE=1`
-  (set by `run_ab.py`), bfcl round-trips to the HF Hub per request and crawls
-  (and rate-limits without a token).
+- **Install `ninja` in the vLLM env (do NOT reach for `--enforce-eager`).**
+  vLLM's torch.compile / CUDA-graph path shells out to `ninja` to build kernels
+  (required for newer archs like Qwen3.6's `qwen3_5`); if it's missing the
+  engine dies with `No such file or directory: 'ninja'`. `--enforce-eager` only
+  *hides* this by skipping compilation (slower). Real fix:
+  `pip install ninja` in the vLLM env **and put its bin on `PATH`** (vLLM execs
+  `ninja` by name) — then run with CUDA graphs, no `--enforce-eager`.
+- **Don't force HF offline.** With the model cached, bfcl runs fine online
+  (~7 req/s measured); a one-off slow run is usually a transient HF hiccup, not
+  a systematic per-request throttle. `run_ab.py` does **not** set
+  `HF_HUB_OFFLINE`; set it yourself only for air-gapped boxes. No HF token is
+  needed for public models.
+- **New models need a bfcl handler.** bfcl-eval pins a fixed model list; a
+  brand-new SKU (e.g. `Qwen/Qwen3.6-27B`) isn't in it, so
+  `bfcl generate --model <id>-FC` fails with "Unknown model_name". Run
+  `register_bfcl_model.py --model-id <id>` first.
+- **SMG auto model→parser mapping lags new SKUs.** SMG's factory doesn't yet map
+  `Qwen3.6*` (it falls back to the JSON `qwen` parser, wrong for the XML format),
+  so pass `--tool-call-parser qwen_xml` explicitly. Adding a `Qwen3.6*`→`qwen_xml`
+  mapping to `crates/tool_parser` is a good follow-up.
 - **Use the `-FC` handler.** `Qwen/Qwen3-4B-Instruct-2507-FC`, not the bare name
   (which is prompt mode and bypasses the server parser).
 - **`bfcl generate --skip-server-setup`** points at `LOCAL_SERVER_ENDPOINT` /
   `LOCAL_SERVER_PORT`. (Custom full base_urls behind a proxy are still rigid —
   gorilla issue #1280.)
-- **vLLM engine stability under load.** On a shared/contended GPU, vLLM 0.22.1's
-  V1 engine has thrown `EngineDeadError` under concurrent bfcl load. Prefer a
-  dedicated GPU per arm and a modest `--num-threads`.
+- **`EngineDeadError` on startup is usually the missing-`ninja` issue above**
+  (the engine dies around CUDA-graph capture / first compile). Install `ninja`
+  and put it on `PATH` rather than falling back to `--enforce-eager`.
 
 ## Validation status — ran end-to-end ✅
 
-Brought up on a dev H100 box against `Qwen/Qwen3-4B-Instruct-2507`, BFCL
-`simple_python` (400 cases), FC mode, temp 0.001, both arms on the same GPU
-(sequentially), `--enforce-eager` + `HF_HUB_OFFLINE=1`:
+Run on a dev H100 box, **`Qwen/Qwen3.6-27B` at TP=2** (one arm per GPU pair),
+BFCL `simple_python` (400 cases), FC mode, temp 0.001 — **no `--enforce-eager`,
+online HF** (i.e. the clean config, after `pip install ninja`):
 
 | arm | accuracy |
 |---|---|
-| pure vLLM (`--tool-call-parser hermes`) | **95.50%** (382/400) |
-| SMG → vLLM gRPC (`--tool-call-parser qwen`) | **95.25%** (381/400) |
-| **Δ (SMG − vLLM)** | **−0.25pp** (1 case — parity, within noise) |
+| pure vLLM (`--tool-call-parser qwen3_xml --reasoning-parser qwen3`) | **94.75%** (379/400) |
+| SMG → vLLM gRPC (`--tool-call-parser qwen_xml --reasoning-parser qwen3`) | **94.25%** (377/400) |
+| **Δ (SMG − vLLM)** | **−0.50pp** (2 cases — parity, within noise) |
 
-So on this slice SMG's Rust frontend is **at parity** with vLLM's native
-parser. Both arms served native `tool_calls` (FC mode confirmed end to end), and
-`run_ab.py` produced the table above. Scale to more categories + multiple runs
-(and the five target models) to characterise the delta with confidence; that's
+So SMG's Rust frontend is **at parity** with vLLM's native parser on this slice.
+Both arms served native `tool_calls` and extracted thinking into
+`reasoning_content` (FC + reasoning confirmed end to end), and `run_ab.py`
+produced the table. (An earlier smaller run on Qwen3-4B-Instruct-2507 gave 95.50
+vs 95.25, Δ −0.25pp — same parity story.) Scale to more categories × multiple
+runs × the five target models to characterise the delta with confidence; that's
 what `nightly-bfcl.yml` is for.
 
-Two things were needed to run cleanly on a shared/contended GPU (both folded
-into the tooling): `BFCL_VLLM_EXTRA=--enforce-eager` (vLLM's V1 engine threw
-`EngineDeadError` under load with CUDA graphs) and `HF_HUB_OFFLINE=1` (set by
-`run_ab.py`; otherwise per-request HF Hub round-trips throttle the run to a
-crawl).
+**On the two "fixes" from the first cut:** neither `--enforce-eager` nor
+`HF_HUB_OFFLINE` is actually needed. The crash was a missing `ninja` (install it
+in the vLLM env + PATH → CUDA graphs work); the slowness was a transient
+unauthenticated-HF hiccup (cached + online runs at ~7 req/s). Both band-aids
+have been removed from the defaults.

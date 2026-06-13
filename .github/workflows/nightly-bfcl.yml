@@ -16,11 +16,11 @@ on:
       model:
         description: "HF model id (weights) served on both arms"
         required: false
-        default: "Qwen/Qwen3-4B-Instruct-2507"
+        default: "Qwen/Qwen3.6-27B"
       bfcl_model:
-        description: "BFCL FC handler name (must end in -FC)"
+        description: "BFCL FC handler name (must end in -FC; auto-registered if new)"
         required: false
-        default: "Qwen/Qwen3-4B-Instruct-2507-FC"
+        default: "Qwen/Qwen3.6-27B-FC"
       categories:
         description: "Comma-separated BFCL test categories"
         required: false
@@ -28,11 +28,15 @@ on:
       vllm_tool_parser:
         description: "pure-vLLM --tool-call-parser"
         required: false
-        default: "hermes"
+        default: "qwen3_xml"
       smg_tool_parser:
         description: "SMG --tool-call-parser"
         required: false
-        default: "qwen"
+        default: "qwen_xml"
+      reasoning_parser:
+        description: "reasoning parser for both arms (empty for non-thinking SKUs)"
+        required: false
+        default: "qwen3"
 
 concurrency:
   group: nightly-bfcl-${{ github.event_name }}
@@ -81,15 +85,15 @@ jobs:
   bfcl-ab:
     needs: build-wheel
     if: ${{ !cancelled() && needs.build-wheel.result == 'success' }}
-    runs-on: 2-gpu-h100 # one GPU per arm
+    runs-on: 4-gpu-h100 # TP=2 per arm, both arms concurrent (GPUs 0,1 + 2,3)
     timeout-minutes: 120
     permissions:
       contents: read
     env:
       ROUTER_LOCAL_MODEL_PATH: /models
       HF_HOME: /models
-      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3-4B-Instruct-2507' }}
-      BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || 'Qwen/Qwen3-4B-Instruct-2507-FC' }}
+      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
+      BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || 'Qwen/Qwen3.6-27B-FC' }}
       CATEGORIES: ${{ github.event.inputs.categories || 'simple_python,multiple,parallel,irrelevance' }}
     steps:
       - uses: actions/checkout@v6
@@ -99,28 +103,33 @@ jobs:
           path: wheel
       - name: Setup vLLM env (provides vllm + grpc servicer + smg)
         uses: ./.github/actions/setup-vllm
-      - name: Install smg wheel + bfcl-eval
+      - name: Install smg wheel + bfcl-eval (+ ninja for vLLM torch.compile, soundfile for bfcl's qwen handler)
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-          pip install "bfcl-eval" soundfile
+          pip install "bfcl-eval" soundfile ninja
+      - name: Register model in bfcl (no-op if bfcl already ships a handler)
+        run: python scripts/bfcl/register_bfcl_model.py --model-id "$MODEL" || true
       - name: Stage model weights
-        run: bash scripts/ci_download_model.sh --gpu-tier 1
+        run: bash scripts/ci_download_model.sh --gpu-tier 2
       - name: Launch arms + run official BFCL A/B
         env:
           BFCL_MODEL: ${{ env.MODEL }}
           VLLM_BIN: vllm
           VLLM_PYTHON: python
           SMG_LAUNCH: "python -m smg.launch_router"
-          BFCL_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'hermes' }}
-          BFCL_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || 'qwen' }}
+          BFCL_VLLM_TOOL_PARSER: ${{ github.event.inputs.vllm_tool_parser || 'qwen3_xml' }}
+          BFCL_SMG_TOOL_PARSER: ${{ github.event.inputs.smg_tool_parser || 'qwen_xml' }}
+          BFCL_VLLM_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
+          BFCL_SMG_REASONING_PARSER: ${{ github.event.inputs.reasoning_parser || 'qwen3' }}
+          BFCL_TP: "2"
           BFCL_MAX_MODEL_LEN: "16384"
           BFCL_GPU_MEM_UTIL: "0.85"
         run: |
           set -euo pipefail
-          # Arm A (pure vLLM) on GPU0, Arm B (SMG -> vLLM gRPC) on GPU1.
-          A_URL=$(BFCL_GPU=0 BFCL_ARM_A_PORT=31199 bash scripts/bfcl/launch_arm.sh a)
-          B_URL=$(BFCL_GPU=1 BFCL_ARM_B_GRPC_PORT=50081 BFCL_ARM_B_GW_PORT=31200 bash scripts/bfcl/launch_arm.sh b)
+          # TP=2 per arm: Arm A (pure vLLM) on GPUs 0,1; Arm B (SMG -> vLLM gRPC) on GPUs 2,3.
+          A_URL=$(BFCL_GPU=0,1 BFCL_ARM_A_PORT=31199 bash scripts/bfcl/launch_arm.sh a)
+          B_URL=$(BFCL_GPU=2,3 BFCL_ARM_B_GRPC_PORT=50081 BFCL_ARM_B_GW_PORT=31200 bash scripts/bfcl/launch_arm.sh b)
           echo "arm A: $A_URL   arm B: $B_URL"
           python scripts/bfcl/run_ab.py \
             --baseline  "vllm=$A_URL" \
