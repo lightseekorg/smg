@@ -495,8 +495,8 @@ jobs:
       matrix:
         include:
           - engine: sglang
-            timeout: 40
-            test_timeout: 32
+            timeout: 36
+            test_timeout: 28
           - engine: vllm
             timeout: 24
             test_timeout: 18
