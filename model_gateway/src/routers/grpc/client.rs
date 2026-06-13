@@ -315,11 +315,9 @@ impl GrpcClient {
             Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
             Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
             Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
+            Self::TokenSpeed(client) => client.subscribe_kv_events(start_seq).await,
             Self::Mlx(_) => Err(tonic::Status::unimplemented(
                 "SubscribeKvEvents RPC not supported for MLX backend",
-            )),
-            Self::TokenSpeed(_) => Err(tonic::Status::unimplemented(
-                "SubscribeKvEvents RPC not supported for TokenSpeed backend",
             )),
         }
     }

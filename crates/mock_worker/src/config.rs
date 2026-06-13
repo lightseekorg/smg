@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::engine::EngineParams;
+
 /// Configuration shared by every mocked HTTP and gRPC worker in the process.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -19,10 +21,16 @@ pub struct Config {
     pub model_id: String,
     /// Tokenizer path advertised by gRPC workers (for gateway autoload).
     pub tokenizer_path: String,
-    /// Simulated per-request generation latency.
+    /// Simulated per-request generation latency (canned mode only).
     pub gen_delay: Duration,
-    /// Number of canned output tokens per generation.
+    /// Number of canned output tokens per generation; also the default output
+    /// length for realistic mode when a request omits `max_tokens`.
     pub output_tokens: u32,
+    /// When true, each worker runs the realistic continuous-batching engine
+    /// simulator ([`EngineParams`]); when false, the cheap canned path.
+    pub realistic: bool,
+    /// Engine-simulator parameters (only used when `realistic`).
+    pub engine: EngineParams,
 }
 
 impl Config {
@@ -38,6 +46,8 @@ impl Config {
             tokenizer_path: String::new(),
             gen_delay: Duration::from_millis(0),
             output_tokens: 8,
+            realistic: false,
+            engine: EngineParams::default(),
         };
 
         let mut args = std::env::args().skip(1);
@@ -54,6 +64,33 @@ impl Config {
                     cfg.gen_delay = Duration::from_millis(parse(value(&mut args, &flag)?, &flag)?);
                 }
                 "--output-tokens" => cfg.output_tokens = parse(value(&mut args, &flag)?, &flag)?,
+                "--engine" => {
+                    cfg.realistic = match value(&mut args, &flag)?.as_str() {
+                        "realistic" => true,
+                        "canned" => false,
+                        other => {
+                            return Err(format!("--engine must be canned|realistic, got {other}"))
+                        }
+                    }
+                }
+                "--prefill-tps" => cfg.engine.prefill_tps = parse(value(&mut args, &flag)?, &flag)?,
+                "--decode-base-ms" => {
+                    cfg.engine.decode_base_ms = parse(value(&mut args, &flag)?, &flag)?;
+                }
+                "--decode-per-req-ms" => {
+                    cfg.engine.decode_per_req_ms = parse(value(&mut args, &flag)?, &flag)?;
+                }
+                "--prefill-chunk" => {
+                    cfg.engine.prefill_chunk_tokens = parse(value(&mut args, &flag)?, &flag)?;
+                }
+                "--max-running" => cfg.engine.max_running = parse(value(&mut args, &flag)?, &flag)?,
+                "--kv-tokens" => {
+                    cfg.engine.kv_capacity_tokens = parse(value(&mut args, &flag)?, &flag)?;
+                }
+                "--block-size" => cfg.engine.block_size = parse(value(&mut args, &flag)?, &flag)?,
+                "--prefix-cache" => {
+                    cfg.engine.prefix_cache = parse(value(&mut args, &flag)?, &flag)?
+                }
                 "-h" | "--help" => return Err(usage()),
                 other => return Err(format!("unknown flag: {other}\n\n{}", usage())),
             }
@@ -62,6 +99,9 @@ impl Config {
         if cfg.tokenizer_path.is_empty() {
             cfg.tokenizer_path = cfg.model_id.clone();
         }
+        // `--output-tokens` doubles as the realistic engine's default output
+        // length when a request omits `max_tokens`.
+        cfg.engine.max_new_default = cfg.output_tokens;
         if cfg.http_count == 0 && cfg.grpc_count == 0 {
             return Err(format!(
                 "nothing to do: pass --http-count and/or --grpc-count\n\n{}",
@@ -95,7 +135,18 @@ fn usage() -> String {
        --grpc-count <n>         number of gRPC workers (default 0)\n\
        --model <id>             advertised model id (default mock-model)\n\
        --tokenizer <path>       tokenizer path for gRPC autoload (default = model)\n\
-       --gen-ms <ms>            simulated generation latency (default 0)\n\
-       --output-tokens <n>      canned output tokens per request (default 8)"
+       --gen-ms <ms>            canned per-request latency (default 0)\n\
+       --output-tokens <n>      output tokens per request when unspecified (default 8)\n\
+     \n\
+     Realistic engine simulator (continuous batching; opt-in):\n\
+       --engine <canned|realistic>  engine mode (default canned)\n\
+       --prefill-tps <f>        prefill throughput, tokens/sec (default 8000)\n\
+       --decode-base-ms <f>     fixed decode-step latency, ms (default 6.0)\n\
+       --decode-per-req-ms <f>  added decode-step latency per running req (default 0.35)\n\
+       --prefill-chunk <n>      max prompt tokens prefilled per step (default 2048)\n\
+       --max-running <n>        max concurrent running requests (default 256)\n\
+       --kv-tokens <n>          KV cache capacity in tokens (default 524288)\n\
+       --block-size <n>         cache block/page size in tokens (default 16)\n\
+       --prefix-cache <bool>    enable prefix caching + KV events (default true)"
         .to_string()
 }

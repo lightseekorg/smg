@@ -7,6 +7,7 @@
 //! All responses are canned — there is no real model.
 
 mod config;
+mod engine;
 mod grpc;
 mod http;
 

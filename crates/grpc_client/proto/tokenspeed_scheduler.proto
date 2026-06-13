@@ -28,6 +28,11 @@ service TokenSpeedScheduler {
 
   // Stop the profiler and export traces
   rpc StopProfile(smg.grpc.common.StopProfileRequest) returns (smg.grpc.common.ProfileResponse);
+
+  // Subscribe to KV cache events (server-streaming). Lets the gateway's
+  // cache-aware router track which prefixes this scheduler has cached.
+  rpc SubscribeKvEvents(smg.grpc.common.SubscribeKvEventsRequest)
+      returns (stream smg.grpc.common.KvEventBatch);
 }
 
 // =====================
@@ -326,6 +331,13 @@ message SchedulerLoad {
   int32 num_used_tokens = 5;
   int32 max_total_num_tokens = 6;
   int32 max_running_requests = 7;
+
+  // Queued token-work: waiting-queue prompt tokens not served from cache
+  // (mirrors SGLang's num_waiting_uncached_tokens). The gateway's least_load
+  // policy uses this as its queued-token signal; 0 when not reported. Grouped
+  // with the other counts for readability; numbered 14 (the next free number)
+  // so the existing field numbers stay stable.
+  int32 num_waiting_uncached_tokens = 14;
 
   double token_usage = 8;
   double gen_throughput = 9;
