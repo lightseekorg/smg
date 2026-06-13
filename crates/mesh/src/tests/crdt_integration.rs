@@ -354,6 +354,31 @@ fn absent_entry_retirement_sweeps_ghost_keys_first() {
 }
 
 #[test]
+fn absent_entry_retirement_sweeps_suffix_attributed_ghosts() {
+    // A suffix-attributed (rl:) key relayed after the dead node left
+    // holddown must also be swept at retirement — it carries no registry
+    // entry, so this is the last pass that can attribute it by node name.
+    let dead = MeshKV::new("dead-node".to_string());
+    let dead_rl = dead.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+    dead_rl.put("rl:global:dead-node", encode_epoch_count(1, 5).to_vec());
+
+    let survivor = MeshKV::new("survivor".to_string());
+    let survivor_rl = survivor.configure_crdt_prefix("rl:", MergeStrategy::EpochMaxWins);
+    survivor.configure_dead_node_sweep("rl:", DeadKeyAttribution::NodeNameSuffix);
+    // The dead node also published a replica-registry entry (every node does).
+    deliver_crdt(&dead, &survivor);
+    assert!(survivor_rl.get("rl:global:dead-node").is_some());
+
+    let retired = survivor.retire_absent_replica_entries(&std::collections::HashSet::new());
+    assert_eq!(retired, 1, "absent node's registry entry retires");
+    assert_eq!(
+        survivor_rl.get("rl:global:dead-node"),
+        None,
+        "the suffix-attributed ghost shard is swept in the same pass"
+    );
+}
+
+#[test]
 fn reconcile_retires_prior_incarnations_registry_entries() {
     // A restarted node mints a fresh replica id; without owner-side
     // retirement the registry would grow by one immortal key per boot.

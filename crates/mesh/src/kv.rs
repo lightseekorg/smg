@@ -636,6 +636,7 @@ impl MeshKV {
     pub fn retire_absent_replica_entries(&self, present: &HashSet<String>) -> usize {
         let mut absent_keys = Vec::new();
         let mut absent_replicas: HashSet<ReplicaId> = HashSet::new();
+        let mut absent_nodes: HashSet<String> = HashSet::new();
         for key in self.store.keys() {
             if !key.starts_with(REPLICA_PREFIX) {
                 continue;
@@ -653,22 +654,34 @@ impl MeshKV {
             {
                 absent_replicas.insert(replica);
             }
+            absent_nodes.insert(node.into_owned());
             absent_keys.push(key);
         }
         if absent_keys.is_empty() {
             return 0;
         }
+        // Sweep any ghost key still attributed to the departed nodes before
+        // dropping their registry entries — this is the last pass that can
+        // attribute them. AuthorReplica keys go by op author; NodeNameSuffix
+        // keys (e.g. rl: shards) go by the node-name segment, which needs no
+        // registry entry, so they are swept here too rather than stranded.
         let sweeps = self.dead_node_sweeps.read().clone();
         for (prefix, attribution) in &sweeps {
-            if *attribution == DeadKeyAttribution::AuthorReplica {
-                let swept = self.sweep_authored_by(prefix, &absent_replicas);
-                if swept > 0 {
-                    tracing::warn!(
-                        swept,
-                        prefix = prefix.as_str(),
-                        "swept ghost keys of departed nodes at registry retirement"
-                    );
+            let swept = match attribution {
+                DeadKeyAttribution::AuthorReplica => {
+                    self.sweep_authored_by(prefix, &absent_replicas)
                 }
+                DeadKeyAttribution::NodeNameSuffix => absent_nodes
+                    .iter()
+                    .map(|node| self.sweep_node_suffix(prefix, node))
+                    .sum(),
+            };
+            if swept > 0 {
+                tracing::warn!(
+                    swept,
+                    prefix = prefix.as_str(),
+                    "swept ghost keys of departed nodes at registry retirement"
+                );
             }
         }
         for key in &absent_keys {
