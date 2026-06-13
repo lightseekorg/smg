@@ -129,22 +129,33 @@ flags.
 ## Validation status — ran end-to-end ✅
 
 Run on a dev H100 box, **`Qwen/Qwen3.6-27B` at TP=2** (one arm per GPU pair),
-BFCL `simple_python` (400 cases), FC mode, temp 0.001 — **no `--enforce-eager`,
-online HF** (i.e. the clean config, after `pip install ninja`):
+the **full `non_live` set** (1390 cases), FC mode, temp 0.001 — **no
+`--enforce-eager`, online HF** (the clean config, after `pip install ninja`):
 
-| arm | accuracy |
-|---|---|
-| pure vLLM (`--tool-call-parser qwen3_xml --reasoning-parser qwen3`) | **94.75%** (379/400) |
-| SMG → vLLM gRPC (`--tool-call-parser qwen_xml --reasoning-parser qwen3`) | **94.25%** (377/400) |
-| **Δ (SMG − vLLM)** | **−0.50pp** (2 cases — parity, within noise) |
+| category | pure vLLM (`qwen3_xml`) | SMG → vLLM gRPC (`qwen_xml`) | Δ |
+|---|---|---|---|
+| simple_python | 95.00 | 94.75 | −0.25 |
+| simple_java | 64.00 | 64.00 | 0.00 |
+| simple_javascript | 72.00 | 72.00 | 0.00 |
+| multiple | 91.00 | 91.50 | +0.50 |
+| parallel | 89.50 | 90.00 | +0.50 |
+| parallel_multiple | 91.00 | 91.50 | +0.50 |
+| irrelevance | 84.58 | 84.58 | 0.00 |
+| **overall (unweighted)** | **83.87** | **84.05** | **+0.18** |
 
-So SMG's Rust frontend is **at parity** with vLLM's native parser on this slice.
-Both arms served native `tool_calls` and extracted thinking into
-`reasoning_content` (FC + reasoning confirmed end to end), and `run_ab.py`
-produced the table. (An earlier smaller run on Qwen3-4B-Instruct-2507 gave 95.50
-vs 95.25, Δ −0.25pp — same parity story.) Scale to more categories × multiple
-runs × the five target models to characterise the delta with confidence; that's
-what `nightly-bfcl.yml` is for.
+So SMG's Rust frontend is **at parity** with vLLM's native parser across the
+full non-live set — marginally ahead overall (+0.18pp), and never worse than
+−0.25pp on any category. Both arms reasoning-parse `<think>` into
+`reasoning_content` and emit native `tool_calls` (FC confirmed end to end). The
+low java/js numbers are the *model's* non-Python ability (identical on both
+arms) — confirming the A/B isolates the frontend, not model quality. (An earlier
+`simple_python`-only run on Qwen3-4B gave 95.50 vs 95.25, same parity story.)
+
+Scope note: this is **non-live only** — the reproducible AST categories, no
+live/internet-dependent data. PR-time uses the cheap CPU Track-A
+parser-conformance gate (`crates/parser_conformance`); the nightly runs this
+full non-live A/B. Scale to multiple runs × the five target models for tight
+confidence intervals.
 
 **On the two "fixes" from the first cut:** neither `--enforce-eager` nor
 `HF_HUB_OFFLINE` is actually needed. The crash was a missing `ninja` (install it

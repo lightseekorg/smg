@@ -24,7 +24,7 @@ on:
       categories:
         description: "Comma-separated BFCL test categories"
         required: false
-        default: "simple_python,multiple,parallel,irrelevance"
+        default: "simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance"
       vllm_tool_parser:
         description: "pure-vLLM --tool-call-parser"
         required: false
@@ -94,7 +94,7 @@ jobs:
       HF_HOME: /models
       MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3.6-27B' }}
       BFCL_MODEL_FC: ${{ github.event.inputs.bfcl_model || 'Qwen/Qwen3.6-27B-FC' }}
-      CATEGORIES: ${{ github.event.inputs.categories || 'simple_python,multiple,parallel,irrelevance' }}
+      CATEGORIES: ${{ github.event.inputs.categories || 'simple_python,simple_java,simple_javascript,multiple,parallel,parallel_multiple,irrelevance' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
