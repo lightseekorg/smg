@@ -318,7 +318,7 @@ impl GossipController {
                 let removed_version = {
                     let mut state = init_state.write();
                     match state.get(&name) {
-                        Some(node) if node.status == NodeStatus::Down as i32 => {
+                        Some(node) if is_departed(node.status) => {
                             let version = node.version;
                             state.remove(&name);
                             Some(version)
