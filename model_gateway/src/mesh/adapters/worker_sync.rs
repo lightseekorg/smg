@@ -180,22 +180,24 @@ impl WorkerSyncAdapter {
         // to test membership, and feeds the backfill below so the
         // namespace is scanned once per pass.
         let live: HashSet<String> = self.workers.keys("").into_iter().collect();
-        // Corrections this pass: store-vs-registry divergences on
-        // locally-owned workers that reconcile had to repair. Steady state
-        // is 0; a persistent nonzero value means notifications are being
-        // dropped and only reconcile recovers them.
+        // Corrections this pass: every store-vs-registry disagreement
+        // reconcile repairs — recovered drops as well as local re-asserts.
+        // Steady state is 0; a persistent nonzero value means notifications
+        // are dropping and only reconcile recovers them.
         let mut corrections = 0usize;
+        // Registry's worker keys, to spot store keys the registry never
+        // learned (dropped remote puts) after the loop.
+        let mut registry_keys: HashSet<String> = HashSet::new();
         for (id, worker) in self.worker_registry.get_all_with_ids() {
             let key = format!("{PREFIX}{}", id.as_str());
+            registry_keys.insert(key.clone());
             let is_local = self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local);
             if !live.contains(&key) {
-                // Missing backing key: a locally-owned worker whose key
-                // vanished is real drift (foreign tombstone or lost publish)
-                // this pass re-publishes; a mesh import's missing key is just
-                // a tombstone being applied, not drift.
-                if is_local {
-                    corrections += 1;
-                }
+                // Registry has the worker, the store doesn't: a locally-owned
+                // one is re-published (foreign tombstone / lost publish), a
+                // mesh import is removed (a dropped tombstone now applied).
+                // Both are real divergences this pass repairs.
+                corrections += 1;
                 self.sync_key_from_store(&key, id.as_str());
             } else if is_local {
                 // Present but stale: with restart-stable ids, a prior
@@ -211,6 +213,12 @@ impl WorkerSyncAdapter {
                 }
             }
         }
+        // Store keys the registry never learned: dropped remote puts that
+        // `backfill_keys` below recovers.
+        corrections += live
+            .iter()
+            .filter(|key| !registry_keys.contains(*key))
+            .count();
         Metrics::set_mesh_worker_drift(corrections);
         self.backfill_keys(live);
         corrections
@@ -738,18 +746,22 @@ mod tests {
             "worker:peer-w1",
             bincode::serialize(&sample_state("peer-w1", "http://remote:8080")).unwrap(),
         );
-        adapter.reconcile_once();
+        let drift = adapter.reconcile_once();
         assert!(
             registry.get_by_url("http://remote:8080").is_some(),
             "reconcile recovers a missed put"
         );
+        assert_eq!(drift, 1, "a recovered dropped put counts as drift");
 
         ns.delete("worker:peer-w1");
-        adapter.reconcile_once();
+        let drift = adapter.reconcile_once();
         assert!(
             registry.get_by_url("http://remote:8080").is_none(),
             "reconcile recovers a missed tombstone"
         );
+        assert_eq!(drift, 1, "a recovered dropped tombstone counts as drift");
+
+        assert_eq!(adapter.reconcile_once(), 0, "converged: no drift");
     }
 
     #[tokio::test]
