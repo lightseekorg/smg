@@ -276,12 +276,7 @@ class Worker:
         if self.worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
             kv_role = "kv_producer" if self.worker_type == WorkerType.PREFILL else "kv_consumer"
             if vllm_kv_backend() == "mooncake":
-                # tcp keeps the transfer off RDMA, which is flaky on shared CI nodes
-                config = {
-                    "kv_connector": "MooncakeConnector",
-                    "kv_role": kv_role,
-                    "kv_connector_extra_config": {"mooncake_protocol": "tcp"},
-                }
+                config = {"kv_connector": "MooncakeConnector", "kv_role": kv_role}
             else:
                 config = {"kv_connector": "NixlConnector", "kv_role": kv_role}
             cmd.extend(["--kv-transfer-config", json.dumps(config)])

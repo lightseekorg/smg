@@ -27,15 +27,8 @@ from types import SimpleNamespace
 
 import pytest
 from infra import run_eval
-from infra.constants import is_vllm, vllm_kv_backend
 
 logger = logging.getLogger(__name__)
-
-
-def _pd_mmlu_num_threads() -> int:
-    if is_vllm() and vllm_kv_backend() == "mooncake":
-        return 8
-    return 32
 
 
 @pytest.mark.engine("sglang")
@@ -56,7 +49,7 @@ class TestPDMMLUHttp:
             model=model,
             eval_name="mmlu",
             num_examples=64,
-            num_threads=_pd_mmlu_num_threads(),
+            num_threads=32,
             temperature=0.1,
         )
         metrics = run_eval(args)
@@ -84,7 +77,7 @@ class TestPDMMLUGrpc:
             model=model,
             eval_name="mmlu",
             num_examples=64,
-            num_threads=_pd_mmlu_num_threads(),
+            num_threads=32,
             temperature=0.1,
         )
         metrics = run_eval(args)
