@@ -133,7 +133,7 @@ impl WorkerRegistry {
 
     /// Create an empty worker registry.
     ///
-    /// Initialises all indexes and a broadcast channel with capacity 64
+    /// Initialises all indexes and a broadcast channel with capacity 1024
     /// for `WorkerEvent` delivery. Holds no locks. Emits no events.
     pub fn new() -> Self {
         Self {
@@ -146,7 +146,11 @@ impl WorkerRegistry {
             worker_mutation_locks: Arc::new(DashMap::new()),
             model_retry_configs: Arc::new(DashMap::new()),
             worker_origins: Arc::new(DashMap::new()),
-            event_tx: broadcast::Sender::new(64),
+            // Sized for fleet-scale bursts (startup registration, probe
+            // storms): a lagged subscriber forces a full state resync, so
+            // the capacity should comfortably exceed realistic worker
+            // counts. ~100 B per slot; fixed cost ~100 KB.
+            event_tx: broadcast::Sender::new(1024),
         }
     }
 
