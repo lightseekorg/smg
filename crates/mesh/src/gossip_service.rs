@@ -196,13 +196,27 @@ impl GossipService {
             // intentional and must survive the merge.
             let failure_rumor = node.status == NodeStatus::Suspected as i32
                 || node.status == NodeStatus::Down as i32;
-            // Mid-graceful-shutdown the node IS departing: refuting a
-            // failure rumor here would override its own Leaving broadcast.
-            let self_is_leaving = node.name == self.self_name
-                && state
+            if node.name == self.self_name && failure_rumor {
+                // Mid-graceful-shutdown the node IS departing: a failure
+                // rumor about self must neither be refuted (re-asserting
+                // Alive) nor accepted (the generic merge below would let a
+                // higher-version Down overwrite the deliberate Leaving and
+                // ping_server would start advertising Down). Ignore it
+                // outright while Leaving.
+                let self_is_leaving = state
                     .get(&node.name)
                     .is_some_and(|entry| entry.status == NodeStatus::Leaving as i32);
-            if node.name == self.self_name && failure_rumor && !self_is_leaving {
+                if self_is_leaving {
+                    log::debug!(
+                        "ignoring status {} rumor about self while Leaving",
+                        node.status
+                    );
+                    continue;
+                }
+                // SWIM refutation: re-assert Alive past the rumor's version.
+                // Without this a stale Down rumor outliving a restart (its
+                // version exceeds the fresh boot's) would win every merge and
+                // the live node would be declared dead — and swept — repeatedly.
                 let refuted_version = node.version + 1;
                 log::warn!(
                     "Refuting status {} rumor about self (v{}); re-asserting Alive v{refuted_version}",
@@ -758,11 +772,12 @@ mod sender_tick_tests {
             metadata: std::collections::HashMap::new(),
         }]);
         let entry = state.read().get("self").cloned().expect("self present");
-        assert_ne!(
+        assert_eq!(
             entry.status,
-            NodeStatus::Alive as i32,
-            "a departing node never re-asserts Alive"
+            NodeStatus::Leaving as i32,
+            "a higher-version Down rumor must not overwrite the deliberate Leaving"
         );
+        assert_eq!(entry.version, 5, "the Leaving entry is left untouched");
     }
 
     #[test]
