@@ -185,12 +185,17 @@ impl WorkerSyncAdapter {
         // Steady state is 0; a persistent nonzero value means notifications
         // are dropping and only reconcile recovers them.
         let mut corrections = 0usize;
-        // Registry's worker keys, to spot store keys the registry never
-        // learned (dropped remote puts) after the loop.
+        // Registry's worker keys and URLs. Keys spot store keys the registry
+        // never learned; URLs disambiguate the URL-dedup path, where an
+        // import is registered under a pre-reserved/local id rather than the
+        // publisher's `worker:{id}` key — so the publisher key looks absent
+        // by id yet the worker IS represented and must not count as drift.
         let mut registry_keys: HashSet<String> = HashSet::new();
+        let mut registry_urls: HashSet<String> = HashSet::new();
         for (id, worker) in self.worker_registry.get_all_with_ids() {
             let key = format!("{PREFIX}{}", id.as_str());
             registry_keys.insert(key.clone());
+            registry_urls.insert(worker.url().to_string());
             let is_local = self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local);
             if !live.contains(&key) {
                 // Registry has the worker, the store doesn't: a locally-owned
@@ -213,11 +218,20 @@ impl WorkerSyncAdapter {
                 }
             }
         }
-        // Store keys the registry never learned: dropped remote puts that
-        // `backfill_keys` below recovers.
+        // Store keys the registry knows by neither id nor URL: genuine
+        // dropped remote puts that `backfill_keys` below recovers. Decoding
+        // is confined to keys unmatched by id (rare: dropped puts plus
+        // URL-deduped imports), and the URL check excludes the latter so a
+        // normal URL-deduped import is not miscounted as drift.
         corrections += live
             .iter()
             .filter(|key| !registry_keys.contains(*key))
+            .filter(|key| {
+                self.workers
+                    .get(key)
+                    .and_then(|bytes| bincode::deserialize::<WorkerState>(&bytes).ok())
+                    .is_none_or(|state| !registry_urls.contains(&state.url))
+            })
             .count();
         Metrics::set_mesh_worker_drift(corrections);
         self.backfill_keys(live);
@@ -241,6 +255,10 @@ impl WorkerSyncAdapter {
                 // stays delisted everywhere until its next status change.
                 if self.worker_registry.origin_of(&id) == Some(WorkerOrigin::Local) {
                     if let Some(worker) = self.worker_registry.get(&id) {
+                        // We still own this worker, so the missing key is a
+                        // foreign tombstone (or a lost publish) we overrule by
+                        // re-asserting — a refused tombstone.
+                        Metrics::record_mesh_worker_refused_tombstone();
                         warn!(
                             worker_id,
                             "re-publishing locally-owned worker after foreign tombstone"
@@ -251,10 +269,11 @@ impl WorkerSyncAdapter {
                 }
                 match self.worker_registry.remove_remote(&id) {
                     Some(_) => info!(worker_id, "removed worker on remote tombstone"),
-                    None => {
-                        Metrics::record_mesh_worker_refused_tombstone();
-                        debug!(worker_id, "ignored tombstone (unknown id)");
-                    }
+                    // No-op tombstone: the id is already absent — most often
+                    // the echo of this node's own delete (origin cleared by
+                    // then), or a tombstone for a worker never imported here.
+                    // Not a refusal, so not counted.
+                    None => debug!(worker_id, "ignored tombstone (unknown id)"),
                 }
             }
         }
@@ -762,6 +781,37 @@ mod tests {
         assert_eq!(drift, 1, "a recovered dropped tombstone counts as drift");
 
         assert_eq!(adapter.reconcile_once(), 0, "converged: no drift");
+    }
+
+    #[tokio::test]
+    async fn reconcile_does_not_count_url_deduped_import_as_drift() {
+        // A remote shard whose URL the registry already holds (under a
+        // different, pre-reserved/local id) is the supported URL-dedup path,
+        // not a dropped put — its publisher key looks absent by id yet the
+        // worker is represented, so it must not inflate drift.
+        let mesh = MeshKV::new("node-a".into());
+        let ns = worker_namespace(&mesh);
+        let registry = Arc::new(WorkerRegistry::new());
+        let adapter = WorkerSyncAdapter::new(ns.clone(), registry.clone());
+
+        // A local worker for the URL, with its matching state published so it
+        // is converged (contributes no drift of its own).
+        let id = registry.register(local_worker("http://dup:8080")).unwrap();
+        adapter.on_worker_changed(
+            id.as_str(),
+            &worker_state_of(&id, &registry.get(&id).unwrap()),
+        );
+        // A remote shard for the SAME url under a different publisher key.
+        ns.put(
+            "worker:peer-dup",
+            bincode::serialize(&sample_state("peer-dup", "http://dup:8080")).unwrap(),
+        );
+
+        assert_eq!(
+            adapter.reconcile_once(),
+            0,
+            "a URL-deduped import is represented, not a dropped put"
+        );
     }
 
     #[tokio::test]

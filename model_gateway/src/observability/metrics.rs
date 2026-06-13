@@ -168,7 +168,7 @@ pub(crate) fn init_metrics() {
     );
     describe_counter!(
         "smg_mesh_worker_sync_refused_tombstones_total",
-        "Inbound worker tombstones that evicted nothing (unknown id or locally-owned)"
+        "Foreign worker tombstones overruled by re-asserting a still-locally-owned worker"
     );
     describe_gauge!(
         "smg_mesh_worker_sync_drift",
@@ -582,8 +582,10 @@ impl Metrics {
         counter!("smg_mesh_worker_sync_spec_fallback_total").increment(1);
     }
 
-    /// An inbound worker tombstone evicted nothing (the id was unknown or
-    /// locally-owned). A nonzero rate can flag stale or misrouted tombstones.
+    /// A foreign tombstone was overruled by re-asserting a worker this node
+    /// still owns locally (single-writer: only the owner tombstones its
+    /// keys). A no-op tombstone for an already-absent id — e.g. the echo of
+    /// this node's own delete — is NOT counted.
     pub fn record_mesh_worker_refused_tombstone() {
         counter!("smg_mesh_worker_sync_refused_tombstones_total").increment(1);
     }
