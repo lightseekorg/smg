@@ -45,6 +45,9 @@ fi
 echo "Installing SGLang..."
 uv pip install --prerelease=allow "sglang[all]==0.5.12.post1"
 
+# Work around NVIDIA/cutlass#3259 until the fix ships in CUTLASS 4.6.
+uv pip install --force-reinstall --no-deps "nvidia-cutlass-dsl-libs-cu13==4.5.2"
+
 # sglang 0.5.12.post1 leaves its `kernels` dependency unpinned, so the resolver
 # picks kernels >=0.15, which requires LayerRepository(revision=/version=) —
 # an argument the transformers 5.6.0 hub_kernels integration (pinned by sglang)
