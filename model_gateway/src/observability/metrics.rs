@@ -158,7 +158,7 @@ pub(crate) fn init_metrics() {
     );
     describe_counter!(
         "smg_http_rate_limit_total",
-        "Rate limiting decisions by result (allowed/rejected)"
+        "Rate limiting decisions by result (allowed/rejected/global_rejected)"
     );
 
     // Layer 2: Router metrics
