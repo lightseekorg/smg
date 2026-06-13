@@ -547,6 +547,9 @@ pub mod metrics_labels {
     // Rate limit results
     pub const RATE_LIMIT_ALLOWED: &str = "allowed";
     pub const RATE_LIMIT_REJECTED: &str = "rejected";
+    /// Rejected by the cluster-wide limiter (vs the local token bucket), so
+    /// a 429 spike can be attributed to the right source.
+    pub const RATE_LIMIT_GLOBAL_REJECTED: &str = "global_rejected";
 
     // Circuit breaker states
     pub const CB_CLOSED: &str = "closed";
