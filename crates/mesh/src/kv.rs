@@ -291,13 +291,11 @@ impl CrdtNamespace {
     }
 
     /// List all live keys matching a sub-prefix within this namespace.
+    /// Routed to this namespace's engine, so the cost scales with this
+    /// namespace's keys, not the whole store's.
     pub fn keys(&self, sub_prefix: &str) -> Vec<String> {
         let full_prefix = format!("{}{}", self.prefix, sub_prefix);
-        self.store
-            .keys()
-            .into_iter()
-            .filter(|k| k.starts_with(&full_prefix))
-            .collect()
+        self.store.keys_with_prefix(&full_prefix)
     }
 
     /// Subscribe to changes for keys matching a sub-prefix within this namespace.

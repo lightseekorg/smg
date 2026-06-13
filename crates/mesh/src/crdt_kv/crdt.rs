@@ -169,6 +169,39 @@ impl CrdtOrMap {
         all
     }
 
+    /// Live keys under `prefix`, consulting only the engine the prefix
+    /// routes to. Readers on request paths use this instead of
+    /// [`Self::keys`], which scans and clones every key of every engine.
+    /// A `prefix` shorter than a registered prefix could span engines and
+    /// falls back to the full scan.
+    pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let engines = self.engines_snapshot();
+        for (registered, engine) in engines.iter() {
+            if prefix.starts_with(registered.as_str()) {
+                return engine
+                    .keys()
+                    .into_iter()
+                    .filter(|key| key.starts_with(prefix))
+                    .collect();
+            }
+        }
+        if engines
+            .iter()
+            .any(|(registered, _)| registered.starts_with(prefix))
+        {
+            return self
+                .keys()
+                .into_iter()
+                .filter(|key| key.starts_with(prefix))
+                .collect();
+        }
+        self.default_engine
+            .keys()
+            .into_iter()
+            .filter(|key| key.starts_with(prefix))
+            .collect()
+    }
+
     pub fn all(&self) -> BTreeMap<String, Vec<u8>> {
         let mut all = BTreeMap::new();
         for engine in self.all_engines() {
