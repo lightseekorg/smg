@@ -158,7 +158,21 @@ pub(crate) fn init_metrics() {
     );
     describe_counter!(
         "smg_http_rate_limit_total",
-        "Rate limiting decisions by result (allowed/rejected)"
+        "Rate limiting decisions by result (allowed/rejected/global_rejected)"
+    );
+
+    // Mesh worker-sync observability
+    describe_counter!(
+        "smg_mesh_worker_sync_spec_fallback_total",
+        "Worker states published without their spec because JSON encoding failed"
+    );
+    describe_counter!(
+        "smg_mesh_worker_sync_refused_tombstones_total",
+        "Inbound worker tombstones that evicted nothing (unknown id or locally-owned)"
+    );
+    describe_gauge!(
+        "smg_mesh_worker_sync_drift",
+        "Store-vs-registry corrections applied in the last reconcile pass"
     );
 
     // Layer 2: Router metrics
@@ -560,6 +574,25 @@ impl Metrics {
             "result" => result
         )
         .increment(1);
+    }
+
+    /// A worker state was published without its spec because JSON encoding
+    /// failed — importers see the worker but no spec details.
+    pub fn record_mesh_worker_spec_fallback() {
+        counter!("smg_mesh_worker_sync_spec_fallback_total").increment(1);
+    }
+
+    /// An inbound worker tombstone evicted nothing (the id was unknown or
+    /// locally-owned). A nonzero rate can flag stale or misrouted tombstones.
+    pub fn record_mesh_worker_refused_tombstone() {
+        counter!("smg_mesh_worker_sync_refused_tombstones_total").increment(1);
+    }
+
+    /// Number of store-vs-registry corrections the reconcile pass applied.
+    /// Steady state is 0; a persistent nonzero value means notifications are
+    /// being dropped and recovered only by reconcile (the drift signal).
+    pub fn set_mesh_worker_drift(corrections: usize) {
+        gauge!("smg_mesh_worker_sync_drift").set(corrections as f64);
     }
 
     // ========================================================================
