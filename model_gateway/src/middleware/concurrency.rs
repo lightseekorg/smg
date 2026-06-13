@@ -217,7 +217,9 @@ pub async fn concurrency_limit_middleware(
     if let Some(limiter) = &global_limiter {
         if !limiter.check(unix_now_secs()) {
             debug!("Cluster-wide rate limit exceeded, returning 429");
-            Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_REJECTED);
+            // Distinct from the local token-bucket's RATE_LIMIT_REJECTED so a
+            // 429 spike is attributable to the cluster limiter vs this node.
+            Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_GLOBAL_REJECTED);
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
     }
