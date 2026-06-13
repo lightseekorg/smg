@@ -42,6 +42,7 @@
 */
 
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -50,7 +51,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
+use kv_index::{ContentHash, PositionalIndexer, TokenTree, Tree, WorkerId};
 use openai_protocol::worker::WorkerLoadResponse;
 use parking_lot::RwLock;
 use rand::Rng;
@@ -789,7 +790,7 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         //   3. Approximate string tree: Tree prefix matching (HTTP)
         if let Some(tokens) = request_tokens {
             if self.has_event_indexer(model_id) {
-                self.select_worker_event_driven(workers, tokens, &healthy_indices, model_id)
+                self.select_worker_event_driven(workers, tokens, info, &healthy_indices, model_id)
             } else {
                 self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
             }
@@ -847,6 +848,7 @@ impl CacheAwarePolicy {
         &self,
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
+        info: &SelectWorkerInfo,
         healthy_indices: &[usize],
         model_id: &str,
     ) -> Option<usize> {
@@ -859,8 +861,13 @@ impl CacheAwarePolicy {
             .block_size(model_id)
             .unwrap_or(self.config.block_size);
 
-        if let Some(idx) =
-            Self::score_overlap(workers, tokens, healthy_indices, &indexer, block_size)
+        // Full-prompt hashing is memoized on the request: PD mode runs
+        // selection twice (prefill + decode) and retries re-run it, all with
+        // the same `SelectWorkerInfo`, so the O(tokens) XXH3 pass happens at
+        // most once per request instead of once per `select_worker` call.
+        let content_hashes = info.request_content_hashes(tokens, block_size);
+
+        if let Some(idx) = Self::score_overlap(workers, &content_hashes, healthy_indices, &indexer)
         {
             return Some(idx);
         }
@@ -880,64 +887,82 @@ impl CacheAwarePolicy {
 
     /// Score healthy workers by PositionalIndexer overlap and select the best.
     ///
-    /// Returns `Some(idx)` if at least one worker has cached blocks matching the
-    /// request. Returns `None` if the request is too short for a full block or
-    /// no workers have matching data.
+    /// `content_hashes` is the request's per-block hash sequence, computed (and
+    /// memoized) by the caller. Returns `Some(idx)` if at least one worker has
+    /// cached blocks matching the request. Returns `None` if the request is
+    /// too short for a full block or no workers have matching data.
+    ///
+    /// The scoring loop is integer-keyed: each worker's interned u32 id comes
+    /// from a per-worker cache ([`Worker::cached_kv_worker_id`], one relaxed
+    /// atomic load) and the overlap maps are probed by id. The URL-keyed map
+    /// is touched at most once per (worker, indexer instance) — previously it
+    /// was probed 2-3 times per worker on every request.
     fn score_overlap(
         workers: &[Arc<dyn Worker>],
-        tokens: &[u32],
+        content_hashes: &[ContentHash],
         healthy_indices: &[usize],
         indexer: &PositionalIndexer,
-        block_size: usize,
     ) -> Option<usize> {
-        let content_hashes = compute_request_content_hashes(tokens, block_size);
         if content_hashes.is_empty() {
             return None;
         }
 
-        let overlap = indexer.find_matches(&content_hashes, false);
+        let overlap = indexer.find_matches(content_hashes, false);
         if overlap.scores.is_empty() {
             return None;
         }
 
         // Select worker with best overlap among those that actually match.
-        // Tie-break: lower load, then smaller tree size.
-        let best_idx = healthy_indices
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                indexer
-                    .worker_id(workers[idx].url())
-                    .and_then(|id| overlap.scores.get(&id))
-                    .copied()
-                    .unwrap_or(0)
-                    > 0
-            })
-            .max_by_key(|&idx| {
-                let wid = indexer.worker_id(workers[idx].url());
-                let score = wid
-                    .and_then(|id| overlap.scores.get(&id))
-                    .copied()
-                    .unwrap_or(0);
-                let load = workers[idx].load();
-                let tree_size = wid
-                    .and_then(|id| overlap.tree_sizes.get(&id))
-                    .copied()
-                    .unwrap_or(0);
-                (score, std::cmp::Reverse(load), std::cmp::Reverse(tree_size))
-            })?;
+        // Tie-break: lower load, then smaller tree size. On fully equal keys
+        // the later worker wins, matching the previous `max_by_key` behavior.
+        type ScoreKey = (u32, Reverse<usize>, Reverse<usize>);
+        let mut best: Option<(usize, ScoreKey)> = None;
+        for &idx in healthy_indices {
+            let Some(wid) = Self::resolve_worker_id(&workers[idx], indexer) else {
+                continue;
+            };
+            let score = overlap.scores.get(&wid).copied().unwrap_or(0);
+            if score == 0 {
+                continue;
+            }
+            let tree_size = overlap.tree_sizes.get(&wid).copied().unwrap_or(0);
+            let key = (score, Reverse(workers[idx].load()), Reverse(tree_size));
+            if best.as_ref().is_none_or(|(_, best_key)| key >= *best_key) {
+                best = Some((idx, key));
+            }
+        }
+        let (best_idx, (best_score, _, _)) = best?;
 
         debug!(
             worker = workers[best_idx].url(),
-            score = indexer
-                .worker_id(workers[best_idx].url())
-                .and_then(|id| overlap.scores.get(&id))
-                .copied()
-                .unwrap_or(0),
+            score = best_score,
             "Event-driven routing: overlap match"
         );
         workers[best_idx].increment_processed();
         Some(best_idx)
+    }
+
+    /// Interned kv_index id for a worker, cached on the worker object across
+    /// requests and validated against the indexer instance ("epoch") so a
+    /// replaced indexer never sees another instance's ids.
+    ///
+    /// First contact per (worker, indexer instance) interns the URL — ids are
+    /// assigned once and never recycled within an instance, so this is the
+    /// same id the KV-event path uses — and caches it. Afterwards resolution
+    /// is one relaxed atomic load. Returns `None` only on u32 id-space
+    /// exhaustion (the worker then scores as unmatched, exactly like a worker
+    /// the indexer has never seen).
+    fn resolve_worker_id(
+        worker: &Arc<dyn Worker>,
+        indexer: &PositionalIndexer,
+    ) -> Option<WorkerId> {
+        let epoch = indexer.instance_id();
+        if let Some(wid) = worker.cached_kv_worker_id(epoch) {
+            return Some(wid);
+        }
+        let wid = indexer.intern_worker(worker.url()).ok()?;
+        worker.cache_kv_worker_id(epoch, wid);
+        Some(wid)
     }
 
     /// Select worker using token-based tree (gRPC path)
@@ -1015,9 +1040,15 @@ impl CacheAwarePolicy {
                 return Some(idx);
             }
 
-            // Selected worker no longer exists or unhealthy - fall back to first healthy
-            // Stale entries will be cleaned up by LRU eviction
-            healthy_indices.first().copied()
+            // Matched worker no longer exists or unhealthy — fall back to the
+            // least-loaded healthy worker. Always taking the *first* healthy
+            // index herded every fallback request (e.g. all tenants of a dead
+            // worker) onto one replica. Stale entries will be cleaned up by
+            // LRU eviction.
+            healthy_indices
+                .iter()
+                .min_by_key(|&&idx| workers[idx].load())
+                .copied()
         } else {
             debug!(
                 "Warning: No token tree found for model '{}', using random worker selection",
@@ -1096,9 +1127,14 @@ impl CacheAwarePolicy {
                 return Some(idx);
             }
 
-            // Selected worker no longer exists or unhealthy - fall back to first healthy
-            // Stale entries will be cleaned up by LRU eviction
-            healthy_indices.first().copied()
+            // Matched worker no longer exists or unhealthy — fall back to the
+            // least-loaded healthy worker (see the token path above for the
+            // anti-herding rationale). Stale entries will be cleaned up by
+            // LRU eviction.
+            healthy_indices
+                .iter()
+                .min_by_key(|&&idx| workers[idx].load())
+                .copied()
         } else {
             debug!(
                 "Warning: No string tree found for model '{}', using random worker selection",
@@ -1119,7 +1155,10 @@ impl Default for CacheAwarePolicy {
 
 #[cfg(test)]
 mod tests {
-    use kv_index::{compute_content_hash, SequenceHash, StoredBlock, WorkerBlockMap};
+    use kv_index::{
+        compute_content_hash, compute_request_content_hashes, SequenceHash, StoredBlock,
+        WorkerBlockMap,
+    };
     use openai_protocol::worker::{HealthCheckConfig, SchedulerLoadSnapshot, WorkerStatus};
 
     use super::*;
@@ -1748,10 +1787,12 @@ mod tests {
         // Query with matching tokens — should select w1
         let result = CacheAwarePolicy::score_overlap(
             &workers,
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            &compute_request_content_hashes(
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                4,
+            ),
             &[0, 1],
             &indexer,
-            4,
         );
         assert_eq!(result, Some(0)); // w1
     }
@@ -1773,10 +1814,9 @@ mod tests {
         // Completely different tokens — no overlap → None
         let result = CacheAwarePolicy::score_overlap(
             &workers,
-            &[100, 200, 300, 400, 500, 600, 700, 800],
+            &compute_request_content_hashes(&[100, 200, 300, 400, 500, 600, 700, 800], 4),
             &[0],
             &indexer,
-            4,
         );
         assert_eq!(result, None);
     }
@@ -1824,7 +1864,12 @@ mod tests {
             .unwrap();
 
         // Equal overlap → tie-break by load → w2 wins (lower load)
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &compute_request_content_hashes(&[1, 2, 3, 4], 4),
+            &[0, 1],
+            &indexer,
+        );
         assert_eq!(result, Some(1)); // w2 (lower load)
     }
 
@@ -1877,7 +1922,12 @@ mod tests {
             .unwrap();
 
         // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &compute_request_content_hashes(&[1, 2, 3, 4], 4),
+            &[0, 1],
+            &indexer,
+        );
         assert_eq!(result, Some(0)); // w1 (smaller tree)
     }
 
@@ -1893,7 +1943,12 @@ mod tests {
         let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
 
         // Request shorter than block_size → no full blocks → None
-        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &[0], &indexer, 4);
+        let result = CacheAwarePolicy::score_overlap(
+            &workers,
+            &compute_request_content_hashes(&[1, 2, 3], 4),
+            &[0],
+            &indexer,
+        );
         assert_eq!(result, None);
     }
 
@@ -1957,12 +2012,170 @@ mod tests {
         // Query with all 4 blocks worth of tokens → w1 wins (higher overlap: 4 vs 2)
         let result = CacheAwarePolicy::score_overlap(
             &workers,
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            &compute_request_content_hashes(
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                4,
+            ),
             &[0, 1],
             &indexer,
-            4,
         );
         assert_eq!(result, Some(0)); // w1 (higher overlap)
+    }
+
+    /// The pre-K3 `score_overlap` (URL-keyed `worker_id` probes per worker +
+    /// `max_by_key`), kept verbatim as a reference oracle for the equivalence
+    /// test below.
+    fn reference_score_overlap(
+        workers: &[Arc<dyn Worker>],
+        content_hashes: &[ContentHash],
+        healthy_indices: &[usize],
+        indexer: &PositionalIndexer,
+    ) -> Option<usize> {
+        if content_hashes.is_empty() {
+            return None;
+        }
+        let overlap = indexer.find_matches(content_hashes, false);
+        if overlap.scores.is_empty() {
+            return None;
+        }
+        healthy_indices
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                indexer
+                    .worker_id(workers[idx].url())
+                    .and_then(|id| overlap.scores.get(&id))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            })
+            .max_by_key(|&idx| {
+                let wid = indexer.worker_id(workers[idx].url());
+                let score = wid
+                    .and_then(|id| overlap.scores.get(&id))
+                    .copied()
+                    .unwrap_or(0);
+                let load = workers[idx].load();
+                let tree_size = wid
+                    .and_then(|id| overlap.tree_sizes.get(&id))
+                    .copied()
+                    .unwrap_or(0);
+                (score, Reverse(load), Reverse(tree_size))
+            })
+    }
+
+    /// Equivalence guard for the integer-keyed scoring loop: given the same
+    /// indexer state, loads, and health, the new `score_overlap` must select
+    /// exactly the worker the previous URL-probing implementation selected —
+    /// including ties (equal score/load/tree-size keeps the later worker) and
+    /// workers unknown to the indexer.
+    #[test]
+    fn test_score_overlap_matches_reference_implementation() {
+        let mk = |url: &str| {
+            BasicWorkerBuilder::new(url)
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build()
+        };
+        let w1 = mk("http://w1:8000");
+        let w2 = mk("http://w2:8000");
+        let w3 = mk("http://w3:8000");
+        let w4 = mk("http://w4:8000"); // never feeds the indexer
+        for _ in 0..5 {
+            w3.increment_load();
+        }
+        let workers: Vec<Arc<dyn Worker>> =
+            vec![Arc::new(w1), Arc::new(w2), Arc::new(w3), Arc::new(w4)];
+        let healthy = [0, 1, 2, 3];
+
+        // w1: 4 blocks; w2: first 2 blocks; w3: same 4 blocks (higher load).
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let chunk = |i: u32| [i * 4 + 1, i * 4 + 2, i * 4 + 3, i * 4 + 4];
+        for (url, n_blocks) in [
+            ("http://w1:8000", 4u32),
+            ("http://w2:8000", 2),
+            ("http://w3:8000", 4),
+        ] {
+            let wid = indexer.intern_worker(url).unwrap();
+            let mut wb = WorkerBlockMap::default();
+            let blocks: Vec<StoredBlock> = (0..n_blocks)
+                .map(|i| StoredBlock {
+                    seq_hash: SequenceHash(u64::from(i) + 1),
+                    content_hash: compute_content_hash(&chunk(i)),
+                })
+                .collect();
+            indexer.apply_stored(wid, &blocks, None, &mut wb).unwrap();
+        }
+
+        let full: Vec<u32> = (1..=16).collect();
+        let queries: [&[u32]; 4] = [
+            &full,            // full 4-block match: w1 vs w3 tie on score
+            &[1, 2, 3, 4],    // 1-block match: 3-way tie on score
+            &[1, 2, 3],       // too short: no full block
+            &[9, 9, 9, 9, 9], // no overlap
+        ];
+        for tokens in queries {
+            let hashes = compute_request_content_hashes(tokens, 4);
+            let expected = reference_score_overlap(&workers, &hashes, &healthy, &indexer);
+            let got = CacheAwarePolicy::score_overlap(&workers, &hashes, &healthy, &indexer);
+            assert_eq!(got, expected, "selection diverged for tokens {tokens:?}");
+            // Repeat with warm per-worker id caches — must still agree.
+            let got_warm = CacheAwarePolicy::score_overlap(&workers, &hashes, &healthy, &indexer);
+            assert_eq!(got_warm, expected, "warm-cache selection diverged");
+        }
+
+        // Fully equal keys (same score, load, and tree size for w1 and w3):
+        // both implementations must keep the same (later) worker.
+        for _ in 0..5 {
+            workers[0].increment_load();
+        }
+        let hashes = compute_request_content_hashes(&full, 4);
+        let expected = reference_score_overlap(&workers, &hashes, &healthy, &indexer);
+        let got = CacheAwarePolicy::score_overlap(&workers, &hashes, &healthy, &indexer);
+        assert_eq!(got, expected, "selection diverged on a full tie");
+        assert_eq!(got, Some(2), "full tie must keep the later worker");
+    }
+
+    /// Worker-side cached ids are validated against the indexer instance
+    /// ("epoch"): replacing a model's indexer must not let ids interned in the
+    /// old instance leak into scoring against the new one, even when the raw
+    /// u32 ids collide across instances.
+    #[test]
+    fn test_score_overlap_invalidates_ids_across_indexer_instances() {
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+        ];
+
+        // First indexer: only w1 has the block. Scoring caches per-worker ids.
+        let indexer1 = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
+        let hashes = compute_request_content_hashes(&[1, 2, 3, 4], 4);
+        assert_eq!(
+            CacheAwarePolicy::score_overlap(&workers, &hashes, &[0, 1], &indexer1),
+            Some(0)
+        );
+
+        // Replacement indexer (same model in production): only w2 has the
+        // block, and w2 interns FIRST so it gets the same raw id (0) that w1
+        // had in the old instance. A stale cache would credit w1 with w2's
+        // score; epoch validation must force re-interning instead.
+        let indexer2 = setup_indexer_with_blocks("http://w2:8000", &[&[1, 2, 3, 4]], 4);
+        assert_ne!(indexer1.instance_id(), indexer2.instance_id());
+        assert_eq!(
+            CacheAwarePolicy::score_overlap(&workers, &hashes, &[0, 1], &indexer2),
+            Some(1),
+            "stale worker id from the old indexer instance leaked into scoring"
+        );
     }
 
     // -- select_worker_event_driven integration tests --
@@ -2299,5 +2512,153 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, idx2); // token tree cache affinity preserved
+    }
+
+    /// PD mode runs `select_worker` twice (prefill + decode) with one
+    /// `SelectWorkerInfo`: the full-prompt content-hash pass must run once,
+    /// be reused on the second selection, and both selections must agree.
+    #[test]
+    fn test_event_driven_content_hashes_memoized_across_selections() {
+        let policy = CacheAwarePolicy::with_config(test_config()); // block_size=4
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .health_config(no_health_check())
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        let indexer =
+            setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4], &[5, 6, 7, 8]], 4);
+        monitor.indexers.insert("unknown".to_string(), indexer);
+        policy.set_kv_event_monitor(Some(monitor));
+
+        let tokens: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        let info = SelectWorkerInfo {
+            tokens: Some(&tokens),
+            ..Default::default()
+        };
+        assert!(info.content_hashes.get().is_none());
+
+        let first = policy.select_worker(&workers, &info);
+        assert_eq!(first, Some(0));
+        let (memo_block_size, memo_hashes) = info
+            .content_hashes
+            .get()
+            .expect("event-driven scoring must populate the request hash memo");
+        assert_eq!(*memo_block_size, 4);
+        assert_eq!(memo_hashes.len(), 2); // 8 tokens at block_size 4
+
+        // Second selection (the PD decode pass) reuses the memo and agrees.
+        let second = policy.select_worker(&workers, &info);
+        assert_eq!(second, first);
+    }
+
+    /// A cache hit on a tenant that is now unhealthy must fall back to the
+    /// least-loaded healthy worker, not herd onto the first healthy index
+    /// (token-tree path).
+    #[test]
+    fn test_token_tree_dead_tenant_falls_back_to_min_load() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        let w3 = BasicWorkerBuilder::new("http://w3:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        // w1 (the first healthy index) is busier than w2.
+        for _ in 0..5 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2), Arc::new(w3)];
+        policy.init_workers(&workers);
+
+        // The tree maps these tokens to w3 (full match > cache_threshold)...
+        let tokens: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        policy
+            .token_trees
+            .get("unknown")
+            .unwrap()
+            .insert_tokens(&tokens, "http://w3:8000");
+        // ...but w3 is no longer healthy.
+        workers[2].set_status(WorkerStatus::NotReady);
+
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&tokens),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            idx, 1,
+            "fallback must pick min-load (w2), not first healthy (w1)"
+        );
+    }
+
+    /// Same as above for the string-tree (HTTP) path.
+    #[test]
+    fn test_string_tree_dead_tenant_falls_back_to_min_load() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        let w3 = BasicWorkerBuilder::new("http://w3:8000")
+            .worker_type(WorkerType::Regular)
+            .health_config(no_health_check())
+            .build();
+        for _ in 0..5 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2), Arc::new(w3)];
+        policy.init_workers(&workers);
+
+        let text = "the quick brown fox jumps over the lazy dog";
+        policy
+            .string_trees
+            .get("unknown")
+            .unwrap()
+            .insert_text(text, "http://w3:8000");
+        workers[2].set_status(WorkerStatus::NotReady);
+
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    request_text: Some(text),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            idx, 1,
+            "fallback must pick min-load (w2), not first healthy (w1)"
+        );
     }
 }

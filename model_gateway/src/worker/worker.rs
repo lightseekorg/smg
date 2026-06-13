@@ -291,6 +291,25 @@ pub trait Worker: Send + Sync + fmt::Debug + 'static {
     /// Increment the processed requests counter
     fn increment_processed(&self);
 
+    /// Cached kv_index worker id for the indexer instance ("epoch") given, if
+    /// one was stored via [`cache_kv_worker_id`](Self::cache_kv_worker_id).
+    ///
+    /// Event-driven cache-aware scoring resolves each worker's interned u32 id
+    /// at most once per (worker, indexer instance) and rereads it as a single
+    /// atomic load, instead of probing a URL-keyed map on every request.
+    /// Default implementation has no cache and always returns `None` (callers
+    /// then resolve through the indexer directly).
+    fn cached_kv_worker_id(&self, indexer_epoch: u32) -> Option<u32> {
+        let _ = indexer_epoch;
+        None
+    }
+
+    /// Cache this worker's interned kv_index id for the indexer instance
+    /// ("epoch") given. Default implementation is a no-op.
+    fn cache_kv_worker_id(&self, indexer_epoch: u32, worker_id: u32) {
+        let _ = (indexer_epoch, worker_id);
+    }
+
     /// Get worker-specific metadata
     fn metadata(&self) -> &WorkerMetadata;
 
@@ -784,6 +803,14 @@ pub struct WorkerRuntime {
     processed_counter: AtomicUsize,
     worker_routing_key_load: WorkerRoutingKeyLoad,
     revision: AtomicU64,
+    /// Cached kv_index worker id, packed as `(indexer_epoch << 32) | worker_id`
+    /// with `0` meaning "unset" (indexer epochs are non-zero). Written by
+    /// cache-aware event-driven scoring on first contact with an indexer
+    /// instance so the per-request scoring loop reads one atomic instead of
+    /// probing a URL-keyed map. Lives in the shared runtime so a same-URL
+    /// `replace()` keeps the cache (the id is a pure function of the URL
+    /// within one indexer instance).
+    kv_worker_id: AtomicU64,
 }
 
 impl WorkerRuntime {
@@ -797,6 +824,7 @@ impl WorkerRuntime {
             processed_counter: AtomicUsize::new(0),
             worker_routing_key_load: WorkerRoutingKeyLoad::new(url),
             revision: AtomicU64::new(0),
+            kv_worker_id: AtomicU64::new(0),
         }
     }
 
@@ -890,6 +918,27 @@ impl WorkerRuntime {
 
     pub fn increment_processed(&self) {
         self.processed_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ── Cached kv_index worker id ───────────────────────────────────
+
+    /// Cached kv_index worker id for the indexer instance `indexer_epoch`,
+    /// or `None` when unset or cached for a different instance.
+    pub fn cached_kv_worker_id(&self, indexer_epoch: u32) -> Option<u32> {
+        if indexer_epoch == 0 {
+            return None;
+        }
+        let packed = self.kv_worker_id.load(Ordering::Relaxed);
+        ((packed >> 32) as u32 == indexer_epoch).then_some(packed as u32)
+    }
+
+    /// Cache this worker's interned kv_index id for the indexer instance
+    /// `indexer_epoch` (must be non-zero; kv_index guarantees that).
+    pub fn cache_kv_worker_id(&self, indexer_epoch: u32, worker_id: u32) {
+        self.kv_worker_id.store(
+            (u64::from(indexer_epoch) << 32) | u64::from(worker_id),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -1091,6 +1140,16 @@ impl Worker for BasicWorker {
 
     fn increment_processed(&self) {
         self.runtime.load().increment_processed();
+    }
+
+    fn cached_kv_worker_id(&self, indexer_epoch: u32) -> Option<u32> {
+        self.runtime.load().cached_kv_worker_id(indexer_epoch)
+    }
+
+    fn cache_kv_worker_id(&self, indexer_epoch: u32, worker_id: u32) {
+        self.runtime
+            .load()
+            .cache_kv_worker_id(indexer_epoch, worker_id);
     }
 
     fn metadata(&self) -> &WorkerMetadata {

@@ -23,7 +23,7 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc, OnceLock,
     },
 };
@@ -376,9 +376,19 @@ pub struct PositionalIndexer {
     /// Monotonic counter for assigning new worker IDs. Never recycled; u64 so
     /// exhaustion of the u32 id space is detected instead of wrapping.
     next_worker_id: AtomicU64,
+    /// Process-unique, non-zero id for this indexer instance ("epoch").
+    /// Consumers cache `worker URL → worker id` resolutions on long-lived
+    /// worker objects; comparing this id makes such caches self-invalidating
+    /// when an indexer is dropped and a fresh one is created for the same
+    /// model (worker ids from different instances are unrelated).
+    instance_id: u32,
     /// Jump size for search optimization (default 64).
     jump_size: usize,
 }
+
+/// Process-global counter for [`PositionalIndexer`] instance ids. Starts at 1:
+/// 0 is reserved as the "no cached id" sentinel in consumer-side caches.
+static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(1);
 
 impl PositionalIndexer {
     /// Create a new PositionalIndexer with the given jump size.
@@ -388,13 +398,33 @@ impl PositionalIndexer {
     /// when workers drain. Default: 64.
     pub fn new(jump_size: usize) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
+        let instance_id = loop {
+            let id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+            // Skip the reserved 0 sentinel on the (unreachable in practice)
+            // u32 wrap after 2^32 indexer constructions.
+            if id != 0 {
+                break id;
+            }
+        };
         Self {
             index: DashMap::with_hasher_and_shard_amount(FxBuildHasher, INDEX_SHARD_COUNT),
             tree_sizes: TreeSizes::new(),
             worker_to_id: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             next_worker_id: AtomicU64::new(0),
+            instance_id,
             jump_size,
         }
+    }
+
+    /// Process-unique, non-zero id for this indexer instance ("epoch").
+    ///
+    /// Two `PositionalIndexer` instances never share an id, so a cached
+    /// `(instance_id, worker_id)` pair is valid for an indexer if and only if
+    /// the instance id matches. Used by routing policies to cache
+    /// [`intern_worker`](Self::intern_worker) results on worker objects
+    /// instead of probing the URL-keyed map on every request.
+    pub fn instance_id(&self) -> u32 {
+        self.instance_id
     }
 
     /// Get the internal u32 ID for a worker URL, if it has been interned.

@@ -161,6 +161,7 @@ impl WorkerSelectionStage {
                 tokens,
                 headers,
                 hash_ring,
+                content_hashes: Default::default(),
             },
         )?;
         let selected = available[idx].clone();
@@ -267,11 +268,15 @@ impl WorkerSelectionStage {
         // Get cached hash ring for consistent hashing (O(log n) lookup)
         let hash_ring = self.worker_registry.get_hash_ring(model_id);
 
+        // One SelectWorkerInfo for both selections: request-scoped memos (the
+        // per-block content hashes for cache-aware scoring) are computed once
+        // and shared between the prefill and decode passes.
         let info = SelectWorkerInfo {
             request_text: text,
             tokens,
             headers,
             hash_ring,
+            content_hashes: Default::default(),
         };
         let prefill_idx = policy.select_worker(&available_prefill, &info)?;
         let decode_idx = policy.select_worker(&available_decode, &info)?;

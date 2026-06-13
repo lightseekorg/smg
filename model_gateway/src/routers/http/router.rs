@@ -180,6 +180,7 @@ impl Router {
                 tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                 headers,
                 hash_ring,
+                content_hashes: Default::default(),
             },
         )?;
 
@@ -573,6 +574,7 @@ impl Router {
                 tokens: None,
                 headers,
                 hash_ring,
+                content_hashes: Default::default(),
             },
         ) {
             Some(i) => i,

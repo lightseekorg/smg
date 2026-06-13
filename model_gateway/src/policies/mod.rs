@@ -3,8 +3,13 @@
 //! This module provides a unified abstraction for routing policies that work
 //! across both regular and prefill-decode (PD) routing modes.
 
-use std::{fmt::Debug, sync::Arc};
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+    sync::{Arc, OnceLock},
+};
 
+use kv_index::{compute_request_content_hashes, ContentHash};
 use openai_protocol::worker::WorkerLoadResponse;
 
 use crate::worker::{HashRing, Worker};
@@ -201,6 +206,42 @@ pub struct SelectWorkerInfo<'a> {
     /// Pre-computed hash ring for O(log n) consistent hashing
     /// Built and cached by WorkerRegistry, passed through to avoid per-request rebuilds
     pub hash_ring: Option<Arc<HashRing>>,
+    /// Request-scoped memo of the per-block content hashes derived from
+    /// `tokens` (see [`SelectWorkerInfo::request_content_hashes`]). Stored as
+    /// `(block_size, hashes)` so the memo is only reused for the block size it
+    /// was computed with. Filled lazily by the first policy that needs it;
+    /// callers that run selection more than once per request (PD prefill +
+    /// decode, retries) reuse the same `SelectWorkerInfo` so the full-prompt
+    /// hash pass runs at most once.
+    pub content_hashes: OnceLock<(usize, Vec<ContentHash>)>,
+}
+
+impl SelectWorkerInfo<'_> {
+    /// Per-block content hashes of `tokens` for `block_size`, memoized on this
+    /// request.
+    ///
+    /// The memo assumes one `tokens` value per `SelectWorkerInfo` (construction
+    /// sites build the struct once per request). The block size is recorded
+    /// with the memo: a call with a different block size recomputes instead of
+    /// reusing hashes chunked at the wrong width (returns `Cow::Owned` in that
+    /// case, without disturbing the memo).
+    pub fn request_content_hashes(
+        &self,
+        tokens: &[u32],
+        block_size: usize,
+    ) -> Cow<'_, [ContentHash]> {
+        let (memo_block_size, hashes) = self.content_hashes.get_or_init(|| {
+            (
+                block_size,
+                compute_request_content_hashes(tokens, block_size),
+            )
+        });
+        if *memo_block_size == block_size {
+            Cow::Borrowed(hashes.as_slice())
+        } else {
+            Cow::Owned(compute_request_content_hashes(tokens, block_size))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +256,29 @@ mod tests {
             disable_health_check: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn request_content_hashes_memoized_per_block_size() {
+        let tokens: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        let info = SelectWorkerInfo {
+            tokens: Some(&tokens),
+            ..Default::default()
+        };
+
+        let first = info.request_content_hashes(&tokens, 4);
+        assert_eq!(first.len(), 2);
+        // Same block size: served from the memo (same allocation, no rehash).
+        let again = info.request_content_hashes(&tokens, 4);
+        assert_eq!(first.as_ptr(), again.as_ptr());
+        assert_eq!(*first, *again);
+
+        // Different block size: recomputed at the right width; the memo keeps
+        // the original block size.
+        let other = info.request_content_hashes(&tokens, 8);
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0], kv_index::compute_content_hash(&tokens));
+        assert_eq!(info.content_hashes.get().unwrap().0, 4);
     }
 
     #[test]

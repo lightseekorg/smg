@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, PoisonError, RwLock,
+    },
 };
 
 use openai_protocol::worker::WorkerLoadResponse;
@@ -79,11 +82,16 @@ pub const DEFAULT_THROUGHPUT: f64 = 2000.0;
 ///   in-flight correction absorbs staleness between polls.
 #[derive(Debug)]
 pub struct LeastLoadPolicy {
-    /// Cached load reports from the worker monitor (keyed by worker URL).
-    cached_loads: RwLock<HashMap<String, WorkerLoadResponse>>,
-    /// In-flight token-work dispatched per worker since its last load poll
-    /// (keyed by worker URL); reset when a fresh report arrives.
-    inflight_tokens: RwLock<HashMap<String, u64>>,
+    /// Per-worker load-scoring state keyed by worker URL.
+    ///
+    /// Read-mostly: written only by `update_loads` (poll interval) and
+    /// `remove_worker` (churn). Per-request selection takes a **read** guard —
+    /// concurrent selections never serialize on each other — and credits the
+    /// chosen worker's in-flight counter with a relaxed `fetch_add` on the
+    /// entry's atomic. (Previously a *write* guard was held across the whole
+    /// O(workers) scoring scan of every request, serializing all routing for
+    /// the model on one std `RwLock`.)
+    loads: RwLock<HashMap<String, WorkerLoadState>>,
     /// KV-pressure weight `λ_t` (seconds).
     kv_pressure_weight: f64,
     /// Mean prefill length (tokens) for estimating in-flight token-work when a
@@ -92,6 +100,28 @@ pub struct LeastLoadPolicy {
     /// Fallback throughput (tokens/s) for the `/throughput` term when a backend
     /// reports no live `gen_throughput`.
     default_throughput: f64,
+}
+
+/// Per-worker load-scoring state: the latest poll snapshot plus the token-work
+/// dispatched since that snapshot was taken.
+#[derive(Debug)]
+struct WorkerLoadState {
+    /// Latest load report from the worker monitor.
+    report: WorkerLoadResponse,
+    /// In-flight token-work dispatched since `report` was taken. Credited with
+    /// a relaxed `fetch_add` at selection time (under the map's read guard, so
+    /// concurrent credits are never lost) and reset to 0 when a fresh report
+    /// arrives.
+    inflight_tokens: AtomicU64,
+}
+
+impl WorkerLoadState {
+    fn new(report: WorkerLoadResponse) -> Self {
+        Self {
+            report,
+            inflight_tokens: AtomicU64::new(0),
+        }
+    }
 }
 
 impl LeastLoadPolicy {
@@ -117,8 +147,7 @@ impl LeastLoadPolicy {
         default_throughput: f64,
     ) -> Self {
         Self {
-            cached_loads: RwLock::new(HashMap::new()),
-            inflight_tokens: RwLock::new(HashMap::new()),
+            loads: RwLock::new(HashMap::new()),
             kv_pressure_weight: if kv_pressure_weight.is_finite() && kv_pressure_weight >= 0.0 {
                 kv_pressure_weight
             } else {
@@ -135,24 +164,24 @@ impl LeastLoadPolicy {
 
     /// Expected-wait score for a worker (lower is better).
     ///
-    /// `inflight` maps worker URL -> token-work dispatched since its last poll.
-    /// `nominal_throughput` (a peer-derived mean) estimates drain rate for a
-    /// worker missing a fresh snapshot; `fleet_has_loads` is false only when no
-    /// worker reports at all, in which case we fall back to join-shortest-queue
-    /// on the live in-flight count (which, unlike the since-poll estimate,
-    /// reflects completions and so suits backends that never report loads).
+    /// `state` is the worker's load entry (latest report + since-poll in-flight
+    /// token-work), resolved once by the caller. `nominal_throughput` (a
+    /// peer-derived mean) estimates drain rate for a worker missing a fresh
+    /// snapshot; `fleet_has_loads` is false only when no worker reports at all,
+    /// in which case we fall back to join-shortest-queue on the live in-flight
+    /// count (which, unlike the since-poll estimate, reflects completions and
+    /// so suits backends that never report loads).
     fn score(
         &self,
         worker: &Arc<dyn Worker>,
-        loads: Option<&HashMap<String, WorkerLoadResponse>>,
-        inflight: &HashMap<String, u64>,
+        state: Option<&WorkerLoadState>,
         nominal_throughput: f64,
         fleet_has_loads: bool,
     ) -> f64 {
-        let url = worker.url();
-        match loads.and_then(|m| m.get(url)) {
-            Some(load) => {
-                let inflight_tokens = inflight.get(url).copied().unwrap_or(0) as f64;
+        match state {
+            Some(state) => {
+                let load = &state.report;
+                let inflight_tokens = state.inflight_tokens.load(Ordering::Relaxed) as f64;
                 let queued_tokens = load.total_waiting_uncached_tokens() as f64;
                 let live_throughput = load.total_gen_throughput();
                 let throughput = if live_throughput > 0.0 {
@@ -195,62 +224,59 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
             return Some(healthy[0]);
         }
 
-        let loads_guard = self.cached_loads.read().ok();
-        let loads = loads_guard.as_deref();
+        // Selection holds only a shared read guard: concurrent requests score
+        // in parallel, and the chosen worker's in-flight credit is a relaxed
+        // `fetch_add` on its entry's atomic (never lost, no exclusive lock).
+        let (best, best_score) = {
+            let loads = self.loads.read().unwrap_or_else(PoisonError::into_inner);
 
-        // Fleet-nominal throughput (mean of positive reports) stands in for a
-        // worker missing a fresh snapshot; `fleet_has_loads` distinguishes a
-        // partial gap (estimate that worker's drain time at the nominal rate)
-        // from a fully dark fleet (fall back to join-shortest-queue).
-        let (tp_sum, tp_count) = healthy
-            .iter()
-            .filter_map(|&i| loads.and_then(|m| m.get(workers[i].url())))
-            .map(|l| l.total_gen_throughput())
-            .filter(|t| *t > 0.0)
-            .fold((0.0, 0u32), |(s, n), t| (s + t, n + 1));
-        let nominal_throughput = if tp_count > 0 {
-            tp_sum / tp_count as f64
-        } else {
-            self.default_throughput
-        };
-        let fleet_has_loads = loads
-            .map(|m| healthy.iter().any(|&i| m.contains_key(workers[i].url())))
-            .unwrap_or(false);
+            // Resolve each healthy worker's load entry once — a single
+            // URL-keyed probe per worker per request; the throughput and
+            // scoring passes below are string-free.
+            let entries: Vec<(usize, Option<&WorkerLoadState>)> = healthy
+                .iter()
+                .map(|&i| (i, loads.get(workers[i].url())))
+                .collect();
 
-        // Held across selection so the in-flight estimate stays consistent and
-        // the chosen worker can be credited before the guard is released.
-        let mut inflight = self
-            .inflight_tokens
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Fleet-nominal throughput (mean of positive reports) stands in for
+            // a worker missing a fresh snapshot; `fleet_has_loads` distinguishes
+            // a partial gap (estimate that worker's drain time at the nominal
+            // rate) from a fully dark fleet (fall back to join-shortest-queue).
+            let (tp_sum, tp_count) = entries
+                .iter()
+                .filter_map(|(_, state)| state.map(|s| s.report.total_gen_throughput()))
+                .filter(|t| *t > 0.0)
+                .fold((0.0, 0u32), |(s, n), t| (s + t, n + 1));
+            let nominal_throughput = if tp_count > 0 {
+                tp_sum / tp_count as f64
+            } else {
+                self.default_throughput
+            };
+            let fleet_has_loads = entries.iter().any(|(_, state)| state.is_some());
 
-        let mut best = healthy[0];
-        let mut best_score = self.score(
-            &workers[best],
-            loads,
-            &inflight,
-            nominal_throughput,
-            fleet_has_loads,
-        );
-        for &idx in &healthy[1..] {
-            let s = self.score(
-                &workers[idx],
-                loads,
-                &inflight,
-                nominal_throughput,
-                fleet_has_loads,
-            );
-            if s < best_score {
-                best = idx;
-                best_score = s;
+            let mut best = (healthy[0], None);
+            let mut best_score = f64::INFINITY;
+            for &(idx, state) in &entries {
+                let s = self.score(&workers[idx], state, nominal_throughput, fleet_has_loads);
+                if s < best_score {
+                    best = (idx, state);
+                    best_score = s;
+                }
             }
-        }
+            let (best, best_state) = best;
 
-        // In-flight correction: credit the chosen worker with this request's
-        // token-work until its next poll refreshes the snapshot.
-        let req_tokens = self.request_tokens(info);
-        *inflight.entry(workers[best].url().to_string()).or_insert(0) += req_tokens;
-        drop(inflight);
+            // In-flight correction: credit the chosen worker with this
+            // request's token-work until its next poll refreshes the snapshot.
+            // A worker without a load entry takes no credit: the estimate is
+            // only ever read for workers that have a report, and the
+            // `update_loads` that installs one resets the estimate anyway.
+            if let Some(state) = best_state {
+                state
+                    .inflight_tokens
+                    .fetch_add(self.request_tokens(info), Ordering::Relaxed);
+            }
+            (best, best_score)
+        };
 
         debug!(
             "least_load selected {} (score {:.4}, in_flight {})",
@@ -267,25 +293,24 @@ impl LoadBalancingPolicy for LeastLoadPolicy {
     }
 
     fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
-        if let Ok(mut cached) = self.cached_loads.write() {
-            cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        // A fresh snapshot already reflects work up to the poll, so reset the
-        // since-poll in-flight estimate for the workers it covers.
-        if let Ok(mut inflight) = self.inflight_tokens.write() {
-            for url in loads.keys() {
-                inflight.insert(url.clone(), 0);
+        let mut map = self.loads.write().unwrap_or_else(PoisonError::into_inner);
+        for (url, report) in loads {
+            // A fresh snapshot already reflects work up to the poll, so reset
+            // the since-poll in-flight estimate for the workers it covers.
+            if let Some(state) = map.get_mut(url) {
+                state.report = report.clone();
+                state.inflight_tokens.store(0, Ordering::Relaxed);
+            } else {
+                map.insert(url.clone(), WorkerLoadState::new(report.clone()));
             }
         }
     }
 
     fn remove_worker(&self, url: &str) {
-        if let Ok(mut cached) = self.cached_loads.write() {
-            cached.remove(url);
-        }
-        if let Ok(mut inflight) = self.inflight_tokens.write() {
-            inflight.remove(url);
-        }
+        self.loads
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(url);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -483,20 +508,20 @@ mod tests {
             policy.select_worker(&workers, &info);
         }
         assert!(policy
-            .inflight_tokens
+            .loads
             .read()
             .unwrap()
             .values()
-            .any(|&v| v > 0));
+            .any(|s| s.inflight_tokens.load(Ordering::Relaxed) > 0));
 
         // A fresh poll clears the since-poll estimate.
         policy.update_loads(&loads);
         assert!(policy
-            .inflight_tokens
+            .loads
             .read()
             .unwrap()
             .values()
-            .all(|&v| v == 0));
+            .all(|s| s.inflight_tokens.load(Ordering::Relaxed) == 0));
     }
 
     #[test]
@@ -516,13 +541,94 @@ mod tests {
         loads.insert("http://a:8000".to_string(), make_load(0, 0.5, 100.0));
         loads.insert("http://b:8000".to_string(), make_load(0, 0.3, 100.0));
         policy.update_loads(&loads);
-        assert_eq!(policy.cached_loads.read().unwrap().len(), 2);
+        assert_eq!(policy.loads.read().unwrap().len(), 2);
 
         // Removing a worker drops only its entry (no unbounded growth on churn).
         policy.remove_worker("http://a:8000");
-        let cached = policy.cached_loads.read().unwrap();
+        let cached = policy.loads.read().unwrap();
         assert_eq!(cached.len(), 1);
         assert!(!cached.contains_key("http://a:8000"));
         assert!(cached.contains_key("http://b:8000"));
+    }
+
+    /// K4 regression: parallel selections must not lose in-flight credits.
+    ///
+    /// The exclusive write guard formerly held across the scoring scan made
+    /// scan+credit one atomic transaction; with lock-free credits the
+    /// invariant that must survive is that every request's token-work lands
+    /// exactly once — the total credited in-flight equals the sum dispatched.
+    #[test]
+    fn concurrent_selection_loses_no_inflight_credits() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 250;
+        const TOKENS_PER_REQUEST: usize = 7;
+
+        let policy = LeastLoadPolicy::new();
+        let workers = vec![mk("http://a:8000"), mk("http://b:8000")];
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(0, 0.1, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(0, 0.1, 100.0));
+        policy.update_loads(&loads);
+
+        let tokens: Vec<u32> = (0..TOKENS_PER_REQUEST as u32).collect();
+        std::thread::scope(|s| {
+            for _ in 0..THREADS {
+                s.spawn(|| {
+                    for _ in 0..PER_THREAD {
+                        let info = SelectWorkerInfo {
+                            tokens: Some(&tokens),
+                            ..Default::default()
+                        };
+                        policy.select_worker(&workers, &info).unwrap();
+                    }
+                });
+            }
+        });
+
+        let map = policy.loads.read().unwrap();
+        let total: u64 = map
+            .values()
+            .map(|s| s.inflight_tokens.load(Ordering::Relaxed))
+            .sum();
+        assert_eq!(
+            total,
+            (THREADS * PER_THREAD * TOKENS_PER_REQUEST) as u64,
+            "in-flight token credits were lost under concurrent selection"
+        );
+    }
+
+    /// Selections concurrent with `update_loads`/`remove_worker` must not
+    /// deadlock or panic, and the map must reflect the final write afterwards
+    /// (the read-guard scan tolerates writers between requests).
+    #[test]
+    fn concurrent_selection_with_load_updates_is_safe() {
+        let policy = LeastLoadPolicy::new();
+        let workers = vec![mk("http://a:8000"), mk("http://b:8000")];
+        let mut loads = HashMap::new();
+        loads.insert("http://a:8000".to_string(), make_load(0, 0.1, 100.0));
+        loads.insert("http://b:8000".to_string(), make_load(0, 0.1, 100.0));
+        policy.update_loads(&loads);
+
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..200 {
+                        let info = SelectWorkerInfo::default();
+                        assert!(policy.select_worker(&workers, &info).is_some());
+                    }
+                });
+            }
+            s.spawn(|| {
+                for _ in 0..50 {
+                    policy.update_loads(&loads);
+                    policy.remove_worker("http://b:8000");
+                    let mut one = HashMap::new();
+                    one.insert("http://b:8000".to_string(), make_load(0, 0.1, 100.0));
+                    policy.update_loads(&one);
+                }
+            });
+        });
+
+        assert_eq!(policy.loads.read().unwrap().len(), 2);
     }
 }
