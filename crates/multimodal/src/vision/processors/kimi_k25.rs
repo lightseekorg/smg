@@ -315,7 +315,7 @@ impl VisionPreProcessor for KimiK25Processor {
             item_sizes,
         )
         .with_extra(
-            "grid_thws",
+            "image_grid_thw",
             ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
         )
         .with_extra(
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(result.encoder_input.shape()[2], 14);
         assert_eq!(result.encoder_input.shape()[3], 14);
 
-        assert!(result.model_specific.contains_key("grid_thws"));
+        assert!(result.model_specific.contains_key("image_grid_thw"));
         assert!(result.model_specific.contains_key("patches_per_image"));
         assert!(result.feature_token_counts[0] > 0);
     }
@@ -455,12 +455,12 @@ mod tests {
         assert_eq!(result.encoder_input.shape()[1], 3);
 
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
-            result.model_specific.get("grid_thws")
+            result.model_specific.get("image_grid_thw")
         {
             assert_eq!(shape, &[2, 3]);
             assert_eq!(data.len(), 6);
         } else {
-            panic!("Expected grid_thws to be IntTensor");
+            panic!("Expected image_grid_thw to be IntTensor");
         }
 
         if let Some(ModelSpecificValue::IntTensor { data, .. }) =

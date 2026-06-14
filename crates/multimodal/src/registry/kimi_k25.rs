@@ -84,13 +84,13 @@ impl ModelProcessorSpec for KimiK25VisionSpec {
                 "pixel_values".to_string(),
                 FieldLayout::flat("patches_per_image"),
             ),
-            ("grid_thws".to_string(), FieldLayout::Batched),
+            ("image_grid_thw".to_string(), FieldLayout::Batched),
             ("patches_per_image".to_string(), FieldLayout::Batched),
         ])
     }
 
     fn keep_on_cpu_keys(&self) -> Vec<String> {
-        vec!["grid_thws".to_string()]
+        vec!["image_grid_thw".to_string()]
     }
 }
 
