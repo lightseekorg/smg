@@ -80,6 +80,20 @@ MODEL_SPECS: dict[str, dict] = {
         "vllm_args": [] if _is_nightly else ["--enforce-eager"],
         "trtllm_extra_config": {"kv_cache_config": {"free_gpu_memory_fraction": 0.8}},
     },
+    # Qwen3.6-27B — thinking model with XML tool calls (qwen3_5 arch). Staged for
+    # the nightly BFCL A/B (scripts/bfcl); tp=2 fits the 27B on two GPUs.
+    "Qwen/Qwen3.6-27B": {
+        "model": _resolve_model_path("Qwen/Qwen3.6-27B"),
+        "tp": 2,
+        "features": [
+            "chat",
+            "streaming",
+            "function_calling",
+            "tool_choice",
+            "thinking",
+            "reasoning",
+        ],
+    },
     # Mistral for function calling
     "mistralai/Mistral-7B-Instruct-v0.3": {
         "model": _resolve_model_path("mistralai/Mistral-7B-Instruct-v0.3"),
