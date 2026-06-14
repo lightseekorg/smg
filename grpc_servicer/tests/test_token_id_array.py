@@ -35,6 +35,20 @@ _utils = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_utils)
 to_token_id_array = _utils.to_token_id_array
 
+# Env var that toggles the array("q") (new) vs list (old) SGLang contract.
+_TOKEN_ID_ARRAY_ENV = _utils._TOKEN_ID_ARRAY_ENV
+
+
+@pytest.fixture(autouse=True)
+def _array_contract_on(monkeypatch):
+    """The coercion tests below exercise the array("q") path, which is opt-in.
+
+    Production defaults the toggle OFF (legacy list contract); enable it here so
+    these tests target array behavior without per-test setup. Toggle/default
+    tests override this via their own ``monkeypatch`` call.
+    """
+    monkeypatch.setenv(_TOKEN_ID_ARRAY_ENV, "1")
+
 
 def test_list_becomes_array_q():
     out = to_token_id_array([1, 2, 3])
@@ -78,3 +92,35 @@ def test_documents_the_bug_being_fixed():
     # Pre-fix path: a raw list + array("q") is exactly the crash we eliminated.
     with pytest.raises(TypeError):
         _ = [1, 2, 3] + output_ids
+
+
+@pytest.mark.parametrize("value", ["0", "false", "False", "no", "NO", "off", ""])
+def test_legacy_contract_returns_list(monkeypatch, value):
+    """SGLANG_GRPC_TOKEN_ID_ARRAY falsey => plain list (old SGLang contract)."""
+    monkeypatch.setenv(_TOKEN_ID_ARRAY_ENV, value)
+    out = to_token_id_array([1, 2, 3])
+    assert isinstance(out, list)
+    assert out == [1, 2, 3]
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "yes", "YES"])
+def test_array_contract_when_enabled(monkeypatch, value):
+    """SGLANG_GRPC_TOKEN_ID_ARRAY truthy => array("q") (current SGLang contract)."""
+    monkeypatch.setenv(_TOKEN_ID_ARRAY_ENV, value)
+    out = to_token_id_array([1, 2, 3])
+    assert isinstance(out, array)
+    assert out.typecode == "q"
+    assert list(out) == [1, 2, 3]
+
+
+def test_legacy_list_is_the_default(monkeypatch):
+    """Unset env defaults to the legacy list contract for older SGLang builds."""
+    monkeypatch.delenv(_TOKEN_ID_ARRAY_ENV, raising=False)
+    out = to_token_id_array([1, 2, 3])
+    assert isinstance(out, list)
+    assert out == [1, 2, 3]
+
+
+def test_legacy_contract_none_still_returns_none(monkeypatch):
+    monkeypatch.setenv(_TOKEN_ID_ARRAY_ENV, "0")
+    assert to_token_id_array(None) is None
