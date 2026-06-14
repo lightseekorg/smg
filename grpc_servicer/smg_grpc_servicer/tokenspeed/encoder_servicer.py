@@ -210,14 +210,54 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         remote = agent.get_xfer_descs([(remote_addr, nbytes, 0)], "DRAM")
         self._ensure_remote_ready(gw_name, ip, port, remote, room)
 
-        slot = self._landing_free.get(timeout=30)
+        # Lease a slot with patient, VISIBLE backpressure. Failing here aborts a
+        # request whose prefill is already dispatched (the gateway turns it into
+        # an embedding-receive abort), and a burst of those cascades into a
+        # mass-abort storm (prefill tears down receive MRs mid-write -> RDMA
+        # access violations). Slow admission is strictly cheaper than that.
+        wait_budget = float(os.environ.get("SMG_RDMA_LANDING_WAIT_S", 120))
+        t_acq = time.monotonic()
+        slot = None
+        while slot is None:
+            try:
+                slot = self._landing_free.get(timeout=5)
+            except queue.Empty:
+                waited = time.monotonic() - t_acq
+                if waited >= wait_budget:
+                    raise RuntimeError(
+                        f"EPD RDMA: landing-ring starvation for {waited:.0f}s "
+                        f"(room={room}); raise SMG_RDMA_LANDING_SLOTS / "
+                        f"SMG_RDMA_LANDING_WAIT_S"
+                    ) from None
+                logger.warning(
+                    "EPD RDMA: landing ring exhausted for %.0fs (room=%s, qsize=%d);"
+                    " backpressuring",
+                    waited,
+                    room,
+                    self._landing_free.qsize(),
+                )
         try:
             off = slot * self._landing_slot_bytes
             laddr = self._landing_base + off
             local = agent.get_xfer_descs([(laddr, nbytes, 0)], "DRAM")
             h = agent.initialize_xfer("READ", local, remote, gw_name, str(room).encode())
+            read_deadline = time.monotonic() + float(
+                os.environ.get("SMG_RDMA_READ_TIMEOUT_S", 60)
+            )
+            spins = 0
             state = agent.transfer(h)
             while state in ("PROC", "IN_PROG"):
+                # Yield between polls: under EPD_INGEST_OFFLOOP up to ~32 worker
+                # threads poll concurrently, and a no-sleep spin starves the GIL
+                # away from the hash/publish work that RETURNS slots -- the ring
+                # runs dry and admission collapses. Spin briefly for small-READ
+                # latency, then back off.
+                spins += 1
+                if spins > 64:
+                    time.sleep(0.0005)
+                if time.monotonic() > read_deadline:
+                    agent.release_xfer_handle(h)
+                    raise RuntimeError(f"NIXL READ timed out room={room}")
                 state = agent.check_xfer_state(h)
             agent.release_xfer_handle(h)
             if state != "DONE":
