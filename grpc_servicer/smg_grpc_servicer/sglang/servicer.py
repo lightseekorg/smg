@@ -54,7 +54,7 @@ from smg_grpc_proto.generated import common_pb2
 
 from smg_grpc_servicer.sglang.health_servicer import SGLangHealthServicer
 from smg_grpc_servicer.sglang.request_manager import GrpcRequestManager
-from smg_grpc_servicer.sglang.utils import abort_code_from_output
+from smg_grpc_servicer.sglang.utils import abort_code_from_output, to_token_id_array
 from smg_grpc_servicer.tokenizer_bundle import CHUNK_SIZE, build_tokenizer_zip
 
 logger = logging.getLogger(__name__)
@@ -376,7 +376,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             health_req = TokenizedGenerateReqInput(
                 rid=rid,
                 input_text="",
-                input_ids=[0],
+                input_ids=to_token_id_array([0]),
                 sampling_params=sampling_params,
                 return_logprob=False,
                 logprob_start_len=-1,
@@ -394,7 +394,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             health_req = TokenizedEmbeddingReqInput(
                 rid=rid,
                 input_text="",
-                input_ids=[0],
+                input_ids=to_token_id_array([0]),
                 image_inputs=None,
                 token_type_ids=[0],
                 sampling_params=sampling_params,
@@ -935,7 +935,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             raise ValueError("Tokenized input must be provided")
 
         input_text = grpc_req.tokenized.original_text
-        input_ids = list(grpc_req.tokenized.input_ids)
+        input_ids = to_token_id_array(grpc_req.tokenized.input_ids)
 
         # Convert sampling params
         sampling_params = self._convert_sampling_params(grpc_req.sampling_params)
@@ -1041,7 +1041,7 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
             raise ValueError("Tokenized input must be provided")
 
         input_text = grpc_req.tokenized.original_text
-        input_ids = list(grpc_req.tokenized.input_ids)
+        input_ids = to_token_id_array(grpc_req.tokenized.input_ids)
 
         # Convert sampling params
         sampling_params = self._convert_sampling_params(grpc_req.sampling_params)

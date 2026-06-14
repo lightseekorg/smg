@@ -1,8 +1,31 @@
 """gRPC utility functions."""
 
+from array import array
+from collections.abc import Iterable
 from http import HTTPStatus
 
 import grpc
+
+
+def to_token_id_array(token_ids: Iterable[int] | None) -> array | None:
+    """Coerce a token-id sequence to ``array("q")`` (signed 64-bit ints).
+
+    SGLang declares ``TokenizedGenerateReqInput.input_ids`` /
+    ``TokenizedEmbeddingReqInput.input_ids`` as ``Optional[array[int]]`` and its
+    ``Req`` concatenates ``origin_input_ids + output_ids`` where ``output_ids`` is
+    ``array("q")``. Passing a plain ``list`` (as gRPC repeated fields decode to)
+    makes that concatenation raise ``TypeError: can only concatenate list (not
+    "array.array") to list`` on every request. This mirrors what SGLang's own
+    HTTP ``TokenizerManager`` does before handing IDs to the scheduler.
+
+    ``array("q", x)`` accepts any iterable of ints (list, protobuf
+    ``RepeatedScalarContainer``, or an existing ``array``), so this is safe to
+    apply at every call site. Returns ``None`` for ``None`` input.
+    """
+    if token_ids is None:
+        return None
+    return array("q", token_ids)
+
 
 _HTTP_TO_GRPC_CODE = {
     HTTPStatus.BAD_REQUEST: grpc.StatusCode.INVALID_ARGUMENT,
