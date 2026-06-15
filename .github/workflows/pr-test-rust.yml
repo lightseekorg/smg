@@ -280,6 +280,7 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           cargo check -p llm-multimodal
+          cargo check --manifest-path bindings/python/Cargo.toml
           cargo check --manifest-path bindings/golang/Cargo.toml
 
       - name: Install OpenCV build dependencies

@@ -423,6 +423,10 @@ async fn decode_video_frames(
         None => {
             #[cfg(feature = "opencv-video")]
             {
+                // Auto mode prefers OpenCV for in-process decode performance.
+                // OpenCV samples by frame index, while the FFmpeg fallback uses
+                // an fps filter, so fallback can select a slightly different
+                // frame set for the same input.
                 let opencv_bytes = bytes.clone();
                 let opencv_source_path = source_path.clone();
                 let opencv_result = task::spawn_blocking(move || {
@@ -915,8 +919,18 @@ async fn decode_video_with_ffmpeg_raw(
     let fps_filter = fps_filter_for_metadata(metadata, cfg);
     let max_frames = cfg.max_frames.to_string();
     let mut command = Command::new("ffmpeg");
+    // Rawvideo has no per-frame header, so we interpret stdout using ffprobe's
+    // coded stream dimensions. Disable FFmpeg autorotation here; otherwise a
+    // display-matrix rotation can swap output width/height and corrupt framing.
     command
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-noautorotate",
+            "-i",
+        ])
         .arg(input_path)
         .args([
             "-vf",
