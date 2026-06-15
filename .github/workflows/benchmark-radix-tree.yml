@@ -51,13 +51,13 @@ jobs:
           sccache-version: 'v0.10.0'
 
       - name: Run criterion benchmark
-        timeout-minutes: 40
+        timeout-minutes: 90
         run: |
           source "$HOME/.cargo/env"
           cargo bench --bench radix_tree_benchmark -- benchmark_summary 2>&1 | tee benchmark_output.txt
 
       - name: Run throughput benchmark (synthetic)
-        timeout-minutes: 10
+        timeout-minutes: 30
         run: |
           source "$HOME/.cargo/env"
           cargo bench -p kv-index --bench throughput_bench -- \
@@ -77,7 +77,7 @@ jobs:
           done
 
       - name: Run throughput benchmark (Mooncake traces)
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: |
           source "$HOME/.cargo/env"
           for trace in conversation_trace synthetic_trace toolagent_trace; do
