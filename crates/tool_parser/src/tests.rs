@@ -128,31 +128,6 @@ fn test_partial_json_depth_limit() {
 
 // NOTE: test_stream_result_variants removed - StreamResult enum replaced by StreamingParseResult
 
-#[test]
-fn test_partial_tool_call() {
-    let mut partial = PartialToolCall {
-        name: None,
-        arguments_buffer: String::new(),
-        start_position: 0,
-        name_sent: false,
-        streamed_args: String::new(),
-    };
-
-    // Set name
-    partial.name = Some("test_function".to_string());
-    assert_eq!(partial.name.as_ref().unwrap(), "test_function");
-
-    // Append arguments
-    partial.arguments_buffer.push_str(r#"{"key": "value"}"#);
-    assert_eq!(partial.arguments_buffer, r#"{"key": "value"}"#);
-
-    // Update streaming state
-    partial.name_sent = true;
-    partial.streamed_args = r#"{"key": "#.to_string();
-    assert!(partial.name_sent);
-    assert_eq!(partial.streamed_args, r#"{"key": "#);
-}
-
 #[tokio::test]
 async fn test_json_parser_complete_single() {
     let parser = JsonParser::new();

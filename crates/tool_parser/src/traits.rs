@@ -28,12 +28,6 @@ pub trait ToolParser: Send + Sync {
     /// Check if text contains tool calls in this parser's format
     fn has_tool_markers(&self, text: &str) -> bool;
 
-    /// Optionally expose a token-aware parser implementation.
-    /// Default returns `None`, meaning the parser only supports text input.
-    fn as_token_parser(&self) -> Option<&dyn TokenToolParser> {
-        None
-    }
-
     /// Get unstreamed tool call arguments
     /// Returns tool call items for arguments that have been parsed but not yet streamed
     fn get_unstreamed_tool_args(&self) -> Option<Vec<crate::types::ToolCallItem>> {
@@ -57,18 +51,4 @@ pub trait PartialJsonParser: Send + Sync {
 
     /// Get the maximum parsing depth
     fn max_depth(&self) -> usize;
-}
-
-#[async_trait]
-pub trait TokenToolParser: ToolParser {
-    /// Parse complete tool calls when provided with raw token IDs.
-    async fn parse_complete_tokens(&self, tokens: &[u32]) -> ParserResult<(String, Vec<ToolCall>)>;
-
-    /// Streaming parser entrypoint for token chunks.
-    /// Parsers maintain internal state, so self is mutable
-    async fn parse_incremental_tokens(
-        &mut self,
-        tokens: &[u32],
-        tools: &[Tool],
-    ) -> ParserResult<StreamingParseResult>;
 }
