@@ -138,6 +138,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # WASM support
+    enable_wasm: bool = False
     # Storage hooks (WASM)
     storage_hook_wasm_path: str | None = None
     # History backend configuration
@@ -891,6 +893,12 @@ class RouterArgs:
             default=RouterArgs.backend,
             choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
+        )
+        backend_group.add_argument(
+            f"--{prefix}enable-wasm",
+            action="store_true",
+            default=None,
+            help="Enable WebAssembly (WASM) module support",
         )
         backend_group.add_argument(
             f"--{prefix}storage-hook-wasm-path",

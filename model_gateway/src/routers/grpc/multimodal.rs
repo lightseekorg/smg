@@ -684,8 +684,40 @@ async fn process_multimodal_parts(
                 let video = videos_for_preprocess
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No video available for preprocessing"))?;
+
+                if !video.frames().is_empty() {
+                    return processor
+                        .preprocess_video(video.frames(), &pp_config)
+                        .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"));
+                }
+
+                if let Some(rgb_video) = video.rgb_video() {
+                    match rgb_video.frame_refs() {
+                        Ok(frame_refs) => {
+                            match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
+                                Ok(preprocessed) => return Ok(preprocessed),
+                                Err(error) => {
+                                    warn!(
+                                        error = %error,
+                                        "RGB video preprocessing fast path failed; falling back to materialized frames"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                "RGB video frame refs are invalid; falling back to materialized frames"
+                            );
+                        }
+                    }
+                }
+
+                let frames = video
+                    .materialized_frames()
+                    .map_err(|e| anyhow::anyhow!("Video frame materialization failed: {e}"))?;
                 processor
-                    .preprocess_video(video.frames.as_slice(), &pp_config)
+                    .preprocess_video(&frames, &pp_config)
                     .map_err(|e| anyhow::anyhow!("Video preprocessing failed: {e}"))
             }
             _ => Err(anyhow::anyhow!(
