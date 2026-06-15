@@ -615,6 +615,28 @@ mod tests {
     }
 
     #[test]
+    fn test_resize_rgb_bytes_matches_resize() {
+        let mut rgb = RgbImage::new(3, 2);
+        for y in 0..2 {
+            for x in 0..3 {
+                rgb.put_pixel(x, y, Rgb([(x * 40) as u8, (y * 90) as u8, 128]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        let expected = resize(&img, 2, 2, FilterType::Triangle).to_rgb8();
+        let actual = resize_rgb_bytes(rgb.as_raw(), 3, 2, 2, 2, FilterType::Triangle)
+            .expect("resize_rgb_bytes should resize valid RGB input");
+
+        assert_eq!(actual.as_raw(), expected.as_raw());
+    }
+
+    #[test]
+    fn test_resize_rgb_bytes_rejects_invalid_length() {
+        let result = resize_rgb_bytes(&[1, 2, 3, 4, 5], 2, 1, 1, 1, FilterType::Triangle);
+        assert!(matches!(result, Err(TransformError::ShapeError(_))));
+    }
+
+    #[test]
     fn test_center_crop() {
         let img = create_test_image(100, 100, Rgb([128, 128, 128]));
         let cropped = center_crop(&img, 50, 50);

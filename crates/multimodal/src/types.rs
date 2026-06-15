@@ -148,13 +148,19 @@ impl DecodedRgbVideo {
         Self { data, frames }
     }
 
-    pub fn frame_refs(&self) -> Vec<RgbFrameRef<'_>> {
+    pub fn frame_refs(&self) -> Result<Vec<RgbFrameRef<'_>>, String> {
         self.frames
             .iter()
-            .filter_map(|frame| {
-                let end = frame.offset.checked_add(frame.len)?;
-                let data = self.data.get(frame.offset..end)?;
-                Some(RgbFrameRef {
+            .map(|frame| {
+                let end = frame
+                    .offset
+                    .checked_add(frame.len)
+                    .ok_or_else(|| "decoded RGB frame offset overflow".to_string())?;
+                let data = self
+                    .data
+                    .get(frame.offset..end)
+                    .ok_or_else(|| "decoded RGB frame range is out of bounds".to_string())?;
+                Ok(RgbFrameRef {
                     width: frame.width,
                     height: frame.height,
                     data,

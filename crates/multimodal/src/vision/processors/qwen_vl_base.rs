@@ -671,33 +671,30 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             std::array::from_fn(|c| std::array::from_fn(|v| v as f32 * scale[c] + bias[c]));
 
         let mut out_idx = 0;
-        let mut frame_refs = Vec::with_capacity(temporal_patch_size);
-        let mut resized_frames = Vec::with_capacity(temporal_patch_size);
+        let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
         for gt in 0..grid_t {
-            resized_frames.clear();
-            frame_refs.clear();
+            frame_rgbs.clear();
             for tp in 0..temporal_patch_size {
                 let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
                 let frame = &frames[idx];
-                frame_refs.push(frame);
                 let needs_resize = config.do_resize.unwrap_or(true)
                     && (frame.width() != tw32 || frame.height() != th32);
-                resized_frames.push(if needs_resize {
-                    Some(resize(frame, tw32, th32, filter))
+                if needs_resize {
+                    let resized = resize(frame, tw32, th32, filter);
+                    let (width, height, data) = rgb_bytes(&resized);
+                    frame_rgbs.push(VideoFrameRgb {
+                        width,
+                        height,
+                        data: Cow::Owned(data.into_owned()),
+                    });
                 } else {
-                    None
-                });
-            }
-
-            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
-            for tp in 0..temporal_patch_size {
-                let frame_ref = resized_frames[tp].as_ref().unwrap_or(frame_refs[tp]);
-                let (width, height, data) = rgb_bytes(frame_ref);
-                frame_rgbs.push(VideoFrameRgb {
-                    width,
-                    height,
-                    data,
-                });
+                    let (width, height, data) = rgb_bytes(frame);
+                    frame_rgbs.push(VideoFrameRgb {
+                        width,
+                        height,
+                        data,
+                    });
+                }
             }
 
             self.patchify_video_rgb_chunk_into(

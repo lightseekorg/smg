@@ -692,23 +692,24 @@ async fn process_multimodal_parts(
                 }
 
                 if let Some(rgb_video) = video.rgb_video() {
-                    let frame_refs = rgb_video.frame_refs();
-                    if frame_refs.len() == rgb_video.frames.len() {
-                        match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
-                            Ok(preprocessed) => return Ok(preprocessed),
-                            Err(error) => {
-                                warn!(
-                                    error = %error,
-                                    "RGB video preprocessing fast path failed; falling back to materialized frames"
-                                );
+                    match rgb_video.frame_refs() {
+                        Ok(frame_refs) => {
+                            match processor.preprocess_video_rgb(&frame_refs, &pp_config) {
+                                Ok(preprocessed) => return Ok(preprocessed),
+                                Err(error) => {
+                                    warn!(
+                                        error = %error,
+                                        "RGB video preprocessing fast path failed; falling back to materialized frames"
+                                    );
+                                }
                             }
                         }
-                    } else {
-                        warn!(
-                            decoded_frames = rgb_video.frames.len(),
-                            valid_frame_refs = frame_refs.len(),
-                            "RGB video frame refs are incomplete; falling back to materialized frames"
-                        );
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                "RGB video frame refs are invalid; falling back to materialized frames"
+                            );
+                        }
                     }
                 }
 
