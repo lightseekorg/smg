@@ -779,7 +779,6 @@ impl Router {
         policy = PolicyType::RoundRobin,
         host = String::from("0.0.0.0"),
         port = 3001,
-        health_check_port = None,
         worker_startup_timeout_secs = 600,
         worker_startup_check_interval = 30,
         load_monitor_interval = 10,
@@ -885,6 +884,10 @@ impl Router {
         mesh_advertise_host = None,
         drain_settle_secs = 5,
         enable_wasm = false,
+        // Appended last (not inserted mid-list) so every pre-existing
+        // positional argument keeps its index for callers that construct
+        // `_Router(...)` positionally. See the struct-field note above.
+        health_check_port = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -896,7 +899,6 @@ impl Router {
         policy: PolicyType,
         host: String,
         port: u16,
-        health_check_port: Option<u16>,
         worker_startup_timeout_secs: u64,
         worker_startup_check_interval: u64,
         load_monitor_interval: u64,
@@ -1002,6 +1004,9 @@ impl Router {
         mesh_advertise_host: Option<String>,
         drain_settle_secs: u64,
         enable_wasm: bool,
+        // Appended last to match the `#[pyo3(signature)]` order above and
+        // preserve positional-argument compatibility.
+        health_check_port: Option<u16>,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 

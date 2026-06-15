@@ -1,8 +1,6 @@
-//! Liveness/readiness/health endpoints for orchestrators, load balancers, and
-//! uptime monitors: O(1) event-maintained readiness state and an optional
-//! isolated probe listener. Kubernetes is the motivating consumer, but nothing
-//! here is k8s-specific — any caller polling `/liveness`, `/readiness`, or
-//! `/health` benefits.
+//! Liveness, readiness, and health endpoints: O(1) event-maintained readiness
+//! state and an optional isolated probe listener. Not k8s-specific, though
+//! Kubernetes is the motivating consumer.
 //!
 //! # Why this exists (#1694)
 //!
@@ -30,7 +28,7 @@
 //! 2. **Dedicated probe listener.** When `--health-check-port` (config
 //!    `health_check_port`) is set, `/liveness`, `/readiness`, and `/health`
 //!    are *also* served on that port by a minimal router with no middleware,
-//!    running on a single-worker tokio runtime driven by its own OS thread
+//!    running on a current-thread tokio runtime driven by its own OS thread
 //!    (the `build_in_runtime` pattern), so probes cannot be starved by the
 //!    request runtime. The routes always remain on the main listener too;
 //!    point the orchestrator's probes at the dedicated port. Unset means no
@@ -45,11 +43,7 @@
 //! or orchestrator stops routing new connections during the
 //! endpoint-propagation window without restarting the process.
 
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -272,21 +266,47 @@ pub fn liveness_response() -> Response {
 /// The initial snapshot is computed synchronously, after subscribing (so no
 /// event can fall between snapshot and subscription): workers registered
 /// before this call are reflected the moment it returns.
+///
+/// The task holds the worker and tokenizer registries by [`Weak`](std::sync::Weak) and
+/// `upgrade()`s them each iteration, stopping the moment the owning server
+/// drops them. Holding strong `Arc`s would form a reference cycle — the
+/// registry owns the event `Sender`, so a task that also owned a registry
+/// `Arc` would keep that `Sender` (and thus the whole registry graph and
+/// `ProbeState`) alive for the entire process, never observing
+/// `RecvError::Closed` and never exiting. That leak is invisible for a
+/// single long-lived process but matters for tests and embedded callers that
+/// create and drop servers. (The `metrics_ws` worker collector holds a
+/// strong `Arc<AppContext>` with the same loop shape and has the same latent
+/// cycle; this task takes the Weak route since readiness gates traffic and
+/// the fix is self-contained.) `probe_state` stays a strong `Arc` because the
+/// dedicated listener thread shares it and outlives the maintainer.
 pub fn spawn_readiness_maintainer(
     probe_state: Arc<ProbeState>,
     worker_registry: Arc<WorkerRegistry>,
     tokenizer_registry: Arc<TokenizerRegistry>,
     router_config: RouterConfig,
 ) -> JoinHandle<()> {
+    // Subscribe before downgrading: the broadcast `Receiver` is independent
+    // of the registry `Arc`, so it keeps delivering events (and reports
+    // `Closed` once every `Sender` is gone) even though the task no longer
+    // holds the registry strongly.
     let mut rx = worker_registry.subscribe_events();
+    // Initial synchronous recompute while the strong Arcs are still in scope,
+    // so workers registered before this call are reflected on return.
     probe_state.recompute(&worker_registry, &tokenizer_registry, &router_config);
+
+    let worker_registry = Arc::downgrade(&worker_registry);
+    let tokenizer_registry = Arc::downgrade(&tokenizer_registry);
 
     #[expect(
         clippy::disallowed_methods,
-        reason = "readiness maintainer runs for the lifetime of the server"
+        reason = "readiness maintainer runs for the lifetime of the server (and exits when the registry is dropped)"
     )]
     tokio::spawn(async move {
         let mut checkpoint = tokio::time::interval(CHECKPOINT_INTERVAL);
+        // Recompute is idempotent, so a starved maintainer only needs one
+        // catch-up tick, not the default `Burst` of backlogged ticks.
+        checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         checkpoint.tick().await; // skip first immediate tick
 
         loop {
@@ -302,14 +322,23 @@ pub fn spawn_readiness_maintainer(
                             break;
                         }
                     }
-                    probe_state.recompute(&worker_registry, &tokenizer_registry, &router_config);
                 }
                 _ = checkpoint.tick() => {
                     // Catch changes that bypass the broadcast channel and
                     // tokenizer registrations (which emit no worker event).
-                    probe_state.recompute(&worker_registry, &tokenizer_registry, &router_config);
                 }
             }
+
+            // Stop once the owning server drops the registries: upgrading
+            // fails, breaking the would-be reference cycle so the task and
+            // the registries deallocate on teardown.
+            let (Some(workers), Some(tokenizers)) =
+                (worker_registry.upgrade(), tokenizer_registry.upgrade())
+            else {
+                debug!("worker registry dropped, readiness maintainer stopping");
+                break;
+            };
+            probe_state.recompute(&workers, &tokenizers, &router_config);
         }
     })
 }
@@ -354,21 +383,28 @@ pub fn probe_router(probe_state: Arc<ProbeState>) -> Router {
 /// Start the dedicated probe listener on `host:port`.
 ///
 /// Binds synchronously so startup fails fast on port conflicts, then serves
-/// the [`probe_router`] from a single-worker tokio runtime driven by its own
-/// OS thread (the `build_in_runtime` pattern): probes keep answering even
-/// when every request-runtime worker is busy. The thread and runtime live
-/// until process exit — probes must stay answerable through the whole drain
-/// window. Returns the bound address (useful when `port` is `0`).
+/// the [`probe_router`] from a current-thread tokio runtime that drives the
+/// event loop directly on its own OS thread (the `build_in_runtime`
+/// pattern): probes keep answering even when every request-runtime worker is
+/// busy, and the O(1) handlers never need extra worker threads. The thread
+/// and runtime live until process exit — probes must stay answerable through
+/// the whole drain window. Returns the bound address (useful when `port` is
+/// `0`).
 pub fn start_probe_listener(
     host: &str,
     port: u16,
     probe_state: Arc<ProbeState>,
 ) -> Result<SocketAddr, String> {
-    let ip_addr: IpAddr = host.parse().unwrap_or_else(|err| {
-        error!("Failed to parse probe listener host '{host}': {err}, falling back to 0.0.0.0");
-        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
-    });
-    let addr = SocketAddr::new(ip_addr, port);
+    // Parse host+port exactly like the main listener (server.rs): a
+    // `host:port` SocketAddr parse handles bracketed IPv6 literals
+    // (`[::1]`, `[::]`) that a bare `IpAddr::parse` of the host rejects, and
+    // a bad host is a hard error rather than a silent rebind to 0.0.0.0
+    // (which would hide a config typo and widen exposure). `port` may be 0
+    // here on purpose — the ephemeral-port tests bind through this path; the
+    // config-sourced value is rejected for 0 at the validation layer.
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|err| format!("invalid probe listener host '{host}': {err}"))?;
 
     let listener = std::net::TcpListener::bind(addr)
         .map_err(|err| format!("failed to bind probe listener on {addr}: {err}"))?;
@@ -382,9 +418,7 @@ pub fn start_probe_listener(
     std::thread::Builder::new()
         .name("smg-probe".to_string())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .thread_name("smg-probe-worker")
+            let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
@@ -404,7 +438,7 @@ pub fn start_probe_listener(
                 };
                 info!(
                     "Probe listener serving /liveness, /readiness, /health on {local_addr} \
-                     (dedicated single-worker runtime)"
+                     (dedicated current-thread runtime)"
                 );
                 if let Err(err) = axum::serve(listener, probe_router(probe_state)).await {
                     error!("Probe listener error: {err}");
@@ -799,10 +833,14 @@ mod tests {
         let tokenizer_registry = Arc::new(TokenizerRegistry::new());
         let router_config = regular_config();
 
+        // Keep strong Arcs to both registries for the duration of the test:
+        // the maintainer now holds them by Weak (so it can exit on teardown),
+        // mirroring production where `AppContext` owns them for the server's
+        // life.
         let handle = spawn_readiness_maintainer(
             state.clone(),
             registry.clone(),
-            tokenizer_registry,
+            tokenizer_registry.clone(),
             router_config,
         );
 
@@ -826,5 +864,38 @@ mod tests {
         );
 
         handle.abort();
+    }
+
+    /// Dropping the registries must let the maintainer exit: it holds them by
+    /// `Weak`, so once the owning Arcs are gone `upgrade()` fails and the loop
+    /// breaks. Without that, the task would keep the registries (and
+    /// `ProbeState`) alive for the whole process — a leak for create/drop
+    /// server lifecycles (tests, embedded callers).
+    #[tokio::test]
+    async fn maintainer_exits_when_registry_dropped() {
+        let state = probe_state();
+        let registry = Arc::new(WorkerRegistry::new());
+        let tokenizer_registry = Arc::new(TokenizerRegistry::new());
+
+        let handle = spawn_readiness_maintainer(
+            state,
+            registry.clone(),
+            tokenizer_registry.clone(),
+            regular_config(),
+        );
+
+        // Drop every strong Arc the owner held; only the maintainer's Weaks
+        // (which cannot keep them alive) remain.
+        drop(registry);
+        drop(tokenizer_registry);
+
+        // The task observes the dropped registry on its next checkpoint tick
+        // (and the dropped broadcast Sender on recv) and returns; the
+        // JoinHandle then completes on its own without an abort.
+        let exited = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            matches!(exited, Ok(Ok(()))),
+            "maintainer must exit once the registries are dropped, got {exited:?}"
+        );
     }
 }
