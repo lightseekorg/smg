@@ -25,7 +25,12 @@ use crate::{AbortOnDropClient, BoxedTraceInjector, NoopTraceInjector};
 
 #[expect(clippy::allow_attributes)]
 pub mod tokenspeed_proto {
-    #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
+    #![allow(
+        clippy::all,
+        clippy::absolute_paths,
+        clippy::trivially_copy_pass_by_ref,
+        unused_qualifications
+    )]
     tonic::include_proto!("tokenspeed.grpc.scheduler");
 }
 

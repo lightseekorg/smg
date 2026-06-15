@@ -192,7 +192,7 @@ pub struct PreProcessorConfig {
     #[serde(default)]
     pub max_image_tiles: Option<usize>,
 
-    /// Fixed number of image tokens (some models use this)
+    /// Fixed number of image tokens (some model configs use this HF field name).
     #[serde(default)]
     pub num_img_tokens: Option<usize>,
 
@@ -347,6 +347,23 @@ impl PreProcessorConfig {
                 .unwrap_or(224);
             (h, w)
         })
+    }
+
+    /// Get a scalar value from the `size` map, such as `shortest_edge` or
+    /// `longest_edge`.
+    pub fn get_size_value(&self, key: &str) -> Option<usize> {
+        self.size
+            .as_ref()
+            .and_then(|s| s.get(key))
+            .map(|v| *v as usize)
+    }
+
+    pub fn get_shortest_edge(&self) -> Option<usize> {
+        self.get_size_value("shortest_edge")
+    }
+
+    pub fn get_longest_edge(&self) -> Option<usize> {
+        self.get_size_value("longest_edge")
     }
 
     /// Get crop size.

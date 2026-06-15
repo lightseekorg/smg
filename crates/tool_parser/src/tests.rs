@@ -78,6 +78,33 @@ fn test_partial_json_parser() {
 }
 
 #[test]
+fn test_partial_json_consumed_is_byte_offset() {
+    let parser = PartialJson::default();
+
+    // Complete object with a multibyte value: consumed must be the byte length
+    // and must land on a UTF-8 char boundary so input[..consumed] is sliceable.
+    let input = r#"{"k":"é"}"#;
+    let (value, consumed) = parser.parse_value(input, true).unwrap();
+    assert_eq!(value["k"], "é");
+    assert_eq!(consumed, input.len());
+    assert!(input.is_char_boundary(consumed));
+    let _ = &input[..consumed];
+
+    // Partial object whose multibyte char is the last consumed content.
+    let input = "{\"k\":\"é";
+    let (value, consumed) = parser.parse_value(input, true).unwrap();
+    assert_eq!(value["k"], "é");
+    assert!(input.is_char_boundary(consumed));
+    let _ = &input[..consumed];
+
+    // Emoji (4-byte) value also yields a byte offset on a char boundary.
+    let input = r#"{"k":"🌍"}"#;
+    let (_value, consumed) = parser.parse_value(input, true).unwrap();
+    assert_eq!(consumed, input.len());
+    assert!(input.is_char_boundary(consumed));
+}
+
+#[test]
 fn test_partial_json_depth_limit() {
     // max_depth of 3 allows nesting up to 3 levels
     // Set allow_incomplete to false to get errors instead of partial results

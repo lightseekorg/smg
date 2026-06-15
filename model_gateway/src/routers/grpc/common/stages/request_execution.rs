@@ -33,7 +33,7 @@ const NIXL_PREFILL_KV_PARAMS: &str = r#"{"do_remote_decode":true,"do_remote_pref
 enum KvConnectorMode {
     /// MooncakeConnector: mint a transfer_id, tag both legs, synthesize decode
     /// params from worker metadata; legacy host/port injection when the
-    /// servicer predates kv_engine_id reporting (or DP is active).
+    /// servicer predates kv_engine_id reporting (or DP runs without a pinned rank).
     Mooncake {
         host: String,
         port: u32,
@@ -60,6 +60,22 @@ fn kv_connector_mode(
         },
         Some(NIXL_CONNECTOR) => KvConnectorMode::Nixl,
         _ => KvConnectorMode::Passthrough,
+    }
+}
+
+/// Connector id of the engine core serving the prefill leg. With DP the cores
+/// suffix the configured id as `{base}_dp{rank}`, so minting needs a pinned
+/// rank; unpinned DP>1 yields None (no mint — decode recomputes locally).
+fn effective_kv_engine_id(
+    base: Option<&str>,
+    dp_size: Option<usize>,
+    dp_rank: Option<usize>,
+) -> Option<String> {
+    let base = base.filter(|s| !s.is_empty())?;
+    if dp_size.unwrap_or(1) > 1 {
+        dp_rank.map(|rank| format!("{base}_dp{rank}"))
+    } else {
+        Some(base.to_string())
     }
 }
 
@@ -224,7 +240,7 @@ impl PipelineStage for RequestExecutionStage {
 impl RequestExecutionStage {
     async fn execute_single(
         &self,
-        proto_request: ProtoGenerateRequest,
+        mut proto_request: ProtoGenerateRequest,
         clients: &mut ClientSelection,
         workers: &WorkerSelection,
     ) -> Result<ExecutionResult, Response> {
@@ -238,6 +254,10 @@ impl RequestExecutionStage {
                 "Expected single client but got dual",
             )
         })?;
+
+        if let Some(rank) = workers.single().and_then(|w| w.dp_rank()) {
+            proto_request.set_data_parallel_rank(rank as i32);
+        }
 
         let result = client.generate(proto_request).await;
         workers.record_outcome(result.cb_status_code());
@@ -301,11 +321,17 @@ impl RequestExecutionStage {
             )
         })?;
 
-        let prefill_request = proto_request.clone_inner();
+        let mut prefill_request = proto_request.clone_inner();
         // Strip multimodal data from decode request — the decode worker only
         // needs the KV cache from prefill, not the pixel tensors (~40MB saved).
         let mut decode_request = proto_request;
         decode_request.clear_mm_inputs();
+        if let Some(rank) = workers.prefill_worker().and_then(|w| w.dp_rank()) {
+            prefill_request.set_data_parallel_rank(rank as i32);
+        }
+        if let Some(rank) = workers.decode_worker().and_then(|w| w.dp_rank()) {
+            decode_request.set_data_parallel_rank(rank as i32);
+        }
 
         let (prefill_result, decode_result): (StreamResult, StreamResult) = tokio::join!(
             prefill_client.generate(prefill_request),
@@ -366,11 +392,18 @@ impl RequestExecutionStage {
             .prefill_worker()
             .map(|w| {
                 let meta = w.metadata();
+                // Discovered dp_size matters even without --dp-aware expansion:
+                // a DP>1 engine behind an unexpanded worker must not be minted for
+                let dp_size = w
+                    .dp_size()
+                    .or_else(|| meta.spec.labels.get("dp_size").and_then(|s| s.parse().ok()));
+                let engine_id =
+                    effective_kv_engine_id(meta.spec.kv_engine_id.as_deref(), dp_size, w.dp_rank());
                 kv_connector_mode(
                     meta.spec.kv_connector.as_deref(),
                     &meta.spec.bootstrap_host,
                     meta.spec.bootstrap_port,
-                    meta.spec.kv_engine_id.as_deref(),
+                    engine_id.as_deref(),
                 )
             })
             .unwrap_or(KvConnectorMode::Passthrough);
@@ -420,6 +453,9 @@ impl RequestExecutionStage {
         let mut prefill_request = proto_request.clone_inner();
         prefill_request.sanitize_sampling_for_prefill(1);
         prefill_request.set_stream(false);
+        if let Some(rank) = workers.prefill_worker().and_then(|w| w.dp_rank()) {
+            prefill_request.set_data_parallel_rank(rank as i32);
+        }
         if mode == KvConnectorMode::Nixl {
             if relay_kv_params {
                 prefill_request.set_kv_transfer_params_json(NIXL_PREFILL_KV_PARAMS.to_string());
@@ -479,6 +515,9 @@ impl RequestExecutionStage {
         // Decode reuses proto_request as-is; same request_id as the prefill leg is
         // load-bearing for NIXL P/D correlation on vLLM < 0.13
         let mut decode_request = proto_request;
+        if let Some(rank) = workers.decode_worker().and_then(|w| w.dp_rank()) {
+            decode_request.set_data_parallel_rank(rank as i32);
+        }
         match (&mode, prefill_kv_params) {
             // Modern Mooncake: synthesized params under the minted transfer_id
             (
@@ -737,5 +776,40 @@ mod tests {
 
         let unset = ProtoGenerateComplete::Vllm(vllm::GenerateComplete::default());
         assert_eq!(unset.kv_transfer_params_json(), None);
+    }
+
+    #[test]
+    fn effective_engine_id_passthrough_when_no_dp() {
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), None, None).as_deref(),
+            Some("eng")
+        );
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), Some(1), None).as_deref(),
+            Some("eng")
+        );
+    }
+
+    #[test]
+    fn effective_engine_id_suffixes_pinned_dp_rank() {
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), Some(2), Some(1)).as_deref(),
+            Some("eng_dp1")
+        );
+        assert_eq!(
+            effective_kv_engine_id(Some("eng"), Some(2), Some(0)).as_deref(),
+            Some("eng_dp0")
+        );
+    }
+
+    #[test]
+    fn effective_engine_id_none_for_unpinned_dp() {
+        assert_eq!(effective_kv_engine_id(Some("eng"), Some(2), None), None);
+    }
+
+    #[test]
+    fn effective_engine_id_none_for_missing_or_empty_base() {
+        assert_eq!(effective_kv_engine_id(None, Some(2), Some(0)), None);
+        assert_eq!(effective_kv_engine_id(Some(""), None, None), None);
     }
 }

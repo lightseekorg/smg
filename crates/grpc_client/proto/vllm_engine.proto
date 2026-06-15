@@ -173,6 +173,9 @@ message GenerateRequest {
   // engine (e.g. NIXL's do_remote_prefill/remote_block_ids/remote_host/...).
   // Preferred over the legacy typed kv_transfer_params field.
   optional string kv_transfer_params_json = 8;
+
+  // DP rank to pin this request to; unset lets the engine balance internally
+  optional int32 data_parallel_rank = 9;
 }
 
 // KV cache transfer parameters for Mooncake PD disaggregation
@@ -334,6 +337,8 @@ message GetServerInfoResponse {
   string kv_connector = 6;  // "MooncakeConnector", "NixlConnector", "" if not configured
   string kv_role = 7;       // "kv_producer", "kv_consumer", "kv_both", "" if not configured
   string kv_engine_id = 8;  // kv_transfer_config.engine_id, "" if not configured
+
+  int32 data_parallel_size = 9;  // parallel_config.data_parallel_size (1 when DP is off)
 }
 
 // =====================

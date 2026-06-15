@@ -7,7 +7,13 @@ use std::{sync::Arc, time::Duration};
 
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::{json, Value};
-use tokio::{sync::broadcast::error::RecvError, task::JoinHandle};
+use tokio::{
+    sync::broadcast::{
+        error::{RecvError, TryRecvError},
+        Receiver,
+    },
+    task::JoinHandle,
+};
 use tracing::{debug, warn};
 
 use super::{registry::WatchRegistry, types::Topic};
@@ -108,10 +114,11 @@ fn spawn_worker_collector(
                 event = rx.recv() => {
                     match event {
                         Ok(event) => {
-                            debug!("worker event: {event:?}");
+                            // Coalesce a burst of events into a single rebuild, and
+                            // publish models only if any of them changed membership.
+                            let models_changed = drain_pending(&event, &mut rx);
                             publish_workers(&context, &registry);
-                            // Only publish models on membership changes, not health
-                            if matches!(event, WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. } | WorkerEvent::Replaced { .. }) {
+                            if models_changed {
                                 publish_models(&context, &registry);
                             }
                         }
@@ -136,12 +143,47 @@ fn spawn_worker_collector(
     })
 }
 
+/// Membership changes (add/remove/replace) affect the model list; status
+/// changes do not.
+fn is_membership_change(event: &WorkerEvent) -> bool {
+    matches!(
+        event,
+        WorkerEvent::Registered { .. } | WorkerEvent::Removed { .. } | WorkerEvent::Replaced { .. }
+    )
+}
+
+/// Drain every event already queued behind `first` so a burst collapses into a
+/// single rebuild, returning whether any of them (including `first`) changed
+/// membership. A drain-time lag conservatively forces a model rebuild.
+fn drain_pending(first: &WorkerEvent, rx: &mut Receiver<WorkerEvent>) -> bool {
+    let mut models_changed = is_membership_change(first);
+    loop {
+        match rx.try_recv() {
+            Ok(event) => models_changed |= is_membership_change(&event),
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            Err(TryRecvError::Lagged(n)) => {
+                warn!("worker collector lagged by {n} events while draining");
+                models_changed = true;
+            }
+        }
+    }
+    models_changed
+}
+
+/// Collect and publish `topic` only when a WS client is subscribed, so the
+/// collector never builds a snapshot nobody will read.
+fn publish_if_subscribed(registry: &WatchRegistry, topic: Topic, collect: impl FnOnce() -> Value) {
+    if registry.has_receivers(topic) {
+        registry.publish(topic, collect());
+    }
+}
+
 fn publish_workers(context: &AppContext, registry: &WatchRegistry) {
-    registry.publish(Topic::Workers, collect_workers(context));
+    publish_if_subscribed(registry, Topic::Workers, || collect_workers(context));
 }
 
 fn publish_models(context: &AppContext, registry: &WatchRegistry) {
-    registry.publish(Topic::Models, collect_models(context));
+    publish_if_subscribed(registry, Topic::Models, || collect_models(context));
 }
 
 // ── Polled collectors ───────────────────────────────────────────────────
@@ -162,8 +204,8 @@ fn spawn_interval_collector(
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            registry.publish(topic, collect_fn(&context));
-            debug!("{name} collector: published");
+            publish_if_subscribed(&registry, topic, || collect_fn(&context));
+            debug!("{name} collector: tick");
         }
     })
 }
@@ -181,9 +223,12 @@ fn spawn_metrics_collector(
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            let raw = prometheus_handle.render();
-            registry.publish(Topic::Metrics, json!({ "raw": raw }));
-            debug!("metrics collector: published");
+            publish_if_subscribed(
+                &registry,
+                Topic::Metrics,
+                || json!({ "raw": prometheus_handle.render() }),
+            );
+            debug!("metrics collector: tick");
         }
     })
 }
@@ -262,7 +307,43 @@ fn collect_models(context: &AppContext) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
+    use tokio::sync::broadcast;
+
     use super::*;
+    use crate::worker::{registry::WorkerId, BasicWorkerBuilder, Worker, WorkerType};
+
+    fn no_health_check() -> HealthCheckConfig {
+        HealthCheckConfig {
+            disable_health_check: true,
+            ..Default::default()
+        }
+    }
+
+    fn dummy_worker(url: &str) -> Arc<dyn Worker> {
+        Arc::new(
+            BasicWorkerBuilder::new(url)
+                .worker_type(WorkerType::Regular)
+                .health_config(no_health_check())
+                .build(),
+        )
+    }
+
+    fn status_event(url: &str) -> WorkerEvent {
+        WorkerEvent::StatusChanged {
+            worker_id: WorkerId::from_string(url.to_string()),
+            worker: dummy_worker(url),
+            old_status: WorkerStatus::Ready,
+            new_status: WorkerStatus::NotReady,
+        }
+    }
+
+    fn registered_event(url: &str) -> WorkerEvent {
+        WorkerEvent::Registered {
+            worker_id: WorkerId::from_string(url.to_string()),
+            worker: dummy_worker(url),
+        }
+    }
 
     #[test]
     fn default_config_has_sensible_intervals() {
@@ -271,5 +352,70 @@ mod tests {
         assert_eq!(config.rate_limits_interval, Duration::from_secs(5));
         assert_eq!(config.metrics_interval, Duration::from_secs(3));
         assert_eq!(config.worker_checkpoint_interval, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn publish_skipped_without_receivers() {
+        let registry = WatchRegistry::new();
+        let mut collected = 0;
+        publish_if_subscribed(&registry, Topic::Workers, || {
+            collected += 1;
+            json!({ "workers": [] })
+        });
+        assert_eq!(
+            collected, 0,
+            "must not collect when no client is subscribed"
+        );
+        // A fresh subscriber sees the initial None: nothing was published.
+        assert!(registry.subscribe(Topic::Workers).borrow().is_none());
+    }
+
+    #[test]
+    fn publish_runs_with_receiver() {
+        let registry = WatchRegistry::new();
+        let rx = registry.subscribe(Topic::Workers);
+        let mut collected = 0;
+        publish_if_subscribed(&registry, Topic::Workers, || {
+            collected += 1;
+            json!({ "workers": [] })
+        });
+        assert_eq!(collected, 1, "must collect when a client is subscribed");
+        assert!(rx.borrow().is_some());
+    }
+
+    #[test]
+    fn drain_pending_coalesces_burst_and_flags_membership() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let first = status_event("http://w1");
+        tx.send(status_event("http://w1")).unwrap();
+        tx.send(registered_event("http://w2")).unwrap();
+        tx.send(status_event("http://w1")).unwrap();
+
+        let models_changed = drain_pending(&first, &mut rx);
+
+        assert!(
+            models_changed,
+            "a Registered event in the burst must flag a models rebuild"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+            "the whole burst must be drained into a single rebuild"
+        );
+    }
+
+    #[test]
+    fn drain_pending_status_only_keeps_models_untouched() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let first = status_event("http://w1");
+        tx.send(status_event("http://w1")).unwrap();
+        tx.send(status_event("http://w1")).unwrap();
+
+        let models_changed = drain_pending(&first, &mut rx);
+
+        assert!(
+            !models_changed,
+            "a status-only burst must not rebuild models"
+        );
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

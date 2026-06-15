@@ -48,7 +48,14 @@ pub struct CrdtOrMap {
     /// two op-id-colliding ops into one engine deduplicates them.
     clock: Arc<LamportClock>,
     replica_id: ReplicaId,
+    /// Cached gossip snapshot keyed by the sum of engine op-generations.
+    /// Rounds with no log mutations share one `Arc` instead of deep-cloning
+    /// every op (the log carries full values) once per second.
+    op_snapshot: OpSnapshotCache,
 }
+
+/// `(generation, snapshot)` cache slot for [`CrdtOrMap::operation_log_snapshot`].
+type OpSnapshotCache = Arc<RwLock<Option<(u64, Arc<OperationLog>)>>>;
 
 impl CrdtOrMap {
     pub fn new() -> Self {
@@ -63,6 +70,7 @@ impl CrdtOrMap {
             default_engine: Arc::new(LwwEngine::new(replica_id, Arc::clone(&clock))),
             clock,
             replica_id,
+            op_snapshot: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -208,6 +216,31 @@ impl CrdtOrMap {
             ops.extend(engine.export_ops());
         }
         OperationLog::from_operations(ops)
+    }
+
+    /// Shared gossip snapshot of the operation log. Rebuilt only when some
+    /// engine's log mutated since the cached build; unchanged rounds return
+    /// the same `Arc` (an idle node's 1 Hz round clones nothing). A racing
+    /// mutation between the generation read and the rebuild can only make
+    /// the cached snapshot newer than its key, forcing one extra rebuild —
+    /// never a stale serve, since every mutation strictly increases the sum.
+    pub fn operation_log_snapshot(&self) -> Arc<OperationLog> {
+        // Sum over the engine table directly: `all_engines` would allocate a
+        // Vec of handles on every 1 Hz round just to read the counters.
+        let engines = self.engines_snapshot();
+        let generation: u64 = engines
+            .iter()
+            .map(|(_, engine)| engine.op_generation())
+            .sum::<u64>()
+            + self.default_engine.op_generation();
+        if let Some((cached_gen, snapshot)) = self.op_snapshot.read().as_ref() {
+            if *cached_gen == generation {
+                return Arc::clone(snapshot);
+            }
+        }
+        let fresh = Arc::new(self.get_operation_log());
+        *self.op_snapshot.write() = Some((generation, Arc::clone(&fresh)));
+        fresh
     }
 
     /// Merge an incoming operation log. Groups ops by destination engine

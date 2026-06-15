@@ -91,6 +91,32 @@ All fields and defaults match SGLang's `KVEventsConfig` (see `python/sglang/srt/
 
 For data-parallel deployments, the actual TCP port becomes `endpoint_port + dp_rank` (rank 0 keeps the configured port).
 
+### Alternative: launch a vLLM worker
+
+vLLM publishes KV cache events on a ZMQ socket; enable them with `--kv-events-config` and run the worker in SMG gRPC mode:
+
+```bash
+pip install "smg-grpc-servicer[vllm]"
+
+# `--grpc` runs vLLM in SMG gRPC mode (loads smg-grpc-servicer);
+# --kv-events-config turns on KV-event publishing:
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --grpc \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557", "topic": "kv-events"}'
+```
+
+Event-driven routing needs the worker in **SMG gRPC mode** (`--grpc`) — KV events stream over the `SubscribeKvEvents` RPC, so an HTTP worker can't participate. See [gRPC Workers](grpc-workers.md) for additional launch flags (host, port, TP size).
+
+| Field | Why |
+|---|---|
+| `enable_kv_cache_events: true` | vLLM-specific master switch. Without it no events are published even if a publisher is set. |
+| `publisher: "zmq"` | Selects the ZMQ publisher the servicer bridges. |
+| `endpoint` / `topic` | ZMQ `PUB` address and topic prefix. For data-parallel, the port is `endpoint_port + dp_rank`; SMG currently consumes rank 0. |
+
+SMG learns the block size from the `BlockStored` events themselves, so you needn't set it; pass vLLM's `--block-size N` (the analogue of SGLang's `--page-size`) only to pin a non-default value.
+
+Everything downstream — SMG flags, block-size learning, and the verification logs — is unchanged; `KvEventMonitor` consumes the events the same way for any gRPC worker.
+
 ---
 
 ## Step 2 — Launch SMG

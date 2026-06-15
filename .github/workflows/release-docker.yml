@@ -60,7 +60,11 @@ jobs:
           # Uses the full push range (before..after) to catch changes across
           # multiple commits, not just HEAD~1.
           if [[ "${EVENT_NAME}" == "push" ]]; then
-            if git diff --name-only "${EVENT_BEFORE}" "${EVENT_AFTER}" | grep -q '^bindings/python/pyproject.toml$'; then
+            # Capture changed files first so a git failure fails the step,
+            # instead of being swallowed by the pipe and silently leaving
+            # PUSH=false.
+            CHANGED=$(git diff --name-only "${EVENT_BEFORE}" "${EVENT_AFTER}")
+            if grep -q '^bindings/python/pyproject.toml$' <<<"${CHANGED}"; then
               PUSH="true"
             fi
           fi
@@ -81,6 +85,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -92,3 +97,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+
+      - name: Summary
+        if: always()
+        env:
+          PUSH: ${{ steps.should-push.outputs.push }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          IMAGE="lightseekorg/smg:${VERSION}"
+          LATEST="lightseekorg/smg:latest"
+          if [[ "${BUILD_OUTCOME}" == "success" && "${PUSH}" == "true" ]]; then
+            {
+              echo "### ✅ Docker image pushed successfully"
+              echo ""
+              echo "| Tag | Reference |"
+              echo "| --- | --- |"
+              echo "| \`${VERSION}\` | \`${IMAGE}\` |"
+              echo "| \`latest\` | \`${LATEST}\` |"
+              if [[ -n "${DIGEST}" ]]; then
+                echo ""
+                echo "Digest: \`${DIGEST}\`"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${BUILD_OUTCOME}" == "success" ]]; then
+            {
+              echo "### ⚠️ Docker image built but NOT pushed"
+              echo ""
+              echo "\`${IMAGE}\` was built and validated, but not published — no version bump in \`bindings/python/pyproject.toml\` and not a manual dispatch."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Docker image ${IMAGE} was built but not pushed."
+          else
+            {
+              echo "### ❌ Docker image build failed"
+              echo ""
+              echo "\`${IMAGE}\` was **not** pushed because the build did not succeed (outcome: \`${BUILD_OUTCOME}\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Docker image ${IMAGE} was not pushed (build outcome: ${BUILD_OUTCOME})."
+          fi

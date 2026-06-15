@@ -538,6 +538,7 @@ impl GossipController {
                                 let acked = acked_incremental.read();
                                 stream_batch
                                     .crdt_ops
+                                    .operations()
                                     .iter()
                                     .filter(|op| acked.allows(op))
                                     .cloned()

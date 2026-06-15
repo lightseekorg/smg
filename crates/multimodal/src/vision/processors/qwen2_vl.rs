@@ -23,8 +23,8 @@ use image::DynamicImage;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
 use crate::vision::{
-    image_processor::{ImagePreProcessor, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
+    processor::{PreprocessedEncoderInputs, VisionPreProcessor},
     transforms::TransformError,
 };
 
@@ -197,7 +197,7 @@ impl Deref for Qwen2VLProcessor {
     }
 }
 
-impl ImagePreProcessor for Qwen2VLProcessor {
+impl VisionPreProcessor for Qwen2VLProcessor {
     fn default_mean(&self) -> [f64; 3] {
         self.inner.default_mean()
     }
@@ -210,7 +210,7 @@ impl ImagePreProcessor for Qwen2VLProcessor {
         &self,
         images: &[DynamicImage],
         config: &PreProcessorConfig,
-    ) -> Result<PreprocessedImages, TransformError> {
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
         self.inner.preprocess(images, config)
     }
 
@@ -232,7 +232,7 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::*;
-    use crate::vision::{image_processor::ModelSpecificValue, preprocessor_config::PatchSize};
+    use crate::vision::{preprocessor_config::PatchSize, processor::ModelSpecificValue};
 
     fn create_test_image(width: u32, height: u32, color: Rgb<u8>) -> DynamicImage {
         DynamicImage::from(RgbImage::from_pixel(width, height, color))
@@ -366,12 +366,12 @@ mod tests {
         let image = create_test_image(600, 400, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        // pixel_values is patchified: [total_patches, patch_features]
-        assert_eq!(result.pixel_values.ndim(), 2);
-        assert!(result.pixel_values.shape()[0] > 0); // total_patches > 0
+        // encoder_input is patchified: [total_patches, patch_features]
+        assert_eq!(result.encoder_input.ndim(), 2);
+        assert!(result.encoder_input.shape()[0] > 0); // total_patches > 0
 
         // Check pixel values are normalized
-        let flat = result.pixel_values_flat();
+        let flat = result.encoder_input_flat();
         // After normalization with CLIP mean/std, gray (0.5) should be near 0
         // (0.5 - 0.48) / 0.27 ≈ 0.07
         assert!(flat.iter().all(|&v| v.abs() < 1.0)); // Should be normalized
@@ -381,7 +381,7 @@ mod tests {
         assert!(result.model_specific.contains_key("patches_per_image"));
 
         // Verify token count is reasonable
-        assert!(result.num_img_tokens[0] > 0);
+        assert!(result.feature_token_counts[0] > 0);
     }
 
     #[test]
@@ -397,11 +397,11 @@ mod tests {
         let result = processor.preprocess(&images, &config).unwrap();
 
         // Both images processed
-        assert_eq!(result.image_sizes.len(), 2);
-        assert_eq!(result.num_img_tokens.len(), 2);
+        assert_eq!(result.item_sizes.len(), 2);
+        assert_eq!(result.feature_token_counts.len(), 2);
 
-        // pixel_values is 2D [total_patches, patch_features]
-        assert_eq!(result.pixel_values.ndim(), 2);
+        // encoder_input is 2D [total_patches, patch_features]
+        assert_eq!(result.encoder_input.ndim(), 2);
 
         // Check grid_thw shape
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
@@ -420,7 +420,7 @@ mod tests {
             assert_eq!(shape, &[2]); // 2 images
             assert_eq!(data.len(), 2);
             let total: i64 = data.iter().sum();
-            assert_eq!(total as usize, result.pixel_values.shape()[0]);
+            assert_eq!(total as usize, result.encoder_input.shape()[0]);
         } else {
             panic!("Expected patches_per_image to be IntTensor");
         }

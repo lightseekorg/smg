@@ -52,7 +52,8 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "workers(count=1, prefill=None, decode=None): worker topology configuration",
+        "workers(count=1, prefill=None, decode=None, gpus=None, extra_engine_args=None): "
+        "worker topology configuration",
     )
     config.addinivalue_line(
         "markers",

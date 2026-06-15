@@ -79,7 +79,7 @@ pub(super) mod test_helpers {
 
     use crate::{
         types::ImageSize,
-        vision::image_processor::{ModelSpecificValue, PreprocessedImages},
+        vision::processor::{ModelSpecificValue, PreprocessedEncoderInputs},
     };
 
     pub struct TestTokenizer {
@@ -155,24 +155,24 @@ pub(super) mod test_helpers {
     }
 
     pub fn test_preprocessed_with_tokens(
-        image_sizes: &[ImageSize],
-        num_img_tokens: &[usize],
-    ) -> PreprocessedImages {
-        let sizes: Vec<(u32, u32)> = image_sizes.iter().map(|s| (s.height, s.width)).collect();
-        PreprocessedImages {
-            pixel_values: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
-            num_img_tokens: num_img_tokens.to_vec(),
-            image_sizes: sizes,
+        item_sizes: &[ImageSize],
+        feature_token_counts: &[usize],
+    ) -> PreprocessedEncoderInputs {
+        let sizes: Vec<(u32, u32)> = item_sizes.iter().map(|s| (s.height, s.width)).collect();
+        PreprocessedEncoderInputs {
+            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
+            feature_token_counts: feature_token_counts.to_vec(),
+            item_sizes: sizes,
             model_specific: HashMap::new(),
         }
     }
 
-    /// Build `PreprocessedImages` with explicit aspect_ratios (for Llama4 tests).
+    /// Build `PreprocessedEncoderInputs` with explicit aspect_ratios (for Llama4 tests).
     pub fn test_preprocessed_with_aspects(
-        image_sizes: &[ImageSize],
+        item_sizes: &[ImageSize],
         aspect_ratios: &[(i64, i64)],
-    ) -> PreprocessedImages {
-        let sizes: Vec<(u32, u32)> = image_sizes.iter().map(|s| (s.height, s.width)).collect();
+    ) -> PreprocessedEncoderInputs {
+        let sizes: Vec<(u32, u32)> = item_sizes.iter().map(|s| (s.height, s.width)).collect();
         let flat: Vec<i64> = aspect_ratios
             .iter()
             .flat_map(|&(h, w)| vec![h, w])
@@ -186,10 +186,10 @@ pub(super) mod test_helpers {
                 shape: vec![batch, 2],
             },
         );
-        PreprocessedImages {
-            pixel_values: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
-            num_img_tokens: vec![0; sizes.len()],
-            image_sizes: sizes,
+        PreprocessedEncoderInputs {
+            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
+            feature_token_counts: vec![0; sizes.len()],
+            item_sizes: sizes,
             model_specific,
         }
     }

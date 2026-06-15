@@ -152,10 +152,14 @@ the id once at worker registration; without a pinned id, vLLM generates a new
 one per process, so a restarted prefill container would invalidate the
 registered id until the worker is re-registered.
 
-Limitation: Mooncake PD requires the prefill workers to run without vLLM data
-parallelism (`data_parallel_size = 1`). With DP active the servicer reports no
-engine id and SMG falls back to legacy host/port injection (decode recomputes
-the prompt locally).
+With vLLM data parallelism (`data_parallel_size > 1`), run SMG with
+`--dp-aware`: SMG pins each request to a DP rank and mints the decode params
+with the matching `{engine_id}_dp{rank}` engine-core id. Without `--dp-aware`,
+DP>1 prefill workers are not minted for and SMG falls back to legacy host/port
+injection (decode recomputes the prompt locally). External-LB DP
+(`--data-parallel-external-lb`, one pod per rank) is unsupported for Mooncake
+minting: every pod's engine core is `{engine_id}_dp0`, so register pods as
+plain workers and pin a distinct `engine_id` per pod.
 
 ```bash
 smg \

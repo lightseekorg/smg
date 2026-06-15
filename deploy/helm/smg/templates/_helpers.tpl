@@ -280,6 +280,9 @@ Called from the router Deployment template.
 - "--rate-limit-tokens-per-second"
 - {{ .Values.auth.rateLimitTokensPerSecond | quote }}
 {{- end }}
+{{- if .Values.router.wasm.enabled }}
+- "--enable-wasm"
+{{- end }}
 {{- if .Values.router.wasm.path }}
 - "--storage-hook-wasm-path"
 - {{ .Values.router.wasm.path | quote }}

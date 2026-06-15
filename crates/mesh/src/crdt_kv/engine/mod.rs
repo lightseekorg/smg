@@ -58,6 +58,12 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
     /// local or remote write that changes live state.
     fn generation(&self) -> u64;
 
+    /// Monotonically increasing op-log mutation counter. Unlike
+    /// [`Self::generation`], this also covers log-only mutations (a losing
+    /// remote op is appended for relay without changing live state), so it
+    /// is the correct invalidation key for shared op-log snapshots.
+    fn op_generation(&self) -> u64;
+
     // ---- Replication ----
 
     /// Snapshot every operation this engine has retained, in deterministic
@@ -83,8 +89,9 @@ pub(super) trait NamespaceCrdtEngine: Send + Sync {
 
     // ---- Maintenance ----
 
-    /// Garbage-collect tombstones older than `grace`. Returns the number of
-    /// metadata entries removed.
+    /// Garbage-collect tombstones older than `grace`, purging the collected
+    /// keys' dominated ops from the operation log so log size keeps tracking
+    /// the key population. Returns the number of metadata entries removed.
     fn gc_tombstones(&self, grace: Duration) -> usize;
 }
 

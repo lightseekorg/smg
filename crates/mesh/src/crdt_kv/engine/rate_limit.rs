@@ -48,6 +48,9 @@ pub(crate) struct RateLimitEngine {
     clock: Arc<LamportClock>,
     replica_id: ReplicaId,
     generation: AtomicU64,
+    /// Bumped on every log mutation; invalidation key for shared op-log
+    /// snapshots.
+    op_generation: AtomicU64,
 }
 
 impl RateLimitEngine {
@@ -58,13 +61,24 @@ impl RateLimitEngine {
             clock,
             replica_id,
             generation: AtomicU64::new(0),
+            op_generation: AtomicU64::new(0),
         }
+    }
+
+    /// Compact once the log carries more than twice the shard count
+    /// (min 64): a compacted log holds one op per key, so this bounds
+    /// resident log memory at O(keys) while amortizing the fold.
+    fn compact_trigger(&self) -> usize {
+        (self.entries.len() * 2).max(64)
     }
 
     fn append_op(&self, op: Operation) {
         let mut log = self.log.write();
         log.append(op);
-        if log.len() > OperationLog::AUTO_COMPACT_THRESHOLD {
+        self.op_generation.fetch_add(1, Ordering::Release);
+        // The trigger floor is 64, so a short log skips the DashMap len()
+        // (an O(shards) scan) on this per-write path.
+        if log.len() > 64 && log.len() > self.compact_trigger() {
             Self::compact_log(&mut log);
             // Local-write path only: dropping oldest on the remote-merge path
             // would shed remotely-learned shards (see the helper's docs).
@@ -342,6 +356,10 @@ impl NamespaceCrdtEngine for RateLimitEngine {
         self.generation.load(Ordering::Acquire)
     }
 
+    fn op_generation(&self) -> u64 {
+        self.op_generation.load(Ordering::Acquire)
+    }
+
     fn export_ops(&self) -> Vec<Operation> {
         self.log.read().operations().to_vec()
     }
@@ -375,6 +393,7 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                 log.append(op.clone());
             }
             Self::compact_log(&mut log);
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
 
         // Snapshot the observable (encoded-live) value of every key this batch
@@ -446,6 +465,9 @@ impl NamespaceCrdtEngine for RateLimitEngine {
             .collect();
 
         let mut removed = 0;
+        // Collected keys' winning tombstone versions, for the log purge below.
+        let mut purged: std::collections::HashMap<String, RateLimitVersion> =
+            std::collections::HashMap::new();
         for key in candidates {
             let was_removed = self.entries.remove_if(&key, |_, entry| {
                 matches!(&entry.state, RateLimitState::Tombstone(_))
@@ -453,9 +475,25 @@ impl NamespaceCrdtEngine for RateLimitEngine {
                         .tombstoned_at
                         .is_some_and(|at| now.saturating_duration_since(at) >= grace)
             });
-            if was_removed.is_some() {
+            if let Some((key, entry)) = was_removed {
                 removed += 1;
+                if let RateLimitState::Tombstone(version) = entry.state {
+                    purged.insert(key, version);
+                }
             }
+        }
+        if !purged.is_empty() {
+            // Purge the collected keys' dominated ops so log size keeps
+            // tracking the entry count (the compaction trigger) and dead
+            // tombstones stop gossiping. Newer concurrent ops for a reused
+            // key survive the version filter.
+            let mut log = self.log.write();
+            log.retain_ops(|op| {
+                purged.get(op.key()).is_none_or(|tombstone| {
+                    RateLimitVersion::new(op.timestamp(), op.replica_id()) > *tombstone
+                })
+            });
+            self.op_generation.fetch_add(1, Ordering::Release);
         }
         removed
     }

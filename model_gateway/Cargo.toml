@@ -1,6 +1,6 @@
 [package]
 name = "smg"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 description = "High-performance model-routing gateway for large-scale LLM deployments"
 license = "Apache-2.0"
@@ -81,6 +81,7 @@ smg-grpc-client.workspace = true
 bincode = "1.3"
 clap = { version = "4", features = ["derive", "env"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+ndarray = "0.17"
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors", "timeout", "limit", "request-id", "util"] }
 serde_json = { version = "1.0", default-features = false, features = ["std", "preserve_order"] }

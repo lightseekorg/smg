@@ -13,6 +13,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
+use futures::FutureExt as _;
 use kv_index::{
     compute_content_hash, ApplyError, PositionalIndexer, SequenceHash, StoredBlock, WorkerBlockMap,
 };
@@ -23,9 +24,12 @@ use tokio::{
     sync::{oneshot, Mutex},
     task::JoinHandle,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::worker::{ConnectionMode, Worker, UNKNOWN_MODEL_ID};
+use crate::{
+    observability::metrics::Metrics,
+    worker::{ConnectionMode, Worker, UNKNOWN_MODEL_ID},
+};
 
 /// Default jump size for new `PositionalIndexer` instances.
 const DEFAULT_JUMP_SIZE: usize = 64;
@@ -138,6 +142,7 @@ impl KvEventMonitor {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let loop_model_id = model_id.clone();
+        let task_url = url.clone();
 
         #[expect(
             clippy::disallowed_methods,
@@ -145,15 +150,34 @@ impl KvEventMonitor {
                       handle is stored and graceful shutdown is sent on removal"
         )]
         let handle = tokio::spawn(async move {
-            Self::subscription_loop(
+            // Catch panics here so they surface when they happen — a bare
+            // JoinError would only be observed at worker removal, leaving the
+            // index silently frozen for this worker until then.
+            let result = std::panic::AssertUnwindSafe(Self::subscription_loop(
                 worker,
                 worker_url,
                 indexer,
                 block_sizes,
                 loop_model_id,
                 shutdown_rx,
-            )
+            ))
+            .catch_unwind()
             .await;
+            if let Err(payload) = result {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .map(String::from)
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "(non-string panic)".into());
+                error!(
+                    worker_url = %task_url,
+                    panic.message = %msg,
+                    "KV event subscription task panicked; KV events from this \
+                     worker no longer feed cache-aware routing"
+                );
+                Metrics::record_kv_event_subscription_failure(&task_url, "panic");
+            }
         });
 
         handles.insert(
@@ -183,7 +207,16 @@ impl KvEventMonitor {
         info!(worker_url = %worker_url, "Stopping KV event subscription");
         // Signal graceful shutdown — task cleans up its worker_blocks in the indexer.
         let _ = sub.shutdown_tx.send(());
-        let _ = sub.handle.await;
+        // Panics are caught inside the task; a JoinError here (abort or a
+        // panic that escaped the guard) must still be surfaced, not discarded.
+        if let Err(e) = sub.handle.await {
+            error!(
+                worker_url = %worker_url,
+                error = %e,
+                "KV event subscription task failed"
+            );
+            Metrics::record_kv_event_subscription_failure(worker_url, "join_error");
+        }
 
         // Re-check under lock whether this was the last worker for the model.
         // Must re-acquire lock after shutdown to avoid TOCTOU with concurrent
@@ -215,7 +248,14 @@ impl KvEventMonitor {
             for (url, sub) in subscriptions {
                 debug!(worker_url = %url, "Stopping KV event subscription");
                 let _ = sub.shutdown_tx.send(());
-                let _ = sub.handle.await;
+                if let Err(e) = sub.handle.await {
+                    error!(
+                        worker_url = %url,
+                        error = %e,
+                        "KV event subscription task failed"
+                    );
+                    Metrics::record_kv_event_subscription_failure(&url, "join_error");
+                }
             }
         }
 
@@ -308,7 +348,19 @@ impl KvEventMonitor {
         model_id: String,
         mut shutdown_rx: oneshot::Receiver<()>,
     ) {
-        let worker_id = indexer.intern_worker(&worker_url);
+        let worker_id = match indexer.intern_worker(&worker_url) {
+            Ok(id) => id,
+            Err(e) => {
+                error!(
+                    worker_url = %worker_url,
+                    error = %e,
+                    "Failed to intern worker; KV events from this worker will \
+                     not feed cache-aware routing"
+                );
+                Metrics::record_kv_event_subscription_failure(&worker_url, "intern_failed");
+                return;
+            }
+        };
         let mut worker_blocks = WorkerBlockMap::default();
         let mut last_seq: u64 = 0;
         let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
@@ -673,7 +725,7 @@ mod tests {
     #[test]
     fn test_apply_stored_no_parent() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let stored = KvBlocksStored {
             blocks: vec![
@@ -702,7 +754,7 @@ mod tests {
     #[test]
     fn test_apply_stored_with_parent() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored1 = KvBlocksStored {
@@ -734,7 +786,7 @@ mod tests {
     #[test]
     fn test_apply_stored_fallback_on_worker_not_tracked() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://new-worker:8000");
+        let w1 = indexer.intern_worker("http://new-worker:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         // Pass parent_block_hash for an untracked worker — should fallback to no parent.
@@ -755,7 +807,7 @@ mod tests {
     #[test]
     fn test_apply_removed() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored = KvBlocksStored {
@@ -790,7 +842,7 @@ mod tests {
     #[test]
     fn test_apply_cleared_event() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored = KvBlocksStored {
@@ -813,7 +865,7 @@ mod tests {
     #[test]
     fn test_apply_event_dispatch_stored() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let event = KvCacheEvent {
             event_id: 1,
@@ -836,7 +888,7 @@ mod tests {
     #[test]
     fn test_apply_event_dispatch_removed() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         let stored_event = KvCacheEvent {
@@ -868,7 +920,7 @@ mod tests {
     #[test]
     fn test_apply_event_dispatch_cleared() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
 
         KvEventMonitor::apply_event(
@@ -908,7 +960,7 @@ mod tests {
     #[test]
     fn test_apply_event_no_data() {
         let indexer = PositionalIndexer::new(64);
-        let w1 = indexer.intern_worker("http://w1:8000");
+        let w1 = indexer.intern_worker("http://w1:8000").unwrap();
         let mut wb = WorkerBlockMap::default();
         let event = KvCacheEvent {
             event_id: 1,

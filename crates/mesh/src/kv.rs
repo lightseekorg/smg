@@ -434,10 +434,11 @@ pub struct RoundBatch {
     /// Values are `Bytes` so per-peer senders clone by Arc-refcount bump when
     /// fanning out, not by a full heap copy per peer.
     pub drain_entries: Vec<(String, Bytes)>,
-    /// Snapshot of the CRDT operation log for this round. Broadcast in full to
-    /// every peer; merge is idempotent by op-id so re-sending seen ops is a
-    /// no-op. Per-peer watermark filtering is a follow-up.
-    pub crdt_ops: Vec<Operation>,
+    /// Shared snapshot of the CRDT operation log for this round. The `Arc`
+    /// is reused across rounds while no engine's log mutates, so idle
+    /// rounds clone no op data; per-peer senders filter it through their
+    /// send watermarks. Merge is idempotent by op-id.
+    pub crdt_ops: Arc<OperationLog>,
 }
 
 /// Generic, application-agnostic mesh transport. Provides explicit namespace
@@ -654,9 +655,9 @@ impl MeshKV {
         // Broadcast traffic (td:*) flows through this path.
         let drain_entries = self.drain_registry.drain_all();
 
-        // Snapshot the CRDT op-log so the per-peer senders can broadcast it
-        // alongside the stream traffic this round.
-        let crdt_ops = self.store.get_operation_log().operations().to_vec();
+        // Shared CRDT op-log snapshot for the per-peer senders; reused
+        // across rounds while no engine's log mutates.
+        let crdt_ops = self.store.operation_log_snapshot();
 
         RoundBatch {
             targeted_entries,

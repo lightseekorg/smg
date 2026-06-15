@@ -5,7 +5,7 @@ Markers
 @pytest.mark.model(name)
     Specify which model to use for the test.
 
-@pytest.mark.workers(count=1, prefill=None, decode=None)
+@pytest.mark.workers(count=1, prefill=None, decode=None, gpus=None, extra_engine_args=None)
     Configure worker topology for the test.
 
 @pytest.mark.gateway(policy="round_robin", timeout=None, extra_args=None)

@@ -32,7 +32,9 @@ use openai_protocol::{
     responses::ResponsesRequest,
     tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
     validated::ValidatedJson,
-    worker::{StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest},
+    worker::{
+        ListWorkersQuery, StartProfileRequest, StopProfileRequest, WorkerSpec, WorkerUpdateRequest,
+    },
 };
 use rustls::crypto::ring;
 use serde::Deserialize;
@@ -52,7 +54,7 @@ use crate::{
         metrics::{self, PrometheusConfig},
         metrics_server,
         metrics_ws::{collectors, registry::WatchRegistry},
-        otel_trace,
+        otel_trace, runtime_metrics,
     },
     routers::{
         conversations, openai::realtime::ws::RealtimeQueryParams, parse,
@@ -620,8 +622,15 @@ async fn create_worker(
     }
 }
 
-async fn list_workers_rest(State(state): State<Arc<AppState>>) -> Response {
-    state.context.worker_service.list_workers().into_response()
+async fn list_workers_rest(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListWorkersQuery>,
+) -> Response {
+    state
+        .context
+        .worker_service
+        .list_workers(query.model.as_deref())
+        .into_response()
 }
 
 async fn get_worker(
@@ -1058,6 +1067,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                 metrics_server::DEFAULT_MAX_WS_CONNECTIONS,
             )
             .await;
+            // Tokio runtime self-observability (event-loop canary + sampler).
+            // `startup` runs on the main runtime, so the observer lands on —
+            // and therefore measures — the runtime that serves requests.
+            runtime_metrics::spawn_observer();
             (Some(handle), Some(registry))
         } else {
             (None, None)
