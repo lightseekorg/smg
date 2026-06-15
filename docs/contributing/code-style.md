@@ -32,6 +32,10 @@ All code must pass clippy without warnings:
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+`--all-features` enables the `opencv-video` feature, which links system OpenCV
+(`bash scripts/install_opencv.sh` to install it). Without that system
+dependency, lint with `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ---
 
 ## Naming Conventions

@@ -278,15 +278,7 @@ jobs:
           cargo check --manifest-path bindings/golang/Cargo.toml
 
       - name: Install OpenCV build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang \
-            libclang-dev \
-            cmake \
-            ninja-build \
-            pkg-config \
-            libopencv-dev
+        run: AUTO_INSTALL=1 bash scripts/install_opencv.sh
 
       - name: Build WASM test fixtures
         run: |
