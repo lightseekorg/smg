@@ -411,17 +411,12 @@ impl Tree {
         self.insert_from(Arc::clone(&self.root), text, tenant_id);
     }
 
-    /// Insert `remaining` for `tenant_id` starting the descent at `start`
-    /// (which is treated as the parent of the first edge), reusing the exact
-    /// node-split / tenant-attach / leaf-timestamp logic of [`Self::insert_text`].
-    ///
-    /// `insert_text` is `insert_from(root, text, tenant_id)` after the root
-    /// bookkeeping. [`Self::match_and_insert_with`] reuses it to splice only the
-    /// *unmatched suffix* at the fall-off node, so the already-matched prefix is
-    /// never re-walked. The caller is responsible for the root bookkeeping
-    /// (`tenant_last_access_time` / `tenant_char_count` entries) and, when
-    /// resuming below the root, for attaching `tenant_id` to the ancestor nodes
-    /// on the matched path (which this method does not touch).
+    /// Insert `remaining` for `tenant_id` starting the descent at `start` (treated
+    /// as the parent of the first edge), reusing [`Self::insert_text`]'s node-split
+    /// / tenant-attach / leaf-timestamp logic. The caller owns the root bookkeeping
+    /// (`tenant_last_access_time` / `tenant_char_count` entries) and, when resuming
+    /// below the root, attaching `tenant_id` to the ancestor nodes on the matched
+    /// path (which this method does not touch).
     fn insert_from(&self, start: NodeRef, mut remaining: &str, tenant_id: TenantId) {
         let mut prev = start;
 
@@ -703,39 +698,12 @@ impl Tree {
         self.match_and_insert_with(text, move |_| Some(tenant))
     }
 
-    /// Match in a single descent, then choose the insert tenant from the match
-    /// result and insert for it — still a SINGLE walk of the matched prefix.
-    ///
-    /// String analogue of `TokenTree::match_and_insert_with`. The cache-aware
-    /// router picks the worker it inserts for *from* the match outcome, so the
-    /// tenant is unknown until the match finishes. `select` runs once, after the
-    /// match, with the [`PrefixMatchResult`]; `Some(tenant)` inserts `text` for
-    /// that tenant, `None` skips the insert (the router's "no worker selected"
-    /// branch).
-    ///
-    /// # How the single descent is achieved
-    ///
-    /// The match phase walks the prefix exactly like
-    /// [`Self::match_prefix_with_counts`] (including its single deferred,
-    /// probabilistic timestamp touch on the resolved node — done via
-    /// [`Self::finish_match_and_insert`]), while recording the chain of
-    /// full-match nodes it descended through. After `select` yields the tenant we
-    /// re-attach it to those recorded ancestor nodes directly (the epoch-0
-    /// intermediate attach `insert_text` performs while descending) and splice
-    /// only the *unmatched suffix* at the fall-off node via
-    /// [`Self::insert_from`]. The matched prefix is therefore compared once, not
-    /// twice.
-    ///
-    /// # Preserved semantics
-    ///
-    /// Identical to `match_prefix_with_counts` followed by
-    /// `insert_text(text, tenant)`: same matched/-input char counts, same
-    /// resolved tenant and probabilistic touch, same node splits, same epoch-0
-    /// ancestor attaches, same final-leaf real timestamp, and same
-    /// `tenant_char_count` accounting. Because the match phase runs fully before
-    /// any insert mutation (just like the two separate calls), the tenant pick
-    /// observes the un-polluted tree; only the exact monotonic timestamp values
-    /// of insert's writes shift by a few ticks, which is immaterial to LRU.
+    /// String analogue of `TokenTree::match_and_insert_with`: match in a single
+    /// descent, then insert for the tenant `select` returns from the
+    /// [`PrefixMatchResult`] (`None` skips the insert). The matched prefix is
+    /// compared once. The match runs fully before any insert mutation, so the
+    /// tenant pick observes the un-polluted tree; only insert's timestamps shift
+    /// by a few ticks, immaterial to LRU.
     pub fn match_and_insert_with<'t, F>(&self, text: &str, select: F) -> PrefixMatchResult
     where
         F: FnOnce(&PrefixMatchResult) -> Option<&'t str>,

@@ -221,21 +221,6 @@ impl Node {
         }
     }
 
-    #[expect(dead_code)] // Reserved for priority-based eviction policy support
-    fn new_with_priority(tokens: Vec<TokenId>, priority: i32) -> Self {
-        Self {
-            tokens: ParkingLotRwLock::new(tokens),
-            children: new_children_map(),
-            tenant_last_access_time: new_tenant_map(),
-            last_tenant: ParkingLotRwLock::new(None),
-            parent: ParkingLotRwLock::new(Weak::new()),
-            page_key: ParkingLotRwLock::new(None),
-            hit_count: AtomicU64::new(0),
-            creation_time: next_timestamp(),
-            priority: AtomicI32::new(priority),
-        }
-    }
-
     fn new_root() -> Self {
         Self {
             tokens: ParkingLotRwLock::new(Vec::new()),
@@ -311,13 +296,6 @@ impl Node {
                 *guard = Some(Arc::clone(tenant));
             }
         }
-    }
-
-    /// Update priority (take max to propagate higher priority, matching SGLang)
-    #[expect(dead_code)] // Reserved for priority-based eviction policy support
-    fn update_priority(&self, new_priority: i32) {
-        // Use fetch_max for correct concurrent updates (avoids CAS race condition)
-        self.priority.fetch_max(new_priority, Ordering::Relaxed);
     }
 }
 
@@ -766,58 +744,13 @@ impl TokenTree {
         }
     }
 
-    /// Combined match + insert in a SINGLE tree descent.
+    /// Combined match + insert in a single tree descent.
     ///
-    /// Equivalent to calling [`Self::match_prefix_with_counts`] immediately
-    /// followed by [`Self::insert_tokens`] with the same `tokens`, but it
-    /// traverses the prefix only once. For long prefixes (e.g. 150K tokens)
-    /// this halves the number of page-key lookups, child-map probes, token
-    /// comparisons, and `touch_tenant` writes on the request hot path.
-    ///
-    /// # Why a single descent is correct
-    ///
-    /// `insert_tokens` descends through *full-match* children exactly the way
-    /// `match_prefix_with_counts` does (same page key, same page-aligned common
-    /// prefix, same "continue on full match" rule). Insert's descent is a
-    /// (depth-wise) superset of match's: match stops as soon as it hits a node
-    /// with no tenants (all evicted) or a partial match, whereas insert keeps
-    /// going on a full match and only stops when it must create or split a node.
-    /// So we drive the descent with insert's logic and *freeze* the match result
-    /// the first time match's stop condition is reached (tracked by
-    /// `match_frozen`). After freezing, deeper nodes only affect insert
-    /// accounting, never the returned match result — exactly as if the separate
-    /// `match` call had already returned.
-    ///
-    /// # Preserved semantics (identical to match-then-insert)
-    ///
-    /// * **Node split**: the vacant / prefix-of-child / diverge branches below
-    ///   are copied verbatim from `insert_tokens` (intermediate node inherits the
-    ///   child's tenant map, hit_count, creation_time, priority; child is demoted
-    ///   to the suffix; parent pointers / page keys rewritten the same way).
-    /// * **Per-tenant token counting**: `tokens_added` is accumulated with the
-    ///   same rules as `insert_tokens` (full-match Continue counts `common_len`;
-    ///   the split branches count `common_len` only when the tenant did not
-    ///   already own the path, plus any brand-new branch tokens) and folded into
-    ///   `tenant_token_count` once at the end.
-    /// * **`touch_tenant` / timestamps**: at every node we reproduce the exact
-    ///   touch sequence the two separate calls would have made, in the same
-    ///   order, on the same node identities:
-    ///   1. The match side reads `child.get_any_tenant()` *before* any insert
-    ///      mutation (so the all-evicted check and the routed tenant are computed
-    ///      against the pre-insert node), then touches that tenant — exactly what
-    ///      `match_prefix_with_counts` does, and before any split so the split's
-    ///      tenant-map clone inherits the fresh timestamp just like the original
-    ///      ordering (`match` ran fully before `insert`).
-    ///   2. The insert side then touches the inserting `tenant` on the node it
-    ///      would have (the continued child, the newly created leaf, or the new
-    ///      intermediate).
-    ///   We deliberately do NOT deduplicate the two touches even when they land
-    ///   on the same node for the same tenant: the original match-then-insert
-    ///   pair already touched twice in that case (e.g. a full-match continuation
-    ///   whose `get_any_tenant()` is the routed/inserting tenant), so keeping
-    ///   both touches reproduces the LFU `hit_count` and timestamp progression
-    ///   byte-for-byte. For the default LRU policy the second touch only advances
-    ///   the timestamp, which is immaterial to relative ordering.
+    /// Equivalent to [`Self::match_prefix_with_counts`] followed by
+    /// [`Self::insert_tokens`] for the same `tokens` (single-threaded), but it
+    /// traverses the prefix only once. The match result is frozen at match's stop
+    /// condition before insert mutates deeper nodes, so the routed tenant and
+    /// matched count are resolved against the pre-insert tree.
     pub fn match_and_insert(&self, tokens: &[TokenId], tenant: &str) -> PrefixMatchResult {
         let input_token_count = tokens.len();
 
@@ -1090,65 +1023,19 @@ impl TokenTree {
         }
     }
 
-    /// Match in a single descent, then choose the insert tenant from the match
-    /// result and insert for it — still a SINGLE top-to-bottom traversal of the
-    /// prefix.
+    /// Match in a single descent, then insert for a tenant chosen from the match
+    /// result — still one top-to-bottom traversal of the prefix.
     ///
-    /// This is the variant the cache-aware router needs: the worker it inserts
-    /// for is *derived from* the match outcome (route to the matched worker on a
-    /// cache hit, else to the least-loaded worker), so the inserting tenant is
-    /// not known until the match completes. `select` is invoked exactly once,
-    /// after the match, with the [`PrefixMatchResult`]; returning `Some(tenant)`
-    /// inserts `tokens` for that tenant, and returning `None` skips the insert
-    /// entirely (mirroring the router's "selected worker is gone" branch, which
-    /// performs no insert).
+    /// The inserting tenant is derived from the match outcome (route to the matched
+    /// worker on a hit, else the least-loaded worker), so it is not known until the
+    /// match completes. `select` is invoked once with the [`PrefixMatchResult`];
+    /// `Some(tenant)` inserts `tokens` for it, `None` skips the insert.
     ///
-    /// # How the single descent is achieved
-    ///
-    /// The match phase walks the prefix exactly like
-    /// [`Self::match_prefix_with_counts`], additionally recording the chain of
-    /// nodes it traverses as `path` (one `(node, advance)` per edge) and the
-    /// node/`remaining` slice where the walk fell off. After `select` yields the
-    /// tenant we *replay insert's per-node work directly on the recorded nodes*
-    /// (no second tree navigation): `touch_tenant` on every traversed node plus
-    /// the same `tokens_added` accounting, then splice the remainder at the
-    /// fall-off point with the very branches `insert_tokens` uses (vacant leaf /
-    /// prefix-of-child split / diverge split). The only tree lookups are the
-    /// single descent and one `entry()` re-probe at the fall-off node for the
-    /// splice — never a second full walk.
-    ///
-    /// # Preserved semantics
-    ///
-    /// Identical to `match_prefix_with_counts` followed by
-    /// `insert_tokens(tokens, tenant)`:
-    /// * match-side: same matched-token count, same routed tenant, same per-node
-    ///   `touch_tenant(get_any_tenant())`, same "stop at an all-evicted node or a
-    ///   partial match" rule;
-    /// * insert-side: same node-split structure, same `tenant_token_count`
-    ///   accounting (including the existing behavior of re-counting a fully
-    ///   matched path), same `touch_tenant(tenant)` on every node on the path and
-    ///   on freshly created/split nodes.
-    ///
-    /// The replay reorders insert's per-node touches to *after* the match phase
-    /// instead of interleaving them, which only changes the exact monotonic
-    /// timestamp values written (immaterial to relative LRU/LFU ordering); the
-    /// set of touched (node, tenant) pairs and the LFU hit-count increments are
-    /// unchanged.
-    ///
-    /// # Equivalence scope (single-threaded vs concurrent)
-    ///
-    /// The "identical" guarantees above hold exactly **single-threaded**
-    /// (covered by `test_match_and_insert_equiv_*`). Under **concurrent** node
-    /// splits the equivalence is on **routing and `tenant_token_count`**, not on
-    /// per-node access *timestamps*: this path replays onto the nodes recorded
-    /// during the match rather than re-walking, so if another thread splits one
-    /// of those nodes mid-flight, a freshly-created intermediate can miss a
-    /// timestamp bump — it is then evicted slightly earlier (a bounded,
-    /// self-healing cache-hit-rate effect on an approximate tree). The token
-    /// count stays exact because the recorded per-node `advance`s are frozen at
-    /// match time; `test_concurrent_match_and_insert_count_and_route_integrity`
-    /// proves both the exact count and route integrity under a concurrent-split
-    /// stress.
+    /// Equivalent to match-then-[`Self::insert_tokens`] single-threaded. Under
+    /// concurrent node splits, `tenant_token_count` and routing stay exact (per-node
+    /// advances are frozen at match time); only per-node access timestamps are
+    /// approximate — a concurrently-split intermediate may miss a bump and evict
+    /// slightly early.
     pub fn match_and_insert_with<'t, F>(&self, tokens: &[TokenId], select: F) -> PrefixMatchResult
     where
         F: FnOnce(&PrefixMatchResult) -> Option<&'t str>,
