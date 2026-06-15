@@ -125,32 +125,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Cache wheel and Go FFI artifacts
-        id: cache-wheel
-        uses: actions/cache@v5
-        with:
-          path: |
-            bindings/python/dist/*.whl
-            bindings/golang/target/release/libsmg_go.*
-            crates/wasm/tests/fixtures/*.wasm
-            clients/python/smg_client/types/_generated.py
-          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/auth/src/**', 'bindings/python/src/**', 'crates/data_connector/src/**', 'crates/grpc_client/src/**', 'crates/kv_index/src/**', 'crates/mcp/src/**', 'crates/mesh/src/**', 'model_gateway/src/**', 'crates/multimodal/src/**', 'crates/protocols/src/**', 'crates/reasoning_parser/src/**', 'crates/tokenizer/src/**', 'crates/tool_parser/src/**', 'crates/wasm/src/**', 'crates/workflow/src/**', 'bindings/golang/src/**', 'examples/wasm/**') }}
-          restore-keys: |
-            wheel-${{ runner.os }}-
-
+      # No wheel-output cache here. It was keyed on a hash of every crate's
+      # source, so it missed on essentially every code PR (all-or-nothing), and
+      # on a miss it *masked* the incremental compilation cache by skipping the
+      # build entirely — which also meant rust-cache rarely got populated. The
+      # build now always runs and leans on rust-cache + sccache (set up in
+      # ./.github/actions/setup-rust), which degrade gracefully: with the
+      # dependency graph cached, only changed crates recompile.
       - name: Setup Rust
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-rust
 
       - name: Build Python wheel and Go FFI library
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           rm -rf bindings/python/dist/
           bash scripts/ci_setup_python_venv.sh
           bash scripts/ci_build_wheel.sh
 
       - name: Generate Python client types
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           source "$HOME/.cargo/env"
           mkdir -p clients/openapi
@@ -170,7 +161,6 @@ jobs:
           sed -i 's/class \(.*\)(Enum):/class \1(str, Enum):/' clients/python/smg_client/types/_generated.py
 
       - name: Build WASM test fixtures
-        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           source "$HOME/.cargo/env"
           bash crates/wasm/tests/fixtures/build_fixtures.sh
@@ -205,7 +195,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Show sccache stats
-        if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
+        if: always()
         run: sccache --show-stats
 
       - name: Set up Python
