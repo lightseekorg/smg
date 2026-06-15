@@ -29,7 +29,7 @@ use crate::{
         error,
         grpc::{
             context::{PreparationOutput, RequestContext, WorkerSelection},
-            multimodal::{assemble_tokenspeed_from_split, split_preprocessed_per_item},
+            multimodal::{assemble_tokenspeed, MultimodalIntermediate},
         },
     },
     worker::DEFAULT_BOOTSTRAP_PORT,
@@ -65,10 +65,12 @@ impl PipelineStage for EncodeStage {
             ));
         }
 
-        // Borrow the preprocessed multimodal intermediate and split it per image.
-        // Text-only requests (no multimodal) are a graceful no-op: the prefill
-        // simply runs without an encode handshake.
-        let (splits, im_token_id) = {
+        // Assemble the itemized multimodal payload once (one MultimodalItem per
+        // image, each carrying its own encoder_input + grid_thw), then fan the
+        // items out across the encode pool below. We borrow the intermediate so
+        // request building still consumes it unchanged. Text-only requests (no
+        // multimodal) are a graceful no-op: the prefill runs without a handshake.
+        let items = {
             let prep = ctx.state.preparation.as_ref().ok_or_else(|| {
                 error!(
                     function = "EncodeStage::execute",
@@ -88,21 +90,22 @@ impl PipelineStage for EncodeStage {
                 } => processed_messages.multimodal_intermediate.as_ref(),
                 _ => None,
             };
-            let Some(intermediate) = intermediate else {
+            let Some(MultimodalIntermediate::Precomputed(precomputed)) = intermediate else {
                 return Ok(None);
             };
-            let splits = split_preprocessed_per_item(
-                &intermediate.preprocessed,
-                &intermediate.field_layouts,
-            )
-            .map_err(|e| {
-                error!(function = "EncodeStage::execute", error = %e, "Failed to split multimodal payload per item");
-                error::internal_error("mm_split_failed", format!("Failed to split multimodal payload: {e}"))
-            })?;
-            (splits, intermediate.im_token_id)
+            // skip_pixel_values = false: the encode worker NEEDS the encoder_input
+            // (it runs the vision tower). workers = None -> wire dtype from
+            // SMG_TOKENSPEED_*_ENCODER_INPUT_DTYPE or the bf16 default.
+            assemble_tokenspeed(precomputed, None, false)
+                .map_err(|e| {
+                    error!(function = "EncodeStage::execute", error = %e, "Failed to assemble multimodal payload for encode");
+                    error::internal_error("mm_assemble_failed", format!("Failed to assemble multimodal payload: {e}"))
+                })?
+                .into_proto()
+                .items
         };
 
-        if splits.is_empty() {
+        if items.is_empty() {
             return Ok(None);
         }
 
@@ -110,17 +113,17 @@ impl PipelineStage for EncodeStage {
         // rendezvous room, build the request, and record the prefill handshake.
         let pool_len = encode_pool.len();
         let mut handshakes: Vec<tokenspeed_proto::EncodeItemHandshake> =
-            Vec::with_capacity(splits.len());
+            Vec::with_capacity(items.len());
         let mut sends: Vec<tokio::task::JoinHandle<Result<(), String>>> =
-            Vec::with_capacity(splits.len());
+            Vec::with_capacity(items.len());
 
         // Reserve a contiguous block of cursor slots for this request's images so a
         // multi-image request still spreads and consecutive requests continue where
         // the previous one stopped (cross-request balance for single-image requests).
-        let num_images = splits.len();
+        let num_images = items.len();
         let rr_base = ENCODE_RR_CURSOR.fetch_add(num_images.max(1), Ordering::Relaxed);
 
-        for (global_index, split) in splits.into_iter().enumerate() {
+        for (global_index, mut item) in items.into_iter().enumerate() {
             let worker = encode_pool[(rr_base + global_index) % pool_len].clone();
             // 63-bit room: no in-flight dedup, so a 2^31 space birthday-collides
             // under load (silent embedding cross-wire). See the proto field doc.
@@ -141,22 +144,20 @@ impl PipelineStage for EncodeStage {
             });
 
             let endpoint = worker.url().to_string();
-            // Spawn the heavy work (the ~19MB pixel_values serialize + proto framing
-            // + RPC) onto the multi-thread runtime so N images assemble/transmit in
-            // PARALLEL instead of one-after-another on this task. Previously the
-            // serialize ran serially in this loop (futures are lazy; only the RPC
-            // await overlapped), which alone made dispatch ~serial per image.
+            // Spawn the proto framing + RPC (and the RDMA export) onto the multi-thread
+            // runtime so N images transmit in PARALLEL instead of one-after-another.
+            // (The per-item encoder_input was already serialized by assemble_tokenspeed
+            // above; only framing/transport is deferred here.)
             sends.push(tokio::spawn(async move {
-                let mut mm_inputs = assemble_tokenspeed_from_split(split, im_token_id).into_proto();
-                // EPD RDMA (M2): export this image's pixel buffer over NIXL and swap the
+                // EPD RDMA (M2): export this image's encoder_input over NIXL and swap the
                 // inline payload for a remote handle so the encode worker PULLs it instead
                 // of receiving ~10-50MB in this gRPC frame. Keyed by bootstrap_room (the
                 // worker tags its free-notif with it). Any export failure re-attaches the
                 // inline bytes -> no behaviour change. Off unless SMG_MM_PIXEL_RDMA is set.
                 if crate::routers::grpc::rdma::rdma_enabled() {
-                    if let Some(pv) = mm_inputs.pixel_values.as_mut() {
+                    if let Some(encoder_input) = item.encoder_input.as_mut() {
                         if let Some(tokenspeed_proto::tensor_data::Payload::Inline(bytes)) =
-                            pv.payload.take()
+                            encoder_input.payload.take()
                         {
                             let nbytes = bytes.len() as u64;
                             match crate::routers::grpc::rdma::export_pixel_buffer(
@@ -164,7 +165,7 @@ impl PipelineStage for EncodeStage {
                                 bytes,
                             ) {
                                 Ok(descriptor) => {
-                                    pv.payload =
+                                    encoder_input.payload =
                                         Some(tokenspeed_proto::tensor_data::Payload::Remote(
                                             tokenspeed_proto::RemoteTensorHandle {
                                                 transport: "nixl".to_string(),
@@ -174,7 +175,7 @@ impl PipelineStage for EncodeStage {
                                         ));
                                 }
                                 Err(bytes) => {
-                                    pv.payload = Some(
+                                    encoder_input.payload = Some(
                                         tokenspeed_proto::tensor_data::Payload::Inline(bytes),
                                     );
                                 }
@@ -184,7 +185,9 @@ impl PipelineStage for EncodeStage {
                 }
                 let request = enc::EncodeRequest {
                     request_id: format!("encode-{}", Uuid::now_v7()),
-                    mm_inputs: Some(mm_inputs),
+                    // One MultimodalItem per Encode RPC; the room links it to this
+                    // image's prefill handshake recorded above.
+                    mm_inputs: Some(tokenspeed_proto::MultimodalInputs { items: vec![item] }),
                     // One assignment per image; the room links to this image's
                     // prefill handshake recorded above.
                     items: vec![enc::EncodeItemAssignment { bootstrap_room }],

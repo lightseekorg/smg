@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use llm_multimodal::{ImageProcessorRegistry, PreProcessorConfig, PreprocessedImages};
+use llm_multimodal::{PreProcessorConfig, PreprocessedEncoderInputs, VisionProcessorRegistry};
 
 fn synth_jpeg(w: u32, h: u32) -> Vec<u8> {
     let mut buf = image::RgbImage::new(w, h);
@@ -31,7 +31,7 @@ fn synth_jpeg(w: u32, h: u32) -> Vec<u8> {
     out.into_inner()
 }
 
-type ReqResult = (PreprocessedImages, Vec<u8>, Vec<u32>);
+type ReqResult = (PreprocessedEncoderInputs, Vec<u8>, Vec<u32>);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -49,7 +49,7 @@ fn main() {
     let cfg: PreProcessorConfig =
         serde_json::from_str(&std::fs::read_to_string(cfg_path).expect("read config"))
             .expect("parse config");
-    let registry = ImageProcessorRegistry::with_defaults();
+    let registry = VisionProcessorRegistry::with_defaults();
     let jpeg = synth_jpeg(w, h);
     eprintln!(
         "jpeg_bytes={} threads={} secs={} res={}x{} batch={} mode={} hold={}",

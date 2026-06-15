@@ -27,10 +27,8 @@ const MAX_GLOBAL_POOLED: usize = 64;
 
 thread_local! {
     static F32_LOCAL: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
-    static U16_LOCAL: RefCell<Vec<Vec<u16>>> = const { RefCell::new(Vec::new()) };
 }
 static F32_GLOBAL: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
-static U16_GLOBAL: Mutex<Vec<Vec<u16>>> = Mutex::new(Vec::new());
 
 macro_rules! pool_impl {
     ($take_cap:ident, $give:ident, $ty:ty, $local:ident, $global:ident) => {
@@ -71,7 +69,6 @@ macro_rules! pool_impl {
 }
 
 pool_impl!(take_f32_cap, give_f32, f32, F32_LOCAL, F32_GLOBAL);
-pool_impl!(take_u16_cap, give_u16, u16, U16_LOCAL, U16_GLOBAL);
 
 /// Take a zero-filled `Vec<f32>` of exactly `len`, reusing pooled storage.
 pub fn take_f32(len: usize) -> Vec<f32> {

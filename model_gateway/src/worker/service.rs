@@ -359,6 +359,9 @@ impl WorkerService {
                 WorkerType::Prefill => prefill_count += 1,
                 WorkerType::Decode => decode_count += 1,
                 WorkerType::Regular => regular_count += 1,
+                // EPD encode workers are a distinct pool: counted in `total` and
+                // listed, but not in the P/D/Regular sub-counts.
+                WorkerType::Encode => {}
             }
             let mut info = worker_to_info(&worker);
             info.id = worker_id.as_str().to_string();

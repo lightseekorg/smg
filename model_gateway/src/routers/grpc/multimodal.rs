@@ -753,7 +753,7 @@ async fn process_multimodal_parts(
     let preprocess_elapsed_ms = preprocess_started.elapsed().as_secs_f64() * 1000.0;
 
     if _epd_tl {
-        tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_end num_tokens={} epoch_ms={}", preprocessed.num_img_tokens.iter().sum::<usize>(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        tracing::info!(target: "smg::request", "EPD-TL gw_mm_preprocess_end num_tokens={} epoch_ms={}", preprocessed.feature_token_counts.iter().sum::<usize>(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
     }
 
     debug!(
@@ -958,10 +958,11 @@ fn expand_tokens(
     reason = "MLX multimodal rejected by caller before reaching here"
 )]
 /// `skip_pixel_values`: TokenSpeed EPD only -- the prefill receives embeddings over
-/// Mooncake and never reads pixel_values (they're stripped from its request anyway),
+/// Mooncake and never reads encoder_input (it is stripped from its request anyway),
 /// so don't serialize the ~100 MB tensor just to drop it. Saved ~550 ms/req in
 /// RequestBuilding at high concurrency (it delayed the prefill dispatch and parked
-/// the encode sender). The encode leg keeps its pixels via assemble_tokenspeed_from_split.
+/// the encode sender). The encode leg keeps its pixels (it assembles with
+/// skip_pixel_values = false in the EncodeStage).
 pub(crate) fn assemble_multimodal_data(
     intermediate: MultimodalIntermediate,
     client: &GrpcClient,
@@ -983,7 +984,7 @@ pub(crate) fn assemble_multimodal_data(
                 Ok(MultimodalData::Trtllm(assemble_trtllm(precomputed)))
             }
             GrpcClient::TokenSpeed(_) => Ok(MultimodalData::TokenSpeed(assemble_tokenspeed(
-                precomputed,
+                &precomputed,
                 workers,
                 skip_pixel_values,
             )?)),
@@ -1071,8 +1072,8 @@ fn assemble_trtllm(intermediate: PrecomputedMultimodalIntermediate) -> TrtllmMul
     TrtllmMultimodalData { image_data }
 }
 
-fn assemble_tokenspeed(
-    intermediate: PrecomputedMultimodalIntermediate,
+pub(crate) fn assemble_tokenspeed(
+    intermediate: &PrecomputedMultimodalIntermediate,
     workers: Option<&WorkerSelection>,
     skip_pixel_values: bool,
 ) -> Result<TokenSpeedMultimodalData> {
@@ -1097,7 +1098,7 @@ fn assemble_tokenspeed(
         Modality::ImageEmbeds => TokenSpeedModality::Image,
     };
 
-    let item_count = precomputed_multimodal_item_count(&intermediate)?;
+    let item_count = precomputed_multimodal_item_count(intermediate)?;
     // Build items imperatively so that if any step fails partway we can unlink
     // the /dev/shm segments already created for prior items' encoder inputs
     // (and this item's, once created). `?`/`collect` would drop those
@@ -1147,7 +1148,7 @@ fn assemble_tokenspeed(
         let model_specific_serialize_ms = model_specific_started.elapsed().as_secs_f64() * 1000.0;
         let mm_placeholders =
             placeholders_for_item(item_index, &intermediate.placeholders, &patch_offsets);
-        let content_hash = content_hash_for_item(intermediate.modality, &intermediate, item_index);
+        let content_hash = content_hash_for_item(intermediate.modality, intermediate, item_index);
 
         if log_timing {
             info!(
@@ -1355,29 +1356,6 @@ fn hash_hex_strings<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<u8> {
         hasher.update(hash.as_bytes());
     }
     hasher.finalize().as_bytes().to_vec()
-}
-
-/// Assemble a TokenSpeed multimodal payload from a single per-image
-/// `PreprocessedImages` produced by [`split_preprocessed_per_item`], for the EPD
-/// encode leg (one image per Encode RPC).
-///
-/// `mm_placeholders` is intentionally empty: the encode worker only runs the
-/// vision tower (it needs pixel_values + grid_thw), it never slots tokens into
-/// `input_ids`, so placeholder ranges (a prefill concern) are not shipped.
-pub(crate) fn assemble_tokenspeed_from_split(
-    preprocessed: PreprocessedImages,
-    im_token_id: Option<u32>,
-) -> TokenSpeedMultimodalData {
-    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&preprocessed, pixel_wire_dtype());
-    llm_multimodal::recycle_pixel_values(preprocessed.pixel_values);
-    let model_specific_tensors = serialize_model_specific(preprocessed.model_specific);
-    TokenSpeedMultimodalData {
-        pixel_values,
-        pixel_values_shape,
-        model_specific_tensors,
-        im_token_id,
-        mm_placeholders: Vec::new(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,6 +1676,7 @@ fn tokenspeed_encoder_input_dtype_from_worker(workers: Option<&WorkerSelection>)
     let worker = match workers? {
         WorkerSelection::Single { worker } => worker,
         WorkerSelection::Dual { prefill, .. } => prefill,
+        WorkerSelection::Triple { prefill, .. } => prefill,
     };
     worker
         .metadata()
@@ -1867,13 +1846,14 @@ fn f32_to_f16_bits(value: f32) -> u16 {
     half
 }
 
-/// Benchmark-only entry to the pixel serialization path (`cargo build --bin dataplane-bench`).
+/// Benchmark-only entry to the encoder-input serialization path (`cargo build --bin dataplane-bench`).
 #[doc(hidden)]
 pub fn bench_serialize_pixel_values(
-    preprocessed: &PreprocessedImages,
+    preprocessed: &PreprocessedEncoderInputs,
     dtype: &str,
 ) -> (Vec<u8>, Vec<u32>) {
-    serialize_pixel_values(preprocessed, dtype)
+    let (bytes, shape, _dtype) = serialize_array_as_dtype(&preprocessed.encoder_input, dtype);
+    (bytes, shape)
 }
 
 /// Serialize model-specific values to TensorBytes, consuming the map to avoid key clones.
@@ -1927,441 +1907,6 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
         }),
         _ => None,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Per-item multimodal split (engine-neutral EPD encode fan-out)
-// ---------------------------------------------------------------------------
-
-/// Error raised when a packed [`PreprocessedImages`] cannot be split per item.
-///
-/// Every variant is a *fail-loud* condition: rather than silently mis-slicing
-/// or dropping a tensor, the split aborts so the caller never ships a corrupt
-/// per-item payload to an encode worker.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum SplitError {
-    /// Two per-image count sources disagreed (e.g. `num_img_tokens.len()` vs a
-    /// batched tensor's first dimension), so `num_images` is ambiguous.
-    #[error("inconsistent num_images: {what} reports {got}, expected {expected}")]
-    NumImagesMismatch {
-        what: String,
-        got: usize,
-        expected: usize,
-    },
-    /// A `Flat` field's sizes tensor was missing, malformed, or its row counts
-    /// did not sum to the field's leading dimension.
-    #[error("flat field '{field}' sizes are invalid: {detail}")]
-    InvalidFlatSizes { field: String, detail: String },
-    /// A tensor's leading dimension is too small to index per image.
-    #[error("field '{field}' leading dim {got} is smaller than num_images {expected}")]
-    LeadingDimTooSmall {
-        field: String,
-        got: usize,
-        expected: usize,
-    },
-    /// A model_specific variant carries no declared per-item split (e.g. a
-    /// non-tensor type marked Batched/Flat) and cannot be sliced.
-    #[error("field '{field}' has layout {layout} but variant {variant} cannot be sliced that way")]
-    UnsupportedSlice {
-        field: String,
-        layout: String,
-        variant: String,
-    },
-    /// A tensor's data buffer length disagrees with the product of its declared
-    /// shape, so per-item slicing would silently drop or read past the trailing
-    /// elements. Reject rather than truncate.
-    #[error("field '{field}' data len {data_len} != product(shape) {expected}")]
-    ShapeDataMismatch {
-        field: String,
-        data_len: usize,
-        expected: usize,
-    },
-}
-
-/// Static name describing a [`ModelSpecificValue`] variant for error reporting.
-fn model_specific_variant_name(v: &ModelSpecificValue) -> &'static str {
-    match v {
-        ModelSpecificValue::Tensor { .. } => "Tensor",
-        ModelSpecificValue::IntTensor { .. } => "IntTensor",
-        ModelSpecificValue::UintTensor { .. } => "UintTensor",
-        ModelSpecificValue::Int(_) => "Int",
-        ModelSpecificValue::Float(_) => "Float",
-        ModelSpecificValue::IntVec(_) => "IntVec",
-        ModelSpecificValue::UintVec(_) => "UintVec",
-        ModelSpecificValue::FloatVec(_) => "FloatVec",
-        ModelSpecificValue::TupleVec(_) => "TupleVec",
-        ModelSpecificValue::Bool(_) => "Bool",
-    }
-}
-
-/// Read a per-image size vector from a model_specific tensor named `sizes_key`.
-///
-/// The sizes tensor (e.g. Qwen `patches_per_image`) has one row per image; the
-/// returned `usize` row counts are used as variable-length slice offsets for a
-/// `Flat` field. Fails loud if the key is absent, not a tensor, or its length
-/// disagrees with `num_images`.
-fn read_flat_sizes(
-    field: &str,
-    sizes_key: &str,
-    model_specific: &HashMap<String, ModelSpecificValue>,
-    num_images: usize,
-) -> Result<Vec<usize>, SplitError> {
-    let sizes_val = model_specific
-        .get(sizes_key)
-        .ok_or_else(|| SplitError::InvalidFlatSizes {
-            field: field.to_string(),
-            detail: format!("sizes_key '{sizes_key}' not present in model_specific"),
-        })?;
-    let sizes: Vec<usize> = match sizes_val {
-        ModelSpecificValue::IntTensor { data, .. } => data.iter().map(|&v| v as usize).collect(),
-        ModelSpecificValue::UintTensor { data, .. } => data.iter().map(|&v| v as usize).collect(),
-        ModelSpecificValue::IntVec(v) => v.iter().map(|&x| x as usize).collect(),
-        ModelSpecificValue::UintVec(v) => v.iter().map(|&x| x as usize).collect(),
-        other => {
-            return Err(SplitError::InvalidFlatSizes {
-                field: field.to_string(),
-                detail: format!(
-                    "sizes_key '{sizes_key}' is {} which is not an integer sizes tensor",
-                    model_specific_variant_name(other)
-                ),
-            });
-        }
-    };
-    if sizes.len() != num_images {
-        return Err(SplitError::InvalidFlatSizes {
-            field: field.to_string(),
-            detail: format!(
-                "sizes_key '{sizes_key}' has {} entries, expected num_images={num_images}",
-                sizes.len()
-            ),
-        });
-    }
-    Ok(sizes)
-}
-
-/// Slice a model_specific tensor's leading dimension for one item.
-///
-/// `row_range` selects the leading-dim rows to keep (one row for `Batched`,
-/// `sizes[i]` rows for `Flat`); `new_first_dim` is the resulting first shape
-/// entry. The element stride is the product of all trailing dims, so the data
-/// copy is contiguous and the rebuilt tensor stays the same variant.
-fn slice_tensor_variant(
-    field: &str,
-    value: &ModelSpecificValue,
-    row_start: usize,
-    row_count: usize,
-) -> Result<ModelSpecificValue, SplitError> {
-    macro_rules! slice_tensor {
-        ($data:expr, $shape:expr, $ctor:path) => {{
-            // Reject a buffer whose length disagrees with its declared shape:
-            // otherwise an over-long buffer would be silently truncated by the
-            // per-item slices, dropping trailing elements with no error.
-            let declared: usize = $shape.iter().product::<usize>();
-            if $data.len() != declared {
-                return Err(SplitError::ShapeDataMismatch {
-                    field: field.to_string(),
-                    data_len: $data.len(),
-                    expected: declared,
-                });
-            }
-            let stride: usize = $shape.iter().skip(1).product::<usize>().max(1);
-            let start = row_start * stride;
-            let end = (row_start + row_count) * stride;
-            if end > $data.len() {
-                return Err(SplitError::InvalidFlatSizes {
-                    field: field.to_string(),
-                    detail: format!(
-                        "slice rows [{row_start}, {}) exceed tensor data len {} (stride {stride})",
-                        row_start + row_count,
-                        $data.len()
-                    ),
-                });
-            }
-            let mut new_shape = $shape.clone();
-            if new_shape.is_empty() {
-                new_shape.push(row_count);
-            } else {
-                new_shape[0] = row_count;
-            }
-            $ctor {
-                data: $data[start..end].to_vec(),
-                shape: new_shape,
-            }
-        }};
-    }
-    Ok(match value {
-        ModelSpecificValue::Tensor { data, shape } => {
-            slice_tensor!(data, shape, ModelSpecificValue::Tensor)
-        }
-        ModelSpecificValue::IntTensor { data, shape } => {
-            slice_tensor!(data, shape, ModelSpecificValue::IntTensor)
-        }
-        ModelSpecificValue::UintTensor { data, shape } => {
-            slice_tensor!(data, shape, ModelSpecificValue::UintTensor)
-        }
-        other => {
-            return Err(SplitError::UnsupportedSlice {
-                field: field.to_string(),
-                layout: "Batched/Flat".to_string(),
-                variant: model_specific_variant_name(other).to_string(),
-            });
-        }
-    })
-}
-
-/// Take element `i` of a per-image vector variant, producing a length-1 variant.
-///
-/// Used for `Vec`/`TupleVec` model_specific values whose length equals
-/// `num_images` (one entry per image, mirroring `image_sizes` semantics).
-fn slice_vec_variant(
-    field: &str,
-    value: &ModelSpecificValue,
-    i: usize,
-    num_images: usize,
-) -> Result<ModelSpecificValue, SplitError> {
-    macro_rules! index_vec {
-        ($v:expr, $ctor:path) => {{
-            if $v.len() != num_images {
-                return Err(SplitError::UnsupportedSlice {
-                    field: field.to_string(),
-                    layout: "Batched/Flat".to_string(),
-                    variant: format!(
-                        "{} of len {} (expected per-image len {num_images})",
-                        model_specific_variant_name(value),
-                        $v.len()
-                    ),
-                });
-            }
-            $ctor(vec![$v[i].clone()])
-        }};
-    }
-    Ok(match value {
-        ModelSpecificValue::IntVec(v) => index_vec!(v, ModelSpecificValue::IntVec),
-        ModelSpecificValue::UintVec(v) => index_vec!(v, ModelSpecificValue::UintVec),
-        ModelSpecificValue::FloatVec(v) => index_vec!(v, ModelSpecificValue::FloatVec),
-        ModelSpecificValue::TupleVec(v) => index_vec!(v, ModelSpecificValue::TupleVec),
-        other => {
-            return Err(SplitError::UnsupportedSlice {
-                field: field.to_string(),
-                layout: "Batched/Flat".to_string(),
-                variant: model_specific_variant_name(other).to_string(),
-            });
-        }
-    })
-}
-
-/// Split a packed [`PreprocessedImages`] into one owned piece per image.
-///
-/// Engine-neutral fan-out for EPD encode workers (Option A): a single request's
-/// images, packed into one `PreprocessedImages` by the preprocessor, are sliced
-/// back into `num_images` independent pieces so each can be routed to a separate
-/// encode worker via the *unchanged* serialize/assemble path.
-///
-/// Slicing is driven entirely by the model spec's `layouts` (the same metadata
-/// `assemble_vllm` consumes via `batched_keys`/`flat_keys`), so it stays
-/// model-agnostic:
-/// - `pixel_values`: looked up under the `"pixel_values"` layout key. `Flat`
-///   slices axis-0 rows `[prefix_i, prefix_i + size_i)` using the sizes tensor;
-///   `Batched` (or unlisted) takes leading-dim row `i`.
-/// - each `model_specific` tensor: `Batched` -> leading-dim row `i`; `Flat` ->
-///   variable rows from that tensor's own `sizes_key`.
-/// - scalar `Int`/`Float`/`Bool` variants and any key absent from `layouts` are
-///   carried as-is (replicated) to every item.
-/// - `Vec`/`TupleVec` variants are indexed at `i` (one entry per image).
-/// - `num_img_tokens[i]` and `image_sizes[i]` are taken per item.
-///
-/// Produced tensors are owned; when the input `pixel_values` is C-contiguous
-/// (the standard case) each per-item slice is too, keeping the existing
-/// `serialize_pixel_values` zero-copy fast path valid. A non-standard-layout
-/// input still slices correctly and falls back to serialize's `iter()` path.
-///
-/// Fails loud (`Err(SplitError)`) on any ambiguous count, malformed sizes, or
-/// layout/variant it cannot slice; it never silently mis-slices or drops data.
-pub(crate) fn split_preprocessed_per_item(
-    preprocessed: &PreprocessedImages,
-    layouts: &HashMap<String, FieldLayout>,
-) -> Result<Vec<PreprocessedImages>, SplitError> {
-    let num_images = preprocessed.num_images();
-
-    // Cross-check num_images against num_img_tokens (image_sizes is the canonical
-    // source via num_images(); guard the other per-image vec the struct carries).
-    if preprocessed.num_img_tokens.len() != num_images {
-        return Err(SplitError::NumImagesMismatch {
-            what: "num_img_tokens.len()".to_string(),
-            got: preprocessed.num_img_tokens.len(),
-            expected: num_images,
-        });
-    }
-
-    // ----- pixel_values: classify via the "pixel_values" layout key. -----
-    let px = &preprocessed.pixel_values;
-    let px_ndim = px.ndim();
-    let px_lead = if px_ndim == 0 { 0 } else { px.shape()[0] };
-
-    // Per-item pixel row ranges [start, count).
-    let px_ranges: Vec<(usize, usize)> = match layouts.get("pixel_values") {
-        Some(FieldLayout::Flat { sizes_key }) => {
-            let sizes = read_flat_sizes(
-                "pixel_values",
-                sizes_key,
-                &preprocessed.model_specific,
-                num_images,
-            )?;
-            let total: usize = sizes.iter().sum();
-            if total != px_lead {
-                return Err(SplitError::InvalidFlatSizes {
-                    field: "pixel_values".to_string(),
-                    detail: format!("sizes sum {total} != pixel_values leading dim {px_lead}"),
-                });
-            }
-            let mut ranges = Vec::with_capacity(num_images);
-            let mut prefix = 0usize;
-            for &s in &sizes {
-                ranges.push((prefix, s));
-                prefix += s;
-            }
-            ranges
-        }
-        // Batched, or no declared layout: one leading-dim row per image.
-        _ => {
-            if px_lead < num_images {
-                return Err(SplitError::LeadingDimTooSmall {
-                    field: "pixel_values".to_string(),
-                    got: px_lead,
-                    expected: num_images,
-                });
-            }
-            if px_lead != num_images {
-                return Err(SplitError::NumImagesMismatch {
-                    what: "pixel_values leading dim (Batched)".to_string(),
-                    got: px_lead,
-                    expected: num_images,
-                });
-            }
-            (0..num_images).map(|i| (i, 1)).collect()
-        }
-    };
-
-    // Pre-slice each model_specific key once into per-item owned variants.
-    // For each key we build a Vec<ModelSpecificValue> of length num_images,
-    // or a single shared value replicated to all items.
-    enum PerKey {
-        Shared(ModelSpecificValue),
-        PerItem(Vec<ModelSpecificValue>),
-    }
-    let mut sliced: HashMap<String, PerKey> =
-        HashMap::with_capacity(preprocessed.model_specific.len());
-
-    for (key, value) in &preprocessed.model_specific {
-        let per_key = match layouts.get(key) {
-            Some(FieldLayout::Batched) => {
-                // One leading-dim row per image. Validate first_dim if present.
-                if let Some(first) = value.first_dim() {
-                    if first < num_images {
-                        return Err(SplitError::LeadingDimTooSmall {
-                            field: key.clone(),
-                            got: first,
-                            expected: num_images,
-                        });
-                    }
-                    if first != num_images {
-                        return Err(SplitError::NumImagesMismatch {
-                            what: format!("batched field '{key}' first dim"),
-                            got: first,
-                            expected: num_images,
-                        });
-                    }
-                }
-                match value {
-                    ModelSpecificValue::Tensor { .. }
-                    | ModelSpecificValue::IntTensor { .. }
-                    | ModelSpecificValue::UintTensor { .. } => {
-                        let mut items = Vec::with_capacity(num_images);
-                        for i in 0..num_images {
-                            items.push(slice_tensor_variant(key, value, i, 1)?);
-                        }
-                        PerKey::PerItem(items)
-                    }
-                    ModelSpecificValue::IntVec(_)
-                    | ModelSpecificValue::UintVec(_)
-                    | ModelSpecificValue::FloatVec(_)
-                    | ModelSpecificValue::TupleVec(_) => {
-                        let mut items = Vec::with_capacity(num_images);
-                        for i in 0..num_images {
-                            items.push(slice_vec_variant(key, value, i, num_images)?);
-                        }
-                        PerKey::PerItem(items)
-                    }
-                    // Scalars cannot be "batched"; layout says Batched but the
-                    // variant has no per-item axis -> fail loud.
-                    other => {
-                        return Err(SplitError::UnsupportedSlice {
-                            field: key.clone(),
-                            layout: "Batched".to_string(),
-                            variant: model_specific_variant_name(other).to_string(),
-                        });
-                    }
-                }
-            }
-            Some(FieldLayout::Flat { sizes_key }) => {
-                let sizes =
-                    read_flat_sizes(key, sizes_key, &preprocessed.model_specific, num_images)?;
-                // Validate sizes sum against this tensor's leading dim.
-                if let Some(first) = value.first_dim() {
-                    let total: usize = sizes.iter().sum();
-                    if total != first {
-                        return Err(SplitError::InvalidFlatSizes {
-                            field: key.clone(),
-                            detail: format!(
-                                "sizes sum {total} != field '{key}' leading dim {first}"
-                            ),
-                        });
-                    }
-                }
-                let mut items = Vec::with_capacity(num_images);
-                let mut prefix = 0usize;
-                for &s in &sizes {
-                    items.push(slice_tensor_variant(key, value, prefix, s)?);
-                    prefix += s;
-                }
-                PerKey::PerItem(items)
-            }
-            // Key not declared in layouts -> shared/replicated to every item.
-            None => PerKey::Shared(value.clone()),
-        };
-        sliced.insert(key.clone(), per_key);
-    }
-
-    // ----- Build one PreprocessedImages per image. -----
-    let mut out = Vec::with_capacity(num_images);
-    for i in 0..num_images {
-        let (start, count) = px_ranges[i];
-        // slice_axis on axis 0 keeps the leading dim; to_owned() materializes a
-        // fresh standard-layout (C-contiguous) array so serialize stays zero-copy.
-        let px_item: ndarray::ArrayD<f32> = px
-            .slice_axis(ndarray::Axis(0), ndarray::Slice::from(start..start + count))
-            .to_owned();
-
-        let mut item_model_specific: HashMap<String, ModelSpecificValue> =
-            HashMap::with_capacity(sliced.len());
-        for (key, per_key) in &sliced {
-            let v = match per_key {
-                PerKey::Shared(v) => v.clone(),
-                PerKey::PerItem(items) => items[i].clone(),
-            };
-            item_model_specific.insert(key.clone(), v);
-        }
-
-        let item = PreprocessedImages {
-            pixel_values: px_item,
-            num_img_tokens: vec![preprocessed.num_img_tokens[i]],
-            image_sizes: vec![preprocessed.image_sizes[i]],
-            model_specific: item_model_specific,
-        };
-        out.push(item);
-    }
-
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -2672,13 +2217,14 @@ mod tests {
             keep_on_cpu_keys: vec![],
         };
 
-        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
         assert_eq!(assembled.items.len(), 2);
 
         let first = &assembled.items[0];
         assert_eq!(first.modality, TokenSpeedModality::Image);
         assert_eq!(first.encoder_input.shape, vec![2, 2]);
-        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<f32>());
+        // bf16 is the default TokenSpeed encoder_input wire dtype (2 bytes/elem).
+        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<u16>());
         assert_eq!(first.mm_placeholders, vec![(10, 2)]);
         assert_eq!(
             first.content_hash,
@@ -2778,13 +2324,14 @@ mod tests {
             keep_on_cpu_keys: vec![],
         };
 
-        let assembled = assemble_tokenspeed(intermediate, None).unwrap();
+        let assembled = assemble_tokenspeed(&intermediate, None, false).unwrap();
         assert_eq!(assembled.items.len(), 2);
 
         let first = &assembled.items[0];
         assert_eq!(first.modality, TokenSpeedModality::Video);
         assert_eq!(first.encoder_input.shape, vec![2, 2]);
-        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<f32>());
+        // bf16 is the default TokenSpeed encoder_input wire dtype (2 bytes/elem).
+        assert_eq!(first.encoder_input.nbytes(), 4 * size_of::<u16>());
         assert_eq!(first.mm_placeholders, vec![(30, 2)]);
         assert_eq!(
             first.content_hash,
@@ -2933,389 +2480,5 @@ mod tests {
             .await
             .expect("preloaded entry must be returned without touching source");
         assert!(Arc::ptr_eq(&got, &cfg));
-    }
-
-    // -----------------------------------------------------------------------
-    // split_preprocessed_per_item tests (EPD encode fan-out)
-    // -----------------------------------------------------------------------
-
-    /// Qwen-style field layouts: pixel_values is Flat by patches_per_image,
-    /// image_grid_thw and patches_per_image are Batched.
-    fn qwen_layouts() -> HashMap<String, FieldLayout> {
-        HashMap::from([
-            (
-                "pixel_values".to_string(),
-                FieldLayout::flat("patches_per_image"),
-            ),
-            ("image_grid_thw".to_string(), FieldLayout::Batched),
-            ("patches_per_image".to_string(), FieldLayout::Batched),
-        ])
-    }
-
-    /// Build a 2-image patchified fixture. Image 0 gets `rows0` rows filled with
-    /// value 10.0, image 1 gets `rows1` rows filled with value 20.0, so any
-    /// mis-slice is detectable by the fill value. feat columns carry the row's
-    /// (global) row index so row identity is also checkable.
-    fn two_image_fixture(rows0: usize, rows1: usize, feat: usize) -> PreprocessedImages {
-        let total = rows0 + rows1;
-        let mut data = Vec::with_capacity(total * feat);
-        for r in 0..total {
-            let fill = if r < rows0 { 10.0_f32 } else { 20.0_f32 };
-            // Column 0 = fill marker, column 1.. = global row index (if feat>1).
-            for c in 0..feat {
-                data.push(if c == 0 { fill } else { r as f32 });
-            }
-        }
-        let px = ndarray::Array2::from_shape_vec((total, feat), data)
-            .unwrap()
-            .into_dyn();
-
-        // image_grid_thw: per-image (t,h,w) rows.
-        let grid = vec![1_i64, 2, 3, 1, 4, 5];
-        PreprocessedImages::new_dynamic(
-            px,
-            vec![rows0 / 4, rows1 / 4], // num_img_tokens (post-merge, merge^2=4)
-            vec![(64, 48), (32, 32)],   // image_sizes (w,h)
-        )
-        .with_extra("image_grid_thw", ModelSpecificValue::int_2d(grid, 2, 3))
-        .with_extra(
-            "patches_per_image",
-            ModelSpecificValue::int_1d(vec![rows0 as i64, rows1 as i64]),
-        )
-    }
-
-    #[test]
-    fn test_split_preprocessed_two_images_qwen() {
-        let rows0 = 8;
-        let rows1 = 4;
-        let feat = 3;
-        let pre = two_image_fixture(rows0, rows1, feat);
-        let layouts = qwen_layouts();
-
-        let items =
-            split_preprocessed_per_item(&pre, &layouts).expect("two-image split must succeed");
-        assert_eq!(items.len(), 2, "one PreprocessedImages per image");
-
-        // ----- Item 0: rows 0..8, all fill 10.0 -----
-        let it0 = &items[0];
-        assert_eq!(it0.pixel_values.shape(), &[rows0, feat]);
-        assert_eq!(it0.num_images(), 1);
-        assert_eq!(it0.num_img_tokens, vec![rows0 / 4]);
-        assert_eq!(it0.image_sizes, vec![(64, 48)]);
-        for (idx, v) in it0.pixel_values.iter().enumerate() {
-            let col = idx % feat;
-            let row = idx / feat;
-            if col == 0 {
-                assert_eq!(*v, 10.0, "item0 fill marker wrong at {idx}");
-            } else {
-                assert_eq!(*v, row as f32, "item0 row index wrong at {idx}");
-            }
-        }
-        match it0.model_specific.get("image_grid_thw") {
-            Some(ModelSpecificValue::IntTensor { data, shape }) => {
-                assert_eq!(shape, &[1, 3]);
-                assert_eq!(data, &[1, 2, 3], "item0 grid row");
-            }
-            other => panic!("item0 image_grid_thw wrong: {other:?}"),
-        }
-        match it0.model_specific.get("patches_per_image") {
-            Some(ModelSpecificValue::IntTensor { data, shape }) => {
-                assert_eq!(shape, &[1]);
-                assert_eq!(data, &[rows0 as i64]);
-            }
-            other => panic!("item0 patches_per_image wrong: {other:?}"),
-        }
-
-        // ----- Item 1: rows 8..12 (global), all fill 20.0 -----
-        let it1 = &items[1];
-        assert_eq!(it1.pixel_values.shape(), &[rows1, feat]);
-        assert_eq!(it1.num_img_tokens, vec![rows1 / 4]);
-        assert_eq!(it1.image_sizes, vec![(32, 32)]);
-        for (local_idx, v) in it1.pixel_values.iter().enumerate() {
-            let col = local_idx % feat;
-            let global_row = rows0 + local_idx / feat;
-            if col == 0 {
-                assert_eq!(*v, 20.0, "item1 fill marker wrong at {local_idx}");
-            } else {
-                assert_eq!(
-                    *v, global_row as f32,
-                    "item1 global row wrong at {local_idx}"
-                );
-            }
-        }
-        match it1.model_specific.get("image_grid_thw") {
-            Some(ModelSpecificValue::IntTensor { data, shape }) => {
-                assert_eq!(shape, &[1, 3]);
-                assert_eq!(data, &[1, 4, 5], "item1 grid row");
-            }
-            other => panic!("item1 image_grid_thw wrong: {other:?}"),
-        }
-        match it1.model_specific.get("patches_per_image") {
-            Some(ModelSpecificValue::IntTensor { data, shape }) => {
-                assert_eq!(shape, &[1]);
-                assert_eq!(data, &[rows1 as i64]);
-            }
-            other => panic!("item1 patches_per_image wrong: {other:?}"),
-        }
-
-        // ----- Conservation: per-item pixel rows sum to the original. -----
-        let sum_rows: usize = items.iter().map(|it| it.pixel_values.shape()[0]).sum();
-        assert_eq!(sum_rows, pre.pixel_values.shape()[0]);
-
-        // ----- Each per-item pixel_values must be C-contiguous (zero-copy path). -----
-        for it in &items {
-            assert!(
-                it.pixel_values.as_slice().is_some(),
-                "per-item pixel_values must be C-contiguous for serialize fast path"
-            );
-        }
-    }
-
-    #[test]
-    fn test_split_preprocessed_single_image_qwen() {
-        // num_images == 1 must produce one item identical to the input.
-        let rows0 = 6;
-        let feat = 3;
-        let total = rows0;
-        let mut data = Vec::with_capacity(total * feat);
-        for r in 0..total {
-            for _ in 0..feat {
-                data.push(r as f32);
-            }
-        }
-        let px = ndarray::Array2::from_shape_vec((total, feat), data)
-            .unwrap()
-            .into_dyn();
-        let pre = PreprocessedImages::new_dynamic(px, vec![rows0 / 4], vec![(64, 64)])
-            .with_extra(
-                "image_grid_thw",
-                ModelSpecificValue::int_2d(vec![1, 2, 3], 1, 3),
-            )
-            .with_extra(
-                "patches_per_image",
-                ModelSpecificValue::int_1d(vec![rows0 as i64]),
-            );
-
-        let items = split_preprocessed_per_item(&pre, &qwen_layouts()).expect("single-image split");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].pixel_values.shape(), &[rows0, feat]);
-        assert_eq!(
-            items[0].pixel_values.as_slice().unwrap(),
-            pre.pixel_values.as_slice().unwrap(),
-            "single-image split must preserve all pixel data"
-        );
-    }
-
-    #[test]
-    fn test_split_preprocessed_unsupported_layout_fails_loud() {
-        // A Batched field carrying a scalar variant cannot be sliced per item.
-        let rows0 = 4;
-        let rows1 = 4;
-        let feat = 2;
-        let pre = two_image_fixture(rows0, rows1, feat)
-            .with_extra("bogus_scalar", ModelSpecificValue::Int(7));
-
-        let mut layouts = qwen_layouts();
-        // Declare the scalar field as Batched -> must fail (no per-item axis).
-        layouts.insert("bogus_scalar".to_string(), FieldLayout::Batched);
-
-        let err = split_preprocessed_per_item(&pre, &layouts)
-            .expect_err("Batched scalar must fail loud, never silently mis-slice");
-        match err {
-            SplitError::UnsupportedSlice { field, variant, .. } => {
-                assert_eq!(field, "bogus_scalar");
-                assert_eq!(variant, "Int");
-            }
-            other => panic!("expected UnsupportedSlice, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_split_preprocessed_flat_sizes_mismatch_fails_loud() {
-        // patches_per_image sums to a value != pixel_values leading dim.
-        let rows0 = 8;
-        let rows1 = 4;
-        let feat = 3;
-        let mut pre = two_image_fixture(rows0, rows1, feat);
-        // Corrupt the sizes so the sum no longer matches total rows.
-        pre.model_specific.insert(
-            "patches_per_image".to_string(),
-            ModelSpecificValue::int_1d(vec![rows0 as i64, (rows1 + 1) as i64]),
-        );
-
-        let err = split_preprocessed_per_item(&pre, &qwen_layouts())
-            .expect_err("mismatched flat sizes must fail loud");
-        assert!(
-            matches!(err, SplitError::InvalidFlatSizes { .. }),
-            "expected InvalidFlatSizes, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_split_preprocessed_scalar_and_unlisted_keys_replicated() {
-        // Scalar Bool declared by a non-batched layout absence, plus a key not in
-        // layouts at all, must both be replicated identically to every item.
-        let rows0 = 4;
-        let rows1 = 4;
-        let feat = 2;
-        let pre = two_image_fixture(rows0, rows1, feat)
-            .with_extra("global_flag", ModelSpecificValue::Bool(true))
-            .with_extra("global_cfg", ModelSpecificValue::Int(42));
-
-        // Note: global_flag / global_cfg are NOT in layouts -> shared/replicated.
-        let items = split_preprocessed_per_item(&pre, &qwen_layouts())
-            .expect("shared-key split must succeed");
-        assert_eq!(items.len(), 2);
-        for it in &items {
-            assert!(matches!(
-                it.model_specific.get("global_flag"),
-                Some(ModelSpecificValue::Bool(true))
-            ));
-            assert!(matches!(
-                it.model_specific.get("global_cfg"),
-                Some(ModelSpecificValue::Int(42))
-            ));
-        }
-    }
-
-    #[test]
-    fn test_split_preprocessed_flat_model_specific_branch() {
-        // A NON-pixel model_specific tensor declared Flat, with its own asymmetric
-        // per-image sizes, must be variable-row sliced independently of pixels.
-        // Guards the model_specific Flat branch (distinct from the pixel one).
-        let pre = two_image_fixture(8, 4, 3)
-            // aux rows [3, 5] (deliberately != pixel rows 8/4), 2 cols, distinct
-            // per-image markers so a prefix/swap bug is detectable.
-            .with_extra(
-                "aux",
-                ModelSpecificValue::IntTensor {
-                    data: vec![
-                        100, 101, 110, 111, 120, 121, // image 0: 3 rows
-                        200, 201, 210, 211, 220, 221, 230, 231, 240, 241, // image 1: 5 rows
-                    ],
-                    shape: vec![8, 2],
-                },
-            )
-            .with_extra("aux_sizes", ModelSpecificValue::int_1d(vec![3, 5]));
-
-        let mut layouts = qwen_layouts();
-        layouts.insert("aux".to_string(), FieldLayout::flat("aux_sizes"));
-        layouts.insert("aux_sizes".to_string(), FieldLayout::Batched);
-
-        let items = split_preprocessed_per_item(&pre, &layouts).expect("flat model_specific split");
-        assert_eq!(items.len(), 2);
-        match items[0].model_specific.get("aux") {
-            Some(ModelSpecificValue::IntTensor { data, shape }) => {
-                assert_eq!(shape, &[3, 2], "item0 aux shape");
-                assert_eq!(data, &[100, 101, 110, 111, 120, 121], "item0 aux rows");
-            }
-            other => panic!("item0 aux wrong: {other:?}"),
-        }
-        match items[1].model_specific.get("aux") {
-            Some(ModelSpecificValue::IntTensor { data, shape }) => {
-                assert_eq!(shape, &[5, 2], "item1 aux shape");
-                assert_eq!(
-                    data,
-                    &[200, 201, 210, 211, 220, 221, 230, 231, 240, 241],
-                    "item1 aux rows"
-                );
-            }
-            other => panic!("item1 aux wrong: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_split_preprocessed_flat_model_specific_sizes_mismatch_fails_loud() {
-        // The per-field Flat sizes-sum guard (not the pixel one) must fire when a
-        // model_specific Flat field's sizes don't sum to its own leading dim.
-        let pre = two_image_fixture(8, 4, 3)
-            .with_extra(
-                "aux",
-                ModelSpecificValue::IntTensor {
-                    data: vec![0; 16],
-                    shape: vec![8, 2],
-                },
-            )
-            .with_extra("aux_sizes", ModelSpecificValue::int_1d(vec![3, 4])); // 3+4=7 != 8
-
-        let mut layouts = qwen_layouts();
-        layouts.insert("aux".to_string(), FieldLayout::flat("aux_sizes"));
-        layouts.insert("aux_sizes".to_string(), FieldLayout::Batched);
-
-        let err = split_preprocessed_per_item(&pre, &layouts).unwrap_err();
-        assert!(
-            matches!(err, SplitError::InvalidFlatSizes { ref field, .. } if field == "aux"),
-            "expected InvalidFlatSizes for aux, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_split_preprocessed_batched_vec_branch() {
-        // Vec/TupleVec model_specific fields declared Batched must be indexed at i.
-        let pre = two_image_fixture(8, 4, 3)
-            .with_extra(
-                "ratios",
-                ModelSpecificValue::TupleVec(vec![(10, 11), (20, 21)]),
-            )
-            .with_extra("counts", ModelSpecificValue::IntVec(vec![100, 200]));
-
-        let mut layouts = qwen_layouts();
-        layouts.insert("ratios".to_string(), FieldLayout::Batched);
-        layouts.insert("counts".to_string(), FieldLayout::Batched);
-
-        let items = split_preprocessed_per_item(&pre, &layouts).expect("batched vec split");
-        assert!(matches!(
-            items[0].model_specific.get("ratios"),
-            Some(ModelSpecificValue::TupleVec(v)) if v == &vec![(10, 11)]
-        ));
-        assert!(matches!(
-            items[1].model_specific.get("ratios"),
-            Some(ModelSpecificValue::TupleVec(v)) if v == &vec![(20, 21)]
-        ));
-        assert!(matches!(
-            items[0].model_specific.get("counts"),
-            Some(ModelSpecificValue::IntVec(v)) if v == &vec![100]
-        ));
-        assert!(matches!(
-            items[1].model_specific.get("counts"),
-            Some(ModelSpecificValue::IntVec(v)) if v == &vec![200]
-        ));
-    }
-
-    #[test]
-    fn test_split_preprocessed_batched_vec_len_mismatch_fails_loud() {
-        // A Batched Vec whose length != num_images must fail loud, not mis-route.
-        let pre = two_image_fixture(8, 4, 3)
-            .with_extra("counts", ModelSpecificValue::IntVec(vec![1, 2, 3])); // len 3 != 2
-
-        let mut layouts = qwen_layouts();
-        layouts.insert("counts".to_string(), FieldLayout::Batched);
-
-        let err = split_preprocessed_per_item(&pre, &layouts).unwrap_err();
-        assert!(
-            matches!(err, SplitError::UnsupportedSlice { ref field, .. } if field == "counts"),
-            "expected UnsupportedSlice for counts, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_split_preprocessed_shape_data_mismatch_fails_loud() {
-        // A tensor whose buffer is longer than its declared shape must be rejected,
-        // not silently truncated by the per-item slices.
-        let pre = two_image_fixture(8, 4, 3).with_extra(
-            "bad",
-            ModelSpecificValue::IntTensor {
-                data: vec![0; 9],
-                shape: vec![2, 3],
-            }, // 9 != product(shape)=6
-        );
-        let mut layouts = qwen_layouts();
-        layouts.insert("bad".to_string(), FieldLayout::Batched);
-
-        let err = split_preprocessed_per_item(&pre, &layouts).unwrap_err();
-        assert!(
-            matches!(err, SplitError::ShapeDataMismatch { ref field, .. } if field == "bad"),
-            "expected ShapeDataMismatch for bad, got {err:?}"
-        );
     }
 }

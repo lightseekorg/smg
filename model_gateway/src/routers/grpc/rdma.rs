@@ -29,7 +29,7 @@ use nixl_sys::{
 use parking_lot::Mutex;
 use tracing::{debug, error};
 
-/// `SMG_MM_PIXEL_RDMA` gate (mirrors `pixel_wire_dtype()`'s OnceLock pattern).
+/// `SMG_MM_PIXEL_RDMA` gate (cached in a process-wide `OnceLock`).
 pub(crate) fn rdma_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {

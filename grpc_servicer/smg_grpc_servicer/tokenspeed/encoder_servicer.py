@@ -309,8 +309,8 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
     def _items_from_proto(self, mm_inputs, bootstrap_room: int = 0):
         """Reconstruct the engine MultimodalDataItem(s) for the encode worker.
 
-        Unlike the prefill leg, the encode worker NEEDS pixel_values (it runs the
-        tower). It also needs each item's post-merge token count so the executor
+        Unlike the prefill leg, the encode worker NEEDS each item's encoder_input
+        (it runs the tower). It also needs each item's post-merge token count so the executor
         can split the tower output; the gateway ships grid_thw but not
         placeholders to encode, so derive the count from grid_thw and set it as
         the item's single offset span (the offset positions are irrelevant to the
@@ -319,65 +319,71 @@ class TokenSpeedEncoderServicer(tokenspeed_encoder_pb2_grpc.TokenSpeedEncoderSer
         Modality, MultimodalDataItem = _lazy_mm_item()
         model_dtype = getattr(self.async_llm.model_config, "dtype", None)
 
-        # The feature's CROSS-PROCESS representation is decided here, once, for
-        # both payload arms: a plain CPU tensor by default, or (EPD_PIXEL_SHM) a
-        # POSIX-SHM handle so the ZMQ hop to the scheduler pickles ~KB instead of
-        # the 19-77MB pixels. The content hash is computed on the real bytes
-        # before the swap and pre-set on the item.
-        td = mm_inputs.pixel_values
-        if td.WhichOneof("payload") == "remote":
-            # EPD RDMA: PULL the pixels from the gateway's exported NIXL memory
-            # (under EPD_PIXEL_SHM the slot bytes go straight to SHM, one copy).
-            feature, feat_hash = self._feature_from_remote(
-                td, bootstrap_room, model_dtype
-            )
-        else:
-            feature = TokenSpeedSchedulerServicer._tensor_from_proto(
-                td, cast_to=model_dtype
-            )
-            feat_hash = None
-            if self._pixel_shm:
-                from tokenspeed.runtime.multimodal.hash import hash_feature
-                from tokenspeed.runtime.multimodal.shm_transport import (
-                    ShmTensorHandle,
+        # mm_inputs is itemized (one MultimodalItem per image, each owning its
+        # encoder_input + model_specific_tensors). The gateway sends one item per
+        # Encode RPC keyed by bootstrap_room, but iterate generally.
+        items = []
+        for item_proto in mm_inputs.items:
+            # The feature's CROSS-PROCESS representation is decided here, once, for
+            # both payload arms: a plain CPU tensor by default, or (EPD_PIXEL_SHM) a
+            # POSIX-SHM handle so the ZMQ hop to the scheduler pickles ~KB instead of
+            # the 19-77MB pixels. The content hash is computed on the real bytes
+            # before the swap and pre-set on the item.
+            td = item_proto.encoder_input
+            if td.WhichOneof("payload") == "remote":
+                # EPD RDMA: PULL the pixels from the gateway's exported NIXL memory
+                # (under EPD_PIXEL_SHM the slot bytes go straight to SHM, one copy).
+                feature, feat_hash = self._feature_from_remote(
+                    td, bootstrap_room, model_dtype
                 )
+            else:
+                feature = TokenSpeedSchedulerServicer._tensor_from_proto(
+                    td, cast_to=model_dtype
+                )
+                feat_hash = None
+                if self._pixel_shm:
+                    from tokenspeed.runtime.multimodal.hash import hash_feature
+                    from tokenspeed.runtime.multimodal.shm_transport import (
+                        ShmTensorHandle,
+                    )
 
-                feat_hash = hash_feature(feature)
-                feature = ShmTensorHandle.publish(feature)
-        model_specific = {
-            name: TokenSpeedSchedulerServicer._tensor_from_proto(td, cast_to=model_dtype)
-            for name, td in mm_inputs.model_specific_tensors.items()
-        }
+                    feat_hash = hash_feature(feature)
+                    feature = ShmTensorHandle.publish(feature)
+            model_specific = {
+                name: TokenSpeedSchedulerServicer._tensor_from_proto(t, cast_to=model_dtype)
+                for name, t in item_proto.model_specific_tensors.items()
+            }
 
-        grid = model_specific.get("image_grid_thw")
-        if grid is None:
-            # Tolerate the legacy "grid_thws" key (older gateway builds emit it on the
-            # encode RPC); mirrors the engine kimi_k25 _grid() helper's tolerance.
-            grid = model_specific.get("grid_thws")
-        if grid is None:
-            raise ValueError(
-                "encode request is missing image_grid_thw/grid_thws; "
-                f"have keys={sorted(model_specific.keys())}"
+            grid = model_specific.get("image_grid_thw")
+            if grid is None:
+                # Tolerate the legacy "grid_thws" key (older gateway builds emit it on
+                # the encode RPC); mirrors the engine kimi_k25 _grid() helper's tolerance.
+                grid = model_specific.get("grid_thws")
+            if grid is None:
+                raise ValueError(
+                    "encode request is missing image_grid_thw/grid_thws; "
+                    f"have keys={sorted(model_specific.keys())}"
+                )
+            # grid is [num_images, 3] = (t, h, w) in patch units, per image.
+            merge = self._merge_size
+            offsets = []
+            cursor = 0
+            for row in grid.tolist():
+                t, h, w = int(row[0]), int(row[1]), int(row[2])
+                span = t * (h // merge) * (w // merge)
+                offsets.append((cursor, cursor + span - 1))
+                cursor += span
+
+            item = MultimodalDataItem(
+                modality=Modality.IMAGE,
+                hash=feat_hash,
+                feature=feature,
+                model_specific_data=model_specific,
+                offsets=offsets,
             )
-        # grid is [num_images, 3] = (t, h, w) in patch units, per image.
-        merge = self._merge_size
-        offsets = []
-        cursor = 0
-        for row in grid.tolist():
-            t, h, w = int(row[0]), int(row[1]), int(row[2])
-            span = t * (h // merge) * (w // merge)
-            offsets.append((cursor, cursor + span - 1))
-            cursor += span
-
-        item = MultimodalDataItem(
-            modality=Modality.IMAGE,
-            hash=feat_hash,
-            feature=feature,
-            model_specific_data=model_specific,
-            offsets=offsets,
-        )
-        item.set_pad_value()
-        return [item]
+            item.set_pad_value()
+            items.append(item)
+        return items
 
     async def Encode(self, request, context):
         # The gateway sends one image per RPC, so one EncodeItemAssignment / room.
