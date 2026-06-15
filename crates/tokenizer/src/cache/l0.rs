@@ -164,17 +164,6 @@ impl L0Cache {
         self.map_for(add_special_tokens).insert(key, entry);
     }
 
-    /// Insert a pre-wrapped Arc encoding into the cache (avoids double-wrapping)
-    pub fn insert_arc(&self, key: String, add_special_tokens: bool, value: Arc<Encoding>) {
-        self.maybe_evict();
-        let ts = self.next_timestamp();
-        let entry = CachedEntry {
-            encoding: value,
-            last_accessed: AtomicU64::new(ts),
-        };
-        self.map_for(add_special_tokens).insert(key, entry);
-    }
-
     /// Get the current number of entries in the cache
     pub fn len(&self) -> usize {
         self.map_plain.len() + self.map_special.len()
@@ -210,14 +199,6 @@ impl L0Cache {
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
         self.access_counter.store(0, Ordering::Relaxed);
-    }
-
-    /// Estimate memory usage in bytes
-    pub fn memory_usage(&self) -> usize {
-        // Rough estimate:
-        // - Each entry: key (string) + value (encoding ~250 tokens * 4 bytes) + overhead
-        // - Average: ~2.2KB per entry
-        self.len() * 2200
     }
 }
 

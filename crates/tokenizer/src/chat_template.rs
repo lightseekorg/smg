@@ -111,7 +111,7 @@ pub fn detect_thinking_toggle(template: &str) -> (ThinkingToggle, Option<Thinkin
 /// - ChatTemplateContentFormat::String if template expects simple string content
 pub fn detect_chat_template_content_format(template: &str) -> ChatTemplateContentFormat {
     // Use AST-based detection (enabled by default)
-    detect_format_with_ast(template)
+    detect_all_with_ast(template).0
 }
 
 /// Flags tracking which OpenAI-style patterns we've seen
@@ -414,12 +414,6 @@ impl<'a> Detector<'a> {
             }
         }
     }
-}
-
-/// AST-based detection using minijinja's unstable machinery
-/// Single-pass detector with scope tracking
-fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
-    detect_all_with_ast(template).0
 }
 
 /// Single-pass detection of content format, think-in-prefill, and thinking toggle.

@@ -223,15 +223,10 @@ impl L1Cache {
         PrefixLookup::Miss(seeds)
     }
 
-    /// Insert prefix entries at ALL special token boundaries
-    ///
-    /// Uses incremental hashing and tokenization for O(N) performance.
-    ///
-    /// Optimized for workloads with high prefix reuse (e.g., chat templates with repeated system prompts).
-    ///
-    /// The miss path of [`super::CachedTokenizer`] uses [`Self::populate_with_seeds`]
-    /// instead, which reuses this same per-segment work to *also* return the full
-    /// encoding — avoiding a redundant second tokenization of the input.
+    /// Insert prefix entries at all special token boundaries (incremental hashing
+    /// and tokenization, O(N)). The miss path of [`super::CachedTokenizer`] instead
+    /// uses [`Self::populate_with_seeds`], which reuses this per-segment work to also
+    /// return the full encoding.
     pub fn insert_at_boundaries<E: Encoder + ?Sized>(
         &self,
         input: &str,
@@ -250,14 +245,9 @@ impl L1Cache {
     }
 
     /// Miss-path encode: tokenize `input` exactly once, caching the cumulative prefix
-    /// at every special token boundary as we go, and return the assembled encoding.
-    /// This replaces a separate full `encode` + [`Self::insert_at_boundaries`], which
-    /// together tokenized the input ~twice (once whole for the result, once again
-    /// split across the boundary segments).
-    ///
-    /// The concatenation of the per-segment encodes equals an uncached
-    /// `encode(input, add_special_tokens)` because special tokens are atomic in BPE —
-    /// the same invariant the hit path's prefix + suffix splice relies on.
+    /// at every special token boundary, and return the assembled encoding. The
+    /// per-segment encodes concatenate to an uncached `encode(input, add_special_tokens)`
+    /// because special tokens are atomic in BPE.
     pub fn populate_and_encode<E: Encoder + ?Sized>(
         &self,
         input: &str,

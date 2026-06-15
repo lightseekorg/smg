@@ -178,8 +178,7 @@ impl StopSequenceDecoder {
         // Use Sequence for incremental decoding
         let new_text = self.sequence.append_token(token_id)?;
 
-        // Optimization #6: fast path when only token-level stops are configured.
-        // No string stop sequences means no jail needed — emit text immediately.
+        // Token-only fast path: no string stops means no jail is needed.
         if self.token_only {
             if new_text.is_empty() {
                 return Ok(SequenceDecoderOutput::Held);
@@ -190,10 +189,9 @@ impl StopSequenceDecoder {
         let old_len = self.jail_buffer.len();
         self.jail_buffer.push_str(&new_text);
 
-        // Check for stop sequences using Aho-Corasick.
-        // Optimization #3: scope the search to avoid rescanning old text.
-        // A match can start at earliest at `old_len - jail_max_bytes + 1` because
-        // any match starting earlier would have been found on a previous call.
+        // Check for stop sequences using Aho-Corasick, scoped to avoid rescanning
+        // old text: a match can start no earlier than `old_len - jail_max_bytes + 1`
+        // because any earlier match would have been found on a previous call.
         if let Some(ac) = &self.aho_corasick {
             let search_start = if old_len >= self.jail_max_bytes {
                 // Walk forward to a char boundary (we must not start mid-codepoint)

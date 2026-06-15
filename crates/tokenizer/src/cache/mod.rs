@@ -174,9 +174,7 @@ impl Encoder for CachedTokenizer {
 
         // L1 path (prefix match at special token boundaries): a hit splices the
         // shared cached prefix with a fresh suffix encode; a miss tokenizes the
-        // input exactly once, seeding every boundary entry along the way — no full
-        // encode followed by a per-boundary re-tokenize, and no re-hash of the
-        // prefixes the failed lookup already hashed.
+        // input once, seeding every boundary entry along the way.
         if let Some(l1) = &self.l1 {
             let tokens: Vec<&str> = self
                 .special_token_strings
@@ -192,9 +190,8 @@ impl Encoder for CachedTokenizer {
                     let suffix_encoding = self.inner.encode(suffix, false)?;
                     let suffix_tokens = suffix_encoding.token_ids();
 
-                    // Splice with exact capacity: one allocation and a single copy of
-                    // the shared prefix — no `to_vec` clone plus grow-realloc re-copy
-                    // of the (large) cached prefix on every hit.
+                    // Splice with exact capacity: one allocation and a single copy
+                    // of the shared prefix.
                     let mut merged_tokens =
                         Vec::with_capacity(prefix_tokens.len() + suffix_tokens.len());
                     merged_tokens.extend_from_slice(&prefix_tokens);
