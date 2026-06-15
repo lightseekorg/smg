@@ -997,6 +997,7 @@ impl Router {
         mesh_peer_urls: Vec<String>,
         mesh_advertise_host: Option<String>,
         drain_settle_secs: u64,
+        enable_wasm: bool,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 

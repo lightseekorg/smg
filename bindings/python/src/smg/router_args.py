@@ -897,7 +897,7 @@ class RouterArgs:
         backend_group.add_argument(
             f"--{prefix}enable-wasm",
             action="store_true",
-            default=False,
+            default=None,
             help="Enable WebAssembly (WASM) module support",
         )
         backend_group.add_argument(
