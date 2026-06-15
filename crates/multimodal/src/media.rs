@@ -1,5 +1,3 @@
-#[cfg(feature = "opencv-video")]
-use std::collections::HashMap;
 use std::{
     collections::HashSet,
     io::Write,
@@ -12,12 +10,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
 #[cfg(feature = "opencv-video")]
-use opencv::{
-    core::{Mat, Scalar, CV_8UC3},
-    imgproc,
-    prelude::*,
-    videoio,
-};
+use opencv::{core::Mat, imgproc, prelude::*, videoio};
 use reqwest::Client;
 use tokio::{fs, process::Command, task, time};
 use tracing::info;
@@ -394,7 +387,12 @@ async fn decode_video_frames(
     cfg: VideoFetchConfig,
 ) -> Result<DecodedVideoFrames, MediaConnectorError> {
     let input_bytes = bytes.len();
-    let input_file = write_temp_video_file(&bytes)?;
+    let input_file = {
+        let bytes = bytes.clone();
+        task::spawn_blocking(move || write_temp_video_file(&bytes))
+            .await
+            .map_err(MediaConnectorError::Blocking)??
+    };
     let input_path = input_file.path().to_path_buf();
     match video_decode_backend_override().as_deref() {
         Some("ffmpeg") => decode_video_with_ffmpeg(&input_path, input_bytes, cfg).await,
@@ -560,22 +558,6 @@ fn decode_video_with_opencv_file(
         ));
     }
 
-    let width = capture
-        .get(videoio::CAP_PROP_FRAME_WIDTH)
-        .map_err(opencv_decode_error)?
-        .round()
-        .max(0.0) as u32;
-    let height = capture
-        .get(videoio::CAP_PROP_FRAME_HEIGHT)
-        .map_err(opencv_decode_error)?
-        .round()
-        .max(0.0) as u32;
-    if width == 0 || height == 0 {
-        return Err(MediaConnectorError::VideoDecode(format!(
-            "OpenCV reported invalid video frame size: {width}x{height}"
-        )));
-    }
-
     let fps = capture
         .get(videoio::CAP_PROP_FPS)
         .map_err(opencv_decode_error)?;
@@ -586,21 +568,8 @@ fn decode_video_with_opencv_file(
         ));
     }
 
-    let mut frame_index_counts: HashMap<usize, usize> = HashMap::new();
-    for &idx in &frame_indices {
-        *frame_index_counts.entry(idx).or_insert(0) += 1;
-    }
-    let max_frame_index = *frame_indices.last().ok_or_else(|| {
-        MediaConnectorError::VideoDecode("OpenCV video sampling produced no frames".to_string())
-    })?;
-    let frame_size = rawvideo_frame_size(width, height)?;
-    let decoded_bytes = checked_decoded_rgb_bytes(frame_indices.len(), frame_size)?;
+    let sampled_frame_counts = counted_frame_indices(&frame_indices);
     let mut data = Vec::new();
-    data.try_reserve(decoded_bytes).map_err(|e| {
-        MediaConnectorError::VideoDecode(format!(
-            "failed to reserve {decoded_bytes} decoded video bytes: {e}"
-        ))
-    })?;
     let mut frames = Vec::new();
     frames.try_reserve(frame_indices.len()).map_err(|e| {
         MediaConnectorError::VideoDecode(format!(
@@ -609,13 +578,13 @@ fn decode_video_with_opencv_file(
         ))
     })?;
     let mut bgr_frame = Mat::default();
-    let mut rgb_frame =
-        Mat::new_rows_cols_with_default(height as i32, width as i32, CV_8UC3, Scalar::default())
-            .map_err(opencv_decode_error)?;
+    let mut rgb_frame = Mat::default();
 
     let timeout = video_process_timeout();
     let started = Instant::now();
-    for idx in 0..=max_frame_index {
+    // Seek directly to sampled frames instead of scanning every intervening
+    // frame, which can be prohibitively slow for long clips.
+    for (idx, repeat_count) in sampled_frame_counts {
         if started.elapsed() >= timeout {
             return Err(MediaConnectorError::VideoDecode(format!(
                 "OpenCV timed out after {:.3} seconds",
@@ -623,38 +592,59 @@ fn decode_video_with_opencv_file(
             )));
         }
 
-        if !capture.grab().map_err(opencv_decode_error)? {
-            break;
+        if !capture
+            .set(videoio::CAP_PROP_POS_FRAMES, idx as f64)
+            .map_err(opencv_decode_error)?
+        {
+            return Err(MediaConnectorError::VideoDecode(format!(
+                "OpenCV could not seek to sampled frame {idx}"
+            )));
         }
 
-        let Some(repeat_count) = frame_index_counts.get(&idx).copied() else {
-            continue;
-        };
-
-        if !capture
-            .retrieve(&mut bgr_frame, 0)
-            .map_err(opencv_decode_error)?
-            || bgr_frame.empty()
-        {
+        if !capture.read(&mut bgr_frame).map_err(opencv_decode_error)? || bgr_frame.empty() {
             continue;
         }
 
         imgproc::cvt_color_def(&bgr_frame, &mut rgb_frame, imgproc::COLOR_BGR2RGB)
             .map_err(opencv_decode_error)?;
 
+        let decoded_width = u32::try_from(rgb_frame.cols()).map_err(|_| {
+            MediaConnectorError::VideoDecode(format!(
+                "OpenCV produced invalid RGB frame width: {}",
+                rgb_frame.cols()
+            ))
+        })?;
+        let decoded_height = u32::try_from(rgb_frame.rows()).map_err(|_| {
+            MediaConnectorError::VideoDecode(format!(
+                "OpenCV produced invalid RGB frame height: {}",
+                rgb_frame.rows()
+            ))
+        })?;
+        let frame_size = rawvideo_frame_size(decoded_width, decoded_height)?;
         let rgb_bytes = rgb_frame.data_bytes().map_err(opencv_decode_error)?;
         if rgb_bytes.len() < frame_size {
             return Err(MediaConnectorError::VideoDecode(format!(
-                "OpenCV produced {} RGB bytes for {width}x{height} frame, expected {frame_size}",
+                "OpenCV produced {} RGB bytes for {decoded_width}x{decoded_height} frame, expected {frame_size}",
                 rgb_bytes.len()
             )));
         }
         for _ in 0..repeat_count {
+            let new_len = data.len().checked_add(frame_size).ok_or_else(|| {
+                MediaConnectorError::VideoDecode(format!(
+                    "decoded video byte size overflow while appending {frame_size} bytes"
+                ))
+            })?;
+            ensure_decoded_byte_limit(new_len)?;
+            data.try_reserve(frame_size).map_err(|e| {
+                MediaConnectorError::VideoDecode(format!(
+                    "failed to reserve {frame_size} decoded video bytes: {e}"
+                ))
+            })?;
             let offset = data.len();
             data.extend_from_slice(&rgb_bytes[..frame_size]);
             frames.push(DecodedRgbFrame {
-                width,
-                height,
+                width: decoded_width,
+                height: decoded_height,
                 offset,
                 len: frame_size,
             });
@@ -718,6 +708,21 @@ fn opencv_frame_indices(total_frames: usize, fps: f64, cfg: VideoFetchConfig) ->
     (0..target_frames)
         .map(|idx| ((idx as f64 * last) / denom).floor() as usize)
         .collect()
+}
+
+#[cfg(feature = "opencv-video")]
+fn counted_frame_indices(frame_indices: &[usize]) -> Vec<(usize, usize)> {
+    let mut counts = Vec::new();
+    for &idx in frame_indices {
+        if let Some((last_idx, count)) = counts.last_mut() {
+            if *last_idx == idx {
+                *count += 1;
+                continue;
+            }
+        }
+        counts.push((idx, 1));
+    }
+    counts
 }
 
 #[cfg(feature = "opencv-video")]
