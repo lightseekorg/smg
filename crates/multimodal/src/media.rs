@@ -26,10 +26,11 @@ const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 use super::{
     error::MediaConnectorError,
     types::{
-        DecodedRgbFrame, DecodedRgbVideo, ImageDetail, ImageFrame, ImageSource, VideoClip,
-        VideoSource,
+        DecodedRgbFrame, ImageDetail, ImageFrame, ImageSource, VideoClip, VideoSource,
     },
 };
+#[cfg(feature = "opencv-video")]
+use super::types::DecodedRgbVideo;
 
 #[derive(Clone)]
 pub struct MediaConnectorConfig {
@@ -377,6 +378,7 @@ impl MediaConnector {
 
         let clip = match decoded {
             DecodedVideoFrames::Images(frames) => VideoClip::new(frames, bytes, source, hash),
+            #[cfg(feature = "opencv-video")]
             DecodedVideoFrames::Rgb(rgb_video) => {
                 VideoClip::new_rgb(rgb_video, bytes, source, hash)
             }
@@ -387,6 +389,7 @@ impl MediaConnector {
 
 enum DecodedVideoFrames {
     Images(Vec<image::DynamicImage>),
+    #[cfg(feature = "opencv-video")]
     Rgb(DecodedRgbVideo),
 }
 
