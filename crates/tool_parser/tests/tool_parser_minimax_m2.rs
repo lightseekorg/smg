@@ -312,7 +312,7 @@ async fn test_minimax_multiple_tools_boundary() {
 }
 
 #[tokio::test]
-async fn test_minimax_invalid_function_name() {
+async fn test_minimax_unknown_function_name_is_forwarded() {
     let mut parser = MinimaxM2Parser::new();
     let tools = create_test_tools();
 
@@ -324,11 +324,14 @@ async fn test_minimax_invalid_function_name() {
     ];
 
     let mut found_invalid = false;
+    let mut all_normal_text = String::new();
 
     for chunk in chunks {
         let result = parser.parse_incremental(chunk, &tools).await.unwrap();
+        all_normal_text.push_str(&result.normal_text);
 
-        // Invalid function should be skipped
+        // Unknown/hallucinated function names are forwarded as tool calls so the
+        // client gets a clean error, rather than leaking the raw markup as text.
         for call in result.calls {
             if let Some(name) = call.name {
                 if name == "invalid_function" {
@@ -338,7 +341,14 @@ async fn test_minimax_invalid_function_name() {
         }
     }
 
-    assert!(!found_invalid, "Invalid function should not be parsed");
+    assert!(
+        found_invalid,
+        "Unknown function name should be forwarded as a tool call"
+    );
+    assert!(
+        !all_normal_text.contains("<invoke"),
+        "Tool-call markup must not leak into normal text"
+    );
 }
 
 #[tokio::test]
@@ -598,7 +608,7 @@ async fn test_minimax_streaming_with_invalid_function_progressive() {
     ];
 
     let mut all_normal_text = String::new();
-    let mut found_valid_tool = false;
+    let mut forwarded_name = None;
 
     for chunk in chunks {
         let result = parser.parse_incremental(chunk, &tools).await.unwrap();
@@ -606,20 +616,22 @@ async fn test_minimax_streaming_with_invalid_function_progressive() {
 
         for call in result.calls {
             if let Some(name) = call.name {
-                // Should not get here for invalid function
-                if tools.iter().any(|t| t.function.name == name) {
-                    found_valid_tool = true;
-                }
+                forwarded_name = Some(name);
             }
         }
     }
 
-    assert!(
-        !found_valid_tool,
-        "Invalid function should not be parsed as tool call"
+    // The unknown name is forwarded as a tool call, and its markup is NOT
+    // leaked into the user-visible normal text.
+    assert_eq!(
+        forwarded_name.as_deref(),
+        Some("invalid_function"),
+        "Unknown function should be forwarded as a tool call"
     );
-    // The invalid tool call should be returned as normal text
-    assert!(all_normal_text.contains("invalid_function"));
+    assert!(
+        !all_normal_text.contains("<invoke"),
+        "Tool-call markup must not leak into normal text"
+    );
 }
 
 #[tokio::test]

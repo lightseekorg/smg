@@ -345,9 +345,6 @@ impl ToolParser for MinimaxM2Parser {
         let mut normal_text = String::new();
         let mut calls = Vec::new();
 
-        // Build tool indices for validation
-        let tool_indices = helpers::get_tool_indices(tools);
-
         loop {
             // If we're waiting for the tool call end tag, check for it first
             if self.waiting_for_tool_call_end {
@@ -416,44 +413,36 @@ impl ToolParser for MinimaxM2Parser {
                         .trim()
                         .to_string();
 
-                    // Validate function name
-                    if tool_indices.contains_key(&function_name) {
-                        self.current_function_name.clone_from(&function_name);
-                        self.function_name_sent = true;
+                    // Forward unknown tool names too — emit a tool_call rather than
+                    // leaking the <invoke> markup into assistant text.
+                    self.current_function_name.clone_from(&function_name);
+                    self.function_name_sent = true;
 
-                        // Initialize tool call tracking
-                        if self.current_tool_id == -1 {
-                            self.current_tool_id = 0;
-                        }
-
-                        // Ensure tracking arrays are large enough
-                        helpers::ensure_capacity(
-                            self.current_tool_id,
-                            &mut self.prev_tool_call_arr,
-                            &mut self.streamed_args_for_tool,
-                        );
-
-                        // Send tool name with empty parameters
-                        calls.push(ToolCallItem {
-                            tool_index: self.current_tool_id as usize,
-                            name: Some(function_name),
-                            parameters: String::new(),
-                        });
-
-                        // Find the position after the opening invoke tag (after the >)
-                        // We only want to remove up to the opening tag, not the full match
-                        if let Some(pos) = self.buffer.find('>') {
-                            self.buffer = self.buffer[pos + 1..].to_string();
-                        }
-                        continue;
-                    } else {
-                        // Invalid function name, reset state
-                        tracing::debug!("Invalid function name: {}", function_name);
-                        self.in_tool_call = false;
-                        normal_text.push_str(&self.buffer);
-                        self.buffer.clear();
-                        break;
+                    // Initialize tool call tracking
+                    if self.current_tool_id == -1 {
+                        self.current_tool_id = 0;
                     }
+
+                    // Ensure tracking arrays are large enough
+                    helpers::ensure_capacity(
+                        self.current_tool_id,
+                        &mut self.prev_tool_call_arr,
+                        &mut self.streamed_args_for_tool,
+                    );
+
+                    // Send tool name with empty parameters
+                    calls.push(ToolCallItem {
+                        tool_index: self.current_tool_id as usize,
+                        name: Some(function_name),
+                        parameters: String::new(),
+                    });
+
+                    // Find the position after the opening invoke tag (after the >)
+                    // We only want to remove up to the opening tag, not the full match
+                    if let Some(pos) = self.buffer.find('>') {
+                        self.buffer = self.buffer[pos + 1..].to_string();
+                    }
+                    continue;
                 }
                 // No complete invoke pattern found yet, wait for more text
                 break;
