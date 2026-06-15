@@ -476,6 +476,7 @@ struct Router {
     /// New parameters MUST be appended here (not inserted mid-list) to avoid
     /// breaking external Python callers that pass `_Router(...)` positionally.
     drain_settle_secs: u64,
+    enable_wasm: bool,
 }
 
 impl Router {
@@ -749,6 +750,7 @@ impl Router {
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
+            .enable_wasm(self.enable_wasm)
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -879,6 +881,7 @@ impl Router {
         mesh_peer_urls = vec![],
         mesh_advertise_host = None,
         drain_settle_secs = 5,
+        enable_wasm = false,
     ))]
     #[expect(clippy::too_many_arguments)]
     #[expect(
@@ -1119,6 +1122,7 @@ impl Router {
             mesh_port,
             mesh_peer_urls,
             drain_settle_secs,
+            enable_wasm,
         })
     }
 
