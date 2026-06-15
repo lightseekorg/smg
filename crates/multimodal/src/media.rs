@@ -619,7 +619,7 @@ fn decode_video_with_opencv_file(
 
     for idx in 0..=max_frame_index {
         if !capture.grab().map_err(opencv_decode_error)? {
-            continue;
+            break;
         }
 
         if !frame_index_set.contains(&idx) {

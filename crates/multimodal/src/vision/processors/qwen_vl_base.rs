@@ -671,9 +671,11 @@ impl VisionPreProcessor for QwenVLProcessorBase {
             std::array::from_fn(|c| std::array::from_fn(|v| v as f32 * scale[c] + bias[c]));
 
         let mut out_idx = 0;
+        let mut frame_refs = Vec::with_capacity(temporal_patch_size);
+        let mut resized_frames = Vec::with_capacity(temporal_patch_size);
         for gt in 0..grid_t {
-            let mut frame_refs = Vec::with_capacity(temporal_patch_size);
-            let mut resized_frames = Vec::with_capacity(temporal_patch_size);
+            resized_frames.clear();
+            frame_refs.clear();
             for tp in 0..temporal_patch_size {
                 let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
                 let frame = &frames[idx];
@@ -805,8 +807,9 @@ impl VisionPreProcessor for QwenVLProcessorBase {
 
         let mut out_idx = 0;
         if needs_resize_any {
+            let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
             for gt in 0..grid_t {
-                let mut frame_rgbs = Vec::with_capacity(temporal_patch_size);
+                frame_rgbs.clear();
                 for tp in 0..temporal_patch_size {
                     let idx = (gt * temporal_patch_size + tp).min(frames.len() - 1);
                     let frame = frames[idx];
