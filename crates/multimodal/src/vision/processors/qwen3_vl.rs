@@ -21,10 +21,13 @@ use std::ops::Deref;
 use image::DynamicImage;
 
 use super::qwen_vl_base::{QwenVLConfig, QwenVLProcessorBase};
-use crate::vision::{
-    preprocessor_config::PreProcessorConfig,
-    processor::{PreprocessedEncoderInputs, VisionPreProcessor},
-    transforms::TransformError,
+use crate::{
+    types::RgbFrameRef,
+    vision::{
+        preprocessor_config::PreProcessorConfig,
+        processor::{PreprocessedEncoderInputs, VisionPreProcessor},
+        transforms::TransformError,
+    },
 };
 
 /// Qwen3-VL normalization mean values (simple [0.5, 0.5, 0.5]).
@@ -243,6 +246,15 @@ impl VisionPreProcessor for Qwen3VLProcessor {
     ) -> Result<PreprocessedEncoderInputs, TransformError> {
         let processor = self.with_preprocessor_config(config);
         processor.inner.preprocess_video(frames, config)
+    }
+
+    fn preprocess_video_rgb(
+        &self,
+        frames: &[RgbFrameRef<'_>],
+        config: &PreProcessorConfig,
+    ) -> Result<PreprocessedEncoderInputs, TransformError> {
+        let processor = self.with_preprocessor_config(config);
+        processor.inner.preprocess_video_rgb(frames, config)
     }
 
     fn calculate_num_tokens(&self, width: u32, height: u32, config: &PreProcessorConfig) -> usize {
@@ -468,6 +480,61 @@ mod tests {
         } else {
             panic!("Expected video_grid_thw to be IntTensor");
         }
+    }
+
+    #[test]
+    fn test_qwen3_vl_preprocess_video_rgb_applies_config() {
+        let processor = Qwen3VLProcessor::new();
+        let config = PreProcessorConfig {
+            patch_size: Some(PatchSize {
+                height: Some(8),
+                width: Some(8),
+            }),
+            merge_size: Some(1),
+            temporal_patch_size: Some(4),
+            min_pixels: Some(1),
+            max_pixels: Some(4096),
+            ..Default::default()
+        };
+
+        let frames = vec![
+            create_test_image(32, 32, Rgb([100, 100, 100])),
+            create_test_image(32, 32, Rgb([150, 150, 150])),
+            create_test_image(32, 32, Rgb([200, 200, 200])),
+        ];
+        let rgb_images: Vec<RgbImage> = frames.iter().map(|frame| frame.to_rgb8()).collect();
+        let rgb_frames: Vec<RgbFrameRef<'_>> = rgb_images
+            .iter()
+            .map(|frame| RgbFrameRef {
+                width: frame.width(),
+                height: frame.height(),
+                data: frame.as_raw(),
+            })
+            .collect();
+
+        let dynamic = processor.preprocess_video(&frames, &config).unwrap();
+        let rgb = processor
+            .preprocess_video_rgb(&rgb_frames, &config)
+            .unwrap();
+
+        assert_eq!(rgb.encoder_input.shape(), dynamic.encoder_input.shape());
+        assert_eq!(rgb.feature_token_counts, dynamic.feature_token_counts);
+        let Some(ModelSpecificValue::IntTensor {
+            data: rgb_grid,
+            shape: rgb_shape,
+        }) = rgb.model_specific.get("video_grid_thw")
+        else {
+            panic!("Expected RGB video_grid_thw to be IntTensor");
+        };
+        let Some(ModelSpecificValue::IntTensor {
+            data: dynamic_grid,
+            shape: dynamic_shape,
+        }) = dynamic.model_specific.get("video_grid_thw")
+        else {
+            panic!("Expected dynamic video_grid_thw to be IntTensor");
+        };
+        assert_eq!(rgb_shape, dynamic_shape);
+        assert_eq!(rgb_grid, dynamic_grid);
     }
 
     #[test]

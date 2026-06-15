@@ -39,6 +39,7 @@ workspace = true
 
 [features]
 default = []
+opencv-video = ["smg/opencv-video"]
 vendored-openssl = ["smg/vendored-openssl"]
 
 [profile.release]

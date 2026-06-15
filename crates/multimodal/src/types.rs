@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
 
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -112,10 +112,85 @@ pub struct ImageFrame {
 #[derive(Debug, Clone)]
 pub struct VideoClip {
     pub frames: Vec<DynamicImage>,
+    pub rgb_video: Option<DecodedRgbVideo>,
     pub raw_bytes: bytes::Bytes,
     pub source: VideoSource,
     /// Blake3 hex-digest of raw_bytes, computed at decode time.
     pub hash: String,
+}
+
+/// Borrowed RGB frame data for video preprocessors.
+#[derive(Debug, Clone, Copy)]
+pub struct RgbFrameRef<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub data: &'a [u8],
+}
+
+/// One decoded RGB frame inside a shared decoded-video byte buffer.
+#[derive(Debug, Clone)]
+pub struct DecodedRgbFrame {
+    pub width: u32,
+    pub height: u32,
+    pub offset: usize,
+    pub len: usize,
+}
+
+/// Decoded RGB video frames backed by one shared byte buffer.
+#[derive(Debug, Clone)]
+pub struct DecodedRgbVideo {
+    pub data: bytes::Bytes,
+    pub frames: Vec<DecodedRgbFrame>,
+}
+
+impl DecodedRgbVideo {
+    pub fn new(data: bytes::Bytes, frames: Vec<DecodedRgbFrame>) -> Self {
+        Self { data, frames }
+    }
+
+    pub fn frame_refs(&self) -> Result<Vec<RgbFrameRef<'_>>, String> {
+        self.frames
+            .iter()
+            .map(|frame| {
+                let end = frame
+                    .offset
+                    .checked_add(frame.len)
+                    .ok_or_else(|| "decoded RGB frame offset overflow".to_string())?;
+                let data = self
+                    .data
+                    .get(frame.offset..end)
+                    .ok_or_else(|| "decoded RGB frame range is out of bounds".to_string())?;
+                Ok(RgbFrameRef {
+                    width: frame.width,
+                    height: frame.height,
+                    data,
+                })
+            })
+            .collect()
+    }
+
+    pub fn to_dynamic_images(&self) -> Result<Vec<DynamicImage>, String> {
+        let mut images = Vec::with_capacity(self.frames.len());
+        for frame in &self.frames {
+            let end = frame
+                .offset
+                .checked_add(frame.len)
+                .ok_or_else(|| "decoded RGB frame offset overflow".to_string())?;
+            let data = self
+                .data
+                .get(frame.offset..end)
+                .ok_or_else(|| "decoded RGB frame range is out of bounds".to_string())?;
+            let image =
+                RgbImage::from_raw(frame.width, frame.height, data.to_vec()).ok_or_else(|| {
+                    format!(
+                        "failed to build RGB frame from {} bytes for {}x{} video",
+                        frame.len, frame.width, frame.height
+                    )
+                })?;
+            images.push(DynamicImage::ImageRgb8(image));
+        }
+        Ok(images)
+    }
 }
 
 impl VideoClip {
@@ -127,6 +202,22 @@ impl VideoClip {
     ) -> Self {
         Self {
             frames,
+            rgb_video: None,
+            raw_bytes,
+            source,
+            hash,
+        }
+    }
+
+    pub fn new_rgb(
+        rgb_video: DecodedRgbVideo,
+        raw_bytes: bytes::Bytes,
+        source: VideoSource,
+        hash: String,
+    ) -> Self {
+        Self {
+            frames: Vec::new(),
+            rgb_video: Some(rgb_video),
             raw_bytes,
             source,
             hash,
@@ -135,6 +226,20 @@ impl VideoClip {
 
     pub fn frames(&self) -> &[DynamicImage] {
         &self.frames
+    }
+
+    pub fn rgb_video(&self) -> Option<&DecodedRgbVideo> {
+        self.rgb_video.as_ref()
+    }
+
+    pub fn materialized_frames(&self) -> Result<Vec<DynamicImage>, String> {
+        if !self.frames.is_empty() {
+            return Ok(self.frames.clone());
+        }
+        self.rgb_video
+            .as_ref()
+            .ok_or_else(|| "video clip has no decoded frames".to_string())?
+            .to_dynamic_images()
     }
 
     pub fn raw_bytes(&self) -> &[u8] {

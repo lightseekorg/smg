@@ -1,27 +1,31 @@
 use std::{
     collections::HashSet,
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
+#[cfg(feature = "opencv-video")]
+use opencv::{core::Mat, imgproc, prelude::*, videoio};
 use reqwest::Client;
-use tokio::{fs, task};
+use tokio::{fs, process::Command, task, time};
+use tracing::info;
 use url::Url;
+
+const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_VIDEO_MAX_DECODED_BYTES: usize = 1024 * 1024 * 1024;
 
 use super::{
     error::MediaConnectorError,
-    types::{ImageDetail, ImageFrame, ImageSource, VideoClip, VideoSource},
+    types::{
+        DecodedRgbFrame, DecodedRgbVideo, ImageDetail, ImageFrame, ImageSource, VideoClip,
+        VideoSource,
+    },
 };
-
-const DEFAULT_VIDEO_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
-const VIDEO_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const VIDEO_PROCESS_TIMEOUT_ENV: &str = "SMG_VIDEO_PROCESS_TIMEOUT_SECS";
 
 #[derive(Clone)]
 pub struct MediaConnectorConfig {
@@ -361,44 +365,686 @@ impl MediaConnector {
         }
 
         let hash = crate::hasher::hash_video(&bytes);
-        let input = bytes.clone();
-        let frames = task::spawn_blocking(move || decode_video_with_ffmpeg(&input, cfg))
-            .await
-            .map_err(MediaConnectorError::Blocking)??;
+        let decoded = decode_video_frames(bytes.clone(), cfg).await?;
 
-        Ok(Arc::new(VideoClip::new(frames, bytes, source, hash)))
+        let clip = match decoded {
+            DecodedVideoFrames::Images(frames) => VideoClip::new(frames, bytes, source, hash),
+            DecodedVideoFrames::Rgb(rgb_video) => {
+                VideoClip::new_rgb(rgb_video, bytes, source, hash)
+            }
+        };
+        Ok(Arc::new(clip))
     }
 }
 
-fn decode_video_with_ffmpeg(
-    bytes: &[u8],
+enum DecodedVideoFrames {
+    Images(Vec<image::DynamicImage>),
+    Rgb(DecodedRgbVideo),
+}
+
+async fn decode_video_frames(
+    bytes: Bytes,
     cfg: VideoFetchConfig,
-) -> Result<Vec<image::DynamicImage>, MediaConnectorError> {
+) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    let input_bytes = bytes.len();
+    let input_file = {
+        let bytes = bytes.clone();
+        task::spawn_blocking(move || write_temp_video_file(&bytes))
+            .await
+            .map_err(MediaConnectorError::Blocking)??
+    };
+    let input_path = input_file.path().to_path_buf();
+    match video_decode_backend_override().as_deref() {
+        Some("ffmpeg") => decode_video_with_ffmpeg(&input_path, input_bytes, cfg).await,
+        Some("opencv") => {
+            #[cfg(feature = "opencv-video")]
+            {
+                let input_path = input_path.clone();
+                task::spawn_blocking(move || {
+                    decode_video_with_opencv_logged(&input_path, input_bytes, cfg)
+                })
+                .await
+                .map_err(MediaConnectorError::Blocking)?
+            }
+            #[cfg(not(feature = "opencv-video"))]
+            {
+                Err(MediaConnectorError::VideoDecode(
+                    "SMG_VIDEO_DECODE_BACKEND=opencv requires the opencv-video feature".to_string(),
+                ))
+            }
+        }
+        Some(backend) => Err(MediaConnectorError::VideoDecode(format!(
+            "unsupported SMG_VIDEO_DECODE_BACKEND={backend}; expected auto, opencv, or ffmpeg"
+        ))),
+        None => {
+            #[cfg(feature = "opencv-video")]
+            {
+                // Auto mode prefers OpenCV for in-process decode performance.
+                // OpenCV samples by frame index, while the FFmpeg fallback uses
+                // an fps filter, so fallback can select a slightly different
+                // frame set for the same input.
+                let opencv_input_path = input_path.clone();
+                let opencv_result = task::spawn_blocking(move || {
+                    decode_video_with_opencv_logged(&opencv_input_path, input_bytes, cfg)
+                })
+                .await
+                .map_err(MediaConnectorError::Blocking)?;
+
+                match opencv_result {
+                    Ok(frames) => Ok(frames),
+                    Err(opencv_error) => {
+                        if log_video_decode_timing_enabled() {
+                            info!(
+                                error = %opencv_error,
+                                "smg_mm_timing video_decode_auto_opencv_fallback"
+                            );
+                        }
+
+                        match decode_video_with_ffmpeg(&input_path, input_bytes, cfg).await {
+                            Ok(frames) => Ok(frames),
+                            Err(ffmpeg_error) => Err(MediaConnectorError::VideoDecode(format!(
+                                "OpenCV decode failed: {opencv_error}; ffmpeg fallback failed: {ffmpeg_error}"
+                            ))),
+                        }
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "opencv-video"))]
+            {
+                decode_video_with_ffmpeg(&input_path, input_bytes, cfg).await
+            }
+        }
+    }
+}
+
+#[cfg(feature = "opencv-video")]
+fn decode_video_with_opencv_logged(
+    input_path: &std::path::Path,
+    input_bytes: usize,
+    cfg: VideoFetchConfig,
+) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    let started = Instant::now();
+    let result = decode_video_with_opencv_file(input_path, cfg);
+    match &result {
+        Ok(_) => log_video_decode_backend_timing("opencv", started, input_bytes, cfg, None),
+        Err(error) => {
+            log_video_decode_backend_timing("opencv", started, input_bytes, cfg, Some(error));
+        }
+    }
+    result
+}
+
+fn video_decode_backend_override() -> Option<String> {
+    let backend = std::env::var("SMG_VIDEO_DECODE_BACKEND")
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    match backend.as_str() {
+        "" | "auto" => None,
+        _ => Some(backend),
+    }
+}
+
+fn log_video_decode_timing_enabled() -> bool {
+    std::env::var("SMG_LOG_MM_TIMING")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn log_video_decode_backend_timing(
+    backend: &str,
+    started: Instant,
+    input_bytes: usize,
+    cfg: VideoFetchConfig,
+    error: Option<&MediaConnectorError>,
+) {
+    if !log_video_decode_timing_enabled() {
+        return;
+    }
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match error {
+        Some(error) => info!(
+            backend,
+            ok = false,
+            input_bytes,
+            min_frames = cfg.min_frames,
+            max_frames = cfg.max_frames,
+            sample_fps = cfg.sample_fps,
+            elapsed_ms,
+            error = %error,
+            "smg_mm_timing video_decode_backend"
+        ),
+        None => info!(
+            backend,
+            ok = true,
+            input_bytes,
+            min_frames = cfg.min_frames,
+            max_frames = cfg.max_frames,
+            sample_fps = cfg.sample_fps,
+            elapsed_ms,
+            "smg_mm_timing video_decode_backend"
+        ),
+    }
+}
+
+#[cfg(feature = "opencv-video")]
+fn decode_video_with_opencv_file(
+    input_path: &std::path::Path,
+    cfg: VideoFetchConfig,
+) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    let input = input_path.to_str().ok_or_else(|| {
+        MediaConnectorError::VideoDecode(format!(
+            "OpenCV video path is not valid UTF-8: {}",
+            input_path.display()
+        ))
+    })?;
+
+    let mut capture = open_opencv_video_capture(input)?;
+
+    let total_frames = capture
+        .get(videoio::CAP_PROP_FRAME_COUNT)
+        .map_err(opencv_decode_error)?
+        .round()
+        .max(0.0) as usize;
+    if total_frames == 0 {
+        return Err(MediaConnectorError::VideoDecode(
+            "OpenCV reported zero video frames".to_string(),
+        ));
+    }
+
+    let fps = capture
+        .get(videoio::CAP_PROP_FPS)
+        .map_err(opencv_decode_error)?;
+    let frame_indices = opencv_frame_indices(total_frames, fps, cfg);
+    if frame_indices.is_empty() {
+        return Err(MediaConnectorError::VideoDecode(
+            "OpenCV video sampling produced no frame indices".to_string(),
+        ));
+    }
+
+    let sampled_frame_counts = counted_frame_indices(&frame_indices);
+    let mut data = Vec::new();
+    let mut frames = Vec::new();
+    frames.try_reserve(frame_indices.len()).map_err(|e| {
+        MediaConnectorError::VideoDecode(format!(
+            "failed to reserve {} decoded video frame records: {e}",
+            frame_indices.len()
+        ))
+    })?;
+    let mut bgr_frame = Mat::default();
+    let mut rgb_frame = Mat::default();
+
+    let timeout = video_process_timeout();
+    let started = Instant::now();
+    // Seek directly to sampled frames instead of scanning every intervening
+    // frame, which can be prohibitively slow for long clips.
+    for (idx, repeat_count) in sampled_frame_counts {
+        if started.elapsed() >= timeout {
+            return Err(MediaConnectorError::VideoDecode(format!(
+                "OpenCV timed out after {:.3} seconds",
+                timeout.as_secs_f64()
+            )));
+        }
+
+        if !capture
+            .set(videoio::CAP_PROP_POS_FRAMES, idx as f64)
+            .map_err(opencv_decode_error)?
+        {
+            return Err(MediaConnectorError::VideoDecode(format!(
+                "OpenCV could not seek to sampled frame {idx}"
+            )));
+        }
+
+        if !capture.read(&mut bgr_frame).map_err(opencv_decode_error)? || bgr_frame.empty() {
+            continue;
+        }
+
+        imgproc::cvt_color_def(&bgr_frame, &mut rgb_frame, imgproc::COLOR_BGR2RGB)
+            .map_err(opencv_decode_error)?;
+
+        let decoded_width = u32::try_from(rgb_frame.cols()).map_err(|_| {
+            MediaConnectorError::VideoDecode(format!(
+                "OpenCV produced invalid RGB frame width: {}",
+                rgb_frame.cols()
+            ))
+        })?;
+        let decoded_height = u32::try_from(rgb_frame.rows()).map_err(|_| {
+            MediaConnectorError::VideoDecode(format!(
+                "OpenCV produced invalid RGB frame height: {}",
+                rgb_frame.rows()
+            ))
+        })?;
+        let frame_size = rawvideo_frame_size(decoded_width, decoded_height)?;
+        let rgb_bytes = rgb_frame.data_bytes().map_err(opencv_decode_error)?;
+        if rgb_bytes.len() < frame_size {
+            return Err(MediaConnectorError::VideoDecode(format!(
+                "OpenCV produced {} RGB bytes for {decoded_width}x{decoded_height} frame, expected {frame_size}",
+                rgb_bytes.len()
+            )));
+        }
+        for _ in 0..repeat_count {
+            let new_len = data.len().checked_add(frame_size).ok_or_else(|| {
+                MediaConnectorError::VideoDecode(format!(
+                    "decoded video byte size overflow while appending {frame_size} bytes"
+                ))
+            })?;
+            ensure_decoded_byte_limit(new_len)?;
+            data.try_reserve(frame_size).map_err(|e| {
+                MediaConnectorError::VideoDecode(format!(
+                    "failed to reserve {frame_size} decoded video bytes: {e}"
+                ))
+            })?;
+            let offset = data.len();
+            data.extend_from_slice(&rgb_bytes[..frame_size]);
+            frames.push(DecodedRgbFrame {
+                width: decoded_width,
+                height: decoded_height,
+                offset,
+                len: frame_size,
+            });
+        }
+    }
+
+    if frames.is_empty() {
+        return Err(MediaConnectorError::VideoDecode(
+            "OpenCV produced no readable sampled frames".to_string(),
+        ));
+    }
+    if frames.len() != frame_indices.len() {
+        return Err(MediaConnectorError::VideoDecode(format!(
+            "OpenCV produced {} sampled frames, expected {}",
+            frames.len(),
+            frame_indices.len()
+        )));
+    }
+
+    Ok(DecodedVideoFrames::Rgb(DecodedRgbVideo::new(
+        Bytes::from(data),
+        frames,
+    )))
+}
+
+#[cfg(feature = "opencv-video")]
+fn open_opencv_video_capture(input: &str) -> Result<videoio::VideoCapture, MediaConnectorError> {
+    let capture = videoio::VideoCapture::from_file(input, videoio::CAP_FFMPEG)
+        .map_err(opencv_decode_error)?;
+    if capture.is_opened().map_err(opencv_decode_error)? {
+        return Ok(capture);
+    }
+
+    let capture =
+        videoio::VideoCapture::from_file(input, videoio::CAP_ANY).map_err(opencv_decode_error)?;
+    if capture.is_opened().map_err(opencv_decode_error)? {
+        return Ok(capture);
+    }
+
+    Err(MediaConnectorError::VideoDecode(format!(
+        "OpenCV could not open video: {input}"
+    )))
+}
+
+#[cfg(feature = "opencv-video")]
+fn opencv_frame_indices(total_frames: usize, fps: f64, cfg: VideoFetchConfig) -> Vec<usize> {
+    let mut target_frames = if fps.is_finite() && fps > 0.0 {
+        let duration = total_frames as f64 / fps;
+        (duration * cfg.sample_fps as f64).round() as usize
+    } else {
+        cfg.max_frames
+    };
+    target_frames = target_frames.clamp(cfg.min_frames, cfg.max_frames);
+    target_frames = target_frames.max(1);
+    if target_frames == 1 {
+        return vec![0];
+    }
+
+    let last = (total_frames - 1) as f64;
+    let denom = (target_frames - 1) as f64;
+    (0..target_frames)
+        .map(|idx| ((idx as f64 * last) / denom).floor() as usize)
+        .collect()
+}
+
+#[cfg(feature = "opencv-video")]
+fn counted_frame_indices(frame_indices: &[usize]) -> Vec<(usize, usize)> {
+    let mut counts = Vec::new();
+    for &idx in frame_indices {
+        if let Some((last_idx, count)) = counts.last_mut() {
+            if *last_idx == idx {
+                *count += 1;
+                continue;
+            }
+        }
+        counts.push((idx, 1));
+    }
+    counts
+}
+
+#[cfg(feature = "opencv-video")]
+fn opencv_decode_error(err: opencv::Error) -> MediaConnectorError {
+    MediaConnectorError::VideoDecode(format!("OpenCV video decode failed: {err}"))
+}
+
+async fn decode_video_with_ffmpeg(
+    input_path: &std::path::Path,
+    input_bytes: usize,
+    cfg: VideoFetchConfig,
+) -> Result<DecodedVideoFrames, MediaConnectorError> {
+    if let Ok(metadata) = probe_video_metadata(input_path).await {
+        let started = Instant::now();
+        match decode_video_with_ffmpeg_ppm(input_path, cfg, metadata).await {
+            Ok(rgb_video) => {
+                log_video_decode_backend_timing("ffmpeg_ppm_file", started, input_bytes, cfg, None);
+                return Ok(DecodedVideoFrames::Rgb(rgb_video));
+            }
+            Err(error) => {
+                log_video_decode_backend_timing(
+                    "ffmpeg_ppm_file",
+                    started,
+                    input_bytes,
+                    cfg,
+                    Some(&error),
+                );
+            }
+        }
+
+        let started = Instant::now();
+        match decode_video_with_ffmpeg_raw(input_path, cfg, metadata).await {
+            Ok(rgb_video) => {
+                log_video_decode_backend_timing("ffmpeg_raw_file", started, input_bytes, cfg, None);
+                return Ok(DecodedVideoFrames::Rgb(rgb_video));
+            }
+            Err(error) => {
+                log_video_decode_backend_timing(
+                    "ffmpeg_raw_file",
+                    started,
+                    input_bytes,
+                    cfg,
+                    Some(&error),
+                );
+            }
+        }
+    }
+
+    let started = Instant::now();
+    match decode_video_with_ffmpeg_png(input_path, cfg).await {
+        Ok(frames) => {
+            log_video_decode_backend_timing("ffmpeg_png_file", started, input_bytes, cfg, None);
+            Ok(DecodedVideoFrames::Images(frames))
+        }
+        Err(error) => {
+            log_video_decode_backend_timing(
+                "ffmpeg_png_file",
+                started,
+                input_bytes,
+                cfg,
+                Some(&error),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn write_temp_video_file(bytes: &[u8]) -> Result<tempfile::NamedTempFile, MediaConnectorError> {
+    let started = Instant::now();
     let mut input_file = tempfile::Builder::new()
         .prefix("smg-video-")
-        .suffix(".mp4")
+        .suffix(video_temp_suffix(bytes))
         .tempfile()?;
     input_file.write_all(bytes)?;
     input_file.flush()?;
+    if log_video_decode_timing_enabled() {
+        info!(
+            nbytes = bytes.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            suffix = video_temp_suffix(bytes),
+            "smg_mm_timing video_tempfile_write"
+        );
+    }
+    Ok(input_file)
+}
 
-    let fps_filter = fps_filter_for_video(input_file.path(), cfg);
+fn video_temp_suffix(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 12 && bytes.get(4..8) == Some(b"ftyp") {
+        return ".mp4";
+    }
+    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        return ".webm";
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"AVI ") {
+        return ".avi";
+    }
+    if bytes.starts_with(b"OggS") {
+        return ".ogv";
+    }
+    if bytes.starts_with(&[0x00, 0x00, 0x01, 0xba]) {
+        return ".mpg";
+    }
+    ".video"
+}
+
+fn video_process_timeout() -> Duration {
+    std::env::var("SMG_VIDEO_PROCESS_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(DEFAULT_VIDEO_PROCESS_TIMEOUT)
+}
+
+fn video_max_decoded_bytes() -> usize {
+    std::env::var("SMG_VIDEO_MAX_DECODED_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(DEFAULT_VIDEO_MAX_DECODED_BYTES)
+}
+
+fn ensure_decoded_byte_limit(bytes: usize) -> Result<(), MediaConnectorError> {
+    let limit = video_max_decoded_bytes();
+    if bytes > limit {
+        return Err(MediaConnectorError::VideoDecode(format!(
+            "decoded video RGB payload would be {bytes} bytes, exceeding SMG_VIDEO_MAX_DECODED_BYTES={limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn checked_decoded_rgb_bytes(
+    frame_count: usize,
+    frame_size: usize,
+) -> Result<usize, MediaConnectorError> {
+    let bytes = frame_count.checked_mul(frame_size).ok_or_else(|| {
+        MediaConnectorError::VideoDecode(format!(
+            "decoded video byte size overflow for {frame_count} frames of {frame_size} bytes"
+        ))
+    })?;
+    ensure_decoded_byte_limit(bytes)?;
+    Ok(bytes)
+}
+
+async fn run_video_command_output(
+    mut command: Command,
+    program: &'static str,
+) -> Result<Output, MediaConnectorError> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = command.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MediaConnectorError::VideoDecode(format!(
+                "{program} executable not found; install {program} to decode video_url inputs"
+            ))
+        } else {
+            MediaConnectorError::Io(e)
+        }
+    })?;
+
+    let timeout = video_process_timeout();
+    match time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(MediaConnectorError::Io(error)),
+        Err(_) => Err(MediaConnectorError::VideoDecode(format!(
+            "{program} timed out after {:.3} seconds",
+            timeout.as_secs_f64()
+        ))),
+    }
+}
+
+async fn decode_video_with_ffmpeg_ppm(
+    input_path: &std::path::Path,
+    cfg: VideoFetchConfig,
+    metadata: VideoMetadata,
+) -> Result<DecodedRgbVideo, MediaConnectorError> {
+    let fps_filter = fps_filter_for_metadata(metadata, cfg);
     let max_frames = cfg.max_frames.to_string();
+    let frame_size = rawvideo_frame_size(metadata.width, metadata.height)?;
+    let target_frames = expected_sampled_frame_count(metadata, cfg);
+    let decoded_bytes = checked_decoded_rgb_bytes(target_frames, frame_size)?;
+    let output_limit = decoded_bytes
+        .checked_add(target_frames.saturating_mul(64))
+        .unwrap_or_else(video_max_decoded_bytes)
+        .min(video_max_decoded_bytes())
+        .to_string();
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
-        .arg(input_file.path())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .arg(input_path)
         .args([
             "-vf",
             &fps_filter,
             "-frames:v",
             &max_frames,
+            "-fs",
+            &output_limit,
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "ppm",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ]);
+    let output = run_video_command_output(command, "ffmpeg").await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(MediaConnectorError::VideoDecode(format!(
+            "ffmpeg failed: {stderr}"
+        )));
+    }
+
+    parse_ppm_rgb_video(Bytes::from(output.stdout))
+}
+
+async fn decode_video_with_ffmpeg_raw(
+    input_path: &std::path::Path,
+    cfg: VideoFetchConfig,
+    metadata: VideoMetadata,
+) -> Result<DecodedRgbVideo, MediaConnectorError> {
+    let fps_filter = fps_filter_for_metadata(metadata, cfg);
+    let max_frames = cfg.max_frames.to_string();
+    let frame_size = rawvideo_frame_size(metadata.width, metadata.height)?;
+    let target_frames = expected_sampled_frame_count(metadata, cfg);
+    let decoded_bytes = checked_decoded_rgb_bytes(target_frames, frame_size)?;
+    let output_limit = decoded_bytes.to_string();
+    let mut command = Command::new("ffmpeg");
+    // Rawvideo has no per-frame header, so we interpret stdout using ffprobe's
+    // coded stream dimensions. Disable FFmpeg autorotation here; otherwise a
+    // display-matrix rotation can swap output width/height and corrupt framing.
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-noautorotate",
+            "-i",
+        ])
+        .arg(input_path)
+        .args([
+            "-vf",
+            &fps_filter,
+            "-frames:v",
+            &max_frames,
+            "-fs",
+            &output_limit,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ]);
+    let output = run_video_command_output(command, "ffmpeg").await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(MediaConnectorError::VideoDecode(format!(
+            "ffmpeg failed: {stderr}"
+        )));
+    }
+
+    let frame_count = output.stdout.len() / frame_size;
+    checked_decoded_rgb_bytes(frame_count, frame_size)?;
+    let mut frames = Vec::new();
+    frames.try_reserve(frame_count).map_err(|e| {
+        MediaConnectorError::VideoDecode(format!(
+            "failed to reserve {frame_count} decoded video frame records: {e}"
+        ))
+    })?;
+    for idx in 0..frame_count {
+        frames.push(DecodedRgbFrame {
+            width: metadata.width,
+            height: metadata.height,
+            offset: idx * frame_size,
+            len: frame_size,
+        });
+    }
+    let remainder = output.stdout.len() % frame_size;
+    if remainder != 0 {
+        return Err(MediaConnectorError::VideoDecode(format!(
+            "ffmpeg rawvideo output has trailing partial frame: {remainder} bytes"
+        )));
+    }
+    if frames.is_empty() {
+        return Err(MediaConnectorError::VideoDecode(
+            "ffmpeg produced no frames".to_string(),
+        ));
+    }
+    Ok(DecodedRgbVideo::new(Bytes::from(output.stdout), frames))
+}
+
+async fn decode_video_with_ffmpeg_png(
+    input_path: &std::path::Path,
+    cfg: VideoFetchConfig,
+) -> Result<Vec<image::DynamicImage>, MediaConnectorError> {
+    let fps_filter = fps_filter_for_video(input_path, cfg).await;
+    let max_frames = cfg.max_frames.to_string();
+    let output_limit = video_max_decoded_bytes().to_string();
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .arg(input_path)
+        .args([
+            "-vf",
+            &fps_filter,
+            "-frames:v",
+            &max_frames,
+            "-fs",
+            &output_limit,
             "-f",
             "image2pipe",
             "-vcodec",
             "png",
             "pipe:1",
         ]);
-    let output = run_video_command_output(command, "ffmpeg")?;
+    let output = run_video_command_output(command, "ffmpeg").await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -409,8 +1055,15 @@ fn decode_video_with_ffmpeg(
 
     let pngs = split_png_stream(&output.stdout)?;
     let mut frames = Vec::with_capacity(pngs.len());
+    let mut decoded_bytes = 0usize;
     for png in pngs {
-        frames.push(image::load_from_memory(png)?);
+        let image = image::load_from_memory(png)?;
+        let frame_size = rawvideo_frame_size(image.width(), image.height())?;
+        decoded_bytes = decoded_bytes.checked_add(frame_size).ok_or_else(|| {
+            MediaConnectorError::VideoDecode("PNG decoded byte size overflow".to_string())
+        })?;
+        ensure_decoded_byte_limit(decoded_bytes)?;
+        frames.push(image);
     }
     if frames.is_empty() {
         return Err(MediaConnectorError::VideoDecode(
@@ -420,21 +1073,113 @@ fn decode_video_with_ffmpeg(
     Ok(frames)
 }
 
-fn fps_filter_for_video(input_path: &std::path::Path, cfg: VideoFetchConfig) -> String {
-    if let Ok(duration) = probe_video_duration_seconds(input_path) {
-        if duration.is_finite() && duration > 0.0 {
-            let target_frames = (duration * cfg.sample_fps as f64)
-                .round()
-                .clamp(cfg.min_frames as f64, cfg.max_frames as f64);
-            let fps = (target_frames / duration).max(f64::EPSILON);
-            return format!("fps={fps:.6}");
+#[derive(Debug, Clone, Copy)]
+struct VideoMetadata {
+    width: u32,
+    height: u32,
+    duration_seconds: Option<f64>,
+}
+
+async fn probe_video_metadata(
+    input_path: &std::path::Path,
+) -> Result<VideoMetadata, MediaConnectorError> {
+    let mut command = Command::new("ffprobe");
+    command
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height:format=duration",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(input_path);
+    let output = run_video_command_output(command, "ffprobe").await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(MediaConnectorError::VideoDecode(format!(
+            "ffprobe failed: {stderr}"
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut width = None;
+    let mut height = None;
+    let mut duration_seconds = None;
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "width" => width = value.parse::<u32>().ok(),
+            "height" => height = value.parse::<u32>().ok(),
+            "duration" if value != "N/A" => duration_seconds = value.parse::<f64>().ok(),
+            _ => {}
+        }
+    }
+
+    let width = width.ok_or_else(|| {
+        MediaConnectorError::VideoDecode("ffprobe did not return video width".to_string())
+    })?;
+    let height = height.ok_or_else(|| {
+        MediaConnectorError::VideoDecode("ffprobe did not return video height".to_string())
+    })?;
+    Ok(VideoMetadata {
+        width,
+        height,
+        duration_seconds,
+    })
+}
+
+fn fps_filter_for_metadata(metadata: VideoMetadata, cfg: VideoFetchConfig) -> String {
+    if let Some(duration) = metadata.duration_seconds {
+        if let Some(filter) = fps_filter_for_duration(duration, cfg) {
+            return filter;
         }
     }
 
     format!("fps={}", cfg.sample_fps)
 }
 
-fn probe_video_duration_seconds(input_path: &std::path::Path) -> Result<f64, MediaConnectorError> {
+fn expected_sampled_frame_count(metadata: VideoMetadata, cfg: VideoFetchConfig) -> usize {
+    if let Some(duration) = metadata.duration_seconds {
+        if duration.is_finite() && duration > 0.0 {
+            return (duration * cfg.sample_fps as f64)
+                .round()
+                .clamp(cfg.min_frames as f64, cfg.max_frames as f64) as usize;
+        }
+    }
+    cfg.max_frames
+}
+
+fn fps_filter_for_duration(duration: f64, cfg: VideoFetchConfig) -> Option<String> {
+    if !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
+    let target_frames = (duration * cfg.sample_fps as f64)
+        .round()
+        .clamp(cfg.min_frames as f64, cfg.max_frames as f64);
+    let fps = (target_frames / duration).max(f64::EPSILON);
+    Some(format!("fps={fps:.6}"))
+}
+
+async fn fps_filter_for_video(input_path: &std::path::Path, cfg: VideoFetchConfig) -> String {
+    if let Ok(duration) = probe_video_duration_seconds(input_path).await {
+        if let Some(filter) = fps_filter_for_duration(duration, cfg) {
+            return filter;
+        }
+    }
+
+    format!("fps={}", cfg.sample_fps)
+}
+
+async fn probe_video_duration_seconds(
+    input_path: &std::path::Path,
+) -> Result<f64, MediaConnectorError> {
     let mut command = Command::new("ffprobe");
     command
         .args([
@@ -447,25 +1192,25 @@ fn probe_video_duration_seconds(input_path: &std::path::Path) -> Result<f64, Med
             "default=noprint_wrappers=1:nokey=1",
         ])
         .arg(input_path);
-    match run_video_command_output(command, "ffprobe") {
+    match run_video_command_output(command, "ffprobe").await {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             stdout.trim().parse::<f64>().map_err(|err| {
                 MediaConnectorError::VideoDecode(format!("failed to parse ffprobe duration: {err}"))
             })
         }
-        Ok(_) | Err(_) => probe_video_duration_seconds_with_ffmpeg(input_path),
+        Ok(_) | Err(_) => probe_video_duration_seconds_with_ffmpeg(input_path).await,
     }
 }
 
-fn probe_video_duration_seconds_with_ffmpeg(
+async fn probe_video_duration_seconds_with_ffmpeg(
     input_path: &std::path::Path,
 ) -> Result<f64, MediaConnectorError> {
     let mut command = Command::new("ffmpeg");
     command
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(input_path);
-    let output = run_video_command_output(command, "ffmpeg")?;
+    let output = run_video_command_output(command, "ffmpeg").await?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     parse_ffmpeg_duration_seconds(&stderr).ok_or_else(|| {
@@ -482,77 +1227,6 @@ fn parse_ffmpeg_duration_seconds(stderr: &str) -> Option<f64> {
     let minutes = parts.next()?.parse::<f64>().ok()?;
     let seconds = parts.next()?.parse::<f64>().ok()?;
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
-}
-
-fn video_process_timeout() -> Duration {
-    std::env::var(VIDEO_PROCESS_TIMEOUT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .filter(|timeout| *timeout > Duration::ZERO)
-        .unwrap_or(DEFAULT_VIDEO_PROCESS_TIMEOUT)
-}
-
-fn run_video_command_output(
-    mut command: Command,
-    program: &'static str,
-) -> Result<Output, MediaConnectorError> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            MediaConnectorError::VideoDecode(format!(
-                "{program} executable not found; install ffmpeg to decode video_url inputs"
-            ))
-        } else {
-            MediaConnectorError::Io(error)
-        }
-    })?;
-
-    let mut stdout = child.stdout.take().ok_or_else(|| {
-        MediaConnectorError::VideoDecode(format!("{program} stdout pipe was not captured"))
-    })?;
-    let mut stderr = child.stderr.take().ok_or_else(|| {
-        MediaConnectorError::VideoDecode(format!("{program} stderr pipe was not captured"))
-    })?;
-
-    let stdout_handle = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stdout.read_to_end(&mut buffer).map(|_| buffer)
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stderr.read_to_end(&mut buffer).map(|_| buffer)
-    });
-
-    let timeout = video_process_timeout();
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(MediaConnectorError::VideoDecode(format!(
-                "{program} timed out after {:.1}s",
-                timeout.as_secs_f64()
-            )));
-        }
-        thread::sleep(VIDEO_PROCESS_POLL_INTERVAL);
-    };
-
-    let stdout = stdout_handle.join().map_err(|_| {
-        MediaConnectorError::VideoDecode(format!("{program} stdout reader panicked"))
-    })??;
-    let stderr = stderr_handle.join().map_err(|_| {
-        MediaConnectorError::VideoDecode(format!("{program} stderr reader panicked"))
-    })??;
-
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
 }
 
 fn split_png_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, MediaConnectorError> {
@@ -600,8 +1274,185 @@ fn split_png_stream(bytes: &[u8]) -> Result<Vec<&[u8]>, MediaConnectorError> {
 }
 
 #[cfg(test)]
+fn parse_ppm_stream(bytes: &[u8]) -> Result<Vec<image::DynamicImage>, MediaConnectorError> {
+    let layouts = parse_ppm_frame_layout(bytes)?;
+    let mut frames = Vec::with_capacity(layouts.len());
+    for layout in layouts {
+        let end = layout.offset.checked_add(layout.len).ok_or_else(|| {
+            MediaConnectorError::VideoDecode("PPM frame size overflow".to_string())
+        })?;
+        let image = image::RgbImage::from_raw(
+            layout.width,
+            layout.height,
+            bytes[layout.offset..end].to_vec(),
+        )
+        .ok_or_else(|| {
+            MediaConnectorError::VideoDecode(format!(
+                "failed to build RGB frame from {} bytes for {}x{} video",
+                layout.len, layout.width, layout.height
+            ))
+        })?;
+        frames.push(image::DynamicImage::ImageRgb8(image));
+    }
+    Ok(frames)
+}
+
+fn parse_ppm_rgb_video(bytes: Bytes) -> Result<DecodedRgbVideo, MediaConnectorError> {
+    let layouts = parse_ppm_frame_layout(&bytes)?;
+    let decoded_bytes = layouts.iter().try_fold(0usize, |total, frame| {
+        total.checked_add(frame.len).ok_or_else(|| {
+            MediaConnectorError::VideoDecode("PPM decoded byte size overflow".to_string())
+        })
+    })?;
+    ensure_decoded_byte_limit(decoded_bytes)?;
+    Ok(DecodedRgbVideo::new(bytes, layouts))
+}
+
+fn parse_ppm_frame_layout(bytes: &[u8]) -> Result<Vec<DecodedRgbFrame>, MediaConnectorError> {
+    let mut frames = Vec::new();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        skip_ppm_whitespace_and_comments(bytes, &mut pos);
+        if pos >= bytes.len() {
+            break;
+        }
+
+        let magic = read_ppm_token(bytes, &mut pos)?.ok_or_else(|| {
+            MediaConnectorError::VideoDecode("truncated PPM frame header".to_string())
+        })?;
+        if magic != b"P6" {
+            return Err(MediaConnectorError::VideoDecode(format!(
+                "unsupported PPM magic: {}",
+                String::from_utf8_lossy(magic)
+            )));
+        }
+        let width = parse_ppm_u32(bytes, &mut pos, "width")?;
+        let height = parse_ppm_u32(bytes, &mut pos, "height")?;
+        let max_value = parse_ppm_u32(bytes, &mut pos, "max value")?;
+        if width == 0 || height == 0 {
+            return Err(MediaConnectorError::VideoDecode(
+                "PPM frame dimensions must be non-zero".to_string(),
+            ));
+        }
+        if max_value != 255 {
+            return Err(MediaConnectorError::VideoDecode(format!(
+                "unsupported PPM max value: {max_value}"
+            )));
+        }
+        if pos >= bytes.len() || !bytes[pos].is_ascii_whitespace() {
+            return Err(MediaConnectorError::VideoDecode(
+                "PPM header is not followed by pixel data".to_string(),
+            ));
+        }
+        pos += 1;
+
+        let frame_size = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| {
+                MediaConnectorError::VideoDecode(format!(
+                    "PPM frame dimensions are too large: {width}x{height}"
+                ))
+            })?;
+        let end = pos.checked_add(frame_size).ok_or_else(|| {
+            MediaConnectorError::VideoDecode("PPM frame size overflow".to_string())
+        })?;
+        if end > bytes.len() {
+            return Err(MediaConnectorError::VideoDecode(
+                "truncated PPM frame pixel data".to_string(),
+            ));
+        }
+        frames.push(DecodedRgbFrame {
+            width,
+            height,
+            offset: pos,
+            len: frame_size,
+        });
+        pos = end;
+    }
+
+    if frames.is_empty() {
+        return Err(MediaConnectorError::VideoDecode(
+            "ffmpeg produced no frames".to_string(),
+        ));
+    }
+
+    Ok(frames)
+}
+
+fn rawvideo_frame_size(width: u32, height: u32) -> Result<usize, MediaConnectorError> {
+    let frame_size = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| {
+            MediaConnectorError::VideoDecode(format!(
+                "video frame dimensions are too large: {width}x{height}"
+            ))
+        })?;
+    if frame_size == 0 {
+        return Err(MediaConnectorError::VideoDecode(
+            "video frame dimensions must be non-zero".to_string(),
+        ));
+    }
+    Ok(frame_size)
+}
+
+fn parse_ppm_u32(bytes: &[u8], pos: &mut usize, field: &str) -> Result<u32, MediaConnectorError> {
+    let token = read_ppm_token(bytes, pos)?
+        .ok_or_else(|| MediaConnectorError::VideoDecode(format!("truncated PPM {field} header")))?;
+    std::str::from_utf8(token)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| {
+            MediaConnectorError::VideoDecode(format!(
+                "invalid PPM {field}: {}",
+                String::from_utf8_lossy(token)
+            ))
+        })
+}
+
+fn read_ppm_token<'a>(
+    bytes: &'a [u8],
+    pos: &mut usize,
+) -> Result<Option<&'a [u8]>, MediaConnectorError> {
+    skip_ppm_whitespace_and_comments(bytes, pos);
+    if *pos >= bytes.len() {
+        return Ok(None);
+    }
+
+    let start = *pos;
+    while *pos < bytes.len() && !bytes[*pos].is_ascii_whitespace() {
+        if bytes[*pos] == b'#' {
+            return Err(MediaConnectorError::VideoDecode(
+                "unexpected PPM comment inside token".to_string(),
+            ));
+        }
+        *pos += 1;
+    }
+    Ok(Some(&bytes[start..*pos]))
+}
+
+fn skip_ppm_whitespace_and_comments(bytes: &[u8], pos: &mut usize) {
+    loop {
+        while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+            *pos += 1;
+        }
+        if *pos < bytes.len() && bytes[*pos] == b'#' {
+            while *pos < bytes.len() && bytes[*pos] != b'\n' {
+                *pos += 1;
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{parse_ffmpeg_duration_seconds, split_png_stream};
+    use super::{
+        parse_ffmpeg_duration_seconds, parse_ppm_stream, split_png_stream, video_temp_suffix,
+    };
 
     const TINY_PNG: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4,
@@ -628,5 +1479,66 @@ mod tests {
     fn parses_ffmpeg_duration() {
         let stderr = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'video.mp4':\n  Duration: 00:01:23.45, start: 0.000000, bitrate: 123 kb/s";
         assert_eq!(parse_ffmpeg_duration_seconds(stderr), Some(83.45));
+    }
+
+    #[test]
+    fn detects_video_temp_suffix_from_container_header() {
+        let mut mp4 = vec![0; 12];
+        mp4[4..8].copy_from_slice(b"ftyp");
+        assert_eq!(video_temp_suffix(&mp4), ".mp4");
+        assert_eq!(video_temp_suffix(&[0x1a, 0x45, 0xdf, 0xa3]), ".webm");
+        assert_eq!(video_temp_suffix(b"RIFF....AVI "), ".avi");
+        assert_eq!(video_temp_suffix(b"OggS"), ".ogv");
+        assert_eq!(video_temp_suffix(&[0x00, 0x00, 0x01, 0xba]), ".mpg");
+        assert_eq!(video_temp_suffix(b"unknown"), ".video");
+    }
+
+    #[test]
+    fn parses_concatenated_ppm_stream() {
+        let stream = b"P6\n2 1\n255\n\x01\x02\x03\x04\x05\x06P6\n# comment\n1 2\n255\n\x07\x08\x09\x0a\x0b\x0c";
+
+        let frames = match parse_ppm_stream(stream) {
+            Ok(frames) => frames,
+            Err(err) => panic!("parse ppm stream failed: {err}"),
+        };
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].width(), 2);
+        assert_eq!(frames[0].height(), 1);
+        assert_eq!(frames[1].width(), 1);
+        assert_eq!(frames[1].height(), 2);
+    }
+
+    #[test]
+    fn rejects_truncated_ppm_stream() {
+        assert!(parse_ppm_stream(b"P6\n2 1\n255\n\x01\x02").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_ppm_header() {
+        assert!(parse_ppm_stream(b"P3\n1 1\n255\n\x01\x02\x03").is_err());
+        assert!(parse_ppm_stream(b"P6\n1 1\n65535\n\x01\x02\x03").is_err());
+    }
+
+    #[test]
+    fn rejects_zero_dimension_ppm_stream() {
+        assert!(parse_ppm_stream(b"P6\n0 1\n255\n").is_err());
+        assert!(parse_ppm_stream(b"P6\n1 0\n255\n").is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_ppm_frame_size() {
+        assert!(parse_ppm_stream(b"P6\n4294967295 4294967295\n255\n").is_err());
+    }
+
+    #[cfg(feature = "opencv-video")]
+    #[test]
+    fn opencv_sampling_preserves_min_frames_for_short_clips() {
+        let cfg = super::VideoFetchConfig {
+            min_frames: 4,
+            max_frames: 8,
+            sample_fps: 2.0,
+        };
+        let indices = super::opencv_frame_indices(1, 30.0, cfg);
+        assert_eq!(indices, vec![0, 0, 0, 0]);
     }
 }

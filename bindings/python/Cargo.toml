@@ -34,6 +34,7 @@ workspace = true
 
 [features]
 default = ["pyo3/extension-module"]
+opencv-video = ["smg/opencv-video"]
 vendored-openssl = ["smg/vendored-openssl"]
 
 [profile.ci]
