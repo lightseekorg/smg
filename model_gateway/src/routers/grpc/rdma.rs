@@ -40,15 +40,55 @@ pub(crate) fn rdma_enabled() -> bool {
     })
 }
 
-/// How long a leased slot may live without a free-notif before the reaper
-/// force-reclaims it (lost notif / dead worker). Well past ViT (~30ms) + READ (~20ms).
-const SLOT_TTL: Duration = Duration::from_secs(30);
 /// Reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_millis(20);
 /// Default arena geometry: 64 slots x 32 MiB = 2 GiB host DRAM. A slot must hold one
 /// image's bf16 pixel buffer (~10 MiB at 1080p, ~40 MiB at 4k -> raise SLOT_BYTES).
 const DEFAULT_POOL_SLOTS: usize = 64;
 const DEFAULT_SLOT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Read a seconds-valued env knob, falling back to `default`.
+fn env_secs(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// The worst-case wall time the encode worker may hold a shipped descriptor before
+/// and during its one-sided READ: it waits up to `SMG_RDMA_LANDING_WAIT_S` for a free
+/// landing slot, then READs for up to `SMG_RDMA_READ_TIMEOUT_S`. These mirror the
+/// encode servicer's own knobs (same env names, same defaults) so the two sides
+/// cannot drift. The gateway must not reclaim a slot inside this window.
+fn worker_max_hold() -> Duration {
+    Duration::from_secs(
+        env_secs("SMG_RDMA_LANDING_WAIT_S", 120) + env_secs("SMG_RDMA_READ_TIMEOUT_S", 60),
+    )
+}
+
+/// How long a leased slot may live without a free-notif before the reaper
+/// force-reclaims it (lost notif / dead worker).
+///
+/// CORRECTNESS: this MUST exceed `worker_max_hold()` (plus slack for the Encode-RPC
+/// delivery the gateway can't see), otherwise the TTL races the worker's still-valid
+/// READ: the reaper returns the slot, the next image re-leases the SAME address, and
+/// the late READ silently returns the WRONG image's pixels (no error, no NaN). It was
+/// a flat 30s, which inverted against the re-applied 120s landing backpressure
+/// (`SMG_RDMA_LANDING_WAIT_S`) and cross-wired pixels under burst. Derived by default
+/// (= worker_max_hold + slack); `SMG_RDMA_SLOT_TTL_S` overrides explicitly. The cost
+/// of the wider TTL is only that a genuinely lost notif leaks one slot for longer --
+/// a capacity nit, never a correctness one (a recycled-under-read slot is).
+fn slot_ttl() -> Duration {
+    static TTL: OnceLock<Duration> = OnceLock::new();
+    *TTL.get_or_init(|| {
+        if let Ok(v) = std::env::var("SMG_RDMA_SLOT_TTL_S") {
+            if let Ok(secs) = v.parse::<u64>() {
+                return Duration::from_secs(secs);
+            }
+        }
+        worker_max_hold() + Duration::from_secs(env_secs("SMG_RDMA_SLOT_TTL_SLACK_S", 30))
+    })
+}
 
 /// NIXL descriptor over the pre-registered arena (host DRAM). Registered once; the
 /// backing allocation is leaked (process-lifetime) so `base` is stable forever.
@@ -86,43 +126,53 @@ struct OccSlot {
     at: Instant,
 }
 
-/// Pre-registered host-DRAM arena, sub-divided into fixed slots. One persistent NIXL
-/// registration (`_handle`) covers the whole arena; each image's pixels are memcpy'd
-/// into a leased slot. A slot is exclusively owned between lease and free, and the
-/// write happens-before the descriptor ship which happens-before the worker's READ,
-/// so no slot is ever written and read concurrently. The hot path touches no NIXL
-/// agent state (only the free-list lock + a lockless memcpy into owned raw memory).
-struct SlotArena {
+/// Pure slot bookkeeping over the arena's raw memory: the free-list, the leased
+/// (room -> slot) map, and the memcpy-into-slot. Deliberately holds NO NIXL handle so
+/// the lease / reclaim / reuse policy (where the TTL-vs-READ race lives) is unit-
+/// testable without a registered agent or any RDMA hardware.
+struct SlotPool {
     /// Raw base address of the leaked arena allocation (usize => Send+Sync).
     base: usize,
     slot_bytes: usize,
     n_slots: usize,
-    /// The single persistent registration; kept alive for the arena's life.
-    _handle: RegistrationHandle,
     /// Available slot indices.
     free: Mutex<Vec<u32>>,
     /// Leased slots keyed by bootstrap_room (free-on-notif + TTL reclaim).
     occupied: DashMap<i32, OccSlot>,
 }
 
-impl SlotArena {
-    /// Lease a free slot and copy `bytes` into it. Returns `(slot, slot_addr)`, or
-    /// `None` if the image exceeds `slot_bytes` or no slot is free (caller -> inline).
-    fn lease_and_write(&self, bytes: &[u8]) -> Option<(u32, u64)> {
+impl SlotPool {
+    fn new(base: usize, slot_bytes: usize, n_slots: usize) -> SlotPool {
+        SlotPool {
+            base,
+            slot_bytes,
+            n_slots,
+            free: Mutex::new((0..n_slots as u32).collect()),
+            occupied: DashMap::new(),
+        }
+    }
+
+    /// Lease a free slot for `room`, copy `bytes` into it, and record the lease at
+    /// `now`. Returns `(slot, slot_addr)`, or `None` if the image exceeds `slot_bytes`
+    /// or no slot is free (caller -> inline). Recording the lease here (rather than in
+    /// the caller) keeps the slot and its TTL timestamp atomic w.r.t. the write.
+    fn lease_and_write(&self, room: i32, bytes: &[u8], now: Instant) -> Option<(u32, u64)> {
         if bytes.len() > self.slot_bytes {
             return None;
         }
         let slot = self.free.lock().pop()?;
         let addr = self.base + slot as usize * self.slot_bytes;
         // SAFETY: `slot` is exclusively leased (popped from `free`, returned only via
-        // free_slot); [addr, addr+len) is within the arena (len <= slot_bytes) and
+        // free_room); [addr, addr+len) is within the arena (len <= slot_bytes) and
         // disjoint from every other leased slot; the worker reads it only after we
-        // ship the descriptor below. The arena is raw, leaked memory (no aliasing
-        // typed reference). So there is no data race and no overlap.
+        // ship the descriptor below, and the TTL keeps it leased past the worker's
+        // max READ window. The arena is raw, leaked memory (no aliasing typed
+        // reference). So there is no data race and no overlap.
         #[allow(unsafe_code)]
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len());
         }
+        self.occupied.insert(room, OccSlot { slot, at: now });
         Some((slot, addr as u64))
     }
 
@@ -132,6 +182,36 @@ impl SlotArena {
             self.free.lock().push(occ.slot);
         }
     }
+
+    /// Reclaim every slot whose lease is older than `ttl` as of `now` (the lost-notif
+    /// net). Returns the count reclaimed. `now`/`ttl` are parameters so the reclaim
+    /// policy is testable without sleeping.
+    fn reap_stale(&self, now: Instant, ttl: Duration) -> usize {
+        let stale: Vec<i32> = self
+            .occupied
+            .iter()
+            .filter(|e| now.duration_since(e.value().at) >= ttl)
+            .map(|e| *e.key())
+            .collect();
+        let n = stale.len();
+        for room in stale {
+            self.free_room(room);
+        }
+        n
+    }
+}
+
+/// Pre-registered host-DRAM arena: a `SlotPool` plus the single persistent NIXL
+/// registration that keeps the backing memory pinned for the worker's one-sided READ.
+/// One registration (`_handle`) covers the whole arena; each image's pixels are
+/// memcpy'd into a leased slot. A slot is exclusively owned between lease and free,
+/// and the write happens-before the descriptor ship which happens-before the worker's
+/// READ, so no slot is ever written and read concurrently. The hot path touches no
+/// NIXL agent state (only the free-list lock + a lockless memcpy into owned memory).
+struct SlotArena {
+    pool: SlotPool,
+    /// The single persistent registration; kept alive for the arena's life.
+    _handle: RegistrationHandle,
 }
 
 /// Persistent gateway NIXL agent (one per process). The agent is touched only at
@@ -179,8 +259,9 @@ fn arena() -> Option<&'static SlotArena> {
             match build_arena(g) {
                 Ok(a) => {
                     debug!(
-                        slots = a.n_slots,
-                        slot_bytes = a.slot_bytes,
+                        slots = a.pool.n_slots,
+                        slot_bytes = a.pool.slot_bytes,
+                        ttl_s = slot_ttl().as_secs(),
                         "EPD RDMA: pixel arena registered"
                     );
                     Some(a)
@@ -213,12 +294,8 @@ fn build_arena(g: &Mutex<GatewayRdma>) -> Result<SlotArena, nixl_sys::NixlError>
         guard.agent.register_memory(&region, Some(&opt))?
     };
     Ok(SlotArena {
-        base,
-        slot_bytes,
-        n_slots,
+        pool: SlotPool::new(base, slot_bytes, n_slots),
         _handle: handle,
-        free: Mutex::new((0..n_slots as u32).collect()),
-        occupied: DashMap::new(),
     })
 }
 
@@ -307,23 +384,15 @@ fn spawn_reaper() {
                     for (_agent, tags) in map {
                         for tag in tags {
                             if let Ok(room) = tag.parse::<i32>() {
-                                a.free_room(room);
+                                a.pool.free_room(room);
                             }
                         }
                     }
                 }
             }
-            // TTL sweep: reclaim slots whose READ-notif never arrived.
-            let now = Instant::now();
-            let stale: Vec<i32> = a
-                .occupied
-                .iter()
-                .filter(|e| now.duration_since(e.value().at) >= SLOT_TTL)
-                .map(|e| *e.key())
-                .collect();
-            for room in stale {
-                a.free_room(room);
-            }
+            // TTL sweep: reclaim slots whose READ-notif never arrived. `slot_ttl()` is
+            // derived to exceed the worker's max hold, so this never races a live READ.
+            let _ = a.pool.reap_stale(Instant::now(), slot_ttl());
         })
         .ok();
 }
@@ -344,17 +413,10 @@ pub(crate) fn export_pixel_buffer(room: i32, bytes: Vec<u8>) -> Result<Vec<u8>, 
     let Some(arena) = arena() else {
         return Err(bytes);
     };
-    let Some((slot, addr)) = arena.lease_and_write(&bytes) else {
+    let Some((slot, addr)) = arena.pool.lease_and_write(room, &bytes, Instant::now()) else {
         // Image too big for a slot, or the pool is momentarily exhausted.
         return Err(bytes);
     };
-    arena.occupied.insert(
-        room,
-        OccSlot {
-            slot,
-            at: Instant::now(),
-        },
-    );
 
     let ip = gw_listen_ip().as_bytes();
     let port = gw_listen_port();
@@ -371,4 +433,139 @@ pub(crate) fn export_pixel_buffer(room: i32, bytes: Vec<u8>) -> Result<Vec<u8>, 
         port
     );
     Ok(descriptor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `SlotPool` over a real (leaked) heap arena -- no NIXL agent, no RDMA.
+    /// Leaking matches production (the arena is process-lifetime) and keeps the raw
+    /// `base` valid for the whole test.
+    fn test_pool(n_slots: usize, slot_bytes: usize) -> SlotPool {
+        let buf = vec![0u8; n_slots * slot_bytes].into_boxed_slice();
+        let base = Box::into_raw(buf) as *mut u8 as usize;
+        SlotPool::new(base, slot_bytes, n_slots)
+    }
+
+    /// Read back what physically sits at a slot address (what a one-sided READ to that
+    /// address would return).
+    fn bytes_at(addr: u64, len: usize) -> Vec<u8> {
+        #[allow(unsafe_code)]
+        unsafe {
+            std::slice::from_raw_parts(addr as *const u8, len).to_vec()
+        }
+    }
+
+    /// Reproduces the bug: a too-short TTL reclaims a slot while the worker is still
+    /// within its hold window, the next image re-leases the SAME address, and a late
+    /// READ against the old descriptor returns the WRONG image's bytes.
+    #[test]
+    fn short_ttl_recycles_slot_under_a_live_descriptor() {
+        let pool = test_pool(1, 64);
+        let t0 = Instant::now();
+        let img_a = b"AAAAAAAAAAAAAAAA";
+        let (_slot_a, addr_a) = pool.lease_and_write(1, img_a, t0).expect("lease A");
+
+        // Worker has NOT issued its READ yet (e.g. parked on landing-ring backpressure).
+        // The reaper runs with a 30s TTL after 31s -> reclaims the still-referenced slot.
+        let freed = pool.reap_stale(t0 + Duration::from_secs(31), Duration::from_secs(30));
+        assert_eq!(freed, 1, "30s TTL reclaims a slot still under a live descriptor");
+
+        // The next image re-leases the freed slot -> same physical address.
+        let img_b = b"BBBBBBBBBBBBBBBB";
+        let (_slot_b, addr_b) = pool
+            .lease_and_write(2, img_b, t0 + Duration::from_secs(31))
+            .expect("lease B");
+        assert_eq!(addr_a, addr_b, "freed slot's address is reused");
+
+        // The late READ for room 1 reads addr_a, which now holds room 2's pixels.
+        assert_eq!(
+            bytes_at(addr_a, img_b.len()),
+            img_b,
+            "stale READ returns the WRONG image (silent cross-wire)"
+        );
+    }
+
+    /// The fix invariant: the derived TTL strictly exceeds the worker's max hold, so
+    /// the reaper can never reclaim a slot the worker could still be reading. Fails
+    /// under the old flat `const SLOT_TTL = 30s`.
+    #[test]
+    fn slot_ttl_exceeds_worker_max_hold() {
+        assert!(
+            slot_ttl() > worker_max_hold(),
+            "slot_ttl {:?} must exceed worker_max_hold {:?} or a late READ cross-wires",
+            slot_ttl(),
+            worker_max_hold()
+        );
+    }
+
+    /// With the derived TTL, a reap at the worker's max hold does NOT reclaim, so the
+    /// address cannot be reused under a live descriptor: a second image finds the pool
+    /// full and the gateway falls back to inline (Err), never aliasing the slot.
+    #[test]
+    fn derived_ttl_keeps_slot_through_worker_hold() {
+        let pool = test_pool(1, 64);
+        let t0 = Instant::now();
+        let (_slot_a, addr_a) = pool.lease_and_write(1, b"AAAAAAAAAAAAAAAA", t0).expect("lease A");
+
+        let freed = pool.reap_stale(t0 + worker_max_hold(), slot_ttl());
+        assert_eq!(freed, 0, "derived TTL must not reclaim within the worker hold");
+
+        // Slot still leased -> no free slot -> caller goes inline, no address reuse.
+        assert!(
+            pool.lease_and_write(2, b"BBBBBBBBBBBBBBBB", t0 + worker_max_hold())
+                .is_none(),
+            "leased slot is not handed to a second image"
+        );
+        assert_eq!(
+            bytes_at(addr_a, 16),
+            b"AAAAAAAAAAAAAAAA",
+            "the slot still holds room 1's pixels for its READ"
+        );
+    }
+
+    /// The recycle is not a one-slot artifact: with two slots, both reclaim under a
+    /// short TTL and a later lease reuses one of the freed addresses.
+    #[test]
+    fn multi_slot_addresses_recycle_after_reclaim() {
+        let pool = test_pool(2, 64);
+        let t0 = Instant::now();
+        let (_a, addr_a) = pool.lease_and_write(1, b"A", t0).unwrap();
+        let (_b, addr_b) = pool.lease_and_write(2, b"B", t0).unwrap();
+        assert_ne!(addr_a, addr_b, "distinct leases get distinct addresses");
+
+        let freed = pool.reap_stale(t0 + Duration::from_secs(31), Duration::from_secs(30));
+        assert_eq!(freed, 2);
+
+        let (_c, addr_c) = pool
+            .lease_and_write(3, b"C", t0 + Duration::from_secs(31))
+            .unwrap();
+        assert!(
+            addr_c == addr_a || addr_c == addr_b,
+            "a reclaimed address is reused by the next lease"
+        );
+    }
+
+    /// An oversized image never leases (caller -> inline), and a normal free returns
+    /// the slot for reuse.
+    #[test]
+    fn oversize_rejected_and_free_returns_slot() {
+        let pool = test_pool(1, 8);
+        let t0 = Instant::now();
+        assert!(
+            pool.lease_and_write(1, &[0u8; 9], t0).is_none(),
+            "image larger than a slot is rejected"
+        );
+        let (_s, _addr) = pool.lease_and_write(1, &[1u8; 8], t0).expect("fits exactly");
+        assert!(
+            pool.lease_and_write(2, &[2u8; 8], t0).is_none(),
+            "pool now full"
+        );
+        pool.free_room(1);
+        assert!(
+            pool.lease_and_write(2, &[2u8; 8], t0).is_some(),
+            "freed slot is reusable"
+        );
+    }
 }
