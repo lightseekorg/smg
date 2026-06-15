@@ -728,6 +728,10 @@ impl VisionPreProcessor for QwenVLProcessorBase {
         .with_extra(
             "patches_per_video",
             ModelSpecificValue::int_1d(vec![num_patches as i64]),
+        )
+        .with_extra(
+            "patches_per_image",
+            ModelSpecificValue::int_1d(vec![num_patches as i64]),
         );
 
         Ok(result)
