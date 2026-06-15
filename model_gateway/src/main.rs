@@ -143,14 +143,16 @@ struct CliArgs {
     #[arg(long, default_value_t = 30000, help_heading = "Worker Configuration")]
     port: u16,
 
-    /// Dedicated port for Kubernetes liveness/readiness/health probes.
+    /// Dedicated port for liveness/readiness/health probes (Kubernetes,
+    /// load balancers, uptime monitors, etc.).
     ///
     /// When set, `/liveness`, `/readiness`, and `/health` are additionally
     /// served on this port by a middleware-free router running on its own
     /// single-worker runtime and OS thread, isolated from the request
-    /// runtime so probes are never starved (and cannot trigger kubelet
-    /// restarts) under load. The same probe routes always remain available
-    /// on the main `--port` too. Unset = dedicated probe listener off.
+    /// runtime so a saturated gateway cannot starve probes (and trigger the
+    /// failed-probe restarts or depooling that follow) under load. The same
+    /// probe routes always remain available on the main `--port` too.
+    /// Unset = dedicated probe listener off.
     #[arg(long, help_heading = "Worker Configuration")]
     health_check_port: Option<u16>,
 

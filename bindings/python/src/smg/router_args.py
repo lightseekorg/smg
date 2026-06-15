@@ -30,7 +30,7 @@ class RouterArgs:
     worker_urls: list[str] = dataclasses.field(default_factory=list)
     host: str = "0.0.0.0"
     port: int = 30000
-    # Dedicated port for k8s liveness/readiness/health probes, served from an
+    # Dedicated port for liveness/readiness/health probes (k8s, load balancers, monitors), served from an
     # isolated runtime so probes are not starved by the request runtime.
     # None = dedicated probe listener off (routes stay on the main port).
     health_check_port: int | None = None
@@ -310,7 +310,8 @@ class RouterArgs:
             type=int,
             default=RouterArgs.health_check_port,
             help=(
-                "Dedicated port for Kubernetes liveness/readiness/health probes."
+                "Dedicated port for liveness/readiness/health probes (Kubernetes, load"
+                " balancers, uptime monitors)."
                 " When set, those routes are also served on this port by an"
                 " isolated runtime so probes are not starved by the request"
                 " runtime. Unset = dedicated probe listener off (routes remain"

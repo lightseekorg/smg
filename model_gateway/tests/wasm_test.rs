@@ -19,7 +19,7 @@ use llm_tokenizer::TokenizerRegistry;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
-    observability::probe::ProbeState,
+    health::ProbeState,
     policies::PolicyRegistry,
     routers::RouterFactory,
     server::{build_app, AppState},

@@ -54,7 +54,7 @@ use crate::{
         metrics::{self, PrometheusConfig},
         metrics_server,
         metrics_ws::{collectors, registry::WatchRegistry},
-        otel_trace, probe, runtime_metrics,
+        otel_trace, runtime_metrics,
     },
     routers::{
         conversations, openai::realtime::ws::RealtimeQueryParams, parse,
@@ -78,8 +78,8 @@ pub struct AppState {
     pub mesh_adapters: Option<Arc<MeshAdapters>>,
     /// Cached O(1) readiness state shared with the optional dedicated
     /// probe listener. Maintained event-driven by
-    /// [`probe::spawn_readiness_maintainer`].
-    pub probe_state: Arc<probe::ProbeState>,
+    /// [`crate::health::spawn_readiness_maintainer`].
+    pub probe_state: Arc<crate::health::ProbeState>,
 }
 
 async fn parse_function_call(
@@ -101,13 +101,13 @@ async fn sink_handler() -> Response {
 }
 
 async fn liveness() -> Response {
-    probe::liveness_response()
+    crate::health::liveness_response()
 }
 
 /// O(1) readiness: reads the event-maintained snapshot (see
-/// [`probe::spawn_readiness_maintainer`]) and the drain flag — no registry
+/// [`crate::health::spawn_readiness_maintainer`]) and the drain flag — no registry
 /// scan per probe. The decision logic lives in
-/// [`probe::ProbeState::recompute`] and is unchanged from the previous
+/// [`crate::health::ProbeState::recompute`] and is unchanged from the previous
 /// inline implementation, plus the drain gate (not-ready while draining).
 async fn readiness(State(state): State<Arc<AppState>>) -> Response {
     state.probe_state.readiness_response()
@@ -687,7 +687,7 @@ async fn v1_tokenizers_remove(
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    /// Dedicated port for the isolated Kubernetes probe listener. `None`
+    /// Dedicated port for the isolated liveness/readiness/health probe listener. `None`
     /// leaves the dedicated listener off; probe routes always stay on the
     /// main `port` regardless.
     pub health_check_port: Option<u16>,
@@ -1285,8 +1285,8 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // short checkpoint for broadcast-bypassing mutations), read by
     // `/readiness` on the main listener and on the optional dedicated
     // probe listener below. Dropping the JoinHandle detaches the task.
-    let probe_state = probe::ProbeState::new(app_context.inflight_tracker.clone());
-    let _readiness_maintainer = probe::spawn_readiness_maintainer(
+    let probe_state = crate::health::ProbeState::new(app_context.inflight_tracker.clone());
+    let _readiness_maintainer = crate::health::spawn_readiness_maintainer(
         probe_state.clone(),
         app_context.worker_registry.clone(),
         app_context.tokenizer_registry.clone(),
@@ -1295,12 +1295,12 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Optional isolated probe listener (additive): when `--health-check-port`
     // is set, serves /liveness, /readiness, /health on that port from a
-    // dedicated single-worker runtime on its own OS thread, so kubelet probes
+    // dedicated single-worker runtime on its own OS thread, so probes
     // cannot be starved by the request runtime. The same routes always remain
     // on the main listener.
     if let Some(probe_port) = config.health_check_port {
         let probe_addr =
-            probe::start_probe_listener(&config.host, probe_port, probe_state.clone())?;
+            crate::health::start_probe_listener(&config.host, probe_port, probe_state.clone())?;
         info!("Probe listener started on {probe_addr} (--health-check-port {probe_port})");
     }
 

@@ -13,8 +13,8 @@ use openai_protocol::chat::ChatCompletionRequest;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
+    health::ProbeState,
     middleware::{wasm_middleware, TenantRequestMeta},
-    observability::probe::ProbeState,
     routers::RouterTrait,
     server::AppState,
 };

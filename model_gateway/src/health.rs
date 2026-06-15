@@ -1,14 +1,17 @@
-//! O(1) Kubernetes probe support: event-maintained readiness state and an
-//! optional isolated probe listener.
+//! Liveness/readiness/health endpoints for orchestrators, load balancers, and
+//! uptime monitors: O(1) event-maintained readiness state and an optional
+//! isolated probe listener. Kubernetes is the motivating consumer, but nothing
+//! here is k8s-specific — any caller polling `/liveness`, `/readiness`, or
+//! `/health` benefits.
 //!
 //! # Why this exists (#1694)
 //!
-//! `/readiness` used to scan the whole fleet on every kubelet probe
-//! (`get_all()` Arc-clones every worker plus a tokenizer lookup per gRPC
-//! worker — O(workers) per probe), and all probes were ordinary tasks on the
-//! request runtime behind the full middleware stack. Under reactor
-//! starvation at fleet scale, probe latency spiked past kubelet timeouts and
-//! pods were killed while perfectly able to serve.
+//! `/readiness` used to scan the whole fleet on every probe (`get_all()`
+//! Arc-clones every worker plus a tokenizer lookup per gRPC worker —
+//! O(workers) per probe), and all probes were ordinary tasks on the request
+//! runtime behind the full middleware stack. Under reactor starvation at fleet
+//! scale, probe latency spiked past the caller's timeout (e.g. a kubelet
+//! liveness deadline) and pods were killed while perfectly able to serve.
 //!
 //! Two countermeasures, both additive:
 //!
@@ -30,17 +33,17 @@
 //!    running on a single-worker tokio runtime driven by its own OS thread
 //!    (the `build_in_runtime` pattern), so probes cannot be starved by the
 //!    request runtime. The routes always remain on the main listener too;
-//!    Kubernetes users point their probes at the dedicated port. Unset means
-//!    no extra listener. The listener is plain HTTP and serves until process
+//!    point the orchestrator's probes at the dedicated port. Unset means no
+//!    extra listener. The listener is plain HTTP and serves until process
 //!    exit, so probes stay answerable through the entire drain window.
 //!
 //! # Drain semantics
 //!
 //! Once graceful shutdown begins (`InFlightRequestTracker::begin_drain`),
 //! `/readiness` reports `503` with reason `"draining"` on **both** listeners
-//! while `/liveness` and `/health` keep returning `200`, so Kubernetes stops
-//! routing new connections during the endpoint-propagation window without
-//! restarting the pod.
+//! while `/liveness` and `/health` keep returning `200`, so the load balancer
+//! or orchestrator stops routing new connections during the
+//! endpoint-propagation window without restarting the process.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -67,9 +70,9 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-use super::inflight_tracker::InFlightRequestTracker;
 use crate::{
     config::{RouterConfig, RoutingMode},
+    observability::inflight_tracker::InFlightRequestTracker,
     worker::{event::WorkerEvent, ConnectionMode, WorkerRegistry, WorkerType},
 };
 
@@ -78,7 +81,7 @@ use crate::{
 /// bypass the `WorkerRegistry` broadcast (direct `set_status()` callers,
 /// tokenizer registrations) and is deliberately shorter than the metrics
 /// collectors' 3s checkpoint: readiness gates traffic, so a flip should
-/// land within one kubelet probe period.
+/// land within one probe interval.
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Result of one readiness evaluation. Field semantics are identical to the
@@ -338,7 +341,7 @@ async fn probe_readiness(State(state): State<Arc<ProbeState>>) -> Response {
 
 /// Minimal router for the dedicated probe listener: the three trivial probe
 /// routes only (`health_generate` stays on the main listener — it proxies
-/// to workers and is not a kubelet probe), no middleware, no fallback
+/// to workers and is not an orchestrator probe), no middleware, no fallback
 /// surprises beyond axum's default 404.
 pub fn probe_router(probe_state: Arc<ProbeState>) -> Router {
     Router::new()

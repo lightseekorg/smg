@@ -6,8 +6,8 @@ use reqwest::Client;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
+    health,
     middleware::{AuthConfig, TokenBucket},
-    observability::probe,
     policies::PolicyRegistry,
     routers::RouterTrait,
     server::{build_app, AppState},
@@ -141,9 +141,9 @@ pub fn create_test_app(
 /// The initial snapshot is computed synchronously, so workers registered
 /// before app creation are visible immediately; later mutations arrive via
 /// the registry event subscription. Must be called from a tokio runtime.
-fn start_probe_state(app_context: &Arc<AppContext>) -> Arc<probe::ProbeState> {
-    let probe_state = probe::ProbeState::new(app_context.inflight_tracker.clone());
-    let _maintainer = probe::spawn_readiness_maintainer(
+fn start_probe_state(app_context: &Arc<AppContext>) -> Arc<health::ProbeState> {
+    let probe_state = health::ProbeState::new(app_context.inflight_tracker.clone());
+    let _maintainer = health::spawn_readiness_maintainer(
         probe_state.clone(),
         app_context.worker_registry.clone(),
         app_context.tokenizer_registry.clone(),
