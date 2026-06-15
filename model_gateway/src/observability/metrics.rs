@@ -358,10 +358,22 @@ pub fn start_prometheus(config: PrometheusConfig) -> PrometheusHandle {
     // render it as a summary.
     let canary_matcher = Matcher::Full(super::runtime_metrics::EVENT_LOOP_DELAY_SECONDS.into());
 
+    // TTFT and TPOT (per-request mean inter-token latency) end in `_seconds`
+    // but NOT `duration_seconds`, so without explicit buckets the recorder
+    // renders them as summaries (quantile lines only) — not heatmap-able. Reuse
+    // the request-latency buckets: they span 0.001-7200s, fine for both the
+    // sub-second-to-seconds TTFT and the tens-of-ms TPOT.
+    let ttft_matcher = Matcher::Suffix(String::from("ttft_seconds"));
+    let tpot_matcher = Matcher::Suffix(String::from("tpot_seconds"));
+
     PrometheusBuilder::new()
         .upkeep_timeout(Duration::from_secs(UPKEEP_INTERVAL_SECS))
         .set_buckets_for_metric(duration_matcher, &duration_bucket)
         .expect("failed to set duration bucket")
+        .set_buckets_for_metric(ttft_matcher, &duration_bucket)
+        .expect("failed to set ttft bucket")
+        .set_buckets_for_metric(tpot_matcher, &duration_bucket)
+        .expect("failed to set tpot bucket")
         .set_buckets_for_metric(
             canary_matcher,
             super::runtime_metrics::EVENT_LOOP_DELAY_BUCKETS,
